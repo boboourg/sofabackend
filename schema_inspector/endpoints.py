@@ -82,8 +82,45 @@ COMPETITION_ENDPOINTS = (
     UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
 )
 
+SPORT_FOOTBALL_SCHEDULED_EVENTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/sport/football/scheduled-events/{date}",
+    envelope_key="events",
+    target_table="event",
+)
+
+SPORT_FOOTBALL_LIVE_EVENTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/sport/football/events/live",
+    envelope_key="events",
+    target_table="event",
+)
+
+UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/featured-events",
+    envelope_key="featuredEvents",
+    target_table="event",
+)
+
+UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}",
+    envelope_key="events",
+    target_table="event",
+)
+
+EVENT_LIST_ENDPOINTS = (
+    SPORT_FOOTBALL_SCHEDULED_EVENTS_ENDPOINT,
+    SPORT_FOOTBALL_LIVE_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+)
+
 
 def competition_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
     """Registry rows for the competition parser family."""
 
     return tuple(endpoint.registry_entry() for endpoint in COMPETITION_ENDPOINTS)
+
+
+def event_list_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
+    """Registry rows for the event-list parser family."""
+
+    return tuple(endpoint.registry_entry() for endpoint in EVENT_LIST_ENDPOINTS)

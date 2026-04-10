@@ -100,6 +100,7 @@ class UniqueTournamentRecord:
     user_count: int | None = None
     has_rounds: bool | None = None
     has_groups: bool | None = None
+    has_event_player_statistics: bool | None = None
     has_performance_graph_feature: bool | None = None
     has_playoff_series: bool | None = None
     disabled_home_away_standings: bool | None = None
@@ -349,6 +350,7 @@ class _CompetitionAccumulator:
                 "user_count": _as_int(payload.get("userCount")),
                 "has_rounds": _as_bool(payload.get("hasRounds")),
                 "has_groups": _as_bool(payload.get("hasGroups")),
+                "has_event_player_statistics": _as_bool(payload.get("hasEventPlayerStatistics")),
                 "has_performance_graph_feature": _as_bool(payload.get("hasPerformanceGraphFeature")),
                 "has_playoff_series": _as_bool(payload.get("hasPlayoffSeries")),
                 "disabled_home_away_standings": _as_bool(payload.get("disabledHomeAwayStandings")),

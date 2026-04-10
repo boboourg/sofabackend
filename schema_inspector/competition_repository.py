@@ -262,6 +262,7 @@ class CompetitionRepository:
                 item.user_count,
                 item.has_rounds,
                 item.has_groups,
+                item.has_event_player_statistics,
                 item.has_performance_graph_feature,
                 item.has_playoff_series,
                 item.disabled_home_away_standings,
@@ -294,6 +295,7 @@ class CompetitionRepository:
                 user_count,
                 has_rounds,
                 has_groups,
+                has_event_player_statistics,
                 has_performance_graph_feature,
                 has_playoff_series,
                 disabled_home_away_standings,
@@ -304,7 +306,7 @@ class CompetitionRepository:
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22, $23, $24::jsonb, $25::jsonb
+                $21, $22, $23, $24, $25::jsonb, $26::jsonb
             )
             ON CONFLICT (id) DO UPDATE SET
                 slug = EXCLUDED.slug,
@@ -325,6 +327,7 @@ class CompetitionRepository:
                 user_count = EXCLUDED.user_count,
                 has_rounds = EXCLUDED.has_rounds,
                 has_groups = EXCLUDED.has_groups,
+                has_event_player_statistics = EXCLUDED.has_event_player_statistics,
                 has_performance_graph_feature = EXCLUDED.has_performance_graph_feature,
                 has_playoff_series = EXCLUDED.has_playoff_series,
                 disabled_home_away_standings = EXCLUDED.disabled_home_away_standings,
