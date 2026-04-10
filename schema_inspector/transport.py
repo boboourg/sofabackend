@@ -27,6 +27,10 @@ class _RawResponse:
     body_bytes: bytes
 
 
+class ProxyRequiredError(RuntimeError):
+    """Raised when proxy-only mode is enabled and no proxy can be used."""
+
+
 class InspectorTransport:
     """All outbound requests for the inspector pass through this class."""
 
@@ -43,6 +47,8 @@ class InspectorTransport:
         headers: Mapping[str, str] | None = None,
         timeout: float = 20.0,
     ) -> TransportResult:
+        parsed = urlparse(url)
+        proxy_required = parsed.scheme in {"http", "https"}
         request_headers = dict(self.runtime_config.default_headers)
         if self.runtime_config.user_agent:
             request_headers["User-Agent"] = self.runtime_config.user_agent
@@ -55,6 +61,21 @@ class InspectorTransport:
             proxy = self.proxy_pool.acquire()
             proxy_name = proxy.name if proxy is not None else None
             proxy_url = proxy.url if proxy is not None else None
+            if proxy_required and proxy_url is None:
+                error_msg = self._proxy_required_message()
+                attempts.append(
+                    TransportAttempt(
+                        attempt_number=attempt_number,
+                        proxy_name=None,
+                        status_code=None,
+                        error=error_msg,
+                        challenge_reason=None,
+                    )
+                )
+                if attempt_number < self.runtime_config.retry_policy.max_attempts:
+                    await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
+                    continue
+                raise ProxyRequiredError(error_msg)
 
             try:
                 raw = await self._execute_once(url, request_headers, timeout, proxy_url)
@@ -118,6 +139,11 @@ class InspectorTransport:
                 raise
 
         raise RuntimeError("Transport exhausted without a final response.")
+
+    def _proxy_required_message(self) -> str:
+        if not self.runtime_config.proxy_endpoints:
+            return "Proxy-only mode is enabled, but no proxies are configured."
+        return "Proxy-only mode is enabled, but no proxy is currently available."
 
     async def _execute_once(
         self,

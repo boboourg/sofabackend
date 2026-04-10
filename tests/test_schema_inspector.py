@@ -15,7 +15,7 @@ from schema_inspector.sofascore_client import (
     SofascoreClient,
     SofascoreRateLimitError,
 )
-from schema_inspector.transport import InspectorTransport
+from schema_inspector.transport import InspectorTransport, ProxyRequiredError
 
 
 class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
@@ -92,10 +92,18 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(config.user_agent, "custom-agent")
+        self.assertEqual(config.require_proxy, True)
         self.assertEqual(config.retry_policy.max_attempts, 5)
         self.assertEqual(config.retry_policy.backoff_seconds, 2.5)
         self.assertEqual(len(config.proxy_endpoints), 3)
         self.assertEqual(config.proxy_endpoints[0].url, "http://proxy-1.local:8080")
+
+    async def test_transport_blocks_direct_http_when_proxy_only_mode_is_enabled(self) -> None:
+        config = load_runtime_config(env={})
+        transport = InspectorTransport(config)
+
+        with self.assertRaises(ProxyRequiredError):
+            await transport.fetch("https://example.test/api", timeout=1.0)
 
     async def test_transport_retries_with_next_proxy_on_retryable_status(self) -> None:
         current_time = [0.0]

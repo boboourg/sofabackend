@@ -42,6 +42,7 @@ class RuntimeConfig:
     """All network settings for schema inspector requests."""
 
     user_agent: str = "schema-inspector/1.0"
+    require_proxy: bool = True
     default_headers: Mapping[str, str] = field(default_factory=dict)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     tls_policy: TlsPolicy = field(default_factory=TlsPolicy)
@@ -104,6 +105,7 @@ def load_runtime_config(
 
     return RuntimeConfig(
         user_agent=user_agent or env.get("SCHEMA_INSPECTOR_USER_AGENT", "schema-inspector/1.0"),
+        require_proxy=_env_bool(env, "SCHEMA_INSPECTOR_REQUIRE_PROXY", True),
         default_headers=headers,
         retry_policy=RetryPolicy(
             max_attempts=max_attempts or _env_int(env, "SCHEMA_INSPECTOR_MAX_ATTEMPTS", 3),

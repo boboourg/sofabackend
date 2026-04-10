@@ -179,6 +179,45 @@ EVENT_DETAIL_ENDPOINTS = (
     EVENT_WINNING_ODDS_ENDPOINT,
 )
 
+UNIQUE_TOURNAMENT_STATISTICS_INFO_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/info",
+    envelope_key="hideHomeAndAway,teams,statisticsGroups,nationalities",
+    target_table="season_statistics_config",
+)
+
+UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics",
+    query_template=(
+        "limit={limit}&offset={offset}&order={order}&accumulation={accumulation}"
+        "&group={group}&fields={fields}&filters={filters}"
+    ),
+    envelope_key="results",
+    target_table="season_statistics_snapshot",
+    notes="Optional query params are omitted when absent; fields and filters preserve exact Sofascore query grammar.",
+)
+
+STATISTICS_ENDPOINTS = (
+    UNIQUE_TOURNAMENT_STATISTICS_INFO_ENDPOINT,
+    UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT,
+)
+
+UNIQUE_TOURNAMENT_STANDINGS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
+    envelope_key="standings",
+    target_table="standing",
+)
+
+TOURNAMENT_STANDINGS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}",
+    envelope_key="standings",
+    target_table="standing",
+)
+
+STANDINGS_ENDPOINTS = (
+    UNIQUE_TOURNAMENT_STANDINGS_ENDPOINT,
+    TOURNAMENT_STANDINGS_ENDPOINT,
+)
+
 
 def competition_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
     """Registry rows for the competition parser family."""
@@ -196,3 +235,15 @@ def event_detail_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
     """Registry rows for the event-detail parser family."""
 
     return tuple(endpoint.registry_entry() for endpoint in EVENT_DETAIL_ENDPOINTS)
+
+
+def statistics_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
+    """Registry rows for the statistics parser family."""
+
+    return tuple(endpoint.registry_entry() for endpoint in STATISTICS_ENDPOINTS)
+
+
+def standings_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
+    """Registry rows for the standings parser family."""
+
+    return tuple(endpoint.registry_entry() for endpoint in STANDINGS_ENDPOINTS)

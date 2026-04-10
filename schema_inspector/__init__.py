@@ -7,12 +7,17 @@ from .db import AsyncpgDatabase, DatabaseConfig, load_database_config
 from .endpoints import (
     EVENT_DETAIL_ENDPOINTS,
     EVENT_LIST_ENDPOINTS,
+    STANDINGS_ENDPOINTS,
+    STATISTICS_ENDPOINTS,
     EndpointRegistryEntry,
     SofascoreEndpoint,
     competition_registry_entries,
     event_detail_registry_entries,
     event_list_registry_entries,
+    standings_registry_entries,
+    statistics_registry_entries,
 )
+from .event_detail_backfill_job import EventDetailBackfillJob, EventDetailBackfillResult
 from .event_detail_job import EventDetailIngestJob, EventDetailIngestResult
 from .event_detail_parser import EventDetailBundle, EventDetailParser, EventDetailParserError
 from .event_detail_repository import EventDetailRepository, EventDetailWriteResult
@@ -29,6 +34,12 @@ from .sofascore_client import (
     SofascoreJsonDecodeError,
     SofascoreRateLimitError,
 )
+from .statistics_job import StatisticsIngestJob, StatisticsIngestResult
+from .statistics_parser import StatisticsBundle, StatisticsParser, StatisticsParserError, StatisticsQuery
+from .statistics_repository import StatisticsRepository, StatisticsWriteResult
+from .standings_job import StandingsIngestJob, StandingsIngestResult
+from .standings_parser import StandingsBundle, StandingsParser, StandingsParserError
+from .standings_repository import StandingsRepository, StandingsWriteResult
 
 __all__ = [
     "inspect_url_to_markdown",
@@ -41,9 +52,13 @@ __all__ = [
     "SofascoreEndpoint",
     "EVENT_DETAIL_ENDPOINTS",
     "EVENT_LIST_ENDPOINTS",
+    "STANDINGS_ENDPOINTS",
+    "STATISTICS_ENDPOINTS",
     "competition_registry_entries",
     "event_detail_registry_entries",
     "event_list_registry_entries",
+    "standings_registry_entries",
+    "statistics_registry_entries",
     "SofascoreClient",
     "SofascoreClientError",
     "SofascoreHttpError",
@@ -64,6 +79,8 @@ __all__ = [
     "EventDetailWriteResult",
     "EventDetailIngestJob",
     "EventDetailIngestResult",
+    "EventDetailBackfillJob",
+    "EventDetailBackfillResult",
     "EventListBundle",
     "EventListParser",
     "EventListParserError",
@@ -71,4 +88,19 @@ __all__ = [
     "EventListWriteResult",
     "EventListIngestJob",
     "EventListIngestResult",
+    "StatisticsBundle",
+    "StatisticsQuery",
+    "StatisticsParser",
+    "StatisticsParserError",
+    "StatisticsRepository",
+    "StatisticsWriteResult",
+    "StatisticsIngestJob",
+    "StatisticsIngestResult",
+    "StandingsBundle",
+    "StandingsParser",
+    "StandingsParserError",
+    "StandingsRepository",
+    "StandingsWriteResult",
+    "StandingsIngestJob",
+    "StandingsIngestResult",
 ]
