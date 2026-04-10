@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable, Protocol
 
 from .event_list_parser import EventListBundle
@@ -597,7 +598,7 @@ class EventListRepository:
                 item.context_entity_type,
                 item.context_entity_id,
                 _jsonb(item.payload),
-                item.fetched_at,
+                _timestamp(item.fetched_at),
             )
             for item in bundle.payload_snapshots
         ]
@@ -623,3 +624,9 @@ def _jsonb(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _timestamp(value: str | datetime | None) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(value)

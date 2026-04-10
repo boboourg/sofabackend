@@ -12,8 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from curl_cffi.requests import AsyncSession
-from curl_cffi.requests.exceptions import RequestException
+from curl_cffi.requests import AsyncSession, RequestsError
 
 from .challenge import detect_challenge
 from .proxy import ProxyPool
@@ -100,7 +99,7 @@ class InspectorTransport:
                     challenge_reason=challenge_reason,
                 )
 
-            except (URLError, RequestException) as exc:
+            except (URLError, RequestsError) as exc:
                 error_msg = str(getattr(exc, "reason", exc))
                 attempts.append(
                     TransportAttempt(

@@ -113,6 +113,72 @@ EVENT_LIST_ENDPOINTS = (
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
 )
 
+EVENT_DETAIL_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}",
+    envelope_key="event",
+    target_table="event",
+)
+
+EVENT_LINEUPS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/lineups",
+    envelope_key="home,away",
+    target_table="event_lineup",
+)
+
+EVENT_MANAGERS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/managers",
+    envelope_key="homeManager,awayManager",
+    target_table="event_manager_assignment",
+)
+
+EVENT_H2H_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/h2h",
+    envelope_key="teamDuel,managerDuel",
+    target_table="event_duel",
+)
+
+EVENT_PREGAME_FORM_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/pregame-form",
+    envelope_key="homeTeam,awayTeam",
+    target_table="event_pregame_form",
+)
+
+EVENT_VOTES_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/votes",
+    envelope_key="vote",
+    target_table="event_vote_option",
+)
+
+EVENT_ODDS_ALL_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/odds/{provider_id}/all",
+    envelope_key="markets",
+    target_table="event_market",
+)
+
+EVENT_ODDS_FEATURED_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/odds/{provider_id}/featured",
+    envelope_key="featured",
+    target_table="event_market",
+)
+
+EVENT_WINNING_ODDS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
+    envelope_key="home,away",
+    target_table="event_winning_odds",
+)
+
+EVENT_DETAIL_ENDPOINTS = (
+    EVENT_DETAIL_ENDPOINT,
+    EVENT_LINEUPS_ENDPOINT,
+    EVENT_MANAGERS_ENDPOINT,
+    EVENT_H2H_ENDPOINT,
+    EVENT_PREGAME_FORM_ENDPOINT,
+    EVENT_VOTES_ENDPOINT,
+    EVENT_ODDS_ALL_ENDPOINT,
+    EVENT_ODDS_FEATURED_ENDPOINT,
+    EVENT_WINNING_ODDS_ENDPOINT,
+)
+
 
 def competition_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
     """Registry rows for the competition parser family."""
@@ -124,3 +190,9 @@ def event_list_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
     """Registry rows for the event-list parser family."""
 
     return tuple(endpoint.registry_entry() for endpoint in EVENT_LIST_ENDPOINTS)
+
+
+def event_detail_registry_entries() -> tuple[EndpointRegistryEntry, ...]:
+    """Registry rows for the event-detail parser family."""
+
+    return tuple(endpoint.registry_entry() for endpoint in EVENT_DETAIL_ENDPOINTS)

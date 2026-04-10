@@ -34,7 +34,7 @@ class TlsPolicy:
     minimum_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2
     maximum_version: ssl.TLSVersion | None = ssl.TLSVersion.TLSv1_3
     check_hostname: bool = True
-    impersonate: str = "chrome120"
+    impersonate: str = "chrome110"
 
 
 @dataclass(frozen=True)
@@ -113,6 +113,7 @@ def load_runtime_config(
             minimum_version=_env_tls(env.get("SCHEMA_INSPECTOR_TLS_MIN_VERSION"), ssl.TLSVersion.TLSv1_2),
             maximum_version=_env_tls(env.get("SCHEMA_INSPECTOR_TLS_MAX_VERSION"), ssl.TLSVersion.TLSv1_3),
             check_hostname=_env_bool(env, "SCHEMA_INSPECTOR_TLS_CHECK_HOSTNAME", True),
+            impersonate=env.get("SCHEMA_INSPECTOR_TLS_IMPERSONATE", "chrome110").strip() or "chrome110",
         ),
         proxy_endpoints=endpoints,
     )

@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import unittest
+
+from schema_inspector.competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
+from schema_inspector.endpoints import event_detail_registry_entries
+from schema_inspector.event_detail_job import EventDetailIngestJob
+from schema_inspector.event_detail_parser import (
+    EventDetailBundle,
+    EventDetailEventRecord,
+    EventDetailTeamRecord,
+    EventDetailTournamentRecord,
+    EventDuelRecord,
+    EventLineupMissingPlayerRecord,
+    EventLineupPlayerRecord,
+    EventLineupRecord,
+    EventManagerAssignmentRecord,
+    EventMarketChoiceRecord,
+    EventMarketRecord,
+    EventPregameFormItemRecord,
+    EventPregameFormRecord,
+    EventPregameFormSideRecord,
+    EventVoteOptionRecord,
+    EventWinningOddsRecord,
+    ManagerPerformanceRecord,
+    ManagerRecord,
+    ManagerTeamMembershipRecord,
+    PlayerRecord,
+    ProviderRecord,
+    RefereeRecord,
+    VenueRecord,
+)
+from schema_inspector.event_detail_repository import EventDetailRepository, EventDetailWriteResult
+from schema_inspector.event_list_parser import (
+    EventChangeItemRecord,
+    EventFilterValueRecord,
+    EventRoundInfoRecord,
+    EventScoreRecord,
+    EventSeasonRecord,
+    EventStatusRecord,
+    EventStatusTimeRecord,
+    EventTimeRecord,
+    EventVarInProgressRecord,
+)
+
+
+class _FakeExecutor:
+    def __init__(self) -> None:
+        self.executemany_calls: list[tuple[str, list[tuple[object, ...]]]] = []
+
+    async def executemany(self, command: str, args):
+        self.executemany_calls.append((command, list(args)))
+        return None
+
+
+class _FakeParser:
+    def __init__(self, bundle: EventDetailBundle) -> None:
+        self.bundle = bundle
+        self.calls: list[tuple[int, tuple[int, ...], float]] = []
+
+    async def fetch_bundle(self, event_id: int, *, provider_ids=(1,), timeout: float = 20.0) -> EventDetailBundle:
+        self.calls.append((event_id, tuple(provider_ids), timeout))
+        return self.bundle
+
+
+class _FakeRepository:
+    def __init__(self, result: EventDetailWriteResult) -> None:
+        self.result = result
+        self.calls: list[tuple[object, EventDetailBundle]] = []
+
+    async def upsert_bundle(self, executor, bundle: EventDetailBundle) -> EventDetailWriteResult:
+        self.calls.append((executor, bundle))
+        return self.result
+
+
+class _FakeTransaction:
+    def __init__(self, connection: object) -> None:
+        self.connection = connection
+
+    async def __aenter__(self) -> object:
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+        return None
+
+
+class _FakeDatabase:
+    def __init__(self, connection: object) -> None:
+        self.connection = connection
+        self.transaction_calls = 0
+
+    def transaction(self) -> _FakeTransaction:
+        self.transaction_calls += 1
+        return _FakeTransaction(self.connection)
+
+
+def _build_bundle() -> EventDetailBundle:
+    return EventDetailBundle(
+        registry_entries=event_detail_registry_entries(),
+        payload_snapshots=(
+            ApiPayloadSnapshotRecord(
+                endpoint_pattern="/api/v1/event/{event_id}",
+                source_url="https://www.sofascore.com/api/v1/event/14083191",
+                envelope_key="event",
+                context_entity_type="event",
+                context_entity_id=14083191,
+                payload={"id": 14083191},
+                fetched_at="2026-04-10T10:00:00+00:00",
+            ),
+        ),
+        sports=(SportRecord(id=1, slug="football", name="Football"),),
+        countries=(CountryRecord(alpha2="EN", alpha3="ENG", slug="england", name="England"),),
+        categories=(CategoryRecord(id=1, slug="england", name="England", sport_id=1, country_alpha2="EN"),),
+        unique_tournaments=(UniqueTournamentRecord(id=17, slug="premier-league", name="Premier League", category_id=1),),
+        seasons=(EventSeasonRecord(id=76986, name="Premier League 25/26", year="25/26", editor=False),),
+        tournaments=(
+            EventDetailTournamentRecord(
+                id=1,
+                slug="premier-league",
+                name="Premier League",
+                category_id=1,
+                unique_tournament_id=17,
+                competition_type=1,
+            ),
+        ),
+        teams=(
+            EventDetailTeamRecord(id=42, slug="arsenal", name="Arsenal", sport_id=1, country_alpha2="EN", manager_id=500),
+            EventDetailTeamRecord(id=43, slug="chelsea", name="Chelsea", sport_id=1, country_alpha2="EN", manager_id=501),
+        ),
+        venues=(VenueRecord(id=55, slug="emirates", name="Emirates Stadium", country_alpha2="EN"),),
+        referees=(RefereeRecord(id=99, slug="michael-oliver", name="Michael Oliver", sport_id=1, country_alpha2="EN"),),
+        managers=(
+            ManagerRecord(id=500, slug="arteta", name="Mikel Arteta", team_id=42),
+            ManagerRecord(id=501, slug="maresca", name="Enzo Maresca", team_id=43),
+        ),
+        manager_performances=(ManagerPerformanceRecord(manager_id=500, total=10, wins=7, draws=2, losses=1),),
+        manager_team_memberships=(
+            ManagerTeamMembershipRecord(manager_id=500, team_id=42),
+            ManagerTeamMembershipRecord(manager_id=501, team_id=43),
+        ),
+        players=(PlayerRecord(id=700, slug="saka", name="Bukayo Saka", team_id=42, country_alpha2="EN", position="F"),),
+        event_statuses=(EventStatusRecord(code=100, description="1st half", type="inprogress"),),
+        events=(
+            EventDetailEventRecord(
+                id=14083191,
+                slug="arsenal-chelsea",
+                custom_id="abc123",
+                detail_id=9,
+                tournament_id=1,
+                unique_tournament_id=17,
+                season_id=76986,
+                home_team_id=42,
+                away_team_id=43,
+                venue_id=55,
+                referee_id=99,
+                status_code=100,
+                season_statistics_type="overall",
+                start_timestamp=1775779200,
+                coverage=1,
+                winner_code=1,
+                aggregated_winner_code=1,
+                home_red_cards=0,
+                away_red_cards=0,
+                previous_leg_event_id=None,
+                cup_matches_in_round=1,
+                default_period_count=2,
+                default_period_length=45,
+                default_overtime_length=15,
+                last_period="2nd",
+                correct_ai_insight=False,
+                correct_halftime_ai_insight=False,
+                feed_locked=False,
+                is_editor=False,
+                show_toto_promo=False,
+                crowdsourcing_enabled=True,
+                crowdsourcing_data_display_enabled=True,
+                final_result_only=False,
+                has_event_player_statistics=True,
+                has_event_player_heat_map=True,
+                has_global_highlights=False,
+                has_xg=True,
+            ),
+        ),
+        event_round_infos=(EventRoundInfoRecord(event_id=14083191, round_number=32, name="Round 32"),),
+        event_status_times=(EventStatusTimeRecord(event_id=14083191, prefix="'", timestamp=1712745600),),
+        event_times=(EventTimeRecord(event_id=14083191, current_period_start_timestamp=1712742000, period_length=45),),
+        event_var_in_progress_items=(EventVarInProgressRecord(event_id=14083191, home_team=True, away_team=False),),
+        event_scores=(
+            EventScoreRecord(event_id=14083191, side="home", current=1, display=1),
+            EventScoreRecord(event_id=14083191, side="away", current=0, display=0),
+        ),
+        event_filter_values=(EventFilterValueRecord(event_id=14083191, filter_name="category", ordinal=0, filter_value="live"),),
+        event_change_items=(EventChangeItemRecord(event_id=14083191, change_timestamp=1712745600, ordinal=0, change_value="status"),),
+        event_manager_assignments=(
+            EventManagerAssignmentRecord(event_id=14083191, side="home", manager_id=500),
+            EventManagerAssignmentRecord(event_id=14083191, side="away", manager_id=501),
+        ),
+        event_duels=(EventDuelRecord(event_id=14083191, duel_type="team", home_wins=5, away_wins=3, draws=2),),
+        event_pregame_forms=(EventPregameFormRecord(event_id=14083191, label="Pts"),),
+        event_pregame_form_sides=(
+            EventPregameFormSideRecord(event_id=14083191, side="home", avg_rating="6.7", position=2, value="70"),
+            EventPregameFormSideRecord(event_id=14083191, side="away", avg_rating="6.6", position=5, value="60"),
+        ),
+        event_pregame_form_items=(
+            EventPregameFormItemRecord(event_id=14083191, side="home", ordinal=0, form_value="W"),
+            EventPregameFormItemRecord(event_id=14083191, side="away", ordinal=0, form_value="L"),
+        ),
+        event_vote_options=(EventVoteOptionRecord(event_id=14083191, vote_type="vote", option_name="vote1", vote_count=10),),
+        providers=(ProviderRecord(id=1),),
+        event_markets=(
+            EventMarketRecord(
+                id=289779151,
+                event_id=14083191,
+                provider_id=1,
+                fid=191744484,
+                market_id=1,
+                source_id=191744484,
+                market_group="1X2",
+                market_name="Full time",
+                market_period="Full-time",
+                structure_type=1,
+                choice_group="default",
+                is_live=False,
+                suspended=False,
+            ),
+        ),
+        event_market_choices=(
+            EventMarketChoiceRecord(
+                source_id=11,
+                event_market_id=289779151,
+                name="1",
+                change_value=0,
+                fractional_value="1/1",
+                initial_fractional_value="11/10",
+            ),
+        ),
+        event_winning_odds=(EventWinningOddsRecord(event_id=14083191, provider_id=1, side="home", odds_id=1, actual=52),),
+        event_lineups=(
+            EventLineupRecord(event_id=14083191, side="home", formation="4-3-3", support_staff=()),
+            EventLineupRecord(event_id=14083191, side="away", formation="4-2-3-1", support_staff=()),
+        ),
+        event_lineup_players=(EventLineupPlayerRecord(event_id=14083191, side="home", player_id=700, team_id=42, position="F", substitute=False, shirt_number=7, jersey_number="7", avg_rating=7.1),),
+        event_lineup_missing_players=(EventLineupMissingPlayerRecord(event_id=14083191, side="away", player_id=700, description="Hamstring", expected_end_date="2026-05-01", external_type=72, reason=1, type="missing"),),
+    )
+
+
+class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_event_detail_repository_writes_expected_tables(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventDetailRepository()
+
+        result = await repository.upsert_bundle(executor, bundle)
+
+        self.assertEqual(result.event_rows, 1)
+        self.assertEqual(result.player_rows, 1)
+        self.assertEqual(result.event_market_rows, 1)
+        statements = [sql for sql, _ in executor.executemany_calls]
+        self.assertTrue(any("INSERT INTO venue" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO referee" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO manager " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO player " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event (" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_lineup " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_market " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_vote_option" in sql for sql in statements))
+
+    async def test_event_detail_ingest_job_uses_transaction_and_repository(self) -> None:
+        bundle = _build_bundle()
+        parser = _FakeParser(bundle)
+        repository_result = EventDetailWriteResult(
+            endpoint_registry_rows=9,
+            payload_snapshot_rows=1,
+            sport_rows=1,
+            country_rows=1,
+            category_rows=1,
+            unique_tournament_rows=1,
+            season_rows=1,
+            tournament_rows=1,
+            team_rows=2,
+            venue_rows=1,
+            referee_rows=1,
+            manager_rows=2,
+            manager_performance_rows=1,
+            manager_team_membership_rows=2,
+            player_rows=1,
+            event_status_rows=1,
+            event_rows=1,
+            event_round_info_rows=1,
+            event_status_time_rows=1,
+            event_time_rows=1,
+            event_var_in_progress_rows=1,
+            event_score_rows=2,
+            event_filter_value_rows=1,
+            event_change_item_rows=1,
+            event_manager_assignment_rows=2,
+            event_duel_rows=1,
+            event_pregame_form_rows=1,
+            event_pregame_form_side_rows=2,
+            event_pregame_form_item_rows=2,
+            event_vote_option_rows=1,
+            provider_rows=1,
+            event_market_rows=1,
+            event_market_choice_rows=1,
+            event_winning_odds_rows=1,
+            event_lineup_rows=2,
+            event_lineup_player_rows=1,
+            event_lineup_missing_player_rows=1,
+        )
+        repository = _FakeRepository(repository_result)
+        connection = object()
+        database = _FakeDatabase(connection)
+        job = EventDetailIngestJob(parser, repository, database)
+
+        result = await job.run(14083191, provider_ids=(1, 2, 1), timeout=12.5)
+
+        self.assertEqual(parser.calls, [(14083191, (1, 2), 12.5)])
+        self.assertEqual(repository.calls, [(connection, bundle)])
+        self.assertEqual(database.transaction_calls, 1)
+        self.assertEqual(result.event_id, 14083191)
+        self.assertEqual(result.provider_ids, (1, 2))
+        self.assertEqual(result.written.event_market_rows, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

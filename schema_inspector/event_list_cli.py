@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 
 from .db import AsyncpgDatabase, load_database_config
 from .event_list_job import EventListIngestJob
@@ -14,6 +15,9 @@ from .sofascore_client import SofascoreClient
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     parser = argparse.ArgumentParser(
         description="Fetch list-style Sofascore event endpoints and persist them into PostgreSQL.",
     )

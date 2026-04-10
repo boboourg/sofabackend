@@ -67,7 +67,7 @@ CREATE TABLE season (
 
 CREATE TABLE unique_tournament (
     id BIGINT PRIMARY KEY,
-    slug TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL,
     name TEXT NOT NULL,
     category_id BIGINT NOT NULL REFERENCES category(id),
     country_alpha2 TEXT REFERENCES country(alpha2),
@@ -141,7 +141,7 @@ CREATE TABLE referee (
 
 CREATE TABLE tournament (
     id BIGINT PRIMARY KEY,
-    slug TEXT UNIQUE,
+    slug TEXT,
     name TEXT NOT NULL,
     category_id BIGINT NOT NULL REFERENCES category(id),
     unique_tournament_id BIGINT REFERENCES unique_tournament(id),
@@ -156,7 +156,7 @@ CREATE TABLE tournament (
 
 CREATE TABLE team (
     id BIGINT PRIMARY KEY,
-    slug TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL,
     name TEXT NOT NULL,
     short_name TEXT,
     full_name TEXT,
@@ -804,7 +804,10 @@ CREATE INDEX idx_category_sport_id ON category(sport_id);
 CREATE INDEX idx_category_country_alpha2 ON category(country_alpha2);
 CREATE INDEX idx_unique_tournament_category_id ON unique_tournament(category_id);
 CREATE INDEX idx_unique_tournament_country_alpha2 ON unique_tournament(country_alpha2);
+CREATE INDEX idx_unique_tournament_slug ON unique_tournament(slug);
 CREATE INDEX idx_unique_tournament_season_season_id ON unique_tournament_season(season_id);
+CREATE INDEX idx_tournament_slug ON tournament(slug);
+CREATE INDEX idx_team_slug ON team(slug);
 CREATE INDEX idx_team_category_id ON team(category_id);
 CREATE INDEX idx_team_country_alpha2 ON team(country_alpha2);
 CREATE INDEX idx_team_primary_unique_tournament_id ON team(primary_unique_tournament_id);

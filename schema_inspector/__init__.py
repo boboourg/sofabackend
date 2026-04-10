@@ -5,12 +5,17 @@ from .competition_parser import CompetitionBundle, CompetitionParser, Competitio
 from .competition_repository import CompetitionRepository, CompetitionWriteResult
 from .db import AsyncpgDatabase, DatabaseConfig, load_database_config
 from .endpoints import (
+    EVENT_DETAIL_ENDPOINTS,
     EVENT_LIST_ENDPOINTS,
     EndpointRegistryEntry,
     SofascoreEndpoint,
     competition_registry_entries,
+    event_detail_registry_entries,
     event_list_registry_entries,
 )
+from .event_detail_job import EventDetailIngestJob, EventDetailIngestResult
+from .event_detail_parser import EventDetailBundle, EventDetailParser, EventDetailParserError
+from .event_detail_repository import EventDetailRepository, EventDetailWriteResult
 from .event_list_job import EventListIngestJob, EventListIngestResult
 from .event_list_parser import EventListBundle, EventListParser, EventListParserError
 from .event_list_repository import EventListRepository, EventListWriteResult
@@ -34,8 +39,10 @@ __all__ = [
     "AsyncpgDatabase",
     "EndpointRegistryEntry",
     "SofascoreEndpoint",
+    "EVENT_DETAIL_ENDPOINTS",
     "EVENT_LIST_ENDPOINTS",
     "competition_registry_entries",
+    "event_detail_registry_entries",
     "event_list_registry_entries",
     "SofascoreClient",
     "SofascoreClientError",
@@ -50,6 +57,13 @@ __all__ = [
     "CompetitionWriteResult",
     "CompetitionIngestJob",
     "CompetitionIngestResult",
+    "EventDetailBundle",
+    "EventDetailParser",
+    "EventDetailParserError",
+    "EventDetailRepository",
+    "EventDetailWriteResult",
+    "EventDetailIngestJob",
+    "EventDetailIngestResult",
     "EventListBundle",
     "EventListParser",
     "EventListParserError",
