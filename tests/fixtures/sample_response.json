@@ -1,0 +1,20 @@
+{
+  "player": {
+    "id": 7,
+    "name": "Ada Lovelace",
+    "team": {
+      "id": 99,
+      "name": "United"
+    }
+  },
+  "events": [
+    {
+      "eventId": 1,
+      "score": 3.2
+    },
+    {
+      "eventId": 2,
+      "score": null
+    }
+  ]
+}
