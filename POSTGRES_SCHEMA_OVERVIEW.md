@@ -117,4 +117,4 @@ not as one stable relational shape. For those cases the schema keeps a controlle
 `api_payload_snapshot(endpoint_pattern, envelope_key, payload)`.
 
 That lets the future parser keep exact Sofascore payloads without inventing fake relational
-columns, while still keeping the business core in 3NF.
+columns, while still keeping the business core in 3NF
