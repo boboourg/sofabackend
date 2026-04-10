@@ -10,10 +10,15 @@ from schema_inspector.report import report_filename
 from schema_inspector.runtime import RuntimeConfig, TransportResult, TransportAttempt, load_runtime_config
 from schema_inspector.schema import infer_schema
 from schema_inspector.service import inspect_url_to_markdown
+from schema_inspector.sofascore_client import (
+    SofascoreAccessDeniedError,
+    SofascoreClient,
+    SofascoreRateLimitError,
+)
 from schema_inspector.transport import InspectorTransport
 
 
-class SchemaInspectorTests(unittest.TestCase):
+class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
     FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
     OUTPUT_DIR = Path(__file__).resolve().parent / "_output"
 
@@ -40,15 +45,15 @@ class SchemaInspectorTests(unittest.TestCase):
         self.assertEqual(root.children["player"].candidate_keys(), ["id"])
         self.assertEqual(root.children["events"].item_summary.candidate_keys(), ["eventId"])
 
-    def test_fetch_and_report_from_file_url(self) -> None:
+    async def test_fetch_and_report_from_file_url(self) -> None:
         json_path = self.FIXTURES_DIR / "sample_response.json"
         file_url = json_path.resolve().as_uri()
-        result = fetch_json(file_url)
+        result = await fetch_json(file_url)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(len(result.attempts), 1)
         self.assertIsNone(result.challenge_reason)
 
-        report_path = inspect_url_to_markdown(file_url, output_dir=self.OUTPUT_DIR)
+        report_path = await inspect_url_to_markdown(file_url, output_dir=self.OUTPUT_DIR)
         markdown = report_path.read_text(encoding="utf-8")
 
         self.assertTrue(report_path.exists())
@@ -92,13 +97,13 @@ class SchemaInspectorTests(unittest.TestCase):
         self.assertEqual(len(config.proxy_endpoints), 3)
         self.assertEqual(config.proxy_endpoints[0].url, "http://proxy-1.local:8080")
 
-    def test_transport_retries_with_next_proxy_on_retryable_status(self) -> None:
+    async def test_transport_retries_with_next_proxy_on_retryable_status(self) -> None:
         current_time = [0.0]
 
         def fake_clock() -> float:
             return current_time[0]
 
-        def fake_sleep(delay: float) -> None:
+        async def fake_sleep(delay: float) -> None:
             current_time[0] += delay
 
         config = load_runtime_config(
@@ -144,27 +149,74 @@ class SchemaInspectorTests(unittest.TestCase):
             )
 
         with patch.object(transport, "_execute_once", side_effect=fake_execute):
-            result = transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+            result = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
 
         self.assertEqual(result.status_code, 200)
         self.assertEqual(len(result.attempts), 2)
         self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080", "http://proxy-2.local:8080"])
 
-    def test_fetch_json_raises_on_challenge_response(self) -> None:
+    async def test_fetch_json_raises_on_challenge_response(self) -> None:
+        config = RuntimeConfig()
+        with patch(
+            "schema_inspector.fetch.SofascoreClient.get_json",
+            side_effect=SofascoreAccessDeniedError("Access denied by upstream: status=403, proxy=direct, challenge=bot_challenge"),
+        ):
+            with self.assertRaises(FetchJsonError):
+                await fetch_json("https://example.test/protected", runtime_config=config)
+
+    async def test_sofascore_client_returns_json_payload(self) -> None:
+        config = RuntimeConfig()
+        mocked_transport_result = TransportResult(
+            resolved_url="https://example.test/api",
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            body_bytes=b'{"ok": true, "items": [1, 2]}',
+            attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+            final_proxy_name="proxy_1",
+            challenge_reason=None,
+        )
+
+        with patch("schema_inspector.sofascore_client.InspectorTransport.fetch", return_value=mocked_transport_result):
+            client = SofascoreClient(config)
+            result = await client.get_json("https://example.test/api")
+
+        self.assertEqual(result.payload, {"ok": True, "items": [1, 2]})
+        self.assertEqual(result.final_proxy_name, "proxy_1")
+        self.assertEqual(result.status_code, 200)
+
+    async def test_sofascore_client_raises_rate_limit_error_on_429(self) -> None:
+        config = RuntimeConfig()
+        mocked_transport_result = TransportResult(
+            resolved_url="https://example.test/api",
+            status_code=429,
+            headers={"Content-Type": "application/json"},
+            body_bytes=b'{"error": "slow down"}',
+            attempts=(TransportAttempt(1, "proxy_1", 429, None, "rate_limited"),),
+            final_proxy_name="proxy_1",
+            challenge_reason="rate_limited",
+        )
+
+        with patch("schema_inspector.sofascore_client.InspectorTransport.fetch", return_value=mocked_transport_result):
+            client = SofascoreClient(config)
+            with self.assertRaises(SofascoreRateLimitError):
+                await client.get_json("https://example.test/api")
+
+    async def test_sofascore_client_raises_access_denied_error_on_403(self) -> None:
         config = RuntimeConfig()
         mocked_transport_result = TransportResult(
             resolved_url="https://example.test/protected",
             status_code=403,
             headers={"Content-Type": "text/html"},
             body_bytes=b"<html>verify you are human</html>",
-            attempts=(TransportAttempt(1, None, 403, None, "bot_challenge"),),
-            final_proxy_name=None,
+            attempts=(TransportAttempt(1, "proxy_1", 403, None, "bot_challenge"),),
+            final_proxy_name="proxy_1",
             challenge_reason="bot_challenge",
         )
 
-        with patch("schema_inspector.fetch.InspectorTransport.fetch", return_value=mocked_transport_result):
-            with self.assertRaises(FetchJsonError):
-                fetch_json("https://example.test/protected", runtime_config=config)
+        with patch("schema_inspector.sofascore_client.InspectorTransport.fetch", return_value=mocked_transport_result):
+            client = SofascoreClient(config)
+            with self.assertRaises(SofascoreAccessDeniedError):
+                await client.get_json("https://example.test/protected")
 
 
 if __name__ == "__main__":

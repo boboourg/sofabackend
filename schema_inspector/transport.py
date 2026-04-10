@@ -3,6 +3,8 @@ Now powered by curl_cffi for Stealth Mode (Cloudflare/Akamai bypass)."""
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import time
 from dataclasses import dataclass
 from typing import Mapping
@@ -10,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from curl_cffi import requests as cffi_requests
+from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 
 from .challenge import detect_challenge
@@ -31,15 +33,21 @@ class InspectorTransport:
 
     def __init__(self, runtime_config: RuntimeConfig, *, sleeper=None, clock=None) -> None:
         self.runtime_config = runtime_config
-        self.sleeper = sleeper or time.sleep
+        self.sleeper = sleeper or asyncio.sleep
         self.clock = clock or time.monotonic
         self.proxy_pool = ProxyPool(runtime_config.proxy_endpoints, clock=self.clock)
 
-    def fetch(self, url: str, *, headers: Mapping[str, str] | None = None, timeout: float = 20.0) -> TransportResult:
+    async def fetch(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float = 20.0,
+    ) -> TransportResult:
         request_headers = dict(self.runtime_config.default_headers)
         if self.runtime_config.user_agent:
             request_headers["User-Agent"] = self.runtime_config.user_agent
-            
+
         if headers:
             request_headers.update(headers)
 
@@ -50,7 +58,7 @@ class InspectorTransport:
             proxy_url = proxy.url if proxy is not None else None
 
             try:
-                raw = self._execute_once(url, request_headers, timeout, proxy_url)
+                raw = await self._execute_once(url, request_headers, timeout, proxy_url)
                 challenge_reason = detect_challenge(
                     raw.status_code,
                     raw.headers,
@@ -74,7 +82,7 @@ class InspectorTransport:
                 if should_retry:
                     if proxy_name is not None:
                         self.proxy_pool.record_failure(proxy_name)
-                    self.sleeper(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
+                    await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
 
                 if raw.status_code < 400 and proxy_name is not None:
@@ -106,13 +114,13 @@ class InspectorTransport:
                 if proxy_name is not None:
                     self.proxy_pool.record_failure(proxy_name)
                 if attempt_number < self.runtime_config.retry_policy.max_attempts:
-                    self.sleeper(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
+                    await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
                 raise
 
         raise RuntimeError("Transport exhausted without a final response.")
 
-    def _execute_once(
+    async def _execute_once(
         self,
         url: str,
         headers: Mapping[str, str],
@@ -120,44 +128,58 @@ class InspectorTransport:
         proxy_url: str | None,
     ) -> _RawResponse:
         parsed = urlparse(url)
-        
+
         # 1. Fallback for local files (curl_cffi doesn't do file://)
         if parsed.scheme == "file":
-            request = Request(url=url, headers=dict(headers), method="GET")
-            try:
-                with urlopen(request, timeout=timeout) as response:
-                    return _RawResponse(
-                        resolved_url=response.geturl(),
-                        status_code=getattr(response, "status", 200) or 200,
-                        headers=dict(response.headers.items()),
-                        body_bytes=response.read(),
-                    )
-            except HTTPError as exc:
-                return _RawResponse(
-                    resolved_url=exc.geturl(),
-                    status_code=exc.code,
-                    headers=dict(exc.headers.items()),
-                    body_bytes=exc.read(),
-                )
+            return await asyncio.to_thread(self._execute_local_file_once, url, headers, timeout)
 
         # 2. STEALTH MODE for HTTP/HTTPS
         proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        
+
         # Safely extract impersonate profile, fallback to "chrome120" if not set in runtime.py yet
         tls_policy = getattr(self.runtime_config, "tls_policy", None)
         impersonate_profile = getattr(tls_policy, "impersonate", "chrome120")
 
-        response = cffi_requests.get(
-            url,
-            headers=dict(headers),
-            proxies=proxies,
-            timeout=timeout,
-            impersonate=impersonate_profile,
-        )
-        
+        async with AsyncSession() as session:
+            response = await session.get(
+                url,
+                headers=dict(headers),
+                proxies=proxies,
+                timeout=timeout,
+                impersonate=impersonate_profile,
+            )
+
         return _RawResponse(
             resolved_url=response.url,
             status_code=response.status_code,
             headers=dict(response.headers),
             body_bytes=response.content,
         )
+
+    async def _sleep(self, delay: float) -> None:
+        maybe_awaitable = self.sleeper(delay)
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
+
+    @staticmethod
+    def _execute_local_file_once(
+        url: str,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> _RawResponse:
+        request = Request(url=url, headers=dict(headers), method="GET")
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return _RawResponse(
+                    resolved_url=response.geturl(),
+                    status_code=getattr(response, "status", 200) or 200,
+                    headers=dict(response.headers.items()),
+                    body_bytes=response.read(),
+                )
+        except HTTPError as exc:
+            return _RawResponse(
+                resolved_url=exc.geturl(),
+                status_code=exc.code,
+                headers=dict(exc.headers.items()),
+                body_bytes=exc.read(),
+            )

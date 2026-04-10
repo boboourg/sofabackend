@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 
 from .runtime import load_runtime_config
@@ -57,12 +58,14 @@ def main() -> int:
         extra_headers=headers,
         max_attempts=args.max_attempts,
     )
-    report_path = inspect_url_to_markdown(
-        args.url,
-        output_dir=Path(args.outdir),
-        headers=headers,
-        timeout=args.timeout,
-        runtime_config=runtime_config,
+    report_path = asyncio.run(
+        inspect_url_to_markdown(
+            args.url,
+            output_dir=Path(args.outdir),
+            headers=headers,
+            timeout=args.timeout,
+            runtime_config=runtime_config,
+        )
     )
     print(report_path)
     return 0

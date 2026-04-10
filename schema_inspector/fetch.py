@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Mapping
 
 from .runtime import RuntimeConfig, TransportAttempt, load_runtime_config
-from .transport import InspectorTransport
+from .sofascore_client import (
+    SofascoreAccessDeniedError,
+    SofascoreClient,
+    SofascoreClientError,
+    SofascoreJsonDecodeError,
+    SofascoreRateLimitError,
+)
 
 
 @dataclass(frozen=True)
@@ -31,7 +36,7 @@ class FetchJsonError(RuntimeError):
     """Raised when a response cannot be safely parsed as JSON."""
 
 
-def fetch_json(
+async def fetch_json(
     url: str,
     headers: Mapping[str, str] | None = None,
     timeout: float = 20.0,
@@ -40,34 +45,32 @@ def fetch_json(
     """Fetch JSON through the inspector transport architecture."""
 
     runtime_config = runtime_config or load_runtime_config(extra_headers=headers)
-    transport = InspectorTransport(runtime_config)
-    transport_result = transport.fetch(url, headers=headers, timeout=timeout)
-    if transport_result.challenge_reason:
-        raise FetchJsonError(
-            f"Request ended with challenge reason '{transport_result.challenge_reason}' "
-            f"and status {transport_result.status_code}"
-        )
-    if transport_result.status_code >= 400:
-        raise FetchJsonError(f"Request failed with HTTP {transport_result.status_code}")
-
+    client = SofascoreClient(runtime_config)
     try:
-        payload = json.loads(transport_result.body_bytes.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise FetchJsonError(f"Response is not valid JSON: {exc}") from exc
+        result = await client.get_json(url, headers=headers, timeout=timeout)
+    except (SofascoreRateLimitError, SofascoreAccessDeniedError, SofascoreJsonDecodeError, SofascoreClientError) as exc:
+        raise FetchJsonError(str(exc)) from exc
 
     return FetchResult(
-        source_url=url,
-        resolved_url=transport_result.resolved_url,
-        fetched_at=_utc_now(),
-        status_code=transport_result.status_code,
-        headers=transport_result.headers,
-        body_bytes=transport_result.body_bytes,
-        payload=payload,
-        attempts=transport_result.attempts,
-        final_proxy_name=transport_result.final_proxy_name,
-        challenge_reason=transport_result.challenge_reason,
+        source_url=result.source_url,
+        resolved_url=result.resolved_url,
+        fetched_at=result.fetched_at,
+        status_code=result.status_code,
+        headers=result.headers,
+        body_bytes=result.body_bytes,
+        payload=result.payload,
+        attempts=result.attempts,
+        final_proxy_name=result.final_proxy_name,
+        challenge_reason=result.challenge_reason,
     )
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def fetch_json_sync(
+    url: str,
+    headers: Mapping[str, str] | None = None,
+    timeout: float = 20.0,
+    runtime_config: RuntimeConfig | None = None,
+) -> FetchResult:
+    """Synchronous bridge for entrypoints that still need a blocking API."""
+
+    return asyncio.run(fetch_json(url, headers=headers, timeout=timeout, runtime_config=runtime_config))
