@@ -1,0 +1,6287 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Sofascore Local Multi-Sport API",
+    "version": "1.0.0",
+    "description": "Local OpenAPI contract for the multi-sport read API backed by the current PostgreSQL dataset. Paths mirror Sofascore-style templates already used by the ingestion layer. Normalized endpoints expose typed schemas where we have stable tables, while snapshot-first endpoints remain intentionally flexible.\n\nGenerated at: 2026-04-15T15:29:43+00:00\nTables with data in summary: 0\nRaw snapshot rows: 0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "Recommended base URL for the future local multi-sport API server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Categories",
+      "description": "Sport-specific category and tournament discovery endpoints."
+    },
+    {
+      "name": "Competition",
+      "description": "Unique tournament and season metadata."
+    },
+    {
+      "name": "Event List",
+      "description": "Sport-specific scheduled/live/tournament event feeds."
+    },
+    {
+      "name": "Event Detail",
+      "description": "Event detail, lineups, odds, managers, h2h and other event subresources."
+    },
+    {
+      "name": "Standings",
+      "description": "Standings and standings rows by unique tournament or tournament."
+    },
+    {
+      "name": "Statistics",
+      "description": "Season statistics config and leaderboard-style snapshot results."
+    },
+    {
+      "name": "Entities",
+      "description": "Player/team entities, player season statistics and enrichment endpoints."
+    },
+    {
+      "name": "Leaderboards",
+      "description": "Top players, top teams, venues, groups, team-of-the-week and related season widgets."
+    }
+  ],
+  "paths": {
+    "/api/v1/sport/football/{date}/{timezone_offset_seconds}/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getFootballCategoriesByDate",
+        "summary": "Football categories discovery",
+        "description": "Daily football category discovery projection.\n\n- Target table: `category_daily_summary`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the discovery endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timezone_offset_seconds",
+            "in": "path",
+            "required": true,
+            "description": "Timezone offset in seconds, for example 10800.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoriesEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/{date}/{timezone_offset_seconds}/categories",
+        "x-source-tables": [
+          "category_daily_summary",
+          "category_daily_unique_tournament",
+          "category_daily_team",
+          "category"
+        ],
+        "x-target-table": "category_daily_summary"
+      }
+    },
+    "/api/v1/sport/football/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getFootballCategoriesCatalog",
+        "summary": "Football categories catalog",
+        "description": "Sport-level categories listing for football.\n\n- Target table: `category`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/categories",
+        "x-source-tables": [
+          "category",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "category"
+      }
+    },
+    "/api/v1/sport/football/categories/all": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getFootballCategoriesCatalogAll",
+        "summary": "Football full categories catalog",
+        "description": "Full category catalog for football used for wide discovery.\n\n- Target table: `category`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/categories/all",
+        "x-source-tables": [
+          "category",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "category"
+      }
+    },
+    "/api/v1/sport/football/scheduled-tournaments/{date}/page/{page}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getFootballScheduledTournamentsPage",
+        "summary": "Football scheduled tournaments page",
+        "description": "Daily scheduled tournament discovery page for football.\n\n- Target table: `tournament`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the discovery endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "required": true,
+            "description": "Scheduled tournaments page number.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/scheduled-tournaments/{date}/page/{page}",
+        "x-source-tables": [
+          "tournament",
+          "unique_tournament",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "tournament"
+      }
+    },
+    "/api/v1/sport/football/scheduled-events/{date}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getScheduledFootballEvents",
+        "summary": "Scheduled football events",
+        "description": "Scheduled football event feed from normalized event tables.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the scheduled events feed.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/scheduled-events/{date}",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/sport/football/events/live": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getLiveFootballEvents",
+        "summary": "Live football events",
+        "description": "Live football event feed from normalized event tables.\n\n- Target table: `event`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/events/live",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/sport/basketball/{date}/{timezone_offset_seconds}/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getBasketballCategoriesByDate",
+        "summary": "Basketball categories discovery",
+        "description": "Daily basketball category discovery projection.\n\n- Target table: `category_daily_summary`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the discovery endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timezone_offset_seconds",
+            "in": "path",
+            "required": true,
+            "description": "Timezone offset in seconds, for example 10800.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoriesEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/{date}/{timezone_offset_seconds}/categories",
+        "x-source-tables": [
+          "category_daily_summary",
+          "category_daily_unique_tournament",
+          "category_daily_team",
+          "category"
+        ],
+        "x-target-table": "category_daily_summary"
+      }
+    },
+    "/api/v1/sport/basketball/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getBasketballCategoriesCatalog",
+        "summary": "Basketball categories catalog",
+        "description": "Sport-level categories listing for basketball.\n\n- Target table: `category`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/categories",
+        "x-source-tables": [
+          "category",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "category"
+      }
+    },
+    "/api/v1/sport/basketball/categories/all": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getBasketballCategoriesCatalogAll",
+        "summary": "Basketball full categories catalog",
+        "description": "Full category catalog for basketball used for wide discovery.\n\n- Target table: `category`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/categories/all",
+        "x-source-tables": [
+          "category",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "category"
+      }
+    },
+    "/api/v1/sport/basketball/scheduled-tournaments/{date}/page/{page}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getBasketballScheduledTournamentsPage",
+        "summary": "Basketball scheduled tournaments page",
+        "description": "Daily scheduled tournament discovery page for basketball.\n\n- Target table: `tournament`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the discovery endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "required": true,
+            "description": "Scheduled tournaments page number.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/scheduled-tournaments/{date}/page/{page}",
+        "x-source-tables": [
+          "tournament",
+          "unique_tournament",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "tournament"
+      }
+    },
+    "/api/v1/sport/basketball/scheduled-events/{date}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getScheduledBasketballEvents",
+        "summary": "Scheduled basketball events",
+        "description": "Scheduled basketball event feed from normalized event tables.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the scheduled events feed.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/scheduled-events/{date}",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/sport/basketball/events/live": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getLiveBasketballEvents",
+        "summary": "Live basketball events",
+        "description": "Live basketball event feed from normalized event tables.\n\n- Target table: `event`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/events/live",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/sport/tennis/{date}/{timezone_offset_seconds}/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getTennisCategoriesByDate",
+        "summary": "Tennis categories discovery",
+        "description": "Daily tennis category discovery projection.\n\n- Target table: `category_daily_summary`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the discovery endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timezone_offset_seconds",
+            "in": "path",
+            "required": true,
+            "description": "Timezone offset in seconds, for example 10800.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoriesEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/{date}/{timezone_offset_seconds}/categories",
+        "x-source-tables": [
+          "category_daily_summary",
+          "category_daily_unique_tournament",
+          "category_daily_team",
+          "category"
+        ],
+        "x-target-table": "category_daily_summary"
+      }
+    },
+    "/api/v1/sport/tennis/categories": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getTennisCategoriesCatalog",
+        "summary": "Tennis categories catalog",
+        "description": "Sport-level categories listing for tennis.\n\n- Target table: `category`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/categories",
+        "x-source-tables": [
+          "category",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "category"
+      }
+    },
+    "/api/v1/sport/tennis/categories/all": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getTennisCategoriesCatalogAll",
+        "summary": "Tennis full categories catalog",
+        "description": "Full category catalog for tennis used for wide discovery.\n\n- Target table: `category`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/categories/all",
+        "x-source-tables": [
+          "category",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "category"
+      }
+    },
+    "/api/v1/sport/tennis/scheduled-tournaments/{date}/page/{page}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getTennisScheduledTournamentsPage",
+        "summary": "Tennis scheduled tournaments page",
+        "description": "Daily scheduled tournament discovery page for tennis.\n\n- Target table: `tournament`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the discovery endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "required": true,
+            "description": "Scheduled tournaments page number.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/scheduled-tournaments/{date}/page/{page}",
+        "x-source-tables": [
+          "tournament",
+          "unique_tournament",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "tournament"
+      }
+    },
+    "/api/v1/sport/tennis/scheduled-events/{date}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getScheduledTennisEvents",
+        "summary": "Scheduled tennis events",
+        "description": "Scheduled tennis event feed from normalized event tables.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the scheduled events feed.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/scheduled-events/{date}",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/sport/tennis/events/live": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getLiveTennisEvents",
+        "summary": "Live tennis events",
+        "description": "Live tennis event feed from normalized event tables.\n\n- Target table: `event`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/events/live",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}": {
+      "get": {
+        "tags": [
+          "Competition"
+        ],
+        "operationId": "getUniqueTournament",
+        "summary": "Unique tournament",
+        "description": "Base unique tournament metadata from normalized competition tables.\n\n- Target table: `unique_tournament`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "uniqueTournament": {
+                      "$ref": "#/components/schemas/UniqueTournament"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}",
+        "x-source-tables": [
+          "unique_tournament"
+        ],
+        "x-target-table": "unique_tournament"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/seasons": {
+      "get": {
+        "tags": [
+          "Competition"
+        ],
+        "operationId": "getUniqueTournamentSeasons",
+        "summary": "Tournament seasons",
+        "description": "Season list linked to one unique tournament.\n\n- Target table: `season`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seasons": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Season"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/seasons",
+        "x-source-tables": [
+          "unique_tournament_season",
+          "season"
+        ],
+        "x-target-table": "season"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/info": {
+      "get": {
+        "tags": [
+          "Competition"
+        ],
+        "operationId": "getUniqueTournamentSeasonInfo",
+        "summary": "Tournament season info snapshot",
+        "description": "Latest stored raw season info payload for the requested unique tournament season.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/info",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/category/{category_id}/unique-tournaments": {
+      "get": {
+        "tags": [
+          "Categories"
+        ],
+        "operationId": "getCategoryUniqueTournaments",
+        "summary": "Category unique tournaments",
+        "description": "Category-level unique tournament discovery feed.\n\n- Target table: `unique_tournament`",
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore category ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/category/{category_id}/unique-tournaments",
+        "x-source-tables": [
+          "unique_tournament",
+          "tournament",
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "unique_tournament"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getUniqueTournamentScheduledEvents",
+        "summary": "Tournament scheduled events by day",
+        "description": "Tournament/day event feed. Particularly useful for tennis and other daily-draw sports.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "date",
+            "in": "path",
+            "required": true,
+            "description": "YYYY-MM-DD date used in the scheduled events feed.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/featured-events": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getUniqueTournamentFeaturedEvents",
+        "summary": "Featured events for one tournament",
+        "description": "Featured event feed for one unique tournament.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "featuredEvents": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/featured-events",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}": {
+      "get": {
+        "tags": [
+          "Event List"
+        ],
+        "operationId": "getRoundEvents",
+        "summary": "Round events",
+        "description": "Event list for one tournament season round.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "round_number",
+            "in": "path",
+            "required": true,
+            "description": "Tournament round number.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}",
+        "x-source-tables": [
+          "event",
+          "event_round_info",
+          "event_score"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/event/{event_id}": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventDetail",
+        "summary": "Event detail",
+        "description": "Normalized event detail record for one football event.\n\n- Target table: `event`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "$ref": "#/components/schemas/EventDetail"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}",
+        "x-source-tables": [
+          "event",
+          "event_score",
+          "event_round_info",
+          "event_status_time",
+          "event_time"
+        ],
+        "x-target-table": "event"
+      }
+    },
+    "/api/v1/event/{event_id}/lineups": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventLineups",
+        "summary": "Event lineups",
+        "description": "Home and away lineups, players and missing players for one event.\n\n- Target table: `event_lineup`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "home": {
+                      "$ref": "#/components/schemas/EventLineupSide"
+                    },
+                    "away": {
+                      "$ref": "#/components/schemas/EventLineupSide"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/lineups",
+        "x-source-tables": [
+          "event_lineup",
+          "event_lineup_player",
+          "event_lineup_missing_player"
+        ],
+        "x-target-table": "event_lineup"
+      }
+    },
+    "/api/v1/event/{event_id}/managers": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventManagers",
+        "summary": "Event managers",
+        "description": "Manager assignments for the home and away side of one event.\n\n- Target table: `event_manager_assignment`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "homeManager": {
+                      "$ref": "#/components/schemas/Manager"
+                    },
+                    "awayManager": {
+                      "$ref": "#/components/schemas/Manager"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/managers",
+        "x-source-tables": [
+          "event_manager_assignment",
+          "manager"
+        ],
+        "x-target-table": "event_manager_assignment"
+      }
+    },
+    "/api/v1/event/{event_id}/h2h": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventH2h",
+        "summary": "Event head-to-head",
+        "description": "Team and manager duel aggregates for one event.\n\n- Target table: `event_duel`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "teamDuel": {
+                      "$ref": "#/components/schemas/EventDuel"
+                    },
+                    "managerDuel": {
+                      "$ref": "#/components/schemas/EventDuel"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/h2h",
+        "x-source-tables": [
+          "event_duel"
+        ],
+        "x-target-table": "event_duel"
+      }
+    },
+    "/api/v1/event/{event_id}/pregame-form": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventPregameForm",
+        "summary": "Event pregame form",
+        "description": "Pregame form block for the home and away side.\n\n- Target table: `event_pregame_form`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPregameFormEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/pregame-form",
+        "x-source-tables": [
+          "event_pregame_form",
+          "event_pregame_form_side",
+          "event_pregame_form_item"
+        ],
+        "x-target-table": "event_pregame_form"
+      }
+    },
+    "/api/v1/event/{event_id}/votes": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventVotes",
+        "summary": "Event votes",
+        "description": "Fan vote distributions for one event.\n\n- Target table: `event_vote_option`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vote": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventVoteOption"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/votes",
+        "x-source-tables": [
+          "event_vote_option"
+        ],
+        "x-target-table": "event_vote_option"
+      }
+    },
+    "/api/v1/event/{event_id}/comments": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventComments",
+        "summary": "Event comments feed",
+        "description": "Minute-by-minute match commentary and kit colors for one event.\n\n- Target table: `event_comment`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventCommentsEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/comments",
+        "x-source-tables": [
+          "event_comment_feed",
+          "event_comment",
+          "player"
+        ],
+        "x-target-table": "event_comment"
+      }
+    },
+    "/api/v1/event/{event_id}/graph": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventGraph",
+        "summary": "Event momentum graph",
+        "description": "Stored momentum graph points for one event.\n\n- Target table: `event_graph`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventGraphEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/graph",
+        "x-source-tables": [
+          "event_graph",
+          "event_graph_point"
+        ],
+        "x-target-table": "event_graph"
+      }
+    },
+    "/api/v1/event/{event_id}/heatmap/{team_id}": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventTeamHeatmap",
+        "summary": "Team heatmap for one event",
+        "description": "Stored event heatmap points for one team inside one event.\n\n- Target table: `event_team_heatmap`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventTeamHeatmapEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/heatmap/{team_id}",
+        "x-source-tables": [
+          "event_team_heatmap",
+          "event_team_heatmap_point"
+        ],
+        "x-target-table": "event_team_heatmap"
+      }
+    },
+    "/api/v1/event/{event_id}/odds/{provider_id}/all": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventOddsAll",
+        "summary": "All event odds markets",
+        "description": "All stored odds markets for one event/provider combination.\n\n- Target table: `event_market`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "description": "Odds provider ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "markets": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventMarket"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/odds/{provider_id}/all",
+        "x-source-tables": [
+          "event_market",
+          "event_market_choice"
+        ],
+        "x-target-table": "event_market"
+      }
+    },
+    "/api/v1/event/{event_id}/odds/{provider_id}/featured": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventOddsFeatured",
+        "summary": "Featured event odds markets",
+        "description": "Featured odds markets for one event/provider combination.\n\n- Target table: `event_market`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "description": "Odds provider ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "featured": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventMarket"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/odds/{provider_id}/featured",
+        "x-source-tables": [
+          "event_market",
+          "event_market_choice"
+        ],
+        "x-target-table": "event_market"
+      }
+    },
+    "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventWinningOdds",
+        "summary": "Winning odds projection",
+        "description": "Stored winning-odds projection for home and away sides.\n\n- Target table: `event_winning_odds`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "description": "Odds provider ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "home": {
+                      "$ref": "#/components/schemas/EventWinningOddsSide"
+                    },
+                    "away": {
+                      "$ref": "#/components/schemas/EventWinningOddsSide"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
+        "x-source-tables": [
+          "event_winning_odds"
+        ],
+        "x-target-table": "event_winning_odds"
+      }
+    },
+    "/api/v1/event/{event_id}/point-by-point": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventPointByPoint",
+        "summary": "Tennis point-by-point payload",
+        "description": "Latest stored raw point-by-point payload for one tennis event.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/point-by-point",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/event/{event_id}/tennis-power": {
+      "get": {
+        "tags": [
+          "Event Detail"
+        ],
+        "operationId": "getEventTennisPower",
+        "summary": "Tennis power snapshot",
+        "description": "Latest stored raw tennis-power payload for one tennis event.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore event ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeFormObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/event/{event_id}/tennis-power",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}": {
+      "get": {
+        "tags": [
+          "Standings"
+        ],
+        "operationId": "getUniqueTournamentStandings",
+        "summary": "Standings by unique tournament",
+        "description": "Standings projection by unique tournament season and scope.\n\n- Target table: `standing`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "description": "Standings scope.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "total",
+                "home",
+                "away"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "standings": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Standing"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
+        "x-source-tables": [
+          "standing",
+          "standing_row"
+        ],
+        "x-target-table": "standing"
+      }
+    },
+    "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}": {
+      "get": {
+        "tags": [
+          "Standings"
+        ],
+        "operationId": "getTournamentStandings",
+        "summary": "Standings by tournament",
+        "description": "Standings projection by concrete tournament season and scope.\n\n- Target table: `standing`",
+        "parameters": [
+          {
+            "name": "tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "description": "Standings scope.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "total",
+                "home",
+                "away"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "standings": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Standing"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}",
+        "x-source-tables": [
+          "standing",
+          "standing_row"
+        ],
+        "x-target-table": "standing"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/info": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "operationId": "getSeasonStatisticsInfo",
+        "summary": "Season statistics info",
+        "description": "Statistics configuration for a tournament season, including teams, group definitions and nationalities.\n\n- Target table: `season_statistics_config`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonStatisticsInfoEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/info",
+        "x-source-tables": [
+          "season_statistics_config",
+          "season_statistics_config_team",
+          "season_statistics_group_item",
+          "season_statistics_nationality"
+        ],
+        "x-target-table": "season_statistics_config"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "operationId": "getSeasonStatistics",
+        "summary": "Season statistics snapshot results",
+        "description": "Leaderboard-style season statistics snapshots. Query parameters intentionally mirror Sofascore grammar.\n\n- Target table: `season_statistics_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Result page size.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Offset used by the original Sofascore query.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "Ordering code, for example -rating.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "accumulation",
+            "in": "query",
+            "required": false,
+            "description": "Accumulation mode, for example total or per90.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "description": "Statistics group code.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Optional list of exact Sofascore field names.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "filters",
+            "in": "query",
+            "required": false,
+            "description": "Optional list of exact Sofascore filter expressions.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonStatisticsEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics?limit={limit}&offset={offset}&order={order}&accumulation={accumulation}&group={group}&fields={fields}&filters={filters}",
+        "x-source-tables": [
+          "season_statistics_snapshot",
+          "season_statistics_result",
+          "player",
+          "team"
+        ],
+        "x-target-table": "season_statistics_snapshot"
+      }
+    },
+    "/api/v1/team/{team_id}": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getTeam",
+        "summary": "Team entity",
+        "description": "Normalized team entity.\n\n- Target table: `team`",
+        "parameters": [
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "team": {
+                      "$ref": "#/components/schemas/Team"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/team/{team_id}",
+        "x-source-tables": [
+          "team"
+        ],
+        "x-target-table": "team"
+      }
+    },
+    "/api/v1/player/{player_id}": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getPlayer",
+        "summary": "Player entity",
+        "description": "Normalized player entity.\n\n- Target table: `player`",
+        "parameters": [
+          {
+            "name": "player_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore player ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "player": {
+                      "$ref": "#/components/schemas/Player"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/player/{player_id}",
+        "x-source-tables": [
+          "player"
+        ],
+        "x-target-table": "player"
+      }
+    },
+    "/api/v1/player/{player_id}/statistics": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getPlayerStatistics",
+        "summary": "Player season statistics",
+        "description": "Player season statistics projection backed by player_season_statistics and related entity tables.\n\n- Target table: `player_season_statistics`",
+        "parameters": [
+          {
+            "name": "player_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore player ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerStatisticsEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/player/{player_id}/statistics",
+        "x-source-tables": [
+          "player_season_statistics",
+          "team",
+          "unique_tournament",
+          "season"
+        ],
+        "x-target-table": "player_season_statistics"
+      }
+    },
+    "/api/v1/player/{player_id}/transfer-history": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getPlayerTransferHistory",
+        "summary": "Player transfer history",
+        "description": "Player transfer history projection.\n\n- Target table: `player_transfer_history`",
+        "parameters": [
+          {
+            "name": "player_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore player ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transferHistory": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PlayerTransferHistoryItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/player/{player_id}/transfer-history",
+        "x-source-tables": [
+          "player_transfer_history"
+        ],
+        "x-target-table": "player_transfer_history"
+      }
+    },
+    "/api/v1/player/{player_id}/statistics/seasons": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getPlayerStatisticsSeasons",
+        "summary": "Player statistics seasons",
+        "description": "Tournament/season availability map for player statistics, plus types map.\n\n- Target table: `entity_statistics_season`",
+        "parameters": [
+          {
+            "name": "player_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore player ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityStatisticsSeasonsEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/player/{player_id}/statistics/seasons",
+        "x-source-tables": [
+          "entity_statistics_season",
+          "entity_statistics_type",
+          "unique_tournament",
+          "season"
+        ],
+        "x-target-table": "entity_statistics_season"
+      }
+    },
+    "/api/v1/team/{team_id}/team-statistics/seasons": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getTeamStatisticsSeasons",
+        "summary": "Team statistics seasons",
+        "description": "Tournament/season availability map for team statistics, plus types map.\n\n- Target table: `entity_statistics_season`",
+        "parameters": [
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityStatisticsSeasonsEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/team/{team_id}/team-statistics/seasons",
+        "x-source-tables": [
+          "entity_statistics_season",
+          "entity_statistics_type",
+          "unique_tournament",
+          "season"
+        ],
+        "x-target-table": "entity_statistics_season"
+      }
+    },
+    "/api/v1/team/{team_id}/player-statistics/seasons": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getTeamPlayerStatisticsSeasons",
+        "summary": "Team player statistics seasons",
+        "description": "Tournament/season availability map for player statistics under one team context.\n\n- Target table: `season_statistics_type`",
+        "parameters": [
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityStatisticsSeasonsEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/team/{team_id}/player-statistics/seasons",
+        "x-source-tables": [
+          "season_statistics_type",
+          "unique_tournament",
+          "season"
+        ],
+        "x-target-table": "season_statistics_type"
+      }
+    },
+    "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getPlayerSeasonOverallStatistics",
+        "summary": "Player season overall statistics snapshot",
+        "description": "Latest stored raw payload for one player/tournament/season overall statistics request.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "player_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore player ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerSeasonOverallEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getTeamSeasonOverallStatistics",
+        "summary": "Team season overall statistics snapshot",
+        "description": "Latest stored raw payload for one team/tournament/season overall statistics request.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamSeasonOverallEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/heatmap/overall": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getPlayerSeasonHeatmapOverall",
+        "summary": "Player season heatmap snapshot",
+        "description": "Latest stored raw payload for one player/tournament/season overall heatmap request.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "player_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore player ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerHeatmapOverallEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/heatmap/overall",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team/{team_id}/team-performance-graph-data": {
+      "get": {
+        "tags": [
+          "Entities"
+        ],
+        "operationId": "getTeamPerformanceGraphData",
+        "summary": "Team performance graph snapshot",
+        "description": "Latest stored raw payload for team performance graph data.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamPerformanceGraphEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team/{team_id}/team-performance-graph-data",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/overall": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopPlayersOverall",
+        "summary": "Top players overall",
+        "description": "Top players leaderboard for one tournament season.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/overall",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-ratings/overall": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopRatingsOverall",
+        "summary": "Top ratings overall",
+        "description": "Top ratings leaderboard for one tournament season.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-ratings/overall",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/regularSeason": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopPlayersRegularSeason",
+        "summary": "Top players regular season",
+        "description": "Regular-season top players leaderboard for one tournament season.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/regularSeason",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/overall": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopPlayersPerGameOverall",
+        "summary": "Top players per game overall",
+        "description": "Per-game top players leaderboard for one tournament season.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/overall",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/overall": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTeamScopedTopPlayersOverall",
+        "summary": "Top players overall for one team context",
+        "description": "Top players leaderboard scoped to one team within a tournament season.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "team_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore team ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/overall",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/regularSeason": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopPlayersPerGameRegularSeason",
+        "summary": "Top players per game regular season",
+        "description": "Regular-season per-game top players leaderboard for one tournament season.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/regularSeason",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season-race": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getPlayerOfTheSeasonRace",
+        "summary": "Player of the season race",
+        "description": "Player of the season race snapshot plus optional statisticsType metadata.\n\n- Target table: `top_player_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerOfTheSeasonRaceEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season-race",
+        "x-source-tables": [
+          "top_player_snapshot",
+          "top_player_entry"
+        ],
+        "x-target-table": "top_player_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/overall": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopTeamsOverall",
+        "summary": "Top teams overall",
+        "description": "Top teams leaderboard for one tournament season.\n\n- Target table: `top_team_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topTeams": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopTeamEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/overall",
+        "x-source-tables": [
+          "top_team_snapshot",
+          "top_team_entry"
+        ],
+        "x-target-table": "top_team_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/venues": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getSeasonVenues",
+        "summary": "Season venues",
+        "description": "Venue list for one tournament season.\n\n- Target table: `venue`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "venues": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Venue"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/venues",
+        "x-source-tables": [
+          "venue"
+        ],
+        "x-target-table": "venue"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/regularSeason": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTopTeamsRegularSeason",
+        "summary": "Top teams regular season",
+        "description": "Regular-season top teams leaderboard for one tournament season.\n\n- Target table: `top_team_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topTeams": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopTeamEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/regularSeason",
+        "x-source-tables": [
+          "top_team_snapshot",
+          "top_team_entry"
+        ],
+        "x-target-table": "top_team_snapshot"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getSeasonGroups",
+        "summary": "Season groups",
+        "description": "Group list for one tournament season.\n\n- Target table: `season_group`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "groups": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SeasonGroup"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups",
+        "x-source-tables": [
+          "season_group"
+        ],
+        "x-target-table": "season_group"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getPlayerOfTheSeason",
+        "summary": "Player of the season",
+        "description": "Player of the season projection for one tournament season.\n\n- Target table: `season_player_of_the_season`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerOfTheSeasonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season",
+        "x-source-tables": [
+          "season_player_of_the_season",
+          "player",
+          "team"
+        ],
+        "x-target-table": "season_player_of_the_season"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/periods": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTeamOfTheWeekPeriods",
+        "summary": "Team of the week periods",
+        "description": "Available team-of-the-week periods for one tournament season.\n\n- Target table: `period`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "periods": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Period"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/periods",
+        "x-source-tables": [
+          "period"
+        ],
+        "x-target-table": "period"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/{period_id}": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTeamOfTheWeek",
+        "summary": "Team of the week",
+        "description": "Team of the week formation and player list for one period.\n\n- Target table: `team_of_the_week`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "period_id",
+            "in": "path",
+            "required": true,
+            "description": "Team-of-the-week period ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamOfTheWeekEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/{period_id}",
+        "x-source-tables": [
+          "team_of_the_week",
+          "team_of_the_week_player"
+        ],
+        "x-target-table": "team_of_the_week"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-statistics/types": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getPlayerStatisticsTypes",
+        "summary": "Player statistics types",
+        "description": "Available player statistics type codes for one tournament season.\n\n- Target table: `season_statistics_type`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "types": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-statistics/types",
+        "x-source-tables": [
+          "season_statistics_type"
+        ],
+        "x-target-table": "season_statistics_type"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-statistics/types": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTeamStatisticsTypes",
+        "summary": "Team statistics types",
+        "description": "Available team statistics type codes for one tournament season.\n\n- Target table: `season_statistics_type`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "types": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-statistics/types",
+        "x-source-tables": [
+          "season_statistics_type"
+        ],
+        "x-target-table": "season_statistics_type"
+      }
+    },
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-events/{scope}": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTournamentTeamEvents",
+        "summary": "Tournament team events",
+        "description": "Stored team-events buckets for one tournament season and scope.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [
+          {
+            "name": "unique_tournament_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore unique tournament ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "path",
+            "required": true,
+            "description": "Sofascore season ID.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "description": "Team-events scope.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "total",
+                "home",
+                "away"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tournamentTeamEvents": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TournamentTeamEventBucket"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-events/{scope}",
+        "x-source-tables": [
+          "tournament_team_event_snapshot",
+          "tournament_team_event_bucket"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/sport/football/trending-top-players": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getFootballTrendingTopPlayers",
+        "summary": "Trending top players for football",
+        "description": "Latest stored raw payload for trending top players in football.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/football/trending-top-players",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/sport/basketball/trending-top-players": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getBasketballTrendingTopPlayers",
+        "summary": "Trending top players for basketball",
+        "description": "Latest stored raw payload for trending top players in basketball.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/basketball/trending-top-players",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    },
+    "/api/v1/sport/tennis/trending-top-players": {
+      "get": {
+        "tags": [
+          "Leaderboards"
+        ],
+        "operationId": "getTennisTrendingTopPlayers",
+        "summary": "Trending top players for tennis",
+        "description": "Latest stored raw payload for trending top players in tennis.\n\n- Target table: `api_payload_snapshot`",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "topPlayers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopPlayerEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in local dataset"
+          }
+        },
+        "x-upstream-pattern": "/api/v1/sport/tennis/trending-top-players",
+        "x-source-tables": [
+          "api_payload_snapshot"
+        ],
+        "x-target-table": "api_payload_snapshot"
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "FreeFormObject": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "TeamColors": {
+        "type": "object",
+        "properties": {
+          "primary": {
+            "type": "string"
+          },
+          "secondary": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TypeMap": {
+        "type": "object",
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "Sport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Category": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "flag": {
+            "type": "string"
+          },
+          "alpha2": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "sportId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "countryAlpha2": {
+            "type": "string"
+          },
+          "fieldTranslations": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Season": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "year": {
+            "type": "string"
+          },
+          "editor": {
+            "type": "boolean"
+          },
+          "seasonCoverageInfo": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "UniqueTournament": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "categoryId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "countryAlpha2": {
+            "type": "string"
+          },
+          "logoAssetId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "darkLogoAssetId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "titleHolderTeamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "titleHolderTitles": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "mostTitles": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "gender": {
+            "type": "string"
+          },
+          "primaryColorHex": {
+            "type": "string"
+          },
+          "secondaryColorHex": {
+            "type": "string"
+          },
+          "startDateTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "endDateTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tier": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tennisPoints": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "userCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "hasRounds": {
+            "type": "boolean"
+          },
+          "hasGroups": {
+            "type": "boolean"
+          },
+          "hasPerformanceGraphFeature": {
+            "type": "boolean"
+          },
+          "hasPlayoffSeries": {
+            "type": "boolean"
+          },
+          "hasEventPlayerStatistics": {
+            "type": "boolean"
+          },
+          "hasLiveRating": {
+            "type": "boolean"
+          },
+          "hasRating": {
+            "type": "boolean"
+          },
+          "hasDownDistance": {
+            "type": "boolean"
+          },
+          "disabledHomeAwayStandings": {
+            "type": "boolean"
+          },
+          "displayInverseHomeAwayTeams": {
+            "type": "boolean"
+          },
+          "fieldTranslations": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "periodLength": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Team": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "shortName": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "nameCode": {
+            "type": "string"
+          },
+          "sportId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "categoryId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "countryAlpha2": {
+            "type": "string"
+          },
+          "managerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "venueId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "primaryUniqueTournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "parentTeamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "gender": {
+            "type": "string"
+          },
+          "type": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "class": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "ranking": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "national": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "foundationDateTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "userCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "teamColors": {
+            "$ref": "#/components/schemas/TeamColors"
+          },
+          "fieldTranslations": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "timeActive": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Player": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "shortName": {
+            "type": "string"
+          },
+          "firstName": {
+            "type": "string"
+          },
+          "lastName": {
+            "type": "string"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "countryAlpha2": {
+            "type": "string"
+          },
+          "managerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "gender": {
+            "type": "string"
+          },
+          "position": {
+            "type": "string"
+          },
+          "positionsDetailed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "preferredFoot": {
+            "type": "string"
+          },
+          "jerseyNumber": {
+            "type": "string"
+          },
+          "sofascoreId": {
+            "type": "string"
+          },
+          "dateOfBirth": {
+            "type": "string"
+          },
+          "dateOfBirthTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "height": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "marketValueCurrency": {
+            "type": "string"
+          },
+          "proposedMarketValueRaw": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "rating": {
+            "type": "string"
+          },
+          "retired": {
+            "type": "boolean"
+          },
+          "deceased": {
+            "type": "boolean"
+          },
+          "userCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "orderValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "fieldTranslations": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Venue": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "capacity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "hidden": {
+            "type": "boolean"
+          },
+          "countryAlpha2": {
+            "type": "string"
+          },
+          "cityName": {
+            "type": "string"
+          },
+          "stadiumName": {
+            "type": "string"
+          },
+          "stadiumCapacity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "latitude": {
+            "type": "number"
+          },
+          "longitude": {
+            "type": "number"
+          },
+          "fieldTranslations": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Manager": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "shortName": {
+            "type": "string"
+          },
+          "sportId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "countryAlpha2": {
+            "type": "string"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "formerPlayerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "nationality": {
+            "type": "string"
+          },
+          "nationalityIso2": {
+            "type": "string"
+          },
+          "dateOfBirthTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deceased": {
+            "type": "boolean"
+          },
+          "preferredFormation": {
+            "type": "string"
+          },
+          "fieldTranslations": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "CategorySeedItem": {
+        "type": "object",
+        "properties": {
+          "observedDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "timezoneOffsetSeconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "category": {
+            "$ref": "#/components/schemas/Category"
+          },
+          "totalEvents": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalEventPlayerStatistics": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalVideos": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "uniqueTournamentIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "teamIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        }
+      },
+      "CategoriesEnvelope": {
+        "type": "object",
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategorySeedItem"
+            }
+          }
+        }
+      },
+      "EventScoreSide": {
+        "type": "object",
+        "properties": {
+          "current": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "display": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "aggregated": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "normaltime": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "overtime": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "penalties": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "period1": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "period2": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "period3": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "period4": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "extra1": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "extra2": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "series": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventScores": {
+        "type": "object",
+        "properties": {
+          "home": {
+            "$ref": "#/components/schemas/EventScoreSide"
+          },
+          "away": {
+            "$ref": "#/components/schemas/EventScoreSide"
+          }
+        }
+      },
+      "EventRoundInfo": {
+        "type": "object",
+        "properties": {
+          "roundNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "cupRoundType": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventStatusTime": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "initial": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "max": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "extra": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventTime": {
+        "type": "object",
+        "properties": {
+          "currentPeriodStartTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "initial": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "max": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "extra": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "injuryTime1": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "injuryTime2": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "injuryTime3": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "injuryTime4": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "overtimeLength": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "periodLength": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalPeriodCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "customId": {
+            "type": "string"
+          },
+          "detailId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "uniqueTournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seasonId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "homeTeamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "awayTeamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "venueId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refereeId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "statusCode": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "seasonStatisticsType": {
+            "type": "string"
+          },
+          "startTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "coverage": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "winnerCode": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "aggregatedWinnerCode": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "homeRedCards": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "awayRedCards": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "previousLegEventId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cupMatchesInRound": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "defaultPeriodCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "defaultPeriodLength": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "defaultOvertimeLength": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "lastPeriod": {
+            "type": "string"
+          },
+          "correctAiInsight": {
+            "type": "boolean"
+          },
+          "correctHalftimeAiInsight": {
+            "type": "boolean"
+          },
+          "feedLocked": {
+            "type": "boolean"
+          },
+          "isEditor": {
+            "type": "boolean"
+          },
+          "showTotoPromo": {
+            "type": "boolean"
+          },
+          "crowdsourcingEnabled": {
+            "type": "boolean"
+          },
+          "crowdsourcingDataDisplayEnabled": {
+            "type": "boolean"
+          },
+          "finalResultOnly": {
+            "type": "boolean"
+          },
+          "hasEventPlayerStatistics": {
+            "type": "boolean"
+          },
+          "hasEventPlayerHeatMap": {
+            "type": "boolean"
+          },
+          "hasGlobalHighlights": {
+            "type": "boolean"
+          },
+          "hasXg": {
+            "type": "boolean"
+          },
+          "roundInfo": {
+            "$ref": "#/components/schemas/EventRoundInfo"
+          },
+          "statusTime": {
+            "$ref": "#/components/schemas/EventStatusTime"
+          },
+          "time": {
+            "$ref": "#/components/schemas/EventTime"
+          },
+          "scores": {
+            "$ref": "#/components/schemas/EventScores"
+          }
+        }
+      },
+      "EventDetail": {
+        "$ref": "#/components/schemas/EventSummary"
+      },
+      "EventLineupPlayer": {
+        "type": "object",
+        "properties": {
+          "playerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "position": {
+            "type": "string"
+          },
+          "substitute": {
+            "type": "boolean"
+          },
+          "shirtNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "jerseyNumber": {
+            "type": "string"
+          },
+          "avgRating": {
+            "type": "number"
+          }
+        }
+      },
+      "EventLineupMissingPlayer": {
+        "type": "object",
+        "properties": {
+          "playerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "description": {
+            "type": "string"
+          },
+          "expectedEndDate": {
+            "type": "string"
+          },
+          "externalType": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "reason": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "EventLineupSide": {
+        "type": "object",
+        "properties": {
+          "formation": {
+            "type": "string"
+          },
+          "playerColor": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "goalkeeperColor": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "supportStaff": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "players": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventLineupPlayer"
+            }
+          },
+          "missingPlayers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventLineupMissingPlayer"
+            }
+          }
+        }
+      },
+      "EventDuel": {
+        "type": "object",
+        "properties": {
+          "duelType": {
+            "type": "string"
+          },
+          "homeWins": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "awayWins": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "draws": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventPregameFormItem": {
+        "type": "object",
+        "properties": {
+          "ordinal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "formValue": {
+            "type": "string"
+          }
+        }
+      },
+      "EventPregameFormSide": {
+        "type": "object",
+        "properties": {
+          "avgRating": {
+            "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "value": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventPregameFormItem"
+            }
+          }
+        }
+      },
+      "EventPregameFormEnvelope": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "homeTeam": {
+            "$ref": "#/components/schemas/EventPregameFormSide"
+          },
+          "awayTeam": {
+            "$ref": "#/components/schemas/EventPregameFormSide"
+          }
+        }
+      },
+      "EventVoteOption": {
+        "type": "object",
+        "properties": {
+          "voteType": {
+            "type": "string"
+          },
+          "optionName": {
+            "type": "string"
+          },
+          "voteCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventCommentColor": {
+        "type": "object",
+        "properties": {
+          "primary": {
+            "type": "string"
+          },
+          "number": {
+            "type": "string"
+          },
+          "outline": {
+            "type": "string"
+          },
+          "fancyNumber": {
+            "type": "string"
+          }
+        }
+      },
+      "EventCommentSideStyle": {
+        "type": "object",
+        "properties": {
+          "playerColor": {
+            "$ref": "#/components/schemas/EventCommentColor"
+          },
+          "goalkeeperColor": {
+            "$ref": "#/components/schemas/EventCommentColor"
+          }
+        }
+      },
+      "EventComment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "periodName": {
+            "type": "string"
+          },
+          "isHome": {
+            "type": "boolean"
+          },
+          "player": {
+            "$ref": "#/components/schemas/Player"
+          },
+          "text": {
+            "type": "string"
+          },
+          "time": {
+            "type": "number"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "EventCommentsEnvelope": {
+        "type": "object",
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventComment"
+            }
+          },
+          "home": {
+            "$ref": "#/components/schemas/EventCommentSideStyle"
+          },
+          "away": {
+            "$ref": "#/components/schemas/EventCommentSideStyle"
+          }
+        }
+      },
+      "EventGraphPoint": {
+        "type": "object",
+        "properties": {
+          "minute": {
+            "type": "number"
+          },
+          "value": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "EventGraphEnvelope": {
+        "type": "object",
+        "properties": {
+          "graphPoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventGraphPoint"
+            }
+          },
+          "periodTime": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "periodCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "overtimeLength": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "HeatmapPoint": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
+        }
+      },
+      "EventTeamHeatmapEnvelope": {
+        "type": "object",
+        "properties": {
+          "playerPoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeatmapPoint"
+            }
+          },
+          "goalkeeperPoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeatmapPoint"
+            }
+          }
+        }
+      },
+      "EventMarketChoice": {
+        "type": "object",
+        "properties": {
+          "sourceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "changeValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "fractionalValue": {
+            "type": "string"
+          },
+          "initialFractionalValue": {
+            "type": "string"
+          }
+        }
+      },
+      "EventMarket": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "eventId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "providerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "fid": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "marketId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sourceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "marketGroup": {
+            "type": "string"
+          },
+          "marketName": {
+            "type": "string"
+          },
+          "marketPeriod": {
+            "type": "string"
+          },
+          "structureType": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "choiceGroup": {
+            "type": "string"
+          },
+          "isLive": {
+            "type": "boolean"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventMarketChoice"
+            }
+          }
+        }
+      },
+      "EventWinningOddsSide": {
+        "type": "object",
+        "properties": {
+          "side": {
+            "type": "string"
+          },
+          "oddsId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "actual": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "expected": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "fractionalValue": {
+            "type": "string"
+          }
+        }
+      },
+      "StandingRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "matches": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "wins": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "draws": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "losses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "points": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "scoresFor": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "scoresAgainst": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "scoreDiffFormatted": {
+            "type": "string"
+          },
+          "promotionId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "descriptions": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Standing": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seasonId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updatedAtTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tieBreakingRuleId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "descriptions": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StandingRow"
+            }
+          }
+        }
+      },
+      "SeasonStatisticsInfoEnvelope": {
+        "type": "object",
+        "properties": {
+          "hideHomeAndAway": {
+            "type": "boolean"
+          },
+          "teams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Team"
+            }
+          },
+          "statisticsGroups": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "nationalities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SeasonStatisticsResult": {
+        "type": "object",
+        "properties": {
+          "rowNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "player": {
+            "$ref": "#/components/schemas/Player"
+          },
+          "team": {
+            "$ref": "#/components/schemas/Team"
+          },
+          "accurateCrosses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accurateCrossesPercentage": {
+            "type": "number"
+          },
+          "accurateFinalThirdPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accurateLongBalls": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accurateLongBallsPercentage": {
+            "type": "number"
+          },
+          "accurateOppositionHalfPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accurateOwnHalfPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accuratePasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accuratePassesPercentage": {
+            "type": "number"
+          },
+          "aerialDuelsWon": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "aerialDuelsWonPercentage": {
+            "type": "number"
+          },
+          "appearances": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "assists": {
+            "type": "number"
+          },
+          "bigChancesCreated": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "bigChancesMissed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "blockedShots": {
+            "type": "number"
+          },
+          "cleanSheet": {
+            "type": "number"
+          },
+          "clearances": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "crossesNotClaimed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dispossessed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dribbledPast": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "errorLeadToGoal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "errorLeadToShot": {
+            "type": "number"
+          },
+          "expectedGoals": {
+            "type": "number"
+          },
+          "fouls": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "freeKickGoal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalConversionPercentage": {
+            "type": "number"
+          },
+          "goals": {
+            "type": "number"
+          },
+          "goalsConcededInsideTheBox": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalsConcededOutsideTheBox": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalsFromInsideTheBox": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalsFromOutsideTheBox": {
+            "type": "number"
+          },
+          "groundDuelsWon": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "groundDuelsWonPercentage": {
+            "type": "number"
+          },
+          "headedGoals": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "highClaims": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "hitWoodwork": {
+            "type": "number"
+          },
+          "inaccuratePasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "interceptions": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "keyPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "leftFootGoals": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "matchesStarted": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "minutesPlayed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "offsides": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "outfielderBlocks": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "ownGoals": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "passToAssist": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "penaltiesTaken": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "penaltyConceded": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "penaltyConversion": {
+            "type": "number"
+          },
+          "penaltyFaced": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "penaltyGoals": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "penaltySave": {
+            "type": "number"
+          },
+          "penaltyWon": {
+            "type": "number"
+          },
+          "possessionLost": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "punches": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rating": {
+            "type": "number"
+          },
+          "redCards": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rightFootGoals": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "runsOut": {
+            "type": "number"
+          },
+          "savedShotsFromInsideTheBox": {
+            "type": "number"
+          },
+          "savedShotsFromOutsideTheBox": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "saves": {
+            "type": "number"
+          },
+          "setPieceConversion": {
+            "type": "number"
+          },
+          "shotFromSetPiece": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "shotsOffTarget": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "shotsOnTarget": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "successfulDribbles": {
+            "type": "number"
+          },
+          "successfulDribblesPercentage": {
+            "type": "number"
+          },
+          "successfulRunsOut": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tackles": {
+            "type": "number"
+          },
+          "totalDuelsWon": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalDuelsWonPercentage": {
+            "type": "number"
+          },
+          "totalPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalShots": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "wasFouled": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "yellowCards": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "SeasonStatisticsEnvelope": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "pages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "order": {
+            "type": "string"
+          },
+          "accumulation": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FreeFormObject"
+            }
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeasonStatisticsResult"
+            }
+          }
+        }
+      },
+      "PlayerTransferHistoryItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "playerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "transferFromTeamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "transferToTeamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "fromTeamName": {
+            "type": "string"
+          },
+          "toTeamName": {
+            "type": "string"
+          },
+          "transferDateTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "transferFee": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "transferFeeDescription": {
+            "type": "string"
+          },
+          "transferFeeRaw": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "type": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "PlayerSeasonStatisticsMetrics": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "type": {
+            "type": "string"
+          },
+          "accurateCrosses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accurateCrossesPercentage": {
+            "type": "number"
+          },
+          "accurateLongBalls": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accurateLongBallsPercentage": {
+            "type": "number"
+          },
+          "accuratePasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "accuratePassesPercentage": {
+            "type": "number"
+          },
+          "aerialDuelsWon": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "appearances": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "assists": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "bigChancesCreated": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "bigChancesMissed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "blockedShots": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "cleanSheet": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "countRating": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dribbledPast": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "errorLeadToGoal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "expectedAssists": {
+            "type": "number"
+          },
+          "expectedGoals": {
+            "type": "number"
+          },
+          "goals": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalsAssistsSum": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalsConceded": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "goalsPrevented": {
+            "type": "number"
+          },
+          "interceptions": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "keyPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "minutesPlayed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "outfielderBlocks": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "passToAssist": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rating": {
+            "type": "number"
+          },
+          "redCards": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "saves": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "shotsFromInsideTheBox": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "shotsOnTarget": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "successfulDribbles": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tackles": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalCross": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalLongBalls": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalPasses": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalRating": {
+            "type": "number"
+          },
+          "totalShots": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "yellowCards": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "PlayerStatisticsSeasonItem": {
+        "type": "object",
+        "properties": {
+          "statistics": {
+            "$ref": "#/components/schemas/PlayerSeasonStatisticsMetrics"
+          },
+          "team": {
+            "$ref": "#/components/schemas/Team"
+          },
+          "uniqueTournament": {
+            "$ref": "#/components/schemas/UniqueTournament"
+          },
+          "season": {
+            "$ref": "#/components/schemas/Season"
+          },
+          "year": {
+            "type": "string"
+          },
+          "startYear": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "endYear": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "UniqueTournamentSeasonsItem": {
+        "type": "object",
+        "properties": {
+          "uniqueTournament": {
+            "$ref": "#/components/schemas/UniqueTournament"
+          },
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Season"
+            }
+          },
+          "allTimeSeasonId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "EntityStatisticsSeasonsEnvelope": {
+        "type": "object",
+        "properties": {
+          "uniqueTournamentSeasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UniqueTournamentSeasonsItem"
+            }
+          },
+          "typesMap": {
+            "$ref": "#/components/schemas/TypeMap"
+          }
+        }
+      },
+      "PlayerStatisticsEnvelope": {
+        "type": "object",
+        "properties": {
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlayerStatisticsSeasonItem"
+            }
+          },
+          "typesMap": {
+            "$ref": "#/components/schemas/TypeMap"
+          }
+        }
+      },
+      "PlayerSeasonOverallEnvelope": {
+        "type": "object",
+        "properties": {
+          "statistics": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "team": {
+            "$ref": "#/components/schemas/Team"
+          }
+        }
+      },
+      "TeamSeasonOverallEnvelope": {
+        "type": "object",
+        "properties": {
+          "statistics": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "PlayerHeatmapOverallEnvelope": {
+        "type": "object",
+        "properties": {
+          "heatmap": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FreeFormObject"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FreeFormObject"
+            }
+          }
+        }
+      },
+      "TeamPerformanceGraphEnvelope": {
+        "type": "object",
+        "properties": {
+          "graphData": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "TopPlayerEntry": {
+        "type": "object",
+        "properties": {
+          "metricName": {
+            "type": "string"
+          },
+          "ordinal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "playerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "eventId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "playedEnough": {
+            "type": "boolean"
+          },
+          "statistic": {
+            "type": "number"
+          },
+          "statisticsId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "statisticsPayload": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "TopTeamEntry": {
+        "type": "object",
+        "properties": {
+          "metricName": {
+            "type": "string"
+          },
+          "ordinal": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "statisticsId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "statisticsPayload": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "SeasonGroup": {
+        "type": "object",
+        "properties": {
+          "uniqueTournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seasonId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "groupName": {
+            "type": "string"
+          }
+        }
+      },
+      "PlayerOfTheSeasonEnvelope": {
+        "type": "object",
+        "properties": {
+          "player": {
+            "$ref": "#/components/schemas/Player"
+          },
+          "team": {
+            "$ref": "#/components/schemas/Team"
+          },
+          "statistics": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          },
+          "playerOfTheTournament": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PlayerOfTheSeasonRaceEnvelope": {
+        "type": "object",
+        "properties": {
+          "topPlayers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopPlayerEntry"
+            }
+          },
+          "statisticsType": {
+            "$ref": "#/components/schemas/FreeFormObject"
+          }
+        }
+      },
+      "Period": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "uniqueTournamentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seasonId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "periodName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "startDateTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "createdAtTimestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "roundName": {
+            "type": "string"
+          },
+          "roundNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "roundSlug": {
+            "type": "string"
+          }
+        }
+      },
+      "TeamOfTheWeekPlayer": {
+        "type": "object",
+        "properties": {
+          "periodId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "entryId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "playerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "teamId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "orderValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rating": {
+            "type": "string"
+          }
+        }
+      },
+      "TeamOfTheWeekEnvelope": {
+        "type": "object",
+        "properties": {
+          "formation": {
+            "type": "string"
+          },
+          "players": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamOfTheWeekPlayer"
+            }
+          }
+        }
+      },
+      "TournamentTeamEventBucket": {
+        "type": "object",
+        "properties": {
+          "level1Key": {
+            "type": "string"
+          },
+          "level2Key": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ordinal": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      }
+    }
+  }
+}

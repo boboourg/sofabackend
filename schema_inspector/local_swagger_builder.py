@@ -1,4 +1,4 @@
-"""Build a local OpenAPI/Swagger document for the football dataset."""
+﻿"""Build a local OpenAPI/Swagger document for the multi-sport dataset."""
 
 from __future__ import annotations
 
@@ -12,21 +12,31 @@ from typing import Any
 
 from .db import load_database_config
 from .endpoints import (
-    CATEGORIES_SEED_ENDPOINTS,
+    CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT,
     COMPETITION_ENDPOINTS,
     ENTITIES_ENDPOINTS,
     EVENT_DETAIL_ENDPOINTS,
     EVENT_LIST_ENDPOINTS,
     LEADERBOARDS_ENDPOINTS,
+    LOCAL_API_SUPPORTED_SPORTS,
     STANDINGS_ENDPOINTS,
     STATISTICS_ENDPOINTS,
+    UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
+    local_api_endpoints,
+    sport_categories_all_endpoint,
+    sport_categories_endpoint,
+    sport_date_categories_endpoint,
+    sport_live_events_endpoint,
+    sport_scheduled_events_endpoint,
+    sport_scheduled_tournaments_endpoint,
+    sport_trending_top_players_endpoint,
 )
 from .entities_parser import _PLAYER_STATISTICS_INTEGER_COLUMNS, _PLAYER_STATISTICS_METRIC_COLUMN_MAP
 from .statistics_parser import _INTEGER_METRIC_COLUMNS, _METRIC_COLUMN_MAP
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "local_swagger"
-DEFAULT_OPENAPI_FILE = "football.openapi.json"
+DEFAULT_OPENAPI_FILE = "multisport.openapi.json"
 DEFAULT_VIEWER_FILE = "index.html"
 
 _SUPPORTED_TABLES = (
@@ -80,7 +90,7 @@ class SwaggerDataSummary:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a local OpenAPI/Swagger document for the football dataset. "
+            "Generate a local OpenAPI/Swagger document for the local multi-sport dataset. "
             "Paths mirror the exact Sofascore-style templates already supported by the project."
         ),
     )
@@ -190,32 +200,31 @@ def build_openapi_document(summary: SwaggerDataSummary) -> dict[str, Any]:
     total_tables = len([name for name, count in summary.table_counts.items() if count > 0]) if summary.table_counts else 0
 
     info_description = (
-        "Локальный OpenAPI-контракт для футбольного read API поверх текущей PostgreSQL-базы. "
-        "Пути намеренно повторяют Sofascore-style path templates, которые уже используются в проекте. "
-        "Схемы ответов описаны только по тем данным, которые реально хранятся в БД: "
-        "нормализованные endpoint-ы имеют явные response-схемы, snapshot-only endpoint-ы оставлены честно свободными.\n\n"
-        f"Сгенерировано: {summary.generated_at}\n"
-        f"Таблиц с данными в summary: {total_tables}\n"
-        f"Сырых snapshot rows: {total_snapshot_rows}"
+        "Local OpenAPI contract for the multi-sport read API backed by the current PostgreSQL dataset. "
+        "Paths mirror Sofascore-style templates already used by the ingestion layer. "
+        "Normalized endpoints expose typed schemas where we have stable tables, while snapshot-first endpoints remain intentionally flexible.\n\n"
+        f"Generated at: {summary.generated_at}\n"
+        f"Tables with data in summary: {total_tables}\n"
+        f"Raw snapshot rows: {total_snapshot_rows}"
     )
 
     return {
         "openapi": "3.0.3",
         "info": {
-            "title": "Sofascore Football Local API",
+            "title": "Sofascore Local Multi-Sport API",
             "version": "1.0.0",
             "description": info_description,
         },
         "servers": [
             {
                 "url": "http://localhost:8000",
-                "description": "Recommended base URL for the future local football API server",
+                "description": "Recommended base URL for the future local multi-sport API server",
             }
         ],
         "tags": [
-            {"name": "Categories", "description": "Daily football category discovery and seed endpoints."},
+            {"name": "Categories", "description": "Sport-specific category and tournament discovery endpoints."},
             {"name": "Competition", "description": "Unique tournament and season metadata."},
-            {"name": "Event List", "description": "Scheduled/live/featured/round football event feeds."},
+            {"name": "Event List", "description": "Sport-specific scheduled/live/tournament event feeds."},
             {"name": "Event Detail", "description": "Event detail, lineups, odds, managers, h2h and other event subresources."},
             {"name": "Standings", "description": "Standings and standings rows by unique tournament or tournament."},
             {"name": "Statistics", "description": "Season statistics config and leaderboard-style snapshot results."},
@@ -236,16 +245,7 @@ def _build_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
 
 
 def _make_operation_builder(summary: SwaggerDataSummary):
-    all_entries = (
-        CATEGORIES_SEED_ENDPOINTS
-        + COMPETITION_ENDPOINTS
-        + EVENT_LIST_ENDPOINTS
-        + EVENT_DETAIL_ENDPOINTS
-        + STANDINGS_ENDPOINTS
-        + STATISTICS_ENDPOINTS
-        + ENTITIES_ENDPOINTS
-        + LEADERBOARDS_ENDPOINTS
-    )
+    all_entries = local_api_endpoints()
     registry = {entry.path_template: entry.registry_entry() for entry in all_entries}
 
     def op(
@@ -296,22 +296,106 @@ def _make_operation_builder(summary: SwaggerDataSummary):
     return op
 
 
-def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
-    op = _make_operation_builder(summary)
-    return {
-        "/api/v1/sport/football/{date}/{timezone_offset_seconds}/categories": op(
-            path_template="/api/v1/sport/football/{date}/{timezone_offset_seconds}/categories",
+def _sport_operation_prefix(sport_slug: str) -> str:
+    return "".join(part.capitalize() for part in sport_slug.split("-"))
+
+
+def _build_sport_specific_core_paths(op) -> dict[str, Any]:
+    paths: dict[str, Any] = {}
+    for sport_slug in LOCAL_API_SUPPORTED_SPORTS:
+        prefix = _sport_operation_prefix(sport_slug)
+        title = sport_slug.capitalize()
+
+        paths[sport_date_categories_endpoint(sport_slug).path_template] = op(
+            path_template=sport_date_categories_endpoint(sport_slug).path_template,
             tag="Categories",
-            operation_id="getFootballCategoriesByDate",
-            summary_text="Football categories discovery",
-            description="Daily football category discovery projection. Paths match Sofascore; payload is built from category seed tables.",
+            operation_id=f"get{prefix}CategoriesByDate",
+            summary_text=f"{title} categories discovery",
+            description=f"Daily {sport_slug} category discovery projection.",
             response_schema=_ref("CategoriesEnvelope"),
             parameters=[
                 _path_param("date", "string", "YYYY-MM-DD date used in the discovery endpoint."),
                 _path_param("timezone_offset_seconds", "integer", "Timezone offset in seconds, for example 10800."),
             ],
             source_tables=["category_daily_summary", "category_daily_unique_tournament", "category_daily_team", "category"],
-        ),
+        )
+        paths[sport_categories_endpoint(sport_slug).path_template] = op(
+            path_template=sport_categories_endpoint(sport_slug).path_template,
+            tag="Categories",
+            operation_id=f"get{prefix}CategoriesCatalog",
+            summary_text=f"{title} categories catalog",
+            description=f"Sport-level categories listing for {sport_slug}.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[],
+            source_tables=["category", "api_payload_snapshot"],
+        )
+        paths[sport_categories_all_endpoint(sport_slug).path_template] = op(
+            path_template=sport_categories_all_endpoint(sport_slug).path_template,
+            tag="Categories",
+            operation_id=f"get{prefix}CategoriesCatalogAll",
+            summary_text=f"{title} full categories catalog",
+            description=f"Full category catalog for {sport_slug} used for wide discovery.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[],
+            source_tables=["category", "api_payload_snapshot"],
+        )
+        paths[sport_scheduled_tournaments_endpoint(sport_slug).path_template] = op(
+            path_template=sport_scheduled_tournaments_endpoint(sport_slug).path_template,
+            tag="Event List",
+            operation_id=f"get{prefix}ScheduledTournamentsPage",
+            summary_text=f"{title} scheduled tournaments page",
+            description=f"Daily scheduled tournament discovery page for {sport_slug}.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[
+                _path_param("date", "string", "YYYY-MM-DD date used in the discovery endpoint."),
+                _path_param("page", "integer", "Scheduled tournaments page number."),
+            ],
+            source_tables=["tournament", "unique_tournament", "api_payload_snapshot"],
+        )
+        paths[sport_scheduled_events_endpoint(sport_slug).path_template] = op(
+            path_template=sport_scheduled_events_endpoint(sport_slug).path_template,
+            tag="Event List",
+            operation_id=f"getScheduled{prefix}Events",
+            summary_text=f"Scheduled {sport_slug} events",
+            description=f"Scheduled {sport_slug} event feed from normalized event tables.",
+            response_schema=_envelope("events", _array(_ref("EventSummary"))),
+            parameters=[_path_param("date", "string", "YYYY-MM-DD date used in the scheduled events feed.")],
+            source_tables=["event", "event_score", "event_round_info", "event_status_time", "event_time"],
+        )
+        paths[sport_live_events_endpoint(sport_slug).path_template] = op(
+            path_template=sport_live_events_endpoint(sport_slug).path_template,
+            tag="Event List",
+            operation_id=f"getLive{prefix}Events",
+            summary_text=f"Live {sport_slug} events",
+            description=f"Live {sport_slug} event feed from normalized event tables.",
+            response_schema=_envelope("events", _array(_ref("EventSummary"))),
+            parameters=[],
+            source_tables=["event", "event_score", "event_round_info", "event_status_time", "event_time"],
+        )
+    return paths
+
+
+def _build_sport_specific_leaderboard_paths(op) -> dict[str, Any]:
+    paths: dict[str, Any] = {}
+    for sport_slug in LOCAL_API_SUPPORTED_SPORTS:
+        prefix = _sport_operation_prefix(sport_slug)
+        paths[sport_trending_top_players_endpoint(sport_slug).path_template] = op(
+            path_template=sport_trending_top_players_endpoint(sport_slug).path_template,
+            tag="Leaderboards",
+            operation_id=f"get{prefix}TrendingTopPlayers",
+            summary_text=f"Trending top players for {sport_slug}",
+            description=f"Latest stored raw payload for trending top players in {sport_slug}.",
+            response_schema=_envelope("topPlayers", _array(_ref("TopPlayerEntry"))),
+            parameters=[],
+            source_tables=["api_payload_snapshot"],
+        )
+    return paths
+
+
+def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
+    op = _make_operation_builder(summary)
+    return {
+        **_build_sport_specific_core_paths(op),
         "/api/v1/unique-tournament/{unique_tournament_id}": op(
             path_template="/api/v1/unique-tournament/{unique_tournament_id}",
             tag="Competition",
@@ -345,24 +429,27 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             ],
             source_tables=["api_payload_snapshot"],
         ),
-        "/api/v1/sport/football/scheduled-events/{date}": op(
-            path_template="/api/v1/sport/football/scheduled-events/{date}",
-            tag="Event List",
-            operation_id="getScheduledFootballEvents",
-            summary_text="Scheduled football events",
-            description="Scheduled football event feed from normalized event tables.",
-            response_schema=_envelope("events", _array(_ref("EventSummary"))),
-            parameters=[_path_param("date", "string", "YYYY-MM-DD date used in the scheduled events feed.")],
-            source_tables=["event", "event_score", "event_round_info", "event_status_time", "event_time"],
+        "/api/v1/category/{category_id}/unique-tournaments": op(
+            path_template="/api/v1/category/{category_id}/unique-tournaments",
+            tag="Categories",
+            operation_id="getCategoryUniqueTournaments",
+            summary_text="Category unique tournaments",
+            description="Category-level unique tournament discovery feed.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("category_id", "integer", "Sofascore category ID.")],
+            source_tables=["unique_tournament", "tournament", "api_payload_snapshot"],
         ),
-        "/api/v1/sport/football/events/live": op(
-            path_template="/api/v1/sport/football/events/live",
+        "/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}",
             tag="Event List",
-            operation_id="getLiveFootballEvents",
-            summary_text="Live football events",
-            description="Live football event feed from normalized event tables.",
+            operation_id="getUniqueTournamentScheduledEvents",
+            summary_text="Tournament scheduled events by day",
+            description="Tournament/day event feed. Particularly useful for tennis and other daily-draw sports.",
             response_schema=_envelope("events", _array(_ref("EventSummary"))),
-            parameters=[],
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("date", "string", "YYYY-MM-DD date used in the scheduled events feed."),
+            ],
             source_tables=["event", "event_score", "event_round_info", "event_status_time", "event_time"],
         ),
         "/api/v1/unique-tournament/{unique_tournament_id}/featured-events": op(
@@ -532,6 +619,26 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
                 _path_param("provider_id", "integer", "Odds provider ID."),
             ],
             source_tables=["event_winning_odds"],
+        ),
+        "/api/v1/event/{event_id}/point-by-point": op(
+            path_template="/api/v1/event/{event_id}/point-by-point",
+            tag="Event Detail",
+            operation_id="getEventPointByPoint",
+            summary_text="Tennis point-by-point payload",
+            description="Latest stored raw point-by-point payload for one tennis event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot"],
+        ),
+        "/api/v1/event/{event_id}/tennis-power": op(
+            path_template="/api/v1/event/{event_id}/tennis-power",
+            tag="Event Detail",
+            operation_id="getEventTennisPower",
+            summary_text="Tennis power snapshot",
+            description="Latest stored raw tennis-power payload for one tennis event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot"],
         ),
         "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}": op(
             path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
@@ -758,6 +865,19 @@ def _build_leaderboard_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             ],
             source_tables=["top_player_snapshot", "top_player_entry"],
         ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/regularSeason": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/regularSeason",
+            tag="Leaderboards",
+            operation_id="getTopPlayersRegularSeason",
+            summary_text="Top players regular season",
+            description="Regular-season top players leaderboard for one tournament season.",
+            response_schema=_envelope("topPlayers", _array(_ref("TopPlayerEntry"))),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+            ],
+            source_tables=["top_player_snapshot", "top_player_entry"],
+        ),
         "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/overall": op(
             path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/overall",
             tag="Leaderboards",
@@ -780,6 +900,19 @@ def _build_leaderboard_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             response_schema=_envelope("topPlayers", _array(_ref("TopPlayerEntry"))),
             parameters=[
                 _path_param("team_id", "integer", "Sofascore team ID."),
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+            ],
+            source_tables=["top_player_snapshot", "top_player_entry"],
+        ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/regularSeason": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/regularSeason",
+            tag="Leaderboards",
+            operation_id="getTopPlayersPerGameRegularSeason",
+            summary_text="Top players per game regular season",
+            description="Regular-season per-game top players leaderboard for one tournament season.",
+            response_schema=_envelope("topPlayers", _array(_ref("TopPlayerEntry"))),
+            parameters=[
                 _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
                 _path_param("season_id", "integer", "Sofascore season ID."),
             ],
@@ -823,6 +956,19 @@ def _build_leaderboard_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
                 _path_param("season_id", "integer", "Sofascore season ID."),
             ],
             source_tables=["venue"],
+        ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/regularSeason": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/regularSeason",
+            tag="Leaderboards",
+            operation_id="getTopTeamsRegularSeason",
+            summary_text="Top teams regular season",
+            description="Regular-season top teams leaderboard for one tournament season.",
+            response_schema=_envelope("topTeams", _array(_ref("TopTeamEntry"))),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+            ],
+            source_tables=["top_team_snapshot", "top_team_entry"],
         ),
         "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups": op(
             path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups",
@@ -917,16 +1063,7 @@ def _build_leaderboard_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             ],
             source_tables=["tournament_team_event_snapshot", "tournament_team_event_bucket"],
         ),
-        "/api/v1/sport/football/trending-top-players": op(
-            path_template="/api/v1/sport/football/trending-top-players",
-            tag="Leaderboards",
-            operation_id="getTrendingTopPlayers",
-            summary_text="Trending top players snapshot",
-            description="Latest stored raw payload for trending top players.",
-            response_schema=_envelope("topPlayers", _array(_ref("TopPlayerEntry"))),
-            parameters=[],
-            source_tables=["api_payload_snapshot"],
-        ),
+        **_build_sport_specific_leaderboard_paths(op),
     }
 
 

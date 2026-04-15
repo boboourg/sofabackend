@@ -1,414 +1,681 @@
 # Next Chat Context
 
 This file is the current handoff source of truth for the next chat.
-It supersedes the older `CHAT_HANDOFF.md`.
+It supersedes the older `NEXT_CHAT_CONTEXT.md` content from `2026-04-12`.
 
 ## Environment
 
-- Repo: `C:\Users\bobur\Desktop\sofascore`
+- Repo: `D:\sofascore`
 - OS: Windows
 - Shell: PowerShell
-- Python: project venv at `.\.venv311\Scripts\python.exe`
+- Python: `.\.venv311\Scripts\python.exe`
 - PostgreSQL: local, reachable at `localhost:5433`
-- DB DSN: already configured in local `.env`
-- Date of this handoff: `2026-04-12`
+- DB / proxy credentials: already configured in local `.env`
+- Date of this handoff: `2026-04-16`
+- Remote: `origin -> https://github.com/boboourg/sofabackend.git`
 
-## Main Goal
+## Why This Chat Happened
 
-Build and run a proxy-first async football data pipeline for Sofascore into a normalized PostgreSQL schema, then expose the ingested payloads through a local Swagger/API mirror using exact Sofascore path patterns.
+The project has moved from "football ETL + local mirror" into two parallel tracks:
 
-The user wants:
+1. make the local API / Swagger multi-sport instead of football-only
+2. map Sofascore endpoint families sport-by-sport, especially for handball
 
-1. fast mass loading
-2. top tournaments first
-3. then broader backfill for the rest
-4. no fake architecture claims
-5. practical commands over theory
+The immediate trigger was a user-supplied `__NEXT_DATA__` dump from `/handball` and the question:
+
+- does `__NEXT_DATA__` actually reveal handball endpoint families?
+- do we need to inspect every page's `__NEXT_DATA__`?
+
+Current answer:
+
+- `__NEXT_DATA__` is useful for feature-family hints and route seeds
+- it is not a direct `api/v1` registry
+- we should inspect page classes, not random pages one by one
+
+## Current Goal
+
+Keep building an honest, proxy-first, async Sofascore ingestion and local mirror stack, but now with a clearer multi-sport endpoint model.
+
+Near-term objective:
+
+1. keep the local API / Swagger aligned with real ingested payload families
+2. use probe scripts plus `__NEXT_DATA__` hints to classify sports into endpoint archetypes
+3. determine the correct handball family without inventing fake sport-specific routes
 
 ## Architecture Truth
 
 These points must stay true in the next chat:
 
-1. All outbound HTTP must go through the existing transport/client layer.
+1. All outbound HTTP goes through the existing transport/client layer.
 2. Proxy-first mode is required.
 3. The ETL architecture is async and should stay async.
-4. Endpoint path templates must remain exact Sofascore-style paths.
+4. Endpoint path templates should remain exact Sofascore-style paths.
 5. Transport uses `curl_cffi` impersonation, retry/backoff, and challenge detection.
-6. There is no legitimate basis to claim a custom TLS spoofing engine, CAPTCHA bypass, or anti-detect bypass stack.
-7. The correct truthful wording is: proxy-only transport plus `curl_cffi` impersonation (`chrome110`) plus challenge detection/retries.
+6. We should not claim custom TLS spoofing, CAPTCHA bypass, or anti-detect magic.
+7. Correct wording: proxy-only transport plus `curl_cffi` impersonation and challenge-aware retries.
 
-## Proxy Status
+## Current Code State
 
-- The project is configured for residential Smartproxy usage through `.env`.
-- There are multiple proxy endpoints in rotation.
-- Do not paste proxy usernames/passwords into new handoff files or commit them.
-- If a future chat needs proxy info, say they are already configured in `.env`.
+Tracked modifications already present before this handoff commit:
 
-## What Exists Now
+- `local_swagger/index.html`
+- `schema_inspector/current_year_pipeline_cli.py`
+- `schema_inspector/endpoints.py`
+- `schema_inspector/entities_backfill_job.py`
+- `schema_inspector/event_detail_backfill_job.py`
+- `schema_inspector/local_api_server.py`
+- `schema_inspector/local_swagger_builder.py`
 
-Implemented parser / ETL families:
+Untracked files already present before this handoff commit:
 
-1. `categories_seed`
-2. `competition`
-3. `event_list`
-4. `event_detail`
-5. `statistics`
-6. `standings`
-7. `entities`
-8. `leaderboards`
-9. local API / local Swagger support
-10. default-tournaments worker pipeline
+- `local_swagger/multisport.openapi.json`
+- `probe_multisport_reports.py`
+- `probe_next_data_feature_families.py`
 
-Main wrapper scripts currently present:
+## What Changed In Code
 
-- `load_bootstrap_pipeline.py`
-- `load_default_tournaments_pipeline.py`
-- `load_full_backfill.py`
-- `load_entities_backfill.py`
-- `load_targeted_pipeline.py`
-- `load_slice_pipeline.py`
-- `serve_local_api.py`
-- `setup_postgres.py`
+### 1. Multi-sport endpoint registry
 
-## Important Endpoint Coverage
+`schema_inspector/endpoints.py` now has an explicit local multi-sport registry instead of assuming football everywhere.
 
-Key exact endpoints currently implemented or recently extended:
+Important additions:
 
-### Bootstrap / discovery
+- `LOCAL_API_SUPPORTED_SPORTS = ("football", "basketball", "tennis")`
+- sport-aware local leaderboard assembly
+- `local_api_endpoints(...)` is now the main source for the local API / OpenAPI route inventory
 
-- `/api/v1/sport/football/{date}/{timezone_offset_seconds}/categories`
-- `/api/v1/config/default-unique-tournaments/{country_code}/{sport_slug}`
+### 2. Local API server is now multi-sport oriented
 
-### Competition
+`schema_inspector/local_api_server.py` now describes itself as a multi-sport local mirror and builds routes from `local_api_endpoints()`.
 
-- `/api/v1/unique-tournament/{unique_tournament_id}`
-- `/api/v1/unique-tournament/{unique_tournament_id}/seasons`
-- `/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/info`
+Meaning:
 
-### Entities / enrichment
+- local server route registration is no longer football-branded
+- Swagger and API server share the same registry source
 
-- `/api/v1/team/{team_id}`
-- `/api/v1/player/{player_id}`
-- `/api/v1/player/{player_id}/statistics`
-- `/api/v1/player/{player_id}/statistics/seasons`
-- `/api/v1/player/{player_id}/transfer-history`
-- `/api/v1/team/{team_id}/team-statistics/seasons`
-- `/api/v1/team/{team_id}/player-statistics/seasons`
-- `/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall`
-- `/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall`
-- `/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/heatmap/overall`
-- `/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team/{team_id}/team-performance-graph-data`
+### 3. Local Swagger builder is now multi-sport
 
-### Event detail
+`schema_inspector/local_swagger_builder.py` now generates:
 
-- `/api/v1/event/{event_id}`
-- `/api/v1/event/{event_id}/lineups`
-- `/api/v1/event/{event_id}/managers`
-- `/api/v1/event/{event_id}/h2h`
-- `/api/v1/event/{event_id}/pregame-form`
-- `/api/v1/event/{event_id}/votes`
-- `/api/v1/event/{event_id}/comments`
-- `/api/v1/event/{event_id}/graph`
-- `/api/v1/event/{event_id}/heatmap/{team_id}`
-- odds routes already wired through event detail
+- title: `Sofascore Local Multi-Sport API`
+- output file: `local_swagger/multisport.openapi.json`
+- tag groups across categories / competition / event list / event detail / standings / statistics / entities / leaderboards
 
-### Statistics / standings / leaderboards
+### 4. Current-year pipeline now propagates tournament scope into deeper stages
 
-- season statistics routes
-- season standings routes
-- top players / top ratings / top teams
-- venues / groups / player-of-the-season
-- team-of-the-week
-- player statistics types / team statistics types
-- team events
+`schema_inspector/current_year_pipeline_cli.py` now passes the discovered / selected tournament ids into:
 
-## Important Data Model Notes
+- `event_detail_backfill_job.run(... unique_tournament_ids=...)`
+- `entities_backfill_job.run(... unique_tournament_ids=...)`
 
-These points were a major source of confusion and should be preserved:
+This matters because current-year runs are now bounded to the selected tournaments instead of accidentally widening again during event-detail and entities backfill.
 
-1. `player_season_statistics` is the table for `/api/v1/player/{player_id}/statistics`.
-   That is where per-player season totals like `total_shots`, `expected_goals`, `assists`, `minutes_played`, etc. belong.
+### 5. Event-detail backfill now accepts tournament-id batches
 
-2. `season_statistics_result` is a different table.
-   It stores rows from `/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics`.
-   Many fields can legitimately be `NULL` there depending on the specific query, field set, and result type.
+`schema_inspector/event_detail_backfill_job.py` now supports:
 
-3. If the user asks where league/season ids are linked:
-   - `unique_tournament`
-   - `season`
-   - `unique_tournament_season`
-   are the key tables.
+- `unique_tournament_ids: Iterable[int] | None`
 
-4. The schema has around 71 tables.
-   That is normal for this project because it is intentionally normalized.
+and filters candidates with:
 
-## Recent Schema / Migration State
+- `e.unique_tournament_id = ANY($3)`
 
-Known migration files in `migrations/`:
+### 6. Entities backfill now accepts tournament-id batches
 
-- `2026-04-11_category_daily_seed.sql`
-- `2026-04-11_drop_player_event_slug_unique.sql`
-- `2026-04-11_drop_venue_slug_unique.sql`
-- `2026-04-11_leaderboards_season_extras.sql`
-- `2026-04-11_player_season_statistics.sql`
-- `2026-04-11_season_statistics_result_extended.sql`
-- `2026-04-12_event_live_detail_extras.sql`
+`schema_inspector/entities_backfill_job.py` now supports:
 
-If a future chat sees missing tables or relation errors, first safe command to suggest is:
+- `unique_tournament_ids: tuple[int, ...] | None`
+
+and threads that filter through:
+
+- player seed loading
+- team seed loading
+- player overall request loading
+- team overall request loading
+
+This keeps entity hydration aligned with the tournament slice chosen by discovery.
+
+## Current Code Excerpts
+
+These are the live code touchpoints that matter most in the next chat.
+
+### `probe_multisport_reports.py`
+
+The broad sport probe starts from a fixed discovery family:
+
+```python
+initial_urls = [
+    f"https://www.sofascore.com/api/v1/sport/{sport}/categories/all",
+    f"https://www.sofascore.com/api/v1/sport/{sport}/{date}/{tz_offset}/categories",
+    f"https://www.sofascore.com/api/v1/sport/{sport}/scheduled-tournaments/{date}/page/1",
+    f"https://www.sofascore.com/api/v1/sport/{sport}/scheduled-events/{date}",
+    f"https://www.sofascore.com/api/v1/sport/{sport}/events/live",
+    f"https://www.sofascore.com/api/v1/sport/{sport}/trending-top-players",
+    f"https://www.sofascore.com/api/v1/config/default-unique-tournaments/{country_code}/{sport}",
+]
+```
+
+It then expands into category / tournament / season / event / entity families and writes markdown + JSON summaries.
+
+### `probe_next_data_feature_families.py`
+
+The targeted probe uses `__NEXT_DATA__` only as a hint source, then verifies URLs empirically:
+
+```python
+target_sports = args.sport or ["ice-hockey", "baseball", "cricket", "mma"]
+```
+
+and probes the generic event family first:
+
+```python
+generic = [
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/meta",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/statistics",
+    f"https://api.sofascore.com/api/v1/event/{context.event_id}/statistics",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/lineups",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/incidents",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/best-players",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/h2h",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/pregame-form",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/graph",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/graph/win-probability",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/votes",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/comments",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/official-tweets",
+    f"https://www.sofascore.com/api/v1/event/{context.event_id}/highlights",
+]
+```
+
+### `schema_inspector/current_year_pipeline_cli.py`
+
+The important current fix is that tournament scope is now preserved:
+
+```python
+event_detail_result = await event_detail_backfill_job.run(
+    limit=args.event_detail_limit,
+    only_missing=not args.all_event_detail,
+    unique_tournament_ids=selected_unique_tournament_ids or None,
+    start_timestamp_from=start_timestamp_from,
+    start_timestamp_to=start_timestamp_to,
+    provider_ids=provider_ids,
+    concurrency=max(args.event_detail_concurrency, 1),
+    timeout=args.timeout,
+)
+
+entities_result = await entities_backfill_job.run(
+    player_limit=args.entity_player_limit,
+    team_limit=args.entity_team_limit,
+    player_request_limit=args.entity_player_request_limit,
+    team_request_limit=args.entity_team_request_limit,
+    only_missing=not args.all_entities,
+    unique_tournament_ids=selected_unique_tournament_ids or None,
+    event_timestamp_from=start_timestamp_from,
+    event_timestamp_to=start_timestamp_to,
+    timeout=args.timeout,
+)
+```
+
+### `schema_inspector/event_detail_backfill_job.py`
+
+Key candidate filter:
+
+```sql
+AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
+```
+
+### `schema_inspector/entities_backfill_job.py`
+
+Key seed filter pattern:
+
+```sql
+AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
+```
+
+This now appears in the event-based entity seed loaders and is the main reason the current-year slice behaves correctly.
+
+## Current Theory: Sofascore Is An ID Graph
+
+Working model:
+
+1. sport discovery
+   - `sport/{sport}/categories/all`
+   - `sport/{sport}/{date}/{tz}/categories`
+   - `sport/{sport}/scheduled-tournaments/{date}/page/{page}`
+   - `sport/{sport}/scheduled-events/{date}`
+   - `sport/{sport}/events/live`
+
+2. category -> unique tournament -> season
+   - `category/{categoryId}/unique-tournaments`
+   - `unique-tournament/{id}`
+   - `unique-tournament/{id}/seasons`
+   - `unique-tournament/{id}/season/{seasonId}/info`
+
+3. event list
+   - `unique-tournament/{id}/scheduled-events/{date}`
+   - `unique-tournament/{id}/season/{seasonId}/events/round/{round}`
+   - `sport/{sport}/scheduled-events/{date}`
+
+4. event detail
+   - `event/{id}`
+   - `meta`
+   - `statistics`
+   - `lineups`
+   - `incidents`
+   - `h2h`
+   - `pregame-form`
+   - `votes`
+   - optional families like `graph`, `comments`, `official-tweets`, `highlights`
+
+5. entities / profiles
+   - `team/{teamId}`
+   - `player/{playerId}`
+   - `manager/{managerId}`
+   - player/team season statistics and history
+
+## Core Theory About `__NEXT_DATA__`
+
+`__NEXT_DATA__` is useful, but only in a bounded way.
+
+### What it is good for
+
+- route seeds like `/handball`, `/handball/tournament/...`, `/handball/match/...#id:{eventId}`
+- tab and feature labels
+- sport-specific stat names
+- hints that some UI block probably maps to `statistics`, `lineups`, `incidents`, `shotmap`, or another family
+
+### What it is not good for
+
+- it is not a direct endpoint registry
+- it does not guarantee a dedicated `api/v1/...` route exists for every UI label
+
+### Important rule
+
+UI feature names do not always map to dedicated endpoints.
+
+Already proven examples:
+
+- hockey `play-by-play` is really `event/{id}/incidents`
+- hockey `event map` / shot heatmap is really `shotmap`
+- baseball `batting order` and `starting pitchers` live inside `lineups`
+
+### Correct inspection order
+
+Do not inspect every random page.
+
+Inspect page classes:
+
+1. sport landing page
+2. tournament page
+3. event page
+4. player page
+5. team page
+
+## Probe Scripts And Outputs
+
+### Broad probe
+
+- Script: `probe_multisport_reports.py`
+- Output folder: `reports/multisport_probe_2026_04_15`
+
+Purpose:
+
+- discover sport slugs from `sport/10800/event-count`
+- probe discovery / competition / event / entity families
+- write schema reports via `inspect_api.py`
+
+### Targeted `__NEXT_DATA__` probe
+
+- Script: `probe_next_data_feature_families.py`
+- Output folder: `reports/next_data_feature_probe_2026_04_15`
+
+Purpose:
+
+- start from UI feature hints
+- probe generic event family first
+- only then probe sport-specific guesses
+- use 200/404 outcomes to kill fake theories early
+
+## Empirical Findings Already Proved
+
+Primary source summary:
+
+- `reports/next_data_feature_probe_2026_04_15/probe_summary.md`
+
+### ice-hockey
+
+Confirmed `200`:
+
+- `meta`
+- `statistics`
+- `lineups`
+- `incidents`
+- `best-players`
+- `h2h`
+- `pregame-form`
+- `votes`
+- `comments`
+- `official-tweets`
+- `highlights`
+- `api.sofascore.com/.../shotmap`
+- `shotmap/{teamId}`
+
+Failed `404`:
+
+- `play-by-play`
+- `event-map`
+- `penalties`
+- `player/{playerId}/shotmap`
+
+Conclusion:
+
+- hockey play-by-play / penalties are represented by `incidents`
+- hockey event-map / shot heatmap is represented by `shotmap`
+
+Supporting evidence:
+
+- `reports/next_data_feature_probe_2026_04_15/www_sofascore_com_api_v1_event_14201603_incidents.md`
+- `reports/next_data_feature_probe_2026_04_15/api_sofascore_com_api_v1_event_14201603_shotmap.md`
+
+### baseball
+
+Confirmed `200`:
+
+- `meta`
+- `statistics`
+- `lineups`
+- `h2h`
+- `pregame-form`
+- `votes`
+- `comments`
+- `official-tweets`
+- `highlights`
+
+Failed `404`:
+
+- `incidents`
+- `best-players`
+- `graph`
+- `plays`
+- `all-plays`
+- `batting-order`
+- `starting-pitchers`
+- `shotmap/{teamId}`
+
+Conclusion:
+
+- baseball lineup payload already carries batting-order / pitcher context
+- do not invent dedicated `batting-order` / `starting-pitchers` endpoints just because the UI has those words
+
+Supporting evidence:
+
+- `reports/next_data_feature_probe_2026_04_15/www_sofascore_com_api_v1_event_15507996_lineups.md`
+
+### cricket
+
+Confirmed `200`:
+
+- `meta`
+- `lineups`
+- `incidents`
+- `h2h`
+- `pregame-form`
+- `votes`
+- `highlights`
+
+Failed `404` in current probe:
+
+- `statistics`
+- `best-players`
+- `graph`
+- `comments`
+- `official-tweets`
+- `runs-per-over`
+- `runs-per-over/graph`
+- `overs`
+
+Conclusion:
+
+- cricket looks thinner than football-style event families
+- innings / scorecard progression probably exists elsewhere or is embedded differently
+
+### mma
+
+Confirmed `200`:
+
+- `meta`
+- `statistics`
+- `h2h`
+- `votes`
+
+Failed `404` in current probe:
+
+- `lineups`
+- `incidents`
+- `best-players`
+- `pregame-form`
+- `comments`
+- `official-tweets`
+- `highlights`
+
+Conclusion:
+
+- MMA is a thin event surface compared with team sports
+
+## Sport Archetype Theory
+
+Current matrix:
+
+- rich team-sport generic:
+  - football
+  - basketball
+
+- rich map / incident team sport:
+  - ice-hockey
+  - baseball
+
+- mixed team sport:
+  - handball
+  - volleyball
+  - futsal
+  - minifootball
+  - floorball
+  - waterpolo
+
+- racket / bracket sport:
+  - tennis
+  - badminton
+  - table-tennis
+  - snooker
+  - darts
+
+- thin / unusual:
+  - cricket
+  - esports
+  - mma
+
+This archetype model is documented in:
+
+- `reports/SPORT_ENDPOINT_PATTERN_MATRIX_2026_04_15.md`
+
+## Handball: Current Best Theory
+
+The current working assumption is:
+
+- handball is closer to a football-like generic team-sport family
+- the valuable specialization is likely inside `statistics`
+- there is no evidence yet that handball needs a tennis-like special endpoint family
+
+### Handball hints extracted from `/handball` `__NEXT_DATA__`
+
+Roster / roles:
+
+- `goalkeeper`
+- `back`
+- `winger`
+- `pivot`
+- `centre_back`
+
+Stat-family hints:
+
+- `sevenMetersScored`
+- `7mSaves`
+- `6mSaves`
+- `9mSaves`
+- `goalkeeperEfficiency`
+- `breakthroughGoals`
+- `breakthroughSaves`
+- `fastbreakGoals`
+- `fastbreakSaves`
+- `twoMinutePenalties`
+- `2minPenalty`
+- `technicalFaults`
+
+### Handball discovery family to test first
+
+```text
+/api/v1/sport/handball/categories/all
+/api/v1/sport/handball/{date}/{tz}/categories
+/api/v1/sport/handball/scheduled-tournaments/{date}/page/1
+/api/v1/sport/handball/scheduled-events/{date}
+/api/v1/sport/handball/events/live
+/api/v1/config/default-unique-tournaments/UA/handball
+```
+
+### Handball competition / season family to test next
+
+```text
+/api/v1/category/{categoryId}/unique-tournaments
+/api/v1/unique-tournament/{id}
+/api/v1/unique-tournament/{id}/seasons
+/api/v1/unique-tournament/{id}/season/{seasonId}/info
+/api/v1/unique-tournament/{id}/featured-events
+/api/v1/unique-tournament/{id}/scheduled-events/{date}
+/api/v1/unique-tournament/{id}/season/{seasonId}/standings/total
+/api/v1/unique-tournament/{id}/season/{seasonId}/statistics/info
+/api/v1/unique-tournament/{id}/season/{seasonId}/statistics?... 
+```
+
+### Handball event family to test next
+
+Core:
+
+```text
+/api/v1/event/{eventId}
+/api/v1/event/{eventId}/meta
+/api/v1/event/{eventId}/statistics
+/api/v1/event/{eventId}/lineups
+/api/v1/event/{eventId}/incidents
+/api/v1/event/{eventId}/best-players
+/api/v1/event/{eventId}/h2h
+/api/v1/event/{eventId}/pregame-form
+/api/v1/event/{eventId}/votes
+```
+
+Optional:
+
+```text
+/api/v1/event/{eventId}/graph
+/api/v1/event/{eventId}/graph/win-probability
+/api/v1/event/{eventId}/comments
+/api/v1/event/{eventId}/official-tweets
+/api/v1/event/{eventId}/highlights
+/api/v1/event/{eventId}/sport-video-highlights/country/UA/extended
+/api/v1/event/{eventId}/live-action-widget
+```
+
+### Handball entity family to test after that
+
+```text
+/api/v1/team/{teamId}
+/api/v1/team/{teamId}/team-statistics/seasons
+/api/v1/team/{teamId}/player-statistics/seasons
+/api/v1/team/{teamId}/events/last/0
+/api/v1/player/{playerId}
+/api/v1/player/{playerId}/statistics
+/api/v1/player/{playerId}/statistics/seasons
+/api/v1/player/{playerId}/events/last/0
+/api/v1/manager/{managerId}
+/api/v1/manager/{managerId}/career-history
+```
+
+## What To Ask For In The Next Chat
+
+If someone pastes handball responses, ask for:
+
+1. a list of URLs with `200`
+2. a list of URLs with `404`
+3. raw or summarized JSON from:
+   - `event/{eventId}/statistics`
+   - `unique-tournament/{id}/season/{seasonId}/statistics/info`
+   - `player/{playerId}/statistics`
+
+That is enough to decide whether handball is:
+
+- pure generic team-sport
+- generic team-sport with custom stat vocabulary
+- or hiding an extra dedicated family
+
+## Files To Open First In The Next Chat
+
+1. `NEXT_CHAT_CONTEXT.md`
+2. `reports/SPORT_ENDPOINT_PATTERN_MATRIX_2026_04_15.md`
+3. `reports/next_data_feature_probe_2026_04_15/probe_summary.md`
+4. `probe_multisport_reports.py`
+5. `probe_next_data_feature_families.py`
+6. `schema_inspector/endpoints.py`
+7. `schema_inspector/local_api_server.py`
+8. `schema_inspector/local_swagger_builder.py`
+9. `schema_inspector/current_year_pipeline_cli.py`
+10. `schema_inspector/event_detail_backfill_job.py`
+11. `schema_inspector/entities_backfill_job.py`
+
+## Useful Commands From Laptop
+
+Pull latest code:
 
 ```powershell
-.\.venv311\Scripts\python.exe setup_postgres.py --skip-create-database
+git -C D:\sofascore pull --ff-only origin main
 ```
 
-## Important Fixes Already Made
+Generate local multi-sport Swagger:
 
-### 1. Proxy starvation / cooldown handling
-
-Earlier long runs could fail with:
-
-- `Proxy-only mode is enabled, but no proxy is currently available.`
-
-This was improved by making transport wait for the next proxy to leave cooldown instead of failing too eagerly.
-
-### 2. Optional 404 handling
-
-Several Sofascore endpoints are genuinely optional and should not be treated as hard failures in every case.
-
-Examples:
-
-- `/api/v1/player/{player_id}/statistics`
-- `/api/v1/player/{player_id}/transfer-history`
-- some standings/statistics combinations
-- event comments/graph/heatmap for not-started matches
-
-### 3. Team performance graph local API bug
-
-There was a local API mismatch for:
-
-- `/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team/{team_id}/team-performance-graph-data`
-
-Root cause:
-
-- local route matching inferred `season` context instead of `team` context
-
-Fix:
-
-- `schema_inspector/local_api_server.py` was updated so team routes use team context first
-
-### 4. Event live detail extras
-
-Recently added storage + parsing for:
-
-- event comments
-- event graph
-- event team heatmap
-
-These are only available for suitable live/finished events, not for every pre-match event.
-
-## Local API / Swagger Notes
-
-The local API mirrors what has already been ingested, not what exists live upstream.
-
-That means this error is expected in some cases:
-
-```json
-{
-  "error": "Requested path exists in the local API contract, but no ingested payload matched this path/query yet."
-}
+```powershell
+.\.venv311\Scripts\python.exe -m schema_inspector.local_swagger_builder
 ```
 
-It means:
-
-1. the route is registered correctly
-2. but the DB has no matching snapshot yet for that exact path/query/context
-
-Correct local API launch command:
+Serve local multi-sport API:
 
 ```powershell
 .\.venv311\Scripts\python.exe serve_local_api.py --host 127.0.0.1 --port 8000
 ```
 
-Important route reminder:
-
-- correct heatmap route is `/api/v1/event/{event_id}/heatmap/{team_id}`
-- wrong route is `/api/v1/event/{event_id}/graph/heatmap/{team_id}`
-
-## Proven / Useful Commands
-
-### A. Fast top-tournaments baseline
-
-This was just added and validated for CLI/help/tests:
+Run broad multisport probe:
 
 ```powershell
-.\.venv311\Scripts\python.exe load_default_tournaments_pipeline.py --country-code UA --sport-slug football --tournament-concurrency 3 --seasons-per-tournament 2 --event-concurrency 3 --timeout 20 --log-level INFO
+.\.venv311\Scripts\python.exe probe_multisport_reports.py --limit-sports 6
 ```
 
-For one tournament only:
+Run targeted handball feature probe after adapting the script or adding `--sport handball`:
 
 ```powershell
-.\.venv311\Scripts\python.exe load_default_tournaments_pipeline.py --country-code UA --sport-slug football --unique-tournament-id 17 --seasons-per-tournament 1 --tournament-concurrency 1 --event-concurrency 2 --timeout 20 --log-level INFO
+.\.venv311\Scripts\python.exe probe_next_data_feature_families.py --sport handball
 ```
 
-What this pipeline does:
-
-1. reads the curated tournament list from `UA/football`
-2. runs tournament workers
-3. loads tournament metadata and seasons
-4. processes latest `N` seasons
-5. loads statistics, standings, leaderboards
-6. loads discovered round events and event details where discoverable
-7. hydrates teams, players, player stats, transfer history, overall stats, heatmaps, team performance graph
-
-Important limitation:
-
-It is a fast baseline, not a magical full historical event discovery engine.
-If the DB does not yet know old `event_id` values, this pipeline cannot invent all historical matches by itself.
-For wide event history, date bootstrap is still needed.
-
-### B. Broad date bootstrap
-
-This command was used successfully in the project:
+Run current-year bounded ingestion:
 
 ```powershell
-.\.venv311\Scripts\python.exe load_bootstrap_pipeline.py --date-from 2026-04-08 --date-to 2026-04-14 --timezone-offset-seconds 10800 --competition-concurrency 3 --include-live --timeout 20
+.\.venv311\Scripts\python.exe -m schema_inspector.current_year_pipeline_cli --sport-slug football --timezone-name Europe/Kiev --log-level INFO
 ```
 
-One real observed large result from the user:
+## Final Reminder
 
-```text
-bootstrap_pipeline dates=7 categories=996 discovered_unique_tournaments=2035 competition_succeeded=2028/2035 scheduled_events=2867 live_events=556
-```
+Do not treat UI wording as proof of a dedicated endpoint.
 
-This means bootstrap is already proven to discover a large volume of tournament ids and event seeds.
+The fastest correct workflow is:
 
-### C. Full backfill
+1. probe discovery family
+2. probe generic event family
+3. inspect `statistics`, `lineups`, `incidents`
+4. only then guess sport-specific routes
 
-The user has been running:
-
-```powershell
-.\.venv311\Scripts\python.exe load_full_backfill.py --event-concurrency 5 --statistics-concurrency 3 --standings-concurrency 3 --leaderboards-concurrency 3 --standings-scope total --standings-scope home --standings-scope away --timeout 20 --log-level DEBUG
-```
-
-What `load_full_backfill.py` does:
-
-1. backfills event details
-2. backfills statistics
-3. backfills entities
-4. backfills standings
-5. backfills leaderboards
-
-### D. Entities-only deep backfill
-
-```powershell
-.\.venv311\Scripts\python.exe load_entities_backfill.py --timeout 30 --log-level INFO
-```
-
-This can take a very long time if run across all players.
-
-### E. One targeted tournament/team/player test
-
-This targeted command is known-good:
-
-```powershell
-.\.venv311\Scripts\python.exe load_targeted_pipeline.py --unique-tournament-id 17 --season-id 76986 --team-id 35 --player-id 288205 --timeout 20
-```
-
-One observed result:
-
-```text
-targeted_pipeline competition_snapshots=3 statistics_results=521 standings=3 leaderboard_snapshots=44 entity_player_stats=56 event_details=0
-```
-
-### F. One slice with event details + manager verification
-
-A slice run for league/team/manager/player succeeded and produced:
-
-```text
-slice_pipeline competition_snapshots=3 statistics_results=521 standings=3 leaderboard_snapshots=44 round_jobs=2 team_events=2 event_detail_succeeded=2/2 discovered_players=29 entity_player_stats=842 found_managers=1
-```
-
-### G. Event-detail batch for one tournament
-
-Useful for filling event extras for one competition:
-
-```powershell
-.\.venv311\Scripts\python.exe load_event_detail_batch.py --all-events --unique-tournament-id 17 --concurrency 3 --timeout 20 --log-level INFO
-```
-
-## Recommended Order For The Next Big Fill
-
-If the next chat needs a practical loading plan, the current best order is:
-
-1. ensure schema/migrations are applied
-2. run `load_default_tournaments_pipeline.py` for fast top-tournament baseline
-3. run `load_bootstrap_pipeline.py` for broad football date discovery
-4. run `load_full_backfill.py` for deeper enrichment
-5. optionally run `load_entities_backfill.py` if player/team enrichment is still thin
-
-## Known Normal Upstream Behaviors
-
-The next chat should not misdiagnose these as automatic bugs:
-
-1. Some Sofascore endpoints really return `404`.
-2. `/statistics/info` is not guaranteed on every competition/season.
-3. `/player/{id}/statistics` is not guaranteed for every player id.
-4. `/player/{id}/transfer-history` is not guaranteed for every player id.
-5. event comments/graph/heatmap are not guaranteed for pre-match events.
-6. the local API can know a route pattern while still having no payload snapshot for it yet.
-
-## Key Files Touched Recently
-
-Recently important files include:
-
-- `schema_inspector/default_tournaments_parser.py`
-- `schema_inspector/default_tournaments_pipeline_cli.py`
-- `load_default_tournaments_pipeline.py`
-- `schema_inspector/competition_job.py`
-- `schema_inspector/local_api_server.py`
-- `schema_inspector/local_swagger_builder.py`
-- `schema_inspector/event_detail_parser.py`
-- `schema_inspector/event_detail_repository.py`
-- `schema_inspector/event_detail_backfill_job.py`
-- `schema_inspector/event_detail_backfill_cli.py`
-- `postgres_schema.sql`
-
-## Useful Reports / Source Notes
-
-The `reports/` folder contains saved Sofascore endpoint payload notes that informed recent work.
-Especially relevant:
-
-- `reports\www_sofascore_com_api_v1_config_default_unique_tournaments_ua_football.md`
-- `reports\www_sofascore_com_api_v1_player_288205_statistics.md`
-- event comments / graph / heatmap report files for one match
-
-## Validation Status
-
-Known earlier full-suite milestone:
-
-- after the event live detail extras work, full test suite reached `82 tests OK`
-
-Latest validation done in this chat:
-
-1. `py_compile` passed for the new default-tournaments pipeline files
-2. new tests passed:
-   - `tests.test_default_tournaments_parser`
-   - `tests.test_default_tournaments_pipeline`
-3. touched legacy tests also passed:
-   - `tests.test_competition_parser`
-   - `tests.test_entities_parser`
-   - `tests.test_event_detail_backfill`
-
-The latest full suite was not rerun in this chat.
-
-## Open Risks / Likely Next Improvements
-
-These are the most realistic next tasks if something breaks or needs speed:
-
-1. run the new top-tournaments pipeline on real volume and inspect DB row growth
-2. if manager slug collisions resurface, inspect manager uniqueness constraints
-3. if entities are too slow, shard or batch entity ingestion more aggressively
-4. if broader history is needed, rely on date bootstrap because top-tournaments baseline alone does not discover every old match
-
-## One-Line Summary For The Next Chat
-
-Continue from the existing repo, do not start from scratch, keep the proxy-first async architecture, treat many upstream `404` as normal/optional, use `player_season_statistics` for player totals, and use the new `load_default_tournaments_pipeline.py` as the fast top-tournament baseline before wider bootstrap/backfill.
+That rule already prevented false theories for hockey and baseball, and it should be applied to handball next.

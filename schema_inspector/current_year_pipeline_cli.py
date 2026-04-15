@@ -360,6 +360,7 @@ async def _run(args: argparse.Namespace) -> int:
             event_detail_result = await event_detail_backfill_job.run(
                 limit=args.event_detail_limit,
                 only_missing=not args.all_event_detail,
+                unique_tournament_ids=selected_unique_tournament_ids or None,
                 start_timestamp_from=start_timestamp_from,
                 start_timestamp_to=start_timestamp_to,
                 provider_ids=provider_ids,
@@ -392,6 +393,7 @@ async def _run(args: argparse.Namespace) -> int:
                 player_request_limit=args.entity_player_request_limit,
                 team_request_limit=args.entity_team_request_limit,
                 only_missing=not args.all_entities,
+                unique_tournament_ids=selected_unique_tournament_ids or None,
                 event_timestamp_from=start_timestamp_from,
                 event_timestamp_to=start_timestamp_to,
                 timeout=args.timeout,
@@ -411,7 +413,7 @@ async def _run(args: argparse.Namespace) -> int:
     scheduled_events_total = sum(item.written.event_rows for item in scheduled_events_results)
     event_detail_failed = 0 if event_detail_result is None else event_detail_result.failed
     entities_snapshots = 0 if entities_result is None else entities_result.ingest.written.payload_snapshot_rows
-    failed = competition_failed + scheduled_event_failures + event_detail_failed
+    failed = discovery_stage_failures + competition_failed + scheduled_event_failures + event_detail_failed
 
     print(
         "current_year_pipeline "

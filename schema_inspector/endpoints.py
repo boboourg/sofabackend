@@ -1,4 +1,4 @@
-"""Exact Sofascore endpoint templates used by parser jobs."""
+﻿"""Exact Sofascore endpoint templates used by parser jobs."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 
 SOFASCORE_BASE_URL = "https://www.sofascore.com"
+
+LOCAL_API_SUPPORTED_SPORTS = ("football", "basketball", "tennis")
 
 
 @dataclass(frozen=True)
@@ -230,6 +232,61 @@ def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoin
 
 
 EVENT_LIST_ENDPOINTS = event_list_endpoints("football")
+
+
+def sport_local_leaderboard_endpoints(sport_slug: str) -> tuple[SofascoreEndpoint, ...]:
+    normalized_sport_slug = _normalize_sport_slug(sport_slug)
+    endpoints: list[SofascoreEndpoint] = []
+
+    if normalized_sport_slug == "football":
+        return LEADERBOARDS_ENDPOINTS
+
+    if normalized_sport_slug == "basketball":
+        endpoints.extend(
+            (
+                unique_tournament_top_players_endpoint("regularSeason"),
+                unique_tournament_top_players_per_game_endpoint("all/regularSeason"),
+                team_scoped_top_players_endpoint("overall"),
+                unique_tournament_top_teams_endpoint("regularSeason"),
+                sport_trending_top_players_endpoint(normalized_sport_slug),
+            )
+        )
+        return tuple(endpoints)
+
+    if normalized_sport_slug == "tennis":
+        return (sport_trending_top_players_endpoint(normalized_sport_slug),)
+
+    return (sport_trending_top_players_endpoint(normalized_sport_slug),)
+
+
+def local_api_endpoints(sport_slugs: tuple[str, ...] = LOCAL_API_SUPPORTED_SPORTS) -> tuple[SofascoreEndpoint, ...]:
+    endpoints: list[SofascoreEndpoint] = []
+    seen_patterns: set[str] = set()
+
+    def add(endpoint: SofascoreEndpoint) -> None:
+        if endpoint.pattern in seen_patterns:
+            return
+        seen_patterns.add(endpoint.pattern)
+        endpoints.append(endpoint)
+
+    for sport_slug in sport_slugs:
+        add(sport_date_categories_endpoint(sport_slug))
+        add(sport_categories_endpoint(sport_slug))
+        add(sport_categories_all_endpoint(sport_slug))
+        add(sport_scheduled_tournaments_endpoint(sport_slug))
+        for endpoint in event_list_endpoints(sport_slug):
+            add(endpoint)
+        for endpoint in event_detail_endpoints(sport_slug=sport_slug):
+            add(endpoint)
+        for endpoint in sport_local_leaderboard_endpoints(sport_slug):
+            add(endpoint)
+
+    add(CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT)
+
+    for endpoint in COMPETITION_ENDPOINTS + STANDINGS_ENDPOINTS + STATISTICS_ENDPOINTS + ENTITIES_ENDPOINTS:
+        add(endpoint)
+
+    return tuple(endpoints)
 
 EVENT_DETAIL_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}",

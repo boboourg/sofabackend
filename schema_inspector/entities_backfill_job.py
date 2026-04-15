@@ -73,13 +73,18 @@ class EntitiesBackfillJob:
         include_team_statistics_seasons: bool = True,
         include_team_player_statistics_seasons: bool = True,
         event_timestamp_from: int | None = None,
+        unique_tournament_ids: tuple[int, ...] | None = None,
         event_timestamp_to: int | None = None,
         timeout: float = 20.0,
     ) -> EntitiesBackfillResult:
+        resolved_unique_tournament_ids = tuple(
+            dict.fromkeys(int(item) for item in (unique_tournament_ids or ()) if item is not None)
+        ) or None
         async with self.database.connection() as connection:
             player_ids = await self._load_player_ids(
                 connection,
                 endpoint=PLAYER_ENDPOINT,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=player_limit,
                 offset=player_offset,
                 only_missing=only_missing,
@@ -89,6 +94,7 @@ class EntitiesBackfillJob:
             player_statistics_ids = await self._load_player_ids(
                 connection,
                 endpoint=PLAYER_STATISTICS_ENDPOINT,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=player_limit,
                 offset=player_offset,
                 only_missing=only_missing,
@@ -97,6 +103,7 @@ class EntitiesBackfillJob:
             )
             team_ids = await self._load_team_ids(
                 connection,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=team_limit,
                 offset=team_offset,
                 only_missing=only_missing,
@@ -107,6 +114,7 @@ class EntitiesBackfillJob:
                 connection,
                 endpoint=PLAYER_SEASON_OVERALL_STATISTICS_ENDPOINT,
                 request_type=PlayerOverallRequest,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=player_request_limit,
                 offset=player_request_offset,
                 only_missing=only_missing,
@@ -117,6 +125,7 @@ class EntitiesBackfillJob:
                 connection,
                 endpoint=PLAYER_SEASON_HEATMAP_OVERALL_ENDPOINT,
                 request_type=PlayerHeatmapRequest,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=player_request_limit,
                 offset=player_request_offset,
                 only_missing=only_missing,
@@ -127,6 +136,7 @@ class EntitiesBackfillJob:
                 connection,
                 endpoint=TEAM_SEASON_OVERALL_STATISTICS_ENDPOINT,
                 request_type=TeamOverallRequest,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=team_request_limit,
                 offset=team_request_offset,
                 only_missing=only_missing,
@@ -137,6 +147,7 @@ class EntitiesBackfillJob:
                 connection,
                 endpoint=TEAM_PERFORMANCE_GRAPH_ENDPOINT,
                 request_type=TeamPerformanceGraphRequest,
+                unique_tournament_ids=resolved_unique_tournament_ids,
                 limit=team_request_limit,
                 offset=team_request_offset,
                 only_missing=only_missing,
@@ -200,6 +211,7 @@ class EntitiesBackfillJob:
         connection,
         *,
         endpoint,
+        unique_tournament_ids: tuple[int, ...] | None,
         limit: int | None,
         offset: int,
         only_missing: bool,
@@ -207,7 +219,7 @@ class EntitiesBackfillJob:
         event_timestamp_to: int | None,
     ) -> tuple[int, ...]:
         resolved_limit = normalize_limit(limit)
-        if event_timestamp_from is None and event_timestamp_to is None:
+        if event_timestamp_from is None and event_timestamp_to is None and not unique_tournament_ids:
             sql = """
                 SELECT p.id
                 FROM player AS p
@@ -229,6 +241,7 @@ class EntitiesBackfillJob:
                     WHERE elp.player_id IS NOT NULL
                       AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                       AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                      AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                     UNION
                     SELECT DISTINCT em.player_id
                     FROM event_lineup_missing_player AS em
@@ -236,17 +249,19 @@ class EntitiesBackfillJob:
                     WHERE em.player_id IS NOT NULL
                       AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                       AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                      AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                 ) AS seed
                 ORDER BY seed.player_id
-                OFFSET $3
+                OFFSET $4
             """
             if resolved_limit is None:
-                rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, offset)
+                rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, list(unique_tournament_ids) if unique_tournament_ids else None, offset)
             else:
                 rows = await connection.fetch(
-                    f"{sql}\n            LIMIT $4",
+                    f"{sql}\n            LIMIT $5",
                     event_timestamp_from,
                     event_timestamp_to,
+                    list(unique_tournament_ids) if unique_tournament_ids else None,
                     offset,
                     resolved_limit,
                 )
@@ -269,6 +284,7 @@ class EntitiesBackfillJob:
         self,
         connection,
         *,
+        unique_tournament_ids: tuple[int, ...] | None,
         limit: int | None,
         offset: int,
         only_missing: bool,
@@ -276,7 +292,7 @@ class EntitiesBackfillJob:
         event_timestamp_to: int | None,
     ) -> tuple[int, ...]:
         resolved_limit = normalize_limit(limit)
-        if event_timestamp_from is None and event_timestamp_to is None:
+        if event_timestamp_from is None and event_timestamp_to is None and not unique_tournament_ids:
             sql = """
                 SELECT t.id
                 FROM team AS t
@@ -297,23 +313,26 @@ class EntitiesBackfillJob:
                     WHERE e.home_team_id IS NOT NULL
                       AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                       AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                      AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                     UNION
                     SELECT DISTINCT e.away_team_id AS team_id
                     FROM event AS e
                     WHERE e.away_team_id IS NOT NULL
                       AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                       AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                      AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                 ) AS seed
                 ORDER BY seed.team_id
-                OFFSET $3
+                OFFSET $4
             """
             if resolved_limit is None:
-                rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, offset)
+                rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, list(unique_tournament_ids) if unique_tournament_ids else None, offset)
             else:
                 rows = await connection.fetch(
-                    f"{sql}\n            LIMIT $4",
+                    f"{sql}\n            LIMIT $5",
                     event_timestamp_from,
                     event_timestamp_to,
+                    list(unique_tournament_ids) if unique_tournament_ids else None,
                     offset,
                     resolved_limit,
                 )
@@ -338,6 +357,7 @@ class EntitiesBackfillJob:
         *,
         endpoint,
         request_type,
+        unique_tournament_ids: tuple[int, ...] | None,
         limit: int | None,
         offset: int,
         only_missing: bool,
@@ -345,7 +365,7 @@ class EntitiesBackfillJob:
         event_timestamp_to: int | None,
     ) -> tuple[PlayerOverallRequest | PlayerHeatmapRequest, ...]:
         resolved_limit = normalize_limit(limit)
-        if event_timestamp_from is None and event_timestamp_to is None:
+        if event_timestamp_from is None and event_timestamp_to is None and not unique_tournament_ids:
             sql = """
                 SELECT DISTINCT
                     r.player_id,
@@ -377,6 +397,7 @@ class EntitiesBackfillJob:
                       AND e.season_id IS NOT NULL
                       AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                       AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                      AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                     UNION
                     SELECT DISTINCT
                         em.player_id,
@@ -389,17 +410,19 @@ class EntitiesBackfillJob:
                       AND e.season_id IS NOT NULL
                       AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                       AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                      AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                 ) AS seed
                 ORDER BY seed.season_id DESC, seed.unique_tournament_id, seed.player_id
-                OFFSET $3
+                OFFSET $4
             """
             if resolved_limit is None:
-                rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, offset)
+                rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, list(unique_tournament_ids) if unique_tournament_ids else None, offset)
             else:
                 rows = await connection.fetch(
-                    f"{sql}\n            LIMIT $4",
+                    f"{sql}\n            LIMIT $5",
                     event_timestamp_from,
                     event_timestamp_to,
+                    list(unique_tournament_ids) if unique_tournament_ids else None,
                     offset,
                     resolved_limit,
                 )
@@ -442,6 +465,7 @@ class EntitiesBackfillJob:
         *,
         endpoint,
         request_type,
+        unique_tournament_ids: tuple[int, ...] | None,
         limit: int | None,
         offset: int,
         only_missing: bool,
@@ -462,6 +486,7 @@ class EntitiesBackfillJob:
                     AND e.season_id IS NOT NULL
                     AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                     AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                    AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
                 UNION
                 SELECT DISTINCT
                     e.away_team_id AS team_id,
@@ -473,17 +498,19 @@ class EntitiesBackfillJob:
                     AND e.season_id IS NOT NULL
                     AND ($1::bigint IS NULL OR e.start_timestamp >= $1)
                     AND ($2::bigint IS NULL OR e.start_timestamp <= $2)
+                    AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
             ) AS seed
             ORDER BY seed.season_id DESC, seed.unique_tournament_id, seed.team_id
-            OFFSET $3
+            OFFSET $4
         """
         if resolved_limit is None:
-            rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, offset)
+            rows = await connection.fetch(sql, event_timestamp_from, event_timestamp_to, list(unique_tournament_ids) if unique_tournament_ids else None, offset)
         else:
             rows = await connection.fetch(
-                f"{sql}\n            LIMIT $4",
+                f"{sql}\n            LIMIT $5",
                 event_timestamp_from,
                 event_timestamp_to,
+                list(unique_tournament_ids) if unique_tournament_ids else None,
                 offset,
                 resolved_limit,
             )

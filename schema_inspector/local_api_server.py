@@ -1,4 +1,4 @@
-"""Serve the ingested football dataset through local Sofascore-style HTTP routes."""
+"""Serve the ingested multi-sport dataset through local Sofascore-style HTTP routes."""
 
 from __future__ import annotations
 
@@ -14,29 +14,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .db import DatabaseConfig, load_database_config
-from .endpoints import (
-    CATEGORIES_SEED_ENDPOINTS,
-    COMPETITION_ENDPOINTS,
-    ENTITIES_ENDPOINTS,
-    EVENT_DETAIL_ENDPOINTS,
-    EVENT_LIST_ENDPOINTS,
-    LEADERBOARDS_ENDPOINTS,
-    STANDINGS_ENDPOINTS,
-    STATISTICS_ENDPOINTS,
-    SofascoreEndpoint,
-)
+from .endpoints import SofascoreEndpoint, local_api_endpoints
+
 from .local_swagger_builder import _build_viewer_html, _empty_summary, _load_summary, build_openapi_document
 
-_ALL_ENDPOINTS = (
-    COMPETITION_ENDPOINTS
-    + CATEGORIES_SEED_ENDPOINTS
-    + EVENT_LIST_ENDPOINTS
-    + EVENT_DETAIL_ENDPOINTS
-    + STANDINGS_ENDPOINTS
-    + STATISTICS_ENDPOINTS
-    + ENTITIES_ENDPOINTS
-    + LEADERBOARDS_ENDPOINTS
-)
+_ALL_ENDPOINTS = local_api_endpoints()
 
 
 @dataclass(frozen=True)
@@ -66,7 +48,7 @@ class ApiResponse:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Serve a local football read API over the ingested PostgreSQL snapshot cache. "
+            "Serve a local multi-sport read API over the ingested PostgreSQL snapshot cache. "
             "Swagger UI is available at the root path and API routes mirror Sofascore-style paths."
         ),
     )
@@ -83,7 +65,7 @@ def main() -> int:
     base_url = f"http://{args.host}:{args.port}"
     application = LocalApiApplication(database_config=database_config, base_url=base_url)
     server = LocalApiHttpServer((args.host, args.port), LocalApiRequestHandler, application)
-    print(f"Serving local football API on {base_url}", flush=True)
+    print(f"Serving local multi-sport API on {base_url}", flush=True)
     print(f"Swagger UI: {base_url}/", flush=True)
     print(f"OpenAPI JSON: {base_url}/openapi.json", flush=True)
     try:
@@ -120,7 +102,7 @@ class LocalApiApplication:
         document["servers"] = [
             {
                 "url": self.base_url,
-                "description": "Live local football API server backed by PostgreSQL snapshots",
+                "description": "Live local multi-sport API server backed by PostgreSQL snapshots",
             }
         ]
         return document
@@ -130,7 +112,7 @@ class LocalApiApplication:
         if route_match is None:
             return ApiResponse(
                 status_code=HTTPStatus.NOT_FOUND,
-                payload={"error": "Route is not registered in the local football API.", "path": path},
+                payload={"error": "Route is not registered in the local multi-sport API.", "path": path},
             )
 
         route, path_params = route_match
@@ -158,7 +140,7 @@ class LocalApiApplication:
         try:
             import asyncpg
         except ImportError as exc:
-            raise RuntimeError("asyncpg is required to serve the local football API.") from exc
+            raise RuntimeError("asyncpg is required to serve the local multi-sport API.") from exc
 
         context_value = _parse_context_value(route, path_params)
         query = "SELECT source_url, payload FROM api_payload_snapshot WHERE endpoint_pattern = $1"
@@ -216,7 +198,7 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(HTTPStatus.OK, self.server.application.openapi_json, "application/json; charset=utf-8")
             return
         if path == "/healthz":
-            payload = {"ok": True, "service": "local-football-api"}
+            payload = {"ok": True, "service": "local-multisport-api"}
             self._send_json(HTTPStatus.OK, payload)
             return
         if path.startswith("/api/"):
