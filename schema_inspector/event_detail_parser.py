@@ -10,13 +10,18 @@ from typing import Any, Iterable, Mapping, Sequence
 from .competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
 from .endpoints import (
     EndpointRegistryEntry,
+    EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
+    EVENT_GRAPH_ENDPOINT,
     EVENT_H2H_ENDPOINT,
+    EVENT_HEATMAP_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_MANAGERS_ENDPOINT,
     EVENT_ODDS_ALL_ENDPOINT,
     EVENT_ODDS_FEATURED_ENDPOINT,
+    EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_PREGAME_FORM_ENDPOINT,
+    EVENT_TENNIS_POWER_ENDPOINT,
     EVENT_VOTES_ENDPOINT,
     EVENT_WINNING_ODDS_ENDPOINT,
     event_detail_registry_entries,
@@ -266,6 +271,60 @@ class EventVoteOptionRecord:
 
 
 @dataclass(frozen=True)
+class EventCommentFeedRecord:
+    event_id: int
+    home_player_color: Mapping[str, Any] | None = None
+    home_goalkeeper_color: Mapping[str, Any] | None = None
+    away_player_color: Mapping[str, Any] | None = None
+    away_goalkeeper_color: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EventCommentRecord:
+    event_id: int
+    comment_id: int
+    sequence: int | None = None
+    period_name: str | None = None
+    is_home: bool | None = None
+    player_id: int | None = None
+    text: str | None = None
+    match_time: float | None = None
+    comment_type: str | None = None
+
+
+@dataclass(frozen=True)
+class EventGraphRecord:
+    event_id: int
+    period_time: int | None = None
+    period_count: int | None = None
+    overtime_length: int | None = None
+
+
+@dataclass(frozen=True)
+class EventGraphPointRecord:
+    event_id: int
+    ordinal: int
+    minute: float | None = None
+    value: int | None = None
+
+
+@dataclass(frozen=True)
+class EventTeamHeatmapRecord:
+    event_id: int
+    team_id: int
+
+
+@dataclass(frozen=True)
+class EventTeamHeatmapPointRecord:
+    event_id: int
+    team_id: int
+    point_type: str
+    ordinal: int
+    x: float | None = None
+    y: float | None = None
+
+
+@dataclass(frozen=True)
 class ProviderRecord:
     id: int
     slug: str | None = None
@@ -275,6 +334,21 @@ class ProviderRecord:
     colors: Mapping[str, Any] | None = None
     odds_from_provider_id: int | None = None
     live_odds_from_provider_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ProviderConfigurationRecord:
+    id: int
+    provider_id: int
+    campaign_id: int | None = None
+    fallback_provider_id: int | None = None
+    type: str | None = None
+    weight: int | None = None
+    branded: bool | None = None
+    featured_odds_type: str | None = None
+    bet_slip_link: str | None = None
+    default_bet_slip_link: str | None = None
+    impression_cost_encrypted: str | None = None
 
 
 @dataclass(frozen=True)
@@ -382,7 +456,14 @@ class EventDetailBundle:
     event_pregame_form_sides: tuple[EventPregameFormSideRecord, ...]
     event_pregame_form_items: tuple[EventPregameFormItemRecord, ...]
     event_vote_options: tuple[EventVoteOptionRecord, ...]
+    event_comment_feeds: tuple[EventCommentFeedRecord, ...]
+    event_comments: tuple[EventCommentRecord, ...]
+    event_graphs: tuple[EventGraphRecord, ...]
+    event_graph_points: tuple[EventGraphPointRecord, ...]
+    event_team_heatmaps: tuple[EventTeamHeatmapRecord, ...]
+    event_team_heatmap_points: tuple[EventTeamHeatmapPointRecord, ...]
     providers: tuple[ProviderRecord, ...]
+    provider_configurations: tuple[ProviderConfigurationRecord, ...]
     event_markets: tuple[EventMarketRecord, ...]
     event_market_choices: tuple[EventMarketChoiceRecord, ...]
     event_winning_odds: tuple[EventWinningOddsRecord, ...]
@@ -411,6 +492,7 @@ class EventDetailParser:
     ) -> EventDetailBundle:
         state = _EventDetailAccumulator()
         await self._fetch_event_root(event_id, state, timeout=timeout)
+        sport_slug = state.event_sport_slug(event_id)
 
         tasks = [
             self._fetch_lineups(event_id, state, timeout=timeout),
@@ -419,6 +501,19 @@ class EventDetailParser:
             self._fetch_pregame_form(event_id, state, timeout=timeout),
             self._fetch_votes(event_id, state, timeout=timeout),
         ]
+        if state.supports_match_live_detail_resources(event_id):
+            tasks.append(self._fetch_comments(event_id, state, timeout=timeout))
+            if sport_slug == "tennis":
+                tasks.extend(
+                    (
+                        self._fetch_point_by_point(event_id, state, timeout=timeout),
+                        self._fetch_tennis_power(event_id, state, timeout=timeout),
+                    )
+                )
+            else:
+                tasks.append(self._fetch_graph(event_id, state, timeout=timeout))
+                for team_id in state.event_team_ids(event_id):
+                    tasks.append(self._fetch_team_heatmap(event_id, team_id, state, timeout=timeout))
         for provider_id in tuple(dict.fromkeys(provider_ids)):
             tasks.extend(
                 (
@@ -429,14 +524,16 @@ class EventDetailParser:
             )
 
         await asyncio.gather(*tasks)
-        self.logger.info(
-            "Event detail bundle collected: event_id=%s players=%s markets=%s lineups=%s",
+        self.logger.debug(
+            "Event detail bundle collected: event_id=%s players=%s markets=%s lineups=%s comments=%s heatmaps=%s",
             event_id,
             len(state.players),
             len(state.event_markets),
             len(state.event_lineups),
+            len(state.event_comments),
+            len(state.event_team_heatmaps),
         )
-        return state.to_bundle()
+        return state.to_bundle(sport_slug=sport_slug)
 
     async def _fetch_event_root(
         self,
@@ -545,6 +642,89 @@ class EventDetailParser:
         if payload is not None:
             state.ingest_votes(event_id, payload)
 
+    async def _fetch_comments(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_COMMENTS_ENDPOINT
+        payload = await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
+        if payload is not None:
+            state.ingest_comments(event_id, payload)
+
+    async def _fetch_graph(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_GRAPH_ENDPOINT
+        payload = await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
+        if payload is not None:
+            state.ingest_graph(event_id, payload)
+
+    async def _fetch_point_by_point(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_POINT_BY_POINT_ENDPOINT
+        await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
+
+    async def _fetch_tennis_power(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_TENNIS_POWER_ENDPOINT
+        await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
+
+    async def _fetch_team_heatmap(
+        self,
+        event_id: int,
+        team_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_HEATMAP_ENDPOINT
+        payload = await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            team_id=team_id,
+            state=state,
+            timeout=timeout,
+        )
+        if payload is not None:
+            state.ingest_team_heatmap(event_id, team_id, payload)
+
     async def _fetch_odds_all(
         self,
         event_id: int,
@@ -562,7 +742,7 @@ class EventDetailParser:
             timeout=timeout,
         )
         if payload is not None:
-            state.ingest_provider(provider_id)
+            state.ingest_provider_payloads(payload, default_provider_id=provider_id)
             state.ingest_odds_all(event_id, provider_id, payload)
 
     async def _fetch_odds_featured(
@@ -582,7 +762,7 @@ class EventDetailParser:
             timeout=timeout,
         )
         if payload is not None:
-            state.ingest_provider(provider_id)
+            state.ingest_provider_payloads(payload, default_provider_id=provider_id)
             state.ingest_odds_featured(event_id, provider_id, payload)
 
     async def _fetch_winning_odds(
@@ -602,7 +782,7 @@ class EventDetailParser:
             timeout=timeout,
         )
         if payload is not None:
-            state.ingest_provider(provider_id)
+            state.ingest_provider_payloads(payload, default_provider_id=provider_id)
             state.ingest_winning_odds(event_id, provider_id, payload)
 
     async def _fetch_optional_root_payload(
@@ -620,7 +800,13 @@ class EventDetailParser:
         except SofascoreHttpError as exc:
             status_code = exc.transport_result.status_code if exc.transport_result is not None else None
             if status_code == 404:
-                self.logger.info("Event detail endpoint missing for event_id=%s url=%s", event_id, url)
+                self.logger.info(
+                    "Event detail optional 404: event_id=%s endpoint=%s target=%s url=%s",
+                    event_id,
+                    endpoint.pattern,
+                    endpoint.target_table,
+                    url,
+                )
                 return None
             raise
 
@@ -667,13 +853,68 @@ class _EventDetailAccumulator:
         self.event_pregame_form_sides: dict[tuple[int, str], dict[str, Any]] = {}
         self.event_pregame_form_items: dict[tuple[int, str, int], dict[str, Any]] = {}
         self.event_vote_options: dict[tuple[int, str, str], dict[str, Any]] = {}
+        self.event_comment_feeds: dict[int, dict[str, Any]] = {}
+        self.event_comments: dict[tuple[int, int], dict[str, Any]] = {}
+        self.event_graphs: dict[int, dict[str, Any]] = {}
+        self.event_graph_points: dict[tuple[int, int], dict[str, Any]] = {}
+        self.event_team_heatmaps: dict[tuple[int, int], dict[str, Any]] = {}
+        self.event_team_heatmap_points: dict[tuple[int, int, str, int], dict[str, Any]] = {}
         self.providers: dict[int, dict[str, Any]] = {}
+        self.provider_configurations: dict[int, dict[str, Any]] = {}
         self.event_markets: dict[int, dict[str, Any]] = {}
         self.event_market_choices: dict[int, dict[str, Any]] = {}
         self.event_winning_odds: dict[tuple[int, int, str], dict[str, Any]] = {}
         self.event_lineups: dict[tuple[int, str], dict[str, Any]] = {}
         self.event_lineup_players: dict[tuple[int, str, int], dict[str, Any]] = {}
         self.event_lineup_missing_players: dict[tuple[int, str, int], dict[str, Any]] = {}
+
+    def supports_match_live_detail_resources(self, event_id: int) -> bool:
+        event = self.events.get(event_id)
+        if not event:
+            return False
+        status_code = event.get("status_code")
+        if status_code is None:
+            return False
+        status = self.event_statuses.get(status_code)
+        if not status:
+            return False
+        return status.get("type") in {"inprogress", "finished"}
+
+    def event_team_ids(self, event_id: int) -> tuple[int, ...]:
+        event = self.events.get(event_id)
+        if not event:
+            return ()
+        team_ids: list[int] = []
+        for key in ("home_team_id", "away_team_id"):
+            team_id = event.get(key)
+            if isinstance(team_id, int) and team_id not in team_ids:
+                team_ids.append(team_id)
+        return tuple(team_ids)
+
+    def event_sport_slug(self, event_id: int) -> str | None:
+        event = self.events.get(event_id)
+        if not event:
+            return None
+        tournament_id = event.get("tournament_id")
+        if not isinstance(tournament_id, int):
+            return None
+        tournament = self.tournaments.get(tournament_id)
+        if not tournament:
+            return None
+        category_id = tournament.get("category_id")
+        if not isinstance(category_id, int):
+            return None
+        category = self.categories.get(category_id)
+        if not category:
+            return None
+        sport_id = category.get("sport_id")
+        if not isinstance(sport_id, int):
+            return None
+        sport = self.sports.get(sport_id)
+        if not sport:
+            return None
+        slug = sport.get("slug")
+        return slug if isinstance(slug, str) else None
 
     def add_payload_snapshot(
         self,
@@ -1368,8 +1609,166 @@ class _EventDetailAccumulator:
                     "vote_count": count,
                 }
 
-    def ingest_provider(self, provider_id: int) -> None:
-        self._merge(self.providers, provider_id, {"id": provider_id})
+    def ingest_comments(self, event_id: int, payload: Mapping[str, Any]) -> None:
+        home = _as_mapping(payload.get("home"))
+        away = _as_mapping(payload.get("away"))
+        self.event_comment_feeds[event_id] = {
+            "event_id": event_id,
+            "home_player_color": _as_mapping(home.get("playerColor")) if home else None,
+            "home_goalkeeper_color": _as_mapping(home.get("goalkeeperColor")) if home else None,
+            "away_player_color": _as_mapping(away.get("playerColor")) if away else None,
+            "away_goalkeeper_color": _as_mapping(away.get("goalkeeperColor")) if away else None,
+        }
+
+        for item in _iter_mappings(payload.get("comments")):
+            comment_id = _as_int(item.get("id"))
+            if comment_id is None:
+                continue
+            player_id = self.ingest_player(_as_mapping(item.get("player")))
+            self._merge(
+                self.event_comments,
+                (event_id, comment_id),
+                {
+                    "event_id": event_id,
+                    "comment_id": comment_id,
+                    "sequence": _as_int(item.get("sequence")),
+                    "period_name": _as_str(item.get("periodName")),
+                    "is_home": _as_bool(item.get("isHome")),
+                    "player_id": player_id,
+                    "text": _as_str(item.get("text")),
+                    "match_time": _as_float(item.get("time")),
+                    "comment_type": _as_str(item.get("type")),
+                },
+            )
+
+    def ingest_graph(self, event_id: int, payload: Mapping[str, Any]) -> None:
+        self.event_graphs[event_id] = {
+            "event_id": event_id,
+            "period_time": _as_int(payload.get("periodTime")),
+            "period_count": _as_int(payload.get("periodCount")),
+            "overtime_length": _as_int(payload.get("overtimeLength")),
+        }
+
+        for ordinal, item in enumerate(_iter_mappings(payload.get("graphPoints"))):
+            minute = _as_float(item.get("minute"))
+            value = _as_int(item.get("value"))
+            if minute is None and value is None:
+                continue
+            self.event_graph_points[(event_id, ordinal)] = {
+                "event_id": event_id,
+                "ordinal": ordinal,
+                "minute": minute,
+                "value": value,
+            }
+
+    def ingest_team_heatmap(self, event_id: int, team_id: int, payload: Mapping[str, Any]) -> None:
+        self.event_team_heatmaps[(event_id, team_id)] = {
+            "event_id": event_id,
+            "team_id": team_id,
+        }
+
+        for point_type, payload_key in (("player", "playerPoints"), ("goalkeeper", "goalkeeperPoints")):
+            for ordinal, item in enumerate(_iter_mappings(payload.get(payload_key))):
+                x = _as_float(item.get("x"))
+                y = _as_float(item.get("y"))
+                if x is None and y is None:
+                    continue
+                self.event_team_heatmap_points[(event_id, team_id, point_type, ordinal)] = {
+                    "event_id": event_id,
+                    "team_id": team_id,
+                    "point_type": point_type,
+                    "ordinal": ordinal,
+                    "x": x,
+                    "y": y,
+                }
+
+    def ingest_provider(self, provider_id: int, payload: Mapping[str, Any] | None = None) -> int:
+        row: dict[str, Any] = {"id": provider_id}
+        if payload:
+            odds_from_provider_id = self.ingest_provider_mapping(_as_mapping(payload.get("oddsFromProvider")))
+            live_odds_from_provider_id = self.ingest_provider_mapping(_as_mapping(payload.get("liveOddsFromProvider")))
+            row.update(
+                {
+                    "slug": _as_str(payload.get("slug")),
+                    "name": _as_str(payload.get("name")),
+                    "country": _as_str(payload.get("country")),
+                    "default_bet_slip_link": _as_str(payload.get("defaultBetSlipLink")),
+                    "colors": _as_mapping(payload.get("colors")),
+                    "odds_from_provider_id": odds_from_provider_id,
+                    "live_odds_from_provider_id": live_odds_from_provider_id,
+                }
+            )
+        self._merge(self.providers, provider_id, row)
+        return provider_id
+
+    def ingest_provider_mapping(self, payload: Mapping[str, Any] | None) -> int | None:
+        if not payload:
+            return None
+        provider_id = _as_int(payload.get("id"))
+        if provider_id is None:
+            return None
+        self.ingest_provider(provider_id, payload)
+        return provider_id
+
+    def ingest_provider_payloads(self, payload: Mapping[str, Any], *, default_provider_id: int | None = None) -> None:
+        provider_payload = _as_mapping(payload.get("provider"))
+        if provider_payload:
+            provider_id = _as_int(provider_payload.get("id"))
+            if provider_id is not None:
+                self.ingest_provider(provider_id, provider_payload)
+        elif default_provider_id is not None:
+            self.ingest_provider(default_provider_id)
+
+        for key in ("providerConfiguration", "providerConfig"):
+            provider_configuration = _as_mapping(payload.get(key))
+            if provider_configuration:
+                self.ingest_provider_configuration(provider_configuration, default_provider_id=default_provider_id)
+
+        for key in ("providerConfigurations", "providerConfigs"):
+            for provider_configuration in _iter_mappings(payload.get(key)):
+                self.ingest_provider_configuration(provider_configuration, default_provider_id=default_provider_id)
+
+    def ingest_provider_configuration(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        default_provider_id: int | None = None,
+    ) -> int | None:
+        configuration_id = _as_int(payload.get("id"))
+        if configuration_id is None:
+            return None
+
+        provider_id = self.ingest_provider_mapping(_as_mapping(payload.get("provider")))
+        if provider_id is None:
+            provider_id = _as_int(payload.get("providerId"))
+        if provider_id is None:
+            provider_id = default_provider_id
+        if provider_id is None:
+            return None
+        self.ingest_provider(provider_id)
+
+        fallback_provider_id = self.ingest_provider_mapping(_as_mapping(payload.get("fallbackProvider")))
+        if fallback_provider_id is None:
+            fallback_provider_id = _as_int(payload.get("fallbackProviderId"))
+
+        self._merge(
+            self.provider_configurations,
+            configuration_id,
+            {
+                "id": configuration_id,
+                "provider_id": provider_id,
+                "campaign_id": _as_int(payload.get("campaignId")),
+                "fallback_provider_id": fallback_provider_id,
+                "type": _as_str(payload.get("type")),
+                "weight": _as_int(payload.get("weight")),
+                "branded": _as_bool(payload.get("branded")),
+                "featured_odds_type": _as_str(payload.get("featuredOddsType")),
+                "bet_slip_link": _as_str(payload.get("betSlipLink")),
+                "default_bet_slip_link": _as_str(payload.get("defaultBetSlipLink")),
+                "impression_cost_encrypted": _as_str(payload.get("impressionCostEncrypted")),
+            },
+        )
+        return configuration_id
 
     def ingest_odds_all(self, event_id: int, provider_id: int, payload: Mapping[str, Any]) -> None:
         for market_payload in _iter_mappings(payload.get("markets")):
@@ -1470,9 +1869,9 @@ class _EventDetailAccumulator:
                 "fractional_value": _as_scalar_text(item.get("fractionalValue")),
             }
 
-    def to_bundle(self) -> EventDetailBundle:
+    def to_bundle(self, *, sport_slug: str | None = None) -> EventDetailBundle:
         return EventDetailBundle(
-            registry_entries=event_detail_registry_entries(),
+            registry_entries=event_detail_registry_entries(sport_slug=sport_slug),
             payload_snapshots=tuple(self.payload_snapshots),
             sports=tuple(SportRecord(**row) for _, row in sorted(self.sports.items())),
             countries=tuple(CountryRecord(**row) for _, row in sorted(self.countries.items())),
@@ -1527,7 +1926,25 @@ class _EventDetailAccumulator:
             event_vote_options=tuple(
                 EventVoteOptionRecord(**row) for _, row in sorted(self.event_vote_options.items())
             ),
+            event_comment_feeds=tuple(
+                EventCommentFeedRecord(**row) for _, row in sorted(self.event_comment_feeds.items())
+            ),
+            event_comments=tuple(EventCommentRecord(**row) for _, row in sorted(self.event_comments.items())),
+            event_graphs=tuple(EventGraphRecord(**row) for _, row in sorted(self.event_graphs.items())),
+            event_graph_points=tuple(
+                EventGraphPointRecord(**row) for _, row in sorted(self.event_graph_points.items())
+            ),
+            event_team_heatmaps=tuple(
+                EventTeamHeatmapRecord(**row) for _, row in sorted(self.event_team_heatmaps.items())
+            ),
+            event_team_heatmap_points=tuple(
+                EventTeamHeatmapPointRecord(**row)
+                for _, row in sorted(self.event_team_heatmap_points.items())
+            ),
             providers=tuple(ProviderRecord(**row) for _, row in sorted(self.providers.items())),
+            provider_configurations=tuple(
+                ProviderConfigurationRecord(**row) for _, row in sorted(self.provider_configurations.items())
+            ),
             event_markets=tuple(EventMarketRecord(**row) for _, row in sorted(self.event_markets.items())),
             event_market_choices=tuple(
                 EventMarketChoiceRecord(**row) for _, row in sorted(self.event_market_choices.items())

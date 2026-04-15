@@ -82,7 +82,14 @@ class _FakeDetailJob:
                 event_pregame_form_side_rows=0,
                 event_pregame_form_item_rows=0,
                 event_vote_option_rows=0,
+                event_comment_feed_rows=0,
+                event_comment_rows=0,
+                event_graph_rows=0,
+                event_graph_point_rows=0,
+                event_team_heatmap_rows=0,
+                event_team_heatmap_point_rows=0,
                 provider_rows=0,
+                provider_configuration_rows=0,
                 event_market_rows=0,
                 event_market_choice_rows=0,
                 event_winning_odds_rows=0,
@@ -107,7 +114,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
             [
                 (
                     ANY,
-                    (True, 5, 2),
+                    (True, None, 5, 2),
                 )
             ],
         )
@@ -117,6 +124,30 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 1)
         self.assertEqual(result.items[1].error, "boom-14083192")
+
+    async def test_backfill_job_treats_zero_limit_as_unbounded(self) -> None:
+        connection = _FakeConnection(rows=[{"id": 14083191}])
+        database = _FakeDatabase(connection)
+        detail_job = _FakeDetailJob()
+        job = EventDetailBackfillJob(detail_job, database)
+
+        result = await job.run(limit=0, offset=7, only_missing=False)
+
+        self.assertEqual(connection.fetch_calls, [(ANY, (False, None, 7))])
+        self.assertEqual(result.total_candidates, 1)
+        self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
+
+    async def test_backfill_job_applies_unique_tournament_filter(self) -> None:
+        connection = _FakeConnection(rows=[{"id": 14083191}])
+        database = _FakeDatabase(connection)
+        detail_job = _FakeDetailJob()
+        job = EventDetailBackfillJob(detail_job, database)
+
+        result = await job.run(limit=3, offset=0, only_missing=False, unique_tournament_id=17)
+
+        self.assertEqual(connection.fetch_calls, [(ANY, (False, 17, 0, 3))])
+        self.assertEqual(result.total_candidates, 1)
+        self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
 
 
 if __name__ == "__main__":

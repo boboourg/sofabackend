@@ -13,55 +13,140 @@ from .endpoints import (
     UNIQUE_TOURNAMENT_STATISTICS_INFO_ENDPOINT,
     statistics_registry_entries,
 )
-from .sofascore_client import SofascoreClient, SofascoreResponse
+from .sofascore_client import SofascoreClient, SofascoreHttpError, SofascoreResponse
 
 _METRIC_COLUMN_MAP: dict[str, str] = {
+    "accurateCrosses": "accurate_crosses",
+    "accurateCrossesPercentage": "accurate_crosses_percentage",
+    "accurateFinalThirdPasses": "accurate_final_third_passes",
+    "accurateLongBalls": "accurate_long_balls",
+    "accurateLongBallsPercentage": "accurate_long_balls_percentage",
+    "accurateOppositionHalfPasses": "accurate_opposition_half_passes",
+    "accurateOwnHalfPasses": "accurate_own_half_passes",
     "accuratePasses": "accurate_passes",
     "accuratePassesPercentage": "accurate_passes_percentage",
+    "aerialDuelsWon": "aerial_duels_won",
+    "aerialDuelsWonPercentage": "aerial_duels_won_percentage",
+    "appearances": "appearances",
     "assists": "assists",
     "bigChancesCreated": "big_chances_created",
     "bigChancesMissed": "big_chances_missed",
     "blockedShots": "blocked_shots",
     "cleanSheet": "clean_sheet",
     "clearances": "clearances",
+    "crossesNotClaimed": "crosses_not_claimed",
+    "dispossessed": "dispossessed",
     "dribbledPast": "dribbled_past",
     "errorLeadToGoal": "error_lead_to_goal",
     "errorLeadToShot": "error_lead_to_shot",
     "expectedGoals": "expected_goals",
+    "fouls": "fouls",
+    "freeKickGoal": "free_kick_goal",
     "goalConversionPercentage": "goal_conversion_percentage",
     "goals": "goals",
+    "goalsConcededInsideTheBox": "goals_conceded_inside_the_box",
+    "goalsConcededOutsideTheBox": "goals_conceded_outside_the_box",
+    "goalsFromInsideTheBox": "goals_from_inside_the_box",
     "goalsFromOutsideTheBox": "goals_from_outside_the_box",
+    "groundDuelsWon": "ground_duels_won",
+    "groundDuelsWonPercentage": "ground_duels_won_percentage",
+    "headedGoals": "headed_goals",
+    "highClaims": "high_claims",
     "hitWoodwork": "hit_woodwork",
+    "inaccuratePasses": "inaccurate_passes",
     "interceptions": "interceptions",
     "keyPasses": "key_passes",
+    "leftFootGoals": "left_foot_goals",
+    "matchesStarted": "matches_started",
+    "minutesPlayed": "minutes_played",
+    "offsides": "offsides",
     "outfielderBlocks": "outfielder_blocks",
     "ownGoals": "own_goals",
+    "passToAssist": "pass_to_assist",
+    "penaltiesTaken": "penalties_taken",
     "penaltyConceded": "penalty_conceded",
+    "penaltyConversion": "penalty_conversion",
+    "penaltyFaced": "penalty_faced",
+    "penaltyGoals": "penalty_goals",
     "penaltySave": "penalty_save",
     "penaltyWon": "penalty_won",
+    "possessionLost": "possession_lost",
+    "punches": "punches",
     "rating": "rating",
+    "redCards": "red_cards",
+    "rightFootGoals": "right_foot_goals",
     "runsOut": "runs_out",
     "savedShotsFromInsideTheBox": "saved_shots_from_inside_the_box",
+    "savedShotsFromOutsideTheBox": "saved_shots_from_outside_the_box",
     "saves": "saves",
+    "setPieceConversion": "set_piece_conversion",
+    "shotFromSetPiece": "shot_from_set_piece",
+    "shotsOffTarget": "shots_off_target",
+    "shotsOnTarget": "shots_on_target",
     "successfulDribbles": "successful_dribbles",
     "successfulDribblesPercentage": "successful_dribbles_percentage",
+    "successfulRunsOut": "successful_runs_out",
     "tackles": "tackles",
+    "totalDuelsWon": "total_duels_won",
+    "totalDuelsWonPercentage": "total_duels_won_percentage",
+    "totalPasses": "total_passes",
     "totalShots": "total_shots",
+    "wasFouled": "was_fouled",
+    "yellowCards": "yellow_cards",
 }
 
 _INTEGER_METRIC_COLUMNS = {
+    "accurate_crosses",
+    "accurate_final_third_passes",
+    "accurate_long_balls",
+    "accurate_opposition_half_passes",
+    "accurate_own_half_passes",
     "accurate_passes",
+    "aerial_duels_won",
+    "appearances",
     "big_chances_created",
     "big_chances_missed",
     "clearances",
+    "crosses_not_claimed",
+    "dispossessed",
     "dribbled_past",
     "error_lead_to_goal",
+    "fouls",
+    "free_kick_goal",
+    "goals_conceded_inside_the_box",
+    "goals_conceded_outside_the_box",
+    "goals_from_inside_the_box",
+    "ground_duels_won",
+    "headed_goals",
+    "high_claims",
+    "inaccurate_passes",
     "interceptions",
     "key_passes",
+    "left_foot_goals",
+    "matches_started",
+    "minutes_played",
+    "offsides",
     "outfielder_blocks",
     "own_goals",
+    "pass_to_assist",
+    "penalties_taken",
     "penalty_conceded",
+    "penalty_faced",
+    "penalty_goals",
+    "possession_lost",
+    "punches",
+    "red_cards",
+    "right_foot_goals",
+    "saved_shots_from_outside_the_box",
+    "shot_from_set_piece",
+    "shots_off_target",
+    "shots_on_target",
+    "successful_runs_out",
+    "total_duels_won",
+    "total_passes",
     "total_shots",
+    "was_fouled",
+    "yellow_cards",
 }
 
 
@@ -173,37 +258,83 @@ class SeasonStatisticsResultRecord:
     row_number: int
     player_id: int | None = None
     team_id: int | None = None
+    accurate_crosses: int | None = None
+    accurate_crosses_percentage: int | float | None = None
+    accurate_final_third_passes: int | None = None
+    accurate_long_balls: int | None = None
+    accurate_long_balls_percentage: int | float | None = None
+    accurate_opposition_half_passes: int | None = None
+    accurate_own_half_passes: int | None = None
     accurate_passes: int | None = None
     accurate_passes_percentage: int | float | None = None
+    aerial_duels_won: int | None = None
+    aerial_duels_won_percentage: int | float | None = None
+    appearances: int | None = None
     assists: int | float | None = None
     big_chances_created: int | None = None
     big_chances_missed: int | None = None
     blocked_shots: int | float | None = None
     clean_sheet: int | float | None = None
     clearances: int | None = None
+    crosses_not_claimed: int | None = None
+    dispossessed: int | None = None
     dribbled_past: int | None = None
     error_lead_to_goal: int | None = None
     error_lead_to_shot: int | float | None = None
     expected_goals: int | float | None = None
+    fouls: int | None = None
+    free_kick_goal: int | None = None
     goal_conversion_percentage: int | float | None = None
     goals: int | float | None = None
+    goals_conceded_inside_the_box: int | None = None
+    goals_conceded_outside_the_box: int | None = None
+    goals_from_inside_the_box: int | None = None
     goals_from_outside_the_box: int | float | None = None
+    ground_duels_won: int | None = None
+    ground_duels_won_percentage: int | float | None = None
+    headed_goals: int | None = None
+    high_claims: int | None = None
     hit_woodwork: int | float | None = None
+    inaccurate_passes: int | None = None
     interceptions: int | None = None
     key_passes: int | None = None
+    left_foot_goals: int | None = None
+    matches_started: int | None = None
+    minutes_played: int | None = None
+    offsides: int | None = None
     outfielder_blocks: int | None = None
     own_goals: int | None = None
+    pass_to_assist: int | None = None
+    penalties_taken: int | None = None
     penalty_conceded: int | None = None
+    penalty_conversion: int | float | None = None
+    penalty_faced: int | None = None
+    penalty_goals: int | None = None
     penalty_save: int | float | None = None
     penalty_won: int | float | None = None
+    possession_lost: int | None = None
+    punches: int | None = None
     rating: int | float | None = None
+    red_cards: int | None = None
+    right_foot_goals: int | None = None
     runs_out: int | float | None = None
     saved_shots_from_inside_the_box: int | float | None = None
+    saved_shots_from_outside_the_box: int | None = None
     saves: int | float | None = None
+    set_piece_conversion: int | float | None = None
+    shot_from_set_piece: int | None = None
+    shots_off_target: int | None = None
+    shots_on_target: int | None = None
     successful_dribbles: int | float | None = None
     successful_dribbles_percentage: int | float | None = None
+    successful_runs_out: int | None = None
     tackles: int | float | None = None
+    total_duels_won: int | None = None
+    total_duels_won_percentage: int | float | None = None
+    total_passes: int | None = None
     total_shots: int | None = None
+    was_fouled: int | None = None
+    yellow_cards: int | None = None
 
 
 @dataclass(frozen=True)
@@ -267,7 +398,7 @@ class StatisticsParser:
         for query in tuple(queries):
             await self._fetch_statistics_query(unique_tournament_id, season_id, query, state, timeout=timeout)
 
-        self.logger.info(
+        self.logger.debug(
             "Statistics bundle collected: configs=%s snapshots=%s players=%s teams=%s",
             len(state.configs),
             len(state.snapshots),
@@ -285,18 +416,17 @@ class StatisticsParser:
         timeout: float,
     ) -> None:
         endpoint = UNIQUE_TOURNAMENT_STATISTICS_INFO_ENDPOINT
-        url = endpoint.build_url(unique_tournament_id=unique_tournament_id, season_id=season_id)
-        response = await self.client.get_json(url, timeout=timeout)
-        payload = _require_root_mapping(response.payload, url)
-
-        state.add_payload_snapshot(
-            endpoint_pattern=endpoint.pattern,
-            response=response,
-            envelope_key=endpoint.envelope_key,
+        response, payload = await self._fetch_optional_root_payload(
+            endpoint,
+            state=state,
             context_entity_type="season",
             context_entity_id=season_id,
-            payload=payload,
+            timeout=timeout,
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
         )
+        if response is None or payload is None:
+            return
         state.ingest_statistics_info(unique_tournament_id, season_id, payload)
 
     async def _fetch_statistics_query(
@@ -309,23 +439,85 @@ class StatisticsParser:
         timeout: float,
     ) -> None:
         endpoint = UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT
-        url = endpoint.build_url_with_query(
-            unique_tournament_id=unique_tournament_id,
-            season_id=season_id,
-            query_params=query.to_query_params(),
-        )
-        response = await self.client.get_json(url, timeout=timeout)
-        payload = _require_root_mapping(response.payload, url)
+        next_query = query
+        while True:
+            response, payload = await self._fetch_optional_root_payload(
+                endpoint,
+                state=state,
+                context_entity_type="season",
+                context_entity_id=season_id,
+                timeout=timeout,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                query_params=next_query.to_query_params(),
+            )
+            if response is None or payload is None:
+                return
 
+            state.ingest_statistics_snapshot(unique_tournament_id, season_id, next_query, response, payload)
+
+            current_page = _as_int(payload.get("page"))
+            total_pages = _as_int(payload.get("pages"))
+            if current_page is None or total_pages is None or current_page >= total_pages:
+                return
+
+            results_payload = payload.get("results")
+            page_size = next_query.limit
+            if page_size is None and isinstance(results_payload, list):
+                page_size = len(results_payload)
+            if page_size is None or page_size <= 0:
+                return
+
+            next_query = StatisticsQuery(
+                limit=next_query.limit,
+                offset=(next_query.offset or 0) + page_size,
+                order=next_query.order,
+                accumulation=next_query.accumulation,
+                group=next_query.group,
+                fields=next_query.fields,
+                filters=next_query.filters,
+            )
+
+    async def _fetch_optional_root_payload(
+        self,
+        endpoint,
+        *,
+        state: "_StatisticsAccumulator",
+        context_entity_type: str | None,
+        context_entity_id: int | None,
+        timeout: float,
+        **path_params: object,
+    ) -> tuple[SofascoreResponse | None, Mapping[str, Any] | None]:
+        url = (
+            endpoint.build_url_with_query(**path_params)
+            if hasattr(endpoint, "build_url_with_query") and "query_params" in path_params
+            else endpoint.build_url(**path_params)
+        )
+        try:
+            response = await self.client.get_json(url, timeout=timeout)
+        except SofascoreHttpError as exc:
+            status_code = exc.transport_result.status_code if exc.transport_result is not None else None
+            if status_code == 404:
+                self.logger.info(
+                    "Statistics optional 404: context=%s:%s endpoint=%s target=%s url=%s",
+                    context_entity_type,
+                    context_entity_id,
+                    endpoint.pattern,
+                    endpoint.target_table,
+                    url,
+                )
+                return None, None
+            raise
+        payload = _require_root_mapping(response.payload, url)
         state.add_payload_snapshot(
             endpoint_pattern=endpoint.pattern,
             response=response,
             envelope_key=endpoint.envelope_key,
-            context_entity_type="season",
-            context_entity_id=season_id,
+            context_entity_type=context_entity_type,
+            context_entity_id=context_entity_id,
             payload=payload,
         )
-        state.ingest_statistics_snapshot(unique_tournament_id, season_id, query, response, payload)
+        return response, payload
 
 
 class _StatisticsAccumulator:

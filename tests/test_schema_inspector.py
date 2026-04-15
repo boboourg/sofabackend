@@ -13,6 +13,7 @@ from schema_inspector.service import inspect_url_to_markdown
 from schema_inspector.sofascore_client import (
     SofascoreAccessDeniedError,
     SofascoreClient,
+    SofascoreHttpError,
     SofascoreRateLimitError,
 )
 from schema_inspector.transport import InspectorTransport, ProxyRequiredError
@@ -99,7 +100,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.proxy_endpoints[0].url, "http://proxy-1.local:8080")
 
     async def test_transport_blocks_direct_http_when_proxy_only_mode_is_enabled(self) -> None:
-        config = load_runtime_config(env={})
+        config = load_runtime_config(env={"SCHEMA_INSPECTOR_REQUIRE_PROXY": "true"})
         transport = InspectorTransport(config)
 
         with self.assertRaises(ProxyRequiredError):
@@ -163,6 +164,198 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.attempts), 2)
         self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080", "http://proxy-2.local:8080"])
 
+    async def test_transport_retries_with_next_proxy_on_challenge_response(self) -> None:
+        current_time = [0.0]
+
+        def fake_clock() -> float:
+            return current_time[0]
+
+        async def fake_sleep(delay: float) -> None:
+            current_time[0] += delay
+
+        config = load_runtime_config(
+            env={},
+            proxy_urls=["http://proxy-1.local:8080", "http://proxy-2.local:8080"],
+            max_attempts=2,
+        )
+        transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
+
+        responses = [
+            TransportResult(
+                resolved_url="https://example.test/api",
+                status_code=403,
+                headers={"Content-Type": "text/html"},
+                body_bytes=b"<html>access denied</html>",
+                attempts=(),
+                final_proxy_name=None,
+                challenge_reason="access_denied",
+            ),
+            TransportResult(
+                resolved_url="https://example.test/api",
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"ok": true}',
+                attempts=(),
+                final_proxy_name=None,
+                challenge_reason=None,
+            ),
+        ]
+        observed_proxy_urls = []
+
+        def fake_execute(url, headers, timeout, proxy_url):
+            del url, headers, timeout
+            observed_proxy_urls.append(proxy_url)
+            item = responses.pop(0)
+            from schema_inspector.transport import _RawResponse
+
+            return _RawResponse(
+                resolved_url=item.resolved_url,
+                status_code=item.status_code,
+                headers=item.headers,
+                body_bytes=item.body_bytes,
+            )
+
+        with patch("schema_inspector.transport.detect_challenge", side_effect=["access_denied", None]):
+            with patch.object(transport, "_execute_once", side_effect=fake_execute):
+                result = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(result.attempts), 2)
+        self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080", "http://proxy-2.local:8080"])
+
+    async def test_transport_reuses_single_proxy_across_retries(self) -> None:
+        current_time = [0.0]
+
+        def fake_clock() -> float:
+            return current_time[0]
+
+        async def fake_sleep(delay: float) -> None:
+            current_time[0] += delay
+
+        config = load_runtime_config(
+            env={},
+            proxy_urls=["http://proxy-1.local:8080"],
+            max_attempts=2,
+        )
+        transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
+
+        responses = [
+            TransportResult(
+                resolved_url="https://example.test/api",
+                status_code=429,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"error":"slow down"}',
+                attempts=(),
+                final_proxy_name=None,
+                challenge_reason="rate_limited",
+            ),
+            TransportResult(
+                resolved_url="https://example.test/api",
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"ok": true}',
+                attempts=(),
+                final_proxy_name=None,
+                challenge_reason=None,
+            ),
+        ]
+        observed_proxy_urls = []
+
+        def fake_execute(url, headers, timeout, proxy_url):
+            del url, headers, timeout
+            observed_proxy_urls.append(proxy_url)
+            item = responses.pop(0)
+            from schema_inspector.transport import _RawResponse
+
+            return _RawResponse(
+                resolved_url=item.resolved_url,
+                status_code=item.status_code,
+                headers=item.headers,
+                body_bytes=item.body_bytes,
+            )
+
+        with patch.object(transport, "_execute_once", side_effect=fake_execute):
+            result = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(result.attempts), 2)
+        self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080", "http://proxy-1.local:8080"])
+
+    async def test_transport_does_not_cooldown_proxy_on_non_retryable_404(self) -> None:
+        config = load_runtime_config(
+            env={},
+            proxy_urls=["http://proxy-1.local:8080"],
+            max_attempts=1,
+        )
+        transport = InspectorTransport(config)
+
+        observed_proxy_urls = []
+
+        def fake_execute(url, headers, timeout, proxy_url):
+            del url, headers, timeout
+            observed_proxy_urls.append(proxy_url)
+            from schema_inspector.transport import _RawResponse
+
+            return _RawResponse(
+                resolved_url="https://example.test/missing",
+                status_code=404,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"error":"not found"}',
+            )
+
+        with patch.object(transport, "_execute_once", side_effect=fake_execute):
+            first = await transport.fetch("https://example.test/missing", headers=None, timeout=10.0)
+            second = await transport.fetch("https://example.test/missing", headers=None, timeout=10.0)
+
+        self.assertEqual(first.status_code, 404)
+        self.assertEqual(second.status_code, 404)
+        self.assertEqual(
+            observed_proxy_urls,
+            ["http://proxy-1.local:8080", "http://proxy-1.local:8080"],
+        )
+
+    async def test_transport_waits_for_proxy_to_leave_cooldown_before_retrying(self) -> None:
+        current_time = [0.0]
+        slept = []
+
+        def fake_clock() -> float:
+            return current_time[0]
+
+        async def fake_sleep(delay: float) -> None:
+            slept.append(delay)
+            current_time[0] += delay
+
+        config = load_runtime_config(
+            env={},
+            proxy_urls=["http://proxy-1.local:8080", "http://proxy-2.local:8080"],
+            max_attempts=2,
+        )
+        transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
+        transport.proxy_pool.record_failure("proxy_1")
+        transport.proxy_pool.record_failure("proxy_2")
+
+        observed_proxy_urls = []
+
+        def fake_execute(url, headers, timeout, proxy_url):
+            del url, headers, timeout
+            observed_proxy_urls.append(proxy_url)
+            from schema_inspector.transport import _RawResponse
+
+            return _RawResponse(
+                resolved_url="https://example.test/api",
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"ok": true}',
+            )
+
+        with patch.object(transport, "_execute_once", side_effect=fake_execute):
+            result = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(len(result.attempts), 1)
+        self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080"])
+        self.assertEqual(slept, [30.0])
+
     async def test_fetch_json_raises_on_challenge_response(self) -> None:
         config = RuntimeConfig()
         with patch(
@@ -225,6 +418,27 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             client = SofascoreClient(config)
             with self.assertRaises(SofascoreAccessDeniedError):
                 await client.get_json("https://example.test/protected")
+
+    async def test_sofascore_client_raises_http_error_with_url_on_404(self) -> None:
+        config = RuntimeConfig()
+        mocked_transport_result = TransportResult(
+            resolved_url="https://example.test/missing",
+            status_code=404,
+            headers={"Content-Type": "application/json"},
+            body_bytes=b'{"error": "not found"}',
+            attempts=(TransportAttempt(1, "proxy_1", 404, None, None),),
+            final_proxy_name="proxy_1",
+            challenge_reason=None,
+        )
+
+        with patch("schema_inspector.sofascore_client.InspectorTransport.fetch", return_value=mocked_transport_result):
+            client = SofascoreClient(config)
+            with self.assertRaises(SofascoreHttpError) as ctx:
+                await client.get_json("https://example.test/missing")
+
+        self.assertIn("status=404", str(ctx.exception))
+        self.assertIn("proxy=proxy_1", str(ctx.exception))
+        self.assertIn("url=https://example.test/missing", str(ctx.exception))
 
 
 if __name__ == "__main__":

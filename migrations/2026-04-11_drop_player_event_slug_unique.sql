@@ -1,0 +1,2 @@
+ALTER TABLE player DROP CONSTRAINT IF EXISTS player_slug_key;
+ALTER TABLE event DROP CONSTRAINT IF EXISTS event_slug_key;

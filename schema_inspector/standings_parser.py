@@ -171,7 +171,7 @@ class StandingsParser:
             if isinstance(standing_payload, Mapping):
                 state.ingest_standing(standing_payload, season_id=season_id)
 
-        self.logger.info(
+        self.logger.debug(
             "Standings bundle collected: standings=%s rows=%s teams=%s",
             len(state.standings),
             len(state.standing_rows),

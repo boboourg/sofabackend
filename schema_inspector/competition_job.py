@@ -39,11 +39,13 @@ class CompetitionIngestJob:
         unique_tournament_id: int,
         *,
         season_id: int | None = None,
+        include_seasons: bool = True,
         timeout: float = 20.0,
     ) -> CompetitionIngestResult:
         bundle = await self.parser.fetch_bundle(
             unique_tournament_id,
             season_id=season_id,
+            include_seasons=include_seasons,
             include_season_info=season_id is not None,
             timeout=timeout,
         )

@@ -40,7 +40,7 @@ CREATE TABLE image_asset (
 
 CREATE TABLE category (
     id BIGINT PRIMARY KEY,
-    slug TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL,
     name TEXT NOT NULL,
     flag TEXT,
     alpha2 TEXT,
@@ -55,6 +55,34 @@ CREATE TABLE category_transfer_period (
     active_from TEXT NOT NULL,
     active_to TEXT NOT NULL,
     PRIMARY KEY (category_id, active_from, active_to)
+);
+
+CREATE TABLE category_daily_summary (
+    observed_date DATE NOT NULL,
+    timezone_offset_seconds INTEGER NOT NULL,
+    category_id BIGINT NOT NULL REFERENCES category(id),
+    total_events INTEGER,
+    total_event_player_statistics INTEGER,
+    total_videos INTEGER,
+    PRIMARY KEY (observed_date, timezone_offset_seconds, category_id)
+);
+
+CREATE TABLE category_daily_unique_tournament (
+    observed_date DATE NOT NULL,
+    timezone_offset_seconds INTEGER NOT NULL,
+    category_id BIGINT NOT NULL REFERENCES category(id),
+    unique_tournament_id BIGINT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY (observed_date, timezone_offset_seconds, category_id, unique_tournament_id)
+);
+
+CREATE TABLE category_daily_team (
+    observed_date DATE NOT NULL,
+    timezone_offset_seconds INTEGER NOT NULL,
+    category_id BIGINT NOT NULL REFERENCES category(id),
+    team_id BIGINT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY (observed_date, timezone_offset_seconds, category_id, team_id)
 );
 
 CREATE TABLE season (
@@ -113,7 +141,7 @@ CREATE TABLE unique_tournament_season (
 
 CREATE TABLE venue (
     id BIGINT PRIMARY KEY,
-    slug TEXT UNIQUE,
+    slug TEXT,
     name TEXT NOT NULL,
     capacity INTEGER,
     hidden BOOLEAN,
@@ -232,7 +260,7 @@ CREATE TABLE unique_tournament_most_title_team (
 
 CREATE TABLE player (
     id BIGINT PRIMARY KEY,
-    slug TEXT UNIQUE,
+    slug TEXT,
     name TEXT NOT NULL,
     short_name TEXT,
     first_name TEXT,
@@ -272,6 +300,60 @@ CREATE TABLE player_transfer_history (
     transfer_fee_description TEXT NOT NULL,
     transfer_fee_raw JSONB NOT NULL,
     type INTEGER NOT NULL
+);
+
+CREATE TABLE player_season_statistics (
+    player_id BIGINT NOT NULL REFERENCES player(id),
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT NOT NULL REFERENCES season(id),
+    team_id BIGINT NOT NULL REFERENCES team(id),
+    stat_type TEXT NOT NULL,
+    statistics_id BIGINT,
+    season_year TEXT,
+    start_year INTEGER,
+    end_year INTEGER,
+    accurate_crosses INTEGER,
+    accurate_crosses_percentage NUMERIC,
+    accurate_long_balls INTEGER,
+    accurate_long_balls_percentage NUMERIC,
+    accurate_passes INTEGER,
+    accurate_passes_percentage NUMERIC,
+    aerial_duels_won INTEGER,
+    appearances INTEGER,
+    assists INTEGER,
+    big_chances_created INTEGER,
+    big_chances_missed INTEGER,
+    blocked_shots INTEGER,
+    clean_sheet INTEGER,
+    count_rating INTEGER,
+    dribbled_past INTEGER,
+    error_lead_to_goal INTEGER,
+    expected_assists NUMERIC,
+    expected_goals NUMERIC,
+    goals INTEGER,
+    goals_assists_sum INTEGER,
+    goals_conceded INTEGER,
+    goals_prevented NUMERIC,
+    interceptions INTEGER,
+    key_passes INTEGER,
+    minutes_played INTEGER,
+    outfielder_blocks INTEGER,
+    pass_to_assist INTEGER,
+    rating NUMERIC,
+    red_cards INTEGER,
+    saves INTEGER,
+    shots_from_inside_the_box INTEGER,
+    shots_on_target INTEGER,
+    successful_dribbles INTEGER,
+    tackles INTEGER,
+    total_cross INTEGER,
+    total_long_balls INTEGER,
+    total_passes INTEGER,
+    total_rating NUMERIC,
+    total_shots INTEGER,
+    yellow_cards INTEGER,
+    statistics_payload JSONB,
+    PRIMARY KEY (player_id, unique_tournament_id, season_id, team_id, stat_type)
 );
 
 CREATE TABLE entity_statistics_season (
@@ -363,37 +445,83 @@ CREATE TABLE season_statistics_result (
     row_number INTEGER,
     player_id BIGINT REFERENCES player(id),
     team_id BIGINT REFERENCES team(id),
+    accurate_crosses INTEGER,
+    accurate_crosses_percentage NUMERIC,
+    accurate_final_third_passes INTEGER,
+    accurate_long_balls INTEGER,
+    accurate_long_balls_percentage NUMERIC,
+    accurate_opposition_half_passes INTEGER,
+    accurate_own_half_passes INTEGER,
     accurate_passes INTEGER,
     accurate_passes_percentage NUMERIC,
+    aerial_duels_won INTEGER,
+    aerial_duels_won_percentage NUMERIC,
+    appearances INTEGER,
     assists NUMERIC,
     big_chances_created INTEGER,
     big_chances_missed INTEGER,
     blocked_shots NUMERIC,
     clean_sheet NUMERIC,
     clearances INTEGER,
+    crosses_not_claimed INTEGER,
+    dispossessed INTEGER,
     dribbled_past INTEGER,
     error_lead_to_goal INTEGER,
     error_lead_to_shot NUMERIC,
     expected_goals NUMERIC,
+    fouls INTEGER,
+    free_kick_goal INTEGER,
     goal_conversion_percentage NUMERIC,
     goals NUMERIC,
+    goals_conceded_inside_the_box INTEGER,
+    goals_conceded_outside_the_box INTEGER,
+    goals_from_inside_the_box INTEGER,
     goals_from_outside_the_box NUMERIC,
+    ground_duels_won INTEGER,
+    ground_duels_won_percentage NUMERIC,
+    headed_goals INTEGER,
+    high_claims INTEGER,
     hit_woodwork NUMERIC,
+    inaccurate_passes INTEGER,
     interceptions INTEGER,
     key_passes INTEGER,
+    left_foot_goals INTEGER,
+    matches_started INTEGER,
+    minutes_played INTEGER,
+    offsides INTEGER,
     outfielder_blocks INTEGER,
     own_goals INTEGER,
+    pass_to_assist INTEGER,
+    penalties_taken INTEGER,
     penalty_conceded INTEGER,
+    penalty_conversion NUMERIC,
+    penalty_faced INTEGER,
+    penalty_goals INTEGER,
     penalty_save NUMERIC,
     penalty_won NUMERIC,
+    possession_lost INTEGER,
+    punches INTEGER,
     rating NUMERIC,
+    red_cards INTEGER,
+    right_foot_goals INTEGER,
     runs_out NUMERIC,
     saved_shots_from_inside_the_box NUMERIC,
+    saved_shots_from_outside_the_box INTEGER,
     saves NUMERIC,
+    set_piece_conversion NUMERIC,
+    shot_from_set_piece INTEGER,
+    shots_off_target INTEGER,
+    shots_on_target INTEGER,
     successful_dribbles NUMERIC,
     successful_dribbles_percentage NUMERIC,
+    successful_runs_out INTEGER,
     tackles NUMERIC,
+    total_duels_won INTEGER,
+    total_duels_won_percentage NUMERIC,
+    total_passes INTEGER,
     total_shots INTEGER,
+    was_fouled INTEGER,
+    yellow_cards INTEGER,
     UNIQUE (snapshot_id, row_number)
 );
 
@@ -440,6 +568,25 @@ CREATE TABLE top_team_entry (
     PRIMARY KEY (snapshot_id, metric_name, ordinal)
 );
 
+CREATE TABLE season_group (
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT NOT NULL REFERENCES season(id),
+    tournament_id BIGINT NOT NULL,
+    group_name TEXT NOT NULL,
+    PRIMARY KEY (unique_tournament_id, season_id, tournament_id)
+);
+
+CREATE TABLE season_player_of_the_season (
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT NOT NULL REFERENCES season(id),
+    player_id BIGINT NOT NULL REFERENCES player(id),
+    team_id BIGINT REFERENCES team(id),
+    player_of_the_tournament BOOLEAN,
+    statistics_id BIGINT,
+    statistics_payload JSONB,
+    PRIMARY KEY (unique_tournament_id, season_id)
+);
+
 CREATE TABLE period (
     id BIGINT PRIMARY KEY,
     unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
@@ -476,7 +623,7 @@ CREATE TABLE event_status (
 
 CREATE TABLE event (
     id BIGINT PRIMARY KEY,
-    slug TEXT UNIQUE,
+    slug TEXT,
     custom_id TEXT,
     detail_id BIGINT,
     tournament_id BIGINT REFERENCES tournament(id),
@@ -634,6 +781,63 @@ CREATE TABLE event_vote_option (
     option_name TEXT NOT NULL,
     vote_count INTEGER NOT NULL,
     PRIMARY KEY (event_id, vote_type, option_name)
+);
+
+CREATE TABLE event_comment_feed (
+    event_id BIGINT PRIMARY KEY REFERENCES event(id) ON DELETE CASCADE,
+    home_player_color JSONB,
+    home_goalkeeper_color JSONB,
+    away_player_color JSONB,
+    away_goalkeeper_color JSONB
+);
+
+CREATE TABLE event_comment (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    comment_id BIGINT NOT NULL,
+    sequence INTEGER,
+    period_name TEXT,
+    is_home BOOLEAN,
+    player_id BIGINT REFERENCES player(id),
+    text TEXT,
+    match_time NUMERIC,
+    comment_type TEXT,
+    PRIMARY KEY (event_id, comment_id)
+);
+
+CREATE INDEX event_comment_player_idx ON event_comment(player_id);
+
+CREATE TABLE event_graph (
+    event_id BIGINT PRIMARY KEY REFERENCES event(id) ON DELETE CASCADE,
+    period_time INTEGER,
+    period_count INTEGER,
+    overtime_length INTEGER
+);
+
+CREATE TABLE event_graph_point (
+    event_id BIGINT NOT NULL REFERENCES event_graph(event_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    minute NUMERIC,
+    value INTEGER,
+    PRIMARY KEY (event_id, ordinal)
+);
+
+CREATE TABLE event_team_heatmap (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    team_id BIGINT NOT NULL REFERENCES team(id),
+    PRIMARY KEY (event_id, team_id)
+);
+
+CREATE TABLE event_team_heatmap_point (
+    event_id BIGINT NOT NULL,
+    team_id BIGINT NOT NULL,
+    point_type TEXT NOT NULL CHECK (point_type IN ('player', 'goalkeeper')),
+    ordinal INTEGER NOT NULL,
+    x NUMERIC,
+    y NUMERIC,
+    PRIMARY KEY (event_id, team_id, point_type, ordinal),
+    FOREIGN KEY (event_id, team_id)
+        REFERENCES event_team_heatmap(event_id, team_id)
+        ON DELETE CASCADE
 );
 
 CREATE TABLE provider (
@@ -800,8 +1004,11 @@ ALTER TABLE top_player_entry
     FOREIGN KEY (event_id) REFERENCES event(id);
 
 CREATE INDEX idx_api_payload_snapshot_pattern ON api_payload_snapshot(endpoint_pattern);
+CREATE INDEX idx_category_slug ON category(slug);
 CREATE INDEX idx_category_sport_id ON category(sport_id);
 CREATE INDEX idx_category_country_alpha2 ON category(country_alpha2);
+CREATE INDEX idx_category_daily_unique_tournament_utid ON category_daily_unique_tournament(unique_tournament_id);
+CREATE INDEX idx_category_daily_team_team_id ON category_daily_team(team_id);
 CREATE INDEX idx_unique_tournament_category_id ON unique_tournament(category_id);
 CREATE INDEX idx_unique_tournament_country_alpha2 ON unique_tournament(country_alpha2);
 CREATE INDEX idx_unique_tournament_slug ON unique_tournament(slug);
@@ -814,6 +1021,8 @@ CREATE INDEX idx_team_primary_unique_tournament_id ON team(primary_unique_tourna
 CREATE INDEX idx_player_team_id ON player(team_id);
 CREATE INDEX idx_player_country_alpha2 ON player(country_alpha2);
 CREATE INDEX idx_player_manager_id ON player(manager_id);
+CREATE INDEX idx_player_season_statistics_player ON player_season_statistics(player_id);
+CREATE INDEX idx_player_season_statistics_ut_season ON player_season_statistics(unique_tournament_id, season_id);
 CREATE INDEX idx_event_tournament_id ON event(tournament_id);
 CREATE INDEX idx_event_season_id ON event(season_id);
 CREATE INDEX idx_event_unique_tournament_id ON event(unique_tournament_id);

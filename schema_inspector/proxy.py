@@ -32,6 +32,9 @@ class ProxyPool:
     def acquire(self) -> ProxyEndpoint | None:
         if not self._states:
             return None
+        if len(self._states) == 1:
+            self._cursor = 0
+            return self._states[0].endpoint
 
         now = self._clock()
         for offset in range(len(self._states)):
@@ -41,6 +44,12 @@ class ProxyPool:
                 self._cursor = (index + 1) % len(self._states)
                 return state.endpoint
         return None
+
+    def next_available_delay(self) -> float | None:
+        if not self._states:
+            return None
+        now = self._clock()
+        return min(max(0.0, state.cooldown_until - now) for state in self._states)
 
     def record_success(self, proxy_name: str) -> None:
         state = self._by_name[proxy_name]

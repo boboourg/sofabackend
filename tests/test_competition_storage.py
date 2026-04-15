@@ -39,10 +39,18 @@ class _FakeExecutor:
 class _FakeParser:
     def __init__(self, bundle: CompetitionBundle) -> None:
         self.bundle = bundle
-        self.calls: list[tuple[int, int | None, bool | None, float]] = []
+        self.calls: list[tuple[int, int | None, bool, bool | None, float]] = []
 
-    async def fetch_bundle(self, unique_tournament_id: int, *, season_id=None, include_season_info=None, timeout=20.0):
-        self.calls.append((unique_tournament_id, season_id, include_season_info, timeout))
+    async def fetch_bundle(
+        self,
+        unique_tournament_id: int,
+        *,
+        season_id=None,
+        include_seasons: bool = True,
+        include_season_info=None,
+        timeout=20.0,
+    ):
+        self.calls.append((unique_tournament_id, season_id, include_seasons, include_season_info, timeout))
         return self.bundle
 
 
@@ -234,7 +242,7 @@ class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(17, season_id=76986, timeout=12.5)
 
-        self.assertEqual(parser.calls, [(17, 76986, True, 12.5)])
+        self.assertEqual(parser.calls, [(17, 76986, True, True, 12.5)])
         self.assertEqual(repository.calls, [(connection, bundle)])
         self.assertEqual(database.transaction_calls, 1)
         self.assertEqual(result.written.unique_tournament_rows, 1)

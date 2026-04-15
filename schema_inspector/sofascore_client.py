@@ -80,18 +80,19 @@ class SofascoreClient:
         self._log_transport_result(url, transport_result)
 
         if transport_result.status_code == 429 or transport_result.challenge_reason == "rate_limited":
-            message = self._format_http_error("Rate limited by upstream", transport_result)
+            message = self._format_http_error("Rate limited by upstream", transport_result, url=url)
             self.logger.warning(message)
             raise SofascoreRateLimitError(message, transport_result=transport_result)
 
         if transport_result.status_code == 403 or transport_result.challenge_reason in {"access_denied", "bot_challenge"}:
-            message = self._format_http_error("Access denied by upstream", transport_result)
+            message = self._format_http_error("Access denied by upstream", transport_result, url=url)
             self.logger.warning(message)
             raise SofascoreAccessDeniedError(message, transport_result=transport_result)
 
         if transport_result.status_code >= 400:
-            message = self._format_http_error("HTTP request failed", transport_result)
-            self.logger.error(message)
+            message = self._format_http_error("HTTP request failed", transport_result, url=url)
+            if transport_result.status_code != 404:
+                self.logger.error(message)
             raise SofascoreHttpError(message, transport_result=transport_result)
 
         try:
@@ -113,7 +114,7 @@ class SofascoreClient:
             final_proxy_name=transport_result.final_proxy_name,
             challenge_reason=transport_result.challenge_reason,
         )
-        self.logger.info(
+        self.logger.debug(
             "SofascoreClient OK status=%s attempts=%s proxy=%s url=%s",
             response.status_code,
             len(response.attempts),
@@ -135,12 +136,15 @@ class SofascoreClient:
             )
 
     @staticmethod
-    def _format_http_error(prefix: str, transport_result: TransportResult) -> str:
+    def _format_http_error(prefix: str, transport_result: TransportResult, *, url: str) -> str:
         proxy_name = transport_result.final_proxy_name or "direct"
-        return (
+        message = (
             f"{prefix}: status={transport_result.status_code}, "
-            f"proxy={proxy_name}, challenge={transport_result.challenge_reason or '-'}"
+            f"proxy={proxy_name}, challenge={transport_result.challenge_reason or '-'}, url={url}"
         )
+        if transport_result.resolved_url and transport_result.resolved_url != url:
+            message += f", resolved_url={transport_result.resolved_url}"
+        return message
 
 
 def _utc_now() -> str:

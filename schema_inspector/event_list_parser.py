@@ -9,11 +9,12 @@ from typing import Any, Mapping
 from .competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
 from .endpoints import (
     EndpointRegistryEntry,
-    SPORT_FOOTBALL_LIVE_EVENTS_ENDPOINT,
-    SPORT_FOOTBALL_SCHEDULED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
     event_list_registry_entries,
+    sport_live_events_endpoint,
+    sport_scheduled_events_endpoint,
 )
 from .sofascore_client import SofascoreClient, SofascoreResponse
 
@@ -217,30 +218,63 @@ class EventListParser:
         self.client = client
         self.logger = logger or logging.getLogger(__name__)
 
-    async def fetch_scheduled_events(self, date: str, *, timeout: float = 20.0) -> EventListBundle:
+    async def fetch_scheduled_events(
+        self,
+        date: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
         return await self._fetch_event_collection(
-            SPORT_FOOTBALL_SCHEDULED_EVENTS_ENDPOINT,
+            sport_scheduled_events_endpoint(sport_slug),
             timeout=timeout,
             context_entity_type=None,
             context_entity_id=None,
+            sport_slug=sport_slug,
             date=date,
         )
 
-    async def fetch_live_events(self, *, timeout: float = 20.0) -> EventListBundle:
+    async def fetch_live_events(self, *, sport_slug: str = "football", timeout: float = 20.0) -> EventListBundle:
         return await self._fetch_event_collection(
-            SPORT_FOOTBALL_LIVE_EVENTS_ENDPOINT,
+            sport_live_events_endpoint(sport_slug),
             timeout=timeout,
             context_entity_type=None,
             context_entity_id=None,
+            sport_slug=sport_slug,
         )
 
-    async def fetch_featured_events(self, unique_tournament_id: int, *, timeout: float = 20.0) -> EventListBundle:
+    async def fetch_featured_events(
+        self,
+        unique_tournament_id: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
         return await self._fetch_event_collection(
             UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
             timeout=timeout,
             context_entity_type="unique_tournament",
             context_entity_id=unique_tournament_id,
+            sport_slug=sport_slug,
             unique_tournament_id=unique_tournament_id,
+        )
+
+    async def fetch_unique_tournament_scheduled_events(
+        self,
+        unique_tournament_id: int,
+        date: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        return await self._fetch_event_collection(
+            UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
+            timeout=timeout,
+            context_entity_type="unique_tournament",
+            context_entity_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            unique_tournament_id=unique_tournament_id,
+            date=date,
         )
 
     async def fetch_round_events(
@@ -249,6 +283,7 @@ class EventListParser:
         season_id: int,
         round_number: int,
         *,
+        sport_slug: str = "football",
         timeout: float = 20.0,
     ) -> EventListBundle:
         return await self._fetch_event_collection(
@@ -256,6 +291,7 @@ class EventListParser:
             timeout=timeout,
             context_entity_type="season",
             context_entity_id=season_id,
+            sport_slug=sport_slug,
             unique_tournament_id=unique_tournament_id,
             season_id=season_id,
             round_number=round_number,
@@ -268,6 +304,7 @@ class EventListParser:
         timeout: float,
         context_entity_type: str | None,
         context_entity_id: int | None,
+        sport_slug: str = "football",
         **path_params: object,
     ) -> EventListBundle:
         url = endpoint.build_url(**path_params)
@@ -294,7 +331,7 @@ class EventListParser:
             len(state.tournaments),
             len(state.teams),
         )
-        return state.to_bundle()
+        return state.to_bundle(registry_entries=event_list_registry_entries(sport_slug=sport_slug))
 
 
 class _EventListAccumulator:
@@ -466,7 +503,7 @@ class _EventListAccumulator:
         )
         return code
 
-    def ingest_team(self, payload: Mapping[str, Any] | None) -> int | None:
+    def ingest_team(self, payload: Mapping[str, Any] | None, *, forced_parent_team_id: int | None = None) -> int | None:
         if not payload:
             return None
         team_id = _as_int(payload.get("id"))
@@ -474,6 +511,8 @@ class _EventListAccumulator:
             return None
 
         parent_team_id = self.ingest_team(_as_mapping(payload.get("parentTeam")))
+        if forced_parent_team_id is not None:
+            parent_team_id = forced_parent_team_id
         sport_id = self.ingest_sport(_as_mapping(payload.get("sport")))
         country_alpha2 = self.ingest_country(_as_mapping(payload.get("country")))
         self._merge(
@@ -497,6 +536,8 @@ class _EventListAccumulator:
                 "team_colors": _as_mapping(payload.get("teamColors")),
             },
         )
+        for sub_team_payload in _iter_mappings(payload.get("subTeams")):
+            self.ingest_team(sub_team_payload, forced_parent_team_id=team_id)
         return team_id
 
     def ingest_unique_tournament(self, payload: Mapping[str, Any] | None) -> int | None:
@@ -699,9 +740,9 @@ class _EventListAccumulator:
                     "change_value": item,
                 }
 
-    def to_bundle(self) -> EventListBundle:
+    def to_bundle(self, *, registry_entries: tuple[EndpointRegistryEntry, ...]) -> EventListBundle:
         return EventListBundle(
-            registry_entries=event_list_registry_entries(),
+            registry_entries=registry_entries,
             payload_snapshots=tuple(self.payload_snapshots),
             sports=tuple(SportRecord(**row) for _, row in sorted(self.sports.items())),
             countries=tuple(CountryRecord(**row) for _, row in sorted(self.countries.items())),
@@ -753,6 +794,12 @@ def _require_event_array(payload: Mapping[str, Any], envelope_key: str, source_u
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
+
+
+def _iter_mappings(value: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
 
 
 def _as_str(value: object) -> str | None:

@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE venue
+    DROP CONSTRAINT IF EXISTS venue_slug_key;
+
+COMMIT;

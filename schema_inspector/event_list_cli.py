@@ -22,14 +22,22 @@ def main() -> int:
         description="Fetch list-style Sofascore event endpoints and persist them into PostgreSQL.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--sport-slug", default="football", help="Sport slug used for scheduled/live discovery.")
 
-    scheduled = subparsers.add_parser("scheduled", help="Load /sport/football/scheduled-events/{date}")
+    scheduled = subparsers.add_parser("scheduled", help="Load /sport/{sport_slug}/scheduled-events/{date}")
     scheduled.add_argument("--date", required=True, help="Date in YYYY-MM-DD format.")
 
-    subparsers.add_parser("live", help="Load /sport/football/events/live")
+    subparsers.add_parser("live", help="Load /sport/{sport_slug}/events/live")
 
     featured = subparsers.add_parser("featured", help="Load /unique-tournament/{id}/featured-events")
     featured.add_argument("--unique-tournament-id", type=int, required=True)
+
+    tournament_scheduled = subparsers.add_parser(
+        "tournament-scheduled",
+        help="Load /unique-tournament/{id}/scheduled-events/{date}",
+    )
+    tournament_scheduled.add_argument("--unique-tournament-id", type=int, required=True)
+    tournament_scheduled.add_argument("--date", required=True, help="Date in YYYY-MM-DD format.")
 
     round_parser = subparsers.add_parser("round", help="Load /unique-tournament/{id}/season/{id}/events/round/{round}")
     round_parser.add_argument("--unique-tournament-id", type=int, required=True)
@@ -72,16 +80,28 @@ async def _run(args: argparse.Namespace) -> int:
         job = EventListIngestJob(parser, repository, database)
 
         if args.command == "scheduled":
-            result = await job.run_scheduled(args.date, timeout=args.timeout)
+            result = await job.run_scheduled(args.date, sport_slug=args.sport_slug, timeout=args.timeout)
         elif args.command == "live":
-            result = await job.run_live(timeout=args.timeout)
+            result = await job.run_live(sport_slug=args.sport_slug, timeout=args.timeout)
         elif args.command == "featured":
-            result = await job.run_featured(args.unique_tournament_id, timeout=args.timeout)
+            result = await job.run_featured(
+                args.unique_tournament_id,
+                sport_slug=args.sport_slug,
+                timeout=args.timeout,
+            )
+        elif args.command == "tournament-scheduled":
+            result = await job.run_unique_tournament_scheduled(
+                args.unique_tournament_id,
+                args.date,
+                sport_slug=args.sport_slug,
+                timeout=args.timeout,
+            )
         else:
             result = await job.run_round(
                 args.unique_tournament_id,
                 args.season_id,
                 args.round_number,
+                sport_slug=args.sport_slug,
                 timeout=args.timeout,
             )
 

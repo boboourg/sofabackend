@@ -8,6 +8,9 @@ from schema_inspector.endpoints import (
     SPORT_FOOTBALL_SCHEDULED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
+    sport_live_events_endpoint,
+    sport_scheduled_events_endpoint,
 )
 from schema_inspector.runtime import RuntimeConfig, TransportAttempt
 from schema_inspector.sofascore_client import SofascoreClient, SofascoreResponse
@@ -52,12 +55,27 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
             "https://www.sofascore.com/api/v1/unique-tournament/17/featured-events",
         )
         self.assertEqual(
+            UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT.build_url(
+                unique_tournament_id=2423,
+                date="2026-04-14",
+            ),
+            "https://www.sofascore.com/api/v1/unique-tournament/2423/scheduled-events/2026-04-14",
+        )
+        self.assertEqual(
             UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT.build_url(
                 unique_tournament_id=17,
                 season_id=76986,
                 round_number=32,
             ),
             "https://www.sofascore.com/api/v1/unique-tournament/17/season/76986/events/round/32",
+        )
+        self.assertEqual(
+            sport_scheduled_events_endpoint("basketball").build_url(date="2026-04-10"),
+            "https://www.sofascore.com/api/v1/sport/basketball/scheduled-events/2026-04-10",
+        )
+        self.assertEqual(
+            sport_live_events_endpoint("cricket").build_url(),
+            "https://www.sofascore.com/api/v1/sport/cricket/events/live",
         )
 
     async def test_event_list_parser_builds_normalized_bundle_for_scheduled_payload(self) -> None:
@@ -214,7 +232,7 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         bundle = await parser.fetch_scheduled_events("2026-04-10")
 
         self.assertEqual(fake_client.seen_urls, [scheduled_url])
-        self.assertEqual(len(bundle.registry_entries), 4)
+        self.assertEqual(len(bundle.registry_entries), 5)
         self.assertEqual(len(bundle.payload_snapshots), 1)
         self.assertEqual({item.id for item in bundle.events}, {15726260})
         self.assertEqual({item.id for item in bundle.tournaments}, {1})
@@ -315,6 +333,223 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(EventListParserError):
             await parser.fetch_featured_events(17)
+
+    async def test_event_list_parser_supports_basketball_live_paths(self) -> None:
+        live_url = sport_live_events_endpoint("basketball").build_url()
+        fake_client = _FakeSofascoreClient(
+            {
+                live_url: {
+                    "events": [
+                        {
+                            "id": 999,
+                            "slug": "lakers-celtics",
+                            "tournament": {
+                                "id": 177,
+                                "slug": "nba",
+                                "name": "NBA",
+                                "category": {
+                                    "id": 15,
+                                    "slug": "usa",
+                                    "name": "USA",
+                                    "sport": {"id": 2, "slug": "basketball", "name": "Basketball"},
+                                },
+                                "uniqueTournament": {
+                                    "id": 132,
+                                    "slug": "nba",
+                                    "name": "NBA",
+                                    "category": {
+                                        "id": 15,
+                                        "slug": "usa",
+                                        "name": "USA",
+                                        "sport": {"id": 2, "slug": "basketball", "name": "Basketball"},
+                                    },
+                                },
+                            },
+                            "season": {"id": 80229, "name": "NBA 25/26", "year": "25/26"},
+                            "status": {"code": 100, "description": "Q1", "type": "inprogress"},
+                            "homeTeam": {"id": 3424, "slug": "lakers", "name": "Lakers"},
+                            "awayTeam": {"id": 3439, "slug": "celtics", "name": "Celtics"},
+                            "homeScore": {"current": 32, "display": 32, "period1": 32},
+                            "awayScore": {"current": 28, "display": 28, "period1": 28},
+                        }
+                    ]
+                }
+            }
+        )
+
+        parser = EventListParser(fake_client)
+        bundle = await parser.fetch_live_events(sport_slug="basketball")
+
+        self.assertEqual(fake_client.seen_urls, [live_url])
+        self.assertEqual(bundle.registry_entries[0].path_template, "/api/v1/sport/basketball/scheduled-events/{date}")
+        self.assertEqual(bundle.registry_entries[1].path_template, "/api/v1/sport/basketball/events/live")
+        self.assertEqual({item.id for item in bundle.sports}, {2})
+        self.assertEqual({item.id for item in bundle.events}, {999})
+
+    async def test_event_list_parser_supports_tennis_tournament_day_paths_and_subteams(self) -> None:
+        scheduled_url = UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT.build_url(
+            unique_tournament_id=2423,
+            date="2026-04-14",
+        )
+        fake_client = _FakeSofascoreClient(
+            {
+                scheduled_url: {
+                    "events": [
+                        {
+                            "id": 16000905,
+                            "slug": "arneodo-polmans-pavlasek-rikl",
+                            "customId": "dcJjsjYKj",
+                            "tournament": {
+                                "id": 144350,
+                                "slug": "barcelona-doubles-qualifying",
+                                "name": "Barcelona, Spain, Doubles, Qualifying",
+                                "category": {
+                                    "id": 3,
+                                    "slug": "atp",
+                                    "name": "ATP",
+                                    "flag": "atp",
+                                    "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                },
+                                "uniqueTournament": {
+                                    "id": 2423,
+                                    "slug": "barcelona-doubles",
+                                    "name": "Barcelona, Doubles",
+                                    "category": {
+                                        "id": 3,
+                                        "slug": "atp",
+                                        "name": "ATP",
+                                        "flag": "atp",
+                                        "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                    },
+                                    "displayInverseHomeAwayTeams": False,
+                                    "hasEventPlayerStatistics": False,
+                                    "hasPerformanceGraphFeature": False,
+                                },
+                            },
+                            "season": {"id": 80012, "name": "Barcelona Doubles 2026", "year": "2026"},
+                            "status": {"code": 0, "description": "Not started", "type": "notstarted"},
+                            "homeTeam": {
+                                "id": 1210041,
+                                "slug": "arneodo-polmans",
+                                "name": "Arneodo R / Polmans M",
+                                "shortName": "Arneodo / Polmans",
+                                "nameCode": "A/P",
+                                "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                "country": {"alpha2": "MC", "name": "Monaco"},
+                                "teamColors": {"primary": "#374df5"},
+                                "subTeams": [
+                                    {
+                                        "id": 41475,
+                                        "slug": "arneodo-romain",
+                                        "name": "Romain Arneodo",
+                                        "shortName": "R. Arneodo",
+                                        "nameCode": "ARN",
+                                        "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                        "country": {"alpha2": "MC", "name": "Monaco"},
+                                        "teamColors": {"primary": "#374df5"},
+                                        "gender": "M",
+                                        "type": 1,
+                                        "national": False,
+                                        "userCount": 119,
+                                        "subTeams": [],
+                                    },
+                                    {
+                                        "id": 65072,
+                                        "slug": "polmans-marc",
+                                        "name": "Marc Polmans",
+                                        "shortName": "M. Polmans",
+                                        "nameCode": "POL",
+                                        "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                        "country": {"alpha2": "AU", "name": "Australia"},
+                                        "teamColors": {"primary": "#374df5"},
+                                        "gender": "M",
+                                        "type": 1,
+                                        "national": False,
+                                        "userCount": 201,
+                                        "subTeams": [],
+                                    },
+                                ],
+                                "gender": "M",
+                                "type": 2,
+                                "national": False,
+                                "userCount": 12,
+                            },
+                            "awayTeam": {
+                                "id": 1210103,
+                                "slug": "pavlasek-rikl",
+                                "name": "Pavlasek A / Rikl P",
+                                "shortName": "Pavlasek / Rikl",
+                                "nameCode": "P/R",
+                                "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                "country": {"alpha2": "CZ", "name": "Czechia"},
+                                "teamColors": {"primary": "#374df5"},
+                                "subTeams": [
+                                    {
+                                        "id": 59324,
+                                        "slug": "pavlasek-adam",
+                                        "name": "Adam Pavlasek",
+                                        "shortName": "A. Pavlasek",
+                                        "nameCode": "PAV",
+                                        "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                        "country": {"alpha2": "CZ", "name": "Czechia"},
+                                        "teamColors": {"primary": "#374df5"},
+                                        "gender": "M",
+                                        "type": 1,
+                                        "national": False,
+                                        "userCount": 215,
+                                        "subTeams": [],
+                                    },
+                                    {
+                                        "id": 93641,
+                                        "slug": "rikl-petr",
+                                        "name": "Petr Rikl",
+                                        "shortName": "P. Rikl",
+                                        "nameCode": "RIK",
+                                        "sport": {"id": 5, "slug": "tennis", "name": "Tennis"},
+                                        "country": {"alpha2": "CZ", "name": "Czechia"},
+                                        "teamColors": {"primary": "#374df5"},
+                                        "gender": "M",
+                                        "type": 1,
+                                        "national": False,
+                                        "userCount": 130,
+                                        "subTeams": [],
+                                    },
+                                ],
+                                "gender": "M",
+                                "type": 2,
+                                "national": False,
+                                "userCount": 9,
+                            },
+                            "roundInfo": {"round": 1, "name": "Qualifying"},
+                            "homeScore": {"current": 0, "period1": 5},
+                            "awayScore": {"current": 2, "period1": 7},
+                            "eventFilters": {"category": ["scheduled"], "gender": ["men"]},
+                            "changes": {"changeTimestamp": 1776167193, "changes": ["score", "status"]},
+                            "startTimestamp": 1776160800,
+                            "coverage": 1,
+                            "groundType": "Red clay",
+                        }
+                    ]
+                }
+            }
+        )
+
+        parser = EventListParser(fake_client)
+        bundle = await parser.fetch_unique_tournament_scheduled_events(
+            2423,
+            "2026-04-14",
+            sport_slug="tennis",
+        )
+
+        self.assertEqual(fake_client.seen_urls, [scheduled_url])
+        self.assertEqual(bundle.registry_entries[2].path_template, "/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}")
+        self.assertEqual({item.id for item in bundle.sports}, {5})
+        self.assertEqual({item.id for item in bundle.unique_tournaments}, {2423})
+        self.assertEqual({item.id for item in bundle.events}, {16000905})
+        self.assertEqual({item.id for item in bundle.teams}, {1210041, 1210103, 41475, 65072, 59324, 93641})
+        child_parent_map = {item.id: item.parent_team_id for item in bundle.teams}
+        self.assertEqual(child_parent_map[41475], 1210041)
+        self.assertEqual(child_parent_map[59324], 1210103)
 
 
 if __name__ == "__main__":

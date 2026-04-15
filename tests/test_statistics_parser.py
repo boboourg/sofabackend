@@ -6,8 +6,8 @@ from schema_inspector.endpoints import (
     UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT,
     UNIQUE_TOURNAMENT_STATISTICS_INFO_ENDPOINT,
 )
-from schema_inspector.runtime import RuntimeConfig, TransportAttempt
-from schema_inspector.sofascore_client import SofascoreClient, SofascoreResponse
+from schema_inspector.runtime import RuntimeConfig, TransportAttempt, TransportResult
+from schema_inspector.sofascore_client import SofascoreClient, SofascoreHttpError, SofascoreResponse
 from schema_inspector.statistics_parser import StatisticsParser, StatisticsQuery
 
 
@@ -21,6 +21,8 @@ class _FakeSofascoreClient(SofascoreClient):
         del headers, timeout
         self.seen_urls.append(url)
         payload = self.responses[url]
+        if isinstance(payload, Exception):
+            raise payload
         return SofascoreResponse(
             source_url=url,
             resolved_url=url,
@@ -33,6 +35,21 @@ class _FakeSofascoreClient(SofascoreClient):
             final_proxy_name="proxy_1",
             challenge_reason=None,
         )
+
+
+def _not_found_error(url: str) -> SofascoreHttpError:
+    return SofascoreHttpError(
+        f"404 for {url}",
+        transport_result=TransportResult(
+            resolved_url=url,
+            status_code=404,
+            headers={},
+            body_bytes=b"{}",
+            attempts=(TransportAttempt(1, "proxy_1", 404, None, None),),
+            final_proxy_name="proxy_1",
+            challenge_reason=None,
+        ),
+    )
 
 
 class StatisticsParserTests(unittest.IsolatedAsyncioTestCase):
@@ -123,12 +140,18 @@ class StatisticsParserTests(unittest.IsolatedAsyncioTestCase):
                 },
                 stats_url: {
                     "page": 1,
-                    "pages": 27,
+                    "pages": 1,
                     "results": [
                         {
                             "rating": 7.6,
                             "goals": 6,
                             "tackles": 6,
+                            "totalShots": 4,
+                            "shotsOnTarget": 2,
+                            "totalPasses": 88,
+                            "minutesPlayed": 166,
+                            "redCards": 1,
+                            "yellowCards": 2,
                             "accuratePassesPercentage": 66.67,
                             "expectedGoals": 0.96,
                             "player": {
@@ -204,7 +227,7 @@ class StatisticsParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bundle.snapshots), 1)
         snapshot = bundle.snapshots[0]
         self.assertEqual(snapshot.page, 1)
-        self.assertEqual(snapshot.pages, 27)
+        self.assertEqual(snapshot.pages, 1)
         self.assertEqual(snapshot.limit_value, 20)
         self.assertEqual(snapshot.order_code, "-rating")
         self.assertEqual(snapshot.accumulation, "per90")
@@ -242,9 +265,94 @@ class StatisticsParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.results[0].rating, 7.6)
         self.assertEqual(snapshot.results[0].goals, 6)
         self.assertEqual(snapshot.results[0].tackles, 6)
+        self.assertEqual(snapshot.results[0].total_shots, 4)
+        self.assertEqual(snapshot.results[0].shots_on_target, 2)
+        self.assertEqual(snapshot.results[0].total_passes, 88)
+        self.assertEqual(snapshot.results[0].minutes_played, 166)
+        self.assertEqual(snapshot.results[0].red_cards, 1)
+        self.assertEqual(snapshot.results[0].yellow_cards, 2)
         self.assertEqual(snapshot.results[0].accurate_passes_percentage, 66.67)
         self.assertEqual(snapshot.results[0].expected_goals, 0.96)
         self.assertEqual(fake_client.seen_urls, [info_url, stats_url])
+
+    async def test_statistics_parser_skips_optional_missing_statistics_endpoints(self) -> None:
+        info_url = UNIQUE_TOURNAMENT_STATISTICS_INFO_ENDPOINT.build_url(unique_tournament_id=17, season_id=76986)
+        query = StatisticsQuery(limit=20, offset=0)
+        stats_url = UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT.build_url_with_query(
+            unique_tournament_id=17,
+            season_id=76986,
+            query_params=query.to_query_params(),
+        )
+        fake_client = _FakeSofascoreClient(
+            {
+                info_url: _not_found_error(info_url),
+                stats_url: _not_found_error(stats_url),
+            }
+        )
+
+        parser = StatisticsParser(fake_client)
+        bundle = await parser.fetch_bundle(17, 76986, queries=(query,), include_info=True)
+
+        self.assertEqual(len(bundle.payload_snapshots), 0)
+        self.assertEqual(len(bundle.configs), 0)
+        self.assertEqual(len(bundle.snapshots), 0)
+        self.assertEqual(fake_client.seen_urls, [info_url, stats_url])
+
+    async def test_statistics_parser_fetches_all_pages_for_one_query(self) -> None:
+        query = StatisticsQuery(limit=2, offset=0, order="-rating")
+        page_1_url = UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT.build_url_with_query(
+            unique_tournament_id=17,
+            season_id=76986,
+            query_params=query.to_query_params(),
+        )
+        page_2_query = StatisticsQuery(limit=2, offset=2, order="-rating")
+        page_2_url = UNIQUE_TOURNAMENT_STATISTICS_ENDPOINT.build_url_with_query(
+            unique_tournament_id=17,
+            season_id=76986,
+            query_params=page_2_query.to_query_params(),
+        )
+        fake_client = _FakeSofascoreClient(
+            {
+                page_1_url: {
+                    "page": 1,
+                    "pages": 2,
+                    "results": [
+                        {
+                            "rating": 7.6,
+                            "player": {"id": 101, "name": "First Player"},
+                            "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                        },
+                        {
+                            "rating": 7.2,
+                            "player": {"id": 102, "name": "Second Player"},
+                            "team": {"id": 40, "slug": "liverpool", "name": "Liverpool"},
+                        },
+                    ],
+                },
+                page_2_url: {
+                    "page": 2,
+                    "pages": 2,
+                    "results": [
+                        {
+                            "rating": 6.9,
+                            "player": {"id": 103, "name": "Third Player"},
+                            "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                        }
+                    ],
+                },
+            }
+        )
+
+        parser = StatisticsParser(fake_client)
+        bundle = await parser.fetch_bundle(17, 76986, queries=(query,), include_info=False)
+
+        self.assertEqual(fake_client.seen_urls, [page_1_url, page_2_url])
+        self.assertEqual(len(bundle.snapshots), 2)
+        self.assertEqual(bundle.snapshots[0].offset_value, 0)
+        self.assertEqual(bundle.snapshots[1].offset_value, 2)
+        self.assertEqual(bundle.snapshots[1].page, 2)
+        self.assertEqual(bundle.snapshots[1].pages, 2)
+        self.assertEqual({player.id for player in bundle.players}, {101, 102, 103})
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from .db import AsyncpgDatabase
 from .event_detail_job import EventDetailIngestJob, EventDetailIngestResult
+from .limit_utils import normalize_limit
 
 
 @dataclass(frozen=True)
@@ -45,16 +46,37 @@ class EventDetailBackfillJob:
     async def run(
         self,
         *,
-        limit: int = 100,
+        limit: int | None = None,
         offset: int = 0,
         only_missing: bool = True,
+        unique_tournament_id: int | None = None,
+        start_timestamp_from: int | None = None,
+        start_timestamp_to: int | None = None,
         provider_ids: Iterable[int] = (1,),
         concurrency: int = 3,
         timeout: float = 20.0,
     ) -> EventDetailBackfillResult:
-        event_ids = await self._load_event_ids(limit=limit, offset=offset, only_missing=only_missing)
+        event_ids = await self._load_event_ids(
+            limit=limit,
+            offset=offset,
+            only_missing=only_missing,
+            unique_tournament_id=unique_tournament_id,
+            start_timestamp_from=start_timestamp_from,
+            start_timestamp_to=start_timestamp_to,
+        )
         semaphore = asyncio.Semaphore(max(concurrency, 1))
         resolved_provider_ids = tuple(dict.fromkeys(provider_ids))
+        total_candidates = len(event_ids)
+        progress_lock = asyncio.Lock()
+        progress = {"processed": 0, "succeeded": 0, "failed": 0}
+
+        self.logger.info(
+            "Event-detail backfill loaded candidates=%s only_missing=%s unique_tournament_id=%s concurrency=%s",
+            total_candidates,
+            only_missing,
+            unique_tournament_id,
+            max(concurrency, 1),
+        )
 
         async def _run_one(event_id: int) -> EventDetailBackfillItem:
             async with semaphore:
@@ -66,8 +88,25 @@ class EventDetailBackfillJob:
                     )
                 except Exception as exc:
                     self.logger.warning("Event-detail backfill failed for event_id=%s: %s", event_id, exc)
-                    return EventDetailBackfillItem(event_id=event_id, success=False, error=str(exc))
-                return EventDetailBackfillItem(event_id=event_id, success=True, result=result)
+                    item = EventDetailBackfillItem(event_id=event_id, success=False, error=str(exc))
+                else:
+                    item = EventDetailBackfillItem(event_id=event_id, success=True, result=result)
+
+                async with progress_lock:
+                    progress["processed"] += 1
+                    if item.success:
+                        progress["succeeded"] += 1
+                    else:
+                        progress["failed"] += 1
+                    self.logger.info(
+                        "Event-detail progress: processed=%s/%s succeeded=%s failed=%s event_id=%s",
+                        progress["processed"],
+                        total_candidates,
+                        progress["succeeded"],
+                        progress["failed"],
+                        event_id,
+                    )
+                return item
 
         items = tuple(await asyncio.gather(*(_run_one(event_id) for event_id in event_ids)))
         succeeded = sum(1 for item in items if item.success)
@@ -86,7 +125,17 @@ class EventDetailBackfillJob:
             items=items,
         )
 
-    async def _load_event_ids(self, *, limit: int, offset: int, only_missing: bool) -> tuple[int, ...]:
+    async def _load_event_ids(
+        self,
+        *,
+        limit: int | None,
+        offset: int,
+        only_missing: bool,
+        unique_tournament_id: int | None,
+        start_timestamp_from: int | None,
+        start_timestamp_to: int | None,
+    ) -> tuple[int, ...]:
+        resolved_limit = normalize_limit(limit)
         sql = """
             SELECT e.id
             FROM event AS e
@@ -100,10 +149,30 @@ class EventDetailBackfillJob:
                       AND s.context_entity_id = e.id
                 )
             )
+              AND ($2::bigint IS NULL OR e.unique_tournament_id = $2)
+              AND ($3::bigint IS NULL OR e.start_timestamp >= $3)
+              AND ($4::bigint IS NULL OR e.start_timestamp <= $4)
             ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
-            OFFSET $2
-            LIMIT $3
+            OFFSET $5
         """
         async with self.database.connection() as connection:
-            rows = await connection.fetch(sql, only_missing, offset, limit)
+            if resolved_limit is None:
+                rows = await connection.fetch(
+                    sql,
+                    only_missing,
+                    unique_tournament_id,
+                    start_timestamp_from,
+                    start_timestamp_to,
+                    offset,
+                )
+            else:
+                rows = await connection.fetch(
+                    f"{sql}\n            LIMIT $6",
+                    only_missing,
+                    unique_tournament_id,
+                    start_timestamp_from,
+                    start_timestamp_to,
+                    offset,
+                    resolved_limit,
+                )
         return tuple(int(row["id"]) for row in rows if row["id"] is not None)

@@ -41,7 +41,14 @@ class EventDetailWriteResult:
     event_pregame_form_side_rows: int
     event_pregame_form_item_rows: int
     event_vote_option_rows: int
+    event_comment_feed_rows: int
+    event_comment_rows: int
+    event_graph_rows: int
+    event_graph_point_rows: int
+    event_team_heatmap_rows: int
+    event_team_heatmap_point_rows: int
     provider_rows: int
+    provider_configuration_rows: int
     event_market_rows: int
     event_market_choice_rows: int
     event_winning_odds_rows: int
@@ -84,7 +91,14 @@ class EventDetailRepository(EventListRepository):
         await self._upsert_event_pregame_form_sides(executor, bundle)
         await self._upsert_event_pregame_form_items(executor, bundle)
         await self._upsert_event_vote_options(executor, bundle)
+        await self._upsert_event_comment_feeds(executor, bundle)
+        await self._upsert_event_comments(executor, bundle)
+        await self._upsert_event_graphs(executor, bundle)
+        await self._upsert_event_graph_points(executor, bundle)
+        await self._upsert_event_team_heatmaps(executor, bundle)
+        await self._upsert_event_team_heatmap_points(executor, bundle)
         await self._upsert_providers(executor, bundle)
+        await self._upsert_provider_configurations(executor, bundle)
         await self._upsert_event_markets(executor, bundle)
         await self._upsert_event_market_choices(executor, bundle)
         await self._upsert_event_winning_odds(executor, bundle)
@@ -124,7 +138,14 @@ class EventDetailRepository(EventListRepository):
             event_pregame_form_side_rows=len(bundle.event_pregame_form_sides),
             event_pregame_form_item_rows=len(bundle.event_pregame_form_items),
             event_vote_option_rows=len(bundle.event_vote_options),
+            event_comment_feed_rows=len(bundle.event_comment_feeds),
+            event_comment_rows=len(bundle.event_comments),
+            event_graph_rows=len(bundle.event_graphs),
+            event_graph_point_rows=len(bundle.event_graph_points),
+            event_team_heatmap_rows=len(bundle.event_team_heatmaps),
+            event_team_heatmap_point_rows=len(bundle.event_team_heatmap_points),
             provider_rows=len(bundle.providers),
+            provider_configuration_rows=len(bundle.provider_configurations),
             event_market_rows=len(bundle.event_markets),
             event_market_choice_rows=len(bundle.event_market_choices),
             event_winning_odds_rows=len(bundle.event_winning_odds),
@@ -696,6 +717,128 @@ class EventDetailRepository(EventListRepository):
             rows,
         )
 
+    async def _upsert_event_comment_feeds(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (
+                item.event_id,
+                _jsonb(item.home_player_color),
+                _jsonb(item.home_goalkeeper_color),
+                _jsonb(item.away_player_color),
+                _jsonb(item.away_goalkeeper_color),
+            )
+            for item in bundle.event_comment_feeds
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_comment_feed (
+                event_id, home_player_color, home_goalkeeper_color, away_player_color, away_goalkeeper_color
+            )
+            VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb)
+            ON CONFLICT (event_id) DO UPDATE SET
+                home_player_color = EXCLUDED.home_player_color,
+                home_goalkeeper_color = EXCLUDED.home_goalkeeper_color,
+                away_player_color = EXCLUDED.away_player_color,
+                away_goalkeeper_color = EXCLUDED.away_goalkeeper_color
+            """,
+            rows,
+        )
+
+    async def _upsert_event_comments(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (
+                item.event_id,
+                item.comment_id,
+                item.sequence,
+                item.period_name,
+                item.is_home,
+                item.player_id,
+                item.text,
+                item.match_time,
+                item.comment_type,
+            )
+            for item in bundle.event_comments
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_comment (
+                event_id, comment_id, sequence, period_name, is_home, player_id, text, match_time, comment_type
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (event_id, comment_id) DO UPDATE SET
+                sequence = EXCLUDED.sequence,
+                period_name = EXCLUDED.period_name,
+                is_home = EXCLUDED.is_home,
+                player_id = EXCLUDED.player_id,
+                text = EXCLUDED.text,
+                match_time = EXCLUDED.match_time,
+                comment_type = EXCLUDED.comment_type
+            """,
+            rows,
+        )
+
+    async def _upsert_event_graphs(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (item.event_id, item.period_time, item.period_count, item.overtime_length)
+            for item in bundle.event_graphs
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_graph (event_id, period_time, period_count, overtime_length)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (event_id) DO UPDATE SET
+                period_time = EXCLUDED.period_time,
+                period_count = EXCLUDED.period_count,
+                overtime_length = EXCLUDED.overtime_length
+            """,
+            rows,
+        )
+
+    async def _upsert_event_graph_points(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [(item.event_id, item.ordinal, item.minute, item.value) for item in bundle.event_graph_points]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_graph_point (event_id, ordinal, minute, value)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (event_id, ordinal) DO UPDATE SET
+                minute = EXCLUDED.minute,
+                value = EXCLUDED.value
+            """,
+            rows,
+        )
+
+    async def _upsert_event_team_heatmaps(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [(item.event_id, item.team_id) for item in bundle.event_team_heatmaps]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_team_heatmap (event_id, team_id)
+            VALUES ($1, $2)
+            ON CONFLICT (event_id, team_id) DO NOTHING
+            """,
+            rows,
+        )
+
+    async def _upsert_event_team_heatmap_points(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (item.event_id, item.team_id, item.point_type, item.ordinal, item.x, item.y)
+            for item in bundle.event_team_heatmap_points
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_team_heatmap_point (event_id, team_id, point_type, ordinal, x, y)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (event_id, team_id, point_type, ordinal) DO UPDATE SET
+                x = EXCLUDED.x,
+                y = EXCLUDED.y
+            """,
+            rows,
+        )
+
     async def _upsert_providers(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
         rows = [
             (
@@ -726,6 +869,47 @@ class EventDetailRepository(EventListRepository):
                 colors = COALESCE(EXCLUDED.colors, provider.colors),
                 odds_from_provider_id = COALESCE(EXCLUDED.odds_from_provider_id, provider.odds_from_provider_id),
                 live_odds_from_provider_id = COALESCE(EXCLUDED.live_odds_from_provider_id, provider.live_odds_from_provider_id)
+            """,
+            rows,
+        )
+
+    async def _upsert_provider_configurations(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (
+                item.id,
+                item.campaign_id,
+                item.provider_id,
+                item.fallback_provider_id,
+                item.type,
+                item.weight,
+                item.branded,
+                item.featured_odds_type,
+                item.bet_slip_link,
+                item.default_bet_slip_link,
+                item.impression_cost_encrypted,
+            )
+            for item in bundle.provider_configurations
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO provider_configuration (
+                id, campaign_id, provider_id, fallback_provider_id, type, weight,
+                branded, featured_odds_type, bet_slip_link, default_bet_slip_link,
+                impression_cost_encrypted
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (id) DO UPDATE SET
+                campaign_id = EXCLUDED.campaign_id,
+                provider_id = EXCLUDED.provider_id,
+                fallback_provider_id = EXCLUDED.fallback_provider_id,
+                type = EXCLUDED.type,
+                weight = EXCLUDED.weight,
+                branded = EXCLUDED.branded,
+                featured_odds_type = EXCLUDED.featured_odds_type,
+                bet_slip_link = EXCLUDED.bet_slip_link,
+                default_bet_slip_link = EXCLUDED.default_bet_slip_link,
+                impression_cost_encrypted = EXCLUDED.impression_cost_encrypted
             """,
             rows,
         )

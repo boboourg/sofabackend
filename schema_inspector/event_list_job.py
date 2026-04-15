@@ -33,16 +33,49 @@ class EventListIngestJob:
         self.database = database
         self.logger = logger or logging.getLogger(__name__)
 
-    async def run_scheduled(self, date: str, *, timeout: float = 20.0) -> EventListIngestResult:
-        return await self._run("scheduled", self.parser.fetch_scheduled_events(date, timeout=timeout))
+    async def run_scheduled(
+        self,
+        date: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"scheduled:{sport_slug}:{date}",
+            self.parser.fetch_scheduled_events(date, sport_slug=sport_slug, timeout=timeout),
+        )
 
-    async def run_live(self, *, timeout: float = 20.0) -> EventListIngestResult:
-        return await self._run("live", self.parser.fetch_live_events(timeout=timeout))
+    async def run_live(self, *, sport_slug: str = "football", timeout: float = 20.0) -> EventListIngestResult:
+        return await self._run(f"live:{sport_slug}", self.parser.fetch_live_events(sport_slug=sport_slug, timeout=timeout))
 
-    async def run_featured(self, unique_tournament_id: int, *, timeout: float = 20.0) -> EventListIngestResult:
+    async def run_featured(
+        self,
+        unique_tournament_id: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
         return await self._run(
             f"featured:{unique_tournament_id}",
-            self.parser.fetch_featured_events(unique_tournament_id, timeout=timeout),
+            self.parser.fetch_featured_events(unique_tournament_id, sport_slug=sport_slug, timeout=timeout),
+        )
+
+    async def run_unique_tournament_scheduled(
+        self,
+        unique_tournament_id: int,
+        date: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"tournament_scheduled:{unique_tournament_id}:{date}",
+            self.parser.fetch_unique_tournament_scheduled_events(
+                unique_tournament_id,
+                date,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
         )
 
     async def run_round(
@@ -51,11 +84,18 @@ class EventListIngestJob:
         season_id: int,
         round_number: int,
         *,
+        sport_slug: str = "football",
         timeout: float = 20.0,
     ) -> EventListIngestResult:
         return await self._run(
             f"round:{unique_tournament_id}:{season_id}:{round_number}",
-            self.parser.fetch_round_events(unique_tournament_id, season_id, round_number, timeout=timeout),
+            self.parser.fetch_round_events(
+                unique_tournament_id,
+                season_id,
+                round_number,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
         )
 
     async def _run(self, job_name: str, bundle_awaitable) -> EventListIngestResult:

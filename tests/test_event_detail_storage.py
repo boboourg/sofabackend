@@ -6,11 +6,15 @@ from schema_inspector.competition_parser import ApiPayloadSnapshotRecord, Catego
 from schema_inspector.endpoints import event_detail_registry_entries
 from schema_inspector.event_detail_job import EventDetailIngestJob
 from schema_inspector.event_detail_parser import (
+    EventCommentFeedRecord,
+    EventCommentRecord,
     EventDetailBundle,
     EventDetailEventRecord,
     EventDetailTeamRecord,
     EventDetailTournamentRecord,
     EventDuelRecord,
+    EventGraphPointRecord,
+    EventGraphRecord,
     EventLineupMissingPlayerRecord,
     EventLineupPlayerRecord,
     EventLineupRecord,
@@ -20,12 +24,15 @@ from schema_inspector.event_detail_parser import (
     EventPregameFormItemRecord,
     EventPregameFormRecord,
     EventPregameFormSideRecord,
+    EventTeamHeatmapPointRecord,
+    EventTeamHeatmapRecord,
     EventVoteOptionRecord,
     EventWinningOddsRecord,
     ManagerPerformanceRecord,
     ManagerRecord,
     ManagerTeamMembershipRecord,
     PlayerRecord,
+    ProviderConfigurationRecord,
     ProviderRecord,
     RefereeRecord,
     VenueRecord,
@@ -207,7 +214,55 @@ def _build_bundle() -> EventDetailBundle:
             EventPregameFormItemRecord(event_id=14083191, side="away", ordinal=0, form_value="L"),
         ),
         event_vote_options=(EventVoteOptionRecord(event_id=14083191, vote_type="vote", option_name="vote1", vote_count=10),),
+        event_comment_feeds=(
+            EventCommentFeedRecord(
+                event_id=14083191,
+                home_player_color={"primary": "#ffffff"},
+                away_player_color={"primary": "#0000ff"},
+            ),
+        ),
+        event_comments=(
+            EventCommentRecord(
+                event_id=14083191,
+                comment_id=37184719,
+                sequence=0,
+                period_name="2ND",
+                is_home=False,
+                player_id=700,
+                text="Second Half begins.",
+                match_time=46,
+                comment_type="matchStarted",
+            ),
+        ),
+        event_graphs=(EventGraphRecord(event_id=14083191, period_time=45, period_count=2, overtime_length=15),),
+        event_graph_points=(
+            EventGraphPointRecord(event_id=14083191, ordinal=0, minute=1, value=-4),
+            EventGraphPointRecord(event_id=14083191, ordinal=1, minute=2, value=12),
+        ),
+        event_team_heatmaps=(
+            EventTeamHeatmapRecord(event_id=14083191, team_id=42),
+            EventTeamHeatmapRecord(event_id=14083191, team_id=43),
+        ),
+        event_team_heatmap_points=(
+            EventTeamHeatmapPointRecord(event_id=14083191, team_id=42, point_type="player", ordinal=0, x=50.2, y=43.1),
+            EventTeamHeatmapPointRecord(event_id=14083191, team_id=42, point_type="goalkeeper", ordinal=0, x=11.1, y=50.0),
+        ),
         providers=(ProviderRecord(id=1),),
+        provider_configurations=(
+            ProviderConfigurationRecord(
+                id=91,
+                provider_id=1,
+                campaign_id=12,
+                fallback_provider_id=None,
+                type="featured",
+                weight=10,
+                branded=True,
+                featured_odds_type="pre",
+                bet_slip_link="https://example.com/slip",
+                default_bet_slip_link="https://example.com/default-slip",
+                impression_cost_encrypted="ciphertext",
+            ),
+        ),
         event_markets=(
             EventMarketRecord(
                 id=289779151,
@@ -263,6 +318,11 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO player " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event (" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_lineup " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_comment_feed " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_comment " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_graph " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_team_heatmap " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO provider_configuration " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_market " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_vote_option" in sql for sql in statements))
 
@@ -270,7 +330,7 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         bundle = _build_bundle()
         parser = _FakeParser(bundle)
         repository_result = EventDetailWriteResult(
-            endpoint_registry_rows=9,
+            endpoint_registry_rows=12,
             payload_snapshot_rows=1,
             sport_rows=1,
             country_rows=1,
@@ -300,7 +360,14 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
             event_pregame_form_side_rows=2,
             event_pregame_form_item_rows=2,
             event_vote_option_rows=1,
+            event_comment_feed_rows=1,
+            event_comment_rows=1,
+            event_graph_rows=1,
+            event_graph_point_rows=2,
+            event_team_heatmap_rows=2,
+            event_team_heatmap_point_rows=2,
             provider_rows=1,
+            provider_configuration_rows=1,
             event_market_rows=1,
             event_market_choice_rows=1,
             event_winning_odds_rows=1,

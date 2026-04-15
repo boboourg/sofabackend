@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 import time
 from dataclasses import dataclass
 from typing import Mapping
@@ -17,6 +18,12 @@ from curl_cffi.requests import AsyncSession, RequestsError
 from .challenge import detect_challenge
 from .proxy import ProxyPool
 from .runtime import RuntimeConfig, TransportAttempt, TransportResult
+
+
+if sys.platform == "win32":
+    current_policy = asyncio.get_event_loop_policy()
+    if not isinstance(current_policy, asyncio.WindowsSelectorEventLoopPolicy):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,14 @@ class InspectorTransport:
         attempts = []
         for attempt_number in range(1, self.runtime_config.retry_policy.max_attempts + 1):
             proxy = self.proxy_pool.acquire()
+            while proxy_required and proxy is None and self.runtime_config.proxy_endpoints:
+                wait_seconds = max(
+                    self.proxy_pool.next_available_delay() or 0.0,
+                    self.runtime_config.retry_policy.backoff_seconds,
+                )
+                await self._sleep(wait_seconds)
+                proxy = self.proxy_pool.acquire()
+
             proxy_name = proxy.name if proxy is not None else None
             proxy_url = proxy.url if proxy is not None else None
             if proxy_required and proxy_url is None:
@@ -72,9 +87,6 @@ class InspectorTransport:
                         challenge_reason=None,
                     )
                 )
-                if attempt_number < self.runtime_config.retry_policy.max_attempts:
-                    await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
-                    continue
                 raise ProxyRequiredError(error_msg)
 
             try:
@@ -96,7 +108,10 @@ class InspectorTransport:
                 )
 
                 should_retry = (
-                    raw.status_code in self.runtime_config.retry_policy.retry_status_codes
+                    (
+                        raw.status_code in self.runtime_config.retry_policy.retry_status_codes
+                        or challenge_reason is not None
+                    )
                     and attempt_number < self.runtime_config.retry_policy.max_attempts
                 )
                 if should_retry:
@@ -105,10 +120,11 @@ class InspectorTransport:
                     await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
 
-                if raw.status_code < 400 and proxy_name is not None:
-                    self.proxy_pool.record_success(proxy_name)
-                elif raw.status_code >= 400 and proxy_name is not None:
-                    self.proxy_pool.record_failure(proxy_name)
+                if proxy_name is not None:
+                    if self._should_cooldown_proxy(raw.status_code, challenge_reason):
+                        self.proxy_pool.record_failure(proxy_name)
+                    else:
+                        self.proxy_pool.record_success(proxy_name)
 
                 return TransportResult(
                     resolved_url=raw.resolved_url,
@@ -144,6 +160,13 @@ class InspectorTransport:
         if not self.runtime_config.proxy_endpoints:
             return "Proxy-only mode is enabled, but no proxies are configured."
         return "Proxy-only mode is enabled, but no proxy is currently available."
+
+    def _should_cooldown_proxy(self, status_code: int, challenge_reason: str | None) -> bool:
+        if challenge_reason is not None:
+            return True
+        if status_code in self.runtime_config.retry_policy.retry_status_codes:
+            return True
+        return status_code >= 500
 
     async def _execute_once(
         self,

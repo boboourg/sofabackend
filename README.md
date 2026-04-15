@@ -117,8 +117,80 @@ reports/api_example_com_api_player_123.md
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+## PostgreSQL Setup
+
+Проект теперь умеет сам подготовить PostgreSQL:
+
+- создать целевую БД, если она отсутствует
+- на пустую БД накатить `postgres_schema.sql`
+- затем применить все SQL-файлы из `migrations/`
+- не применять уже зафиксированные миграции повторно
+
+Базовый запуск:
+
+```powershell
+.\.venv311\Scripts\python.exe setup_postgres.py
+```
+
+Если БД уже есть и создавать ее не нужно:
+
+```powershell
+.\.venv311\Scripts\python.exe setup_postgres.py --skip-create-database
+```
+
+После подготовки БД можно снова запускать пайплайны, например targeted smoke-run:
+
+```powershell
+.\.venv311\Scripts\python.exe load_targeted_pipeline.py --unique-tournament-id 17 --season-id 76986 --team-id 35 --player-id 288205 --timeout 20
+```
+
+## Local Swagger
+
+Локальный Swagger/OpenAPI для футбольного среза можно сгенерировать из текущего состояния БД:
+
+```powershell
+.\.venv311\Scripts\python.exe build_local_swagger.py
+```
+
+Это создаст:
+
+- `local_swagger/football.openapi.json`
+- `local_swagger/index.html`
+
+Чтобы открыть локально через HTTP:
+
+```powershell
+.\.venv311\Scripts\python.exe serve_local_swagger.py --port 8088
+```
+
+После этого Swagger UI будет доступен по адресу:
+
+```text
+http://127.0.0.1:8088/
+```
+
+## Local API Server
+
+Если нужен не только статический Swagger, а именно живые локальные `/api/v1/...` ручки из PostgreSQL, поднимай сервер так:
+
+```powershell
+.\.venv311\Scripts\python.exe serve_local_api.py --host 127.0.0.1 --port 8000
+```
+
+Что он дает:
+
+- `http://127.0.0.1:8000/` — Swagger UI
+- `http://127.0.0.1:8000/openapi.json` — live OpenAPI JSON
+- `http://127.0.0.1:8000/api/v1/...` — сами локальные пути в Sofascore-style формате
+
+Важно:
+
+- сервер читает данные из `api_payload_snapshot` в PostgreSQL
+- если конкретный путь или query еще ни разу не были ingested в базу, локальный API вернет `404`
+- для query-driven statistics endpoint без query-параметров сервер пытается вернуть самый свежий сохраненный snapshot для этого сезона
+
 ## Ограничения
 
 - Сейчас поддерживается только `GET`
 - Генератор строит infer-схему по фактическому ответу, а не по OpenAPI/Swagger
-- База PostgreSQL пока не создается: этот шаг будет следующим после накопления отчетов по endpoint'ам
+- Локальный PostgreSQL сервер и учетная запись из `SOFASCORE_DATABASE_URL` должны уже существовать

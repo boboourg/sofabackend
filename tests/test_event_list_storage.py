@@ -41,18 +41,30 @@ class _FakeExecutor:
 class _FakeParser:
     def __init__(self, bundle: EventListBundle) -> None:
         self.bundle = bundle
-        self.calls: list[tuple[str, tuple[object, ...], float]] = []
+        self.calls: list[tuple[str, tuple[object, ...], str, float]] = []
 
-    async def fetch_scheduled_events(self, date: str, *, timeout: float = 20.0) -> EventListBundle:
-        self.calls.append(("scheduled", (date,), timeout))
+    async def fetch_scheduled_events(
+        self,
+        date: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        self.calls.append(("scheduled", (date,), sport_slug, timeout))
         return self.bundle
 
-    async def fetch_live_events(self, *, timeout: float = 20.0) -> EventListBundle:
-        self.calls.append(("live", (), timeout))
+    async def fetch_live_events(self, *, sport_slug: str = "football", timeout: float = 20.0) -> EventListBundle:
+        self.calls.append(("live", (), sport_slug, timeout))
         return self.bundle
 
-    async def fetch_featured_events(self, unique_tournament_id: int, *, timeout: float = 20.0) -> EventListBundle:
-        self.calls.append(("featured", (unique_tournament_id,), timeout))
+    async def fetch_featured_events(
+        self,
+        unique_tournament_id: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        self.calls.append(("featured", (unique_tournament_id,), sport_slug, timeout))
         return self.bundle
 
     async def fetch_round_events(
@@ -61,9 +73,10 @@ class _FakeParser:
         season_id: int,
         round_number: int,
         *,
+        sport_slug: str = "football",
         timeout: float = 20.0,
     ) -> EventListBundle:
-        self.calls.append(("round", (unique_tournament_id, season_id, round_number), timeout))
+        self.calls.append(("round", (unique_tournament_id, season_id, round_number), sport_slug, timeout))
         return self.bundle
 
 
@@ -324,7 +337,7 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run_round(17, 76986, 32, timeout=12.5)
 
-        self.assertEqual(parser.calls, [("round", (17, 76986, 32), 12.5)])
+        self.assertEqual(parser.calls, [("round", (17, 76986, 32), "football", 12.5)])
         self.assertEqual(repository.calls, [(connection, bundle)])
         self.assertEqual(database.transaction_calls, 1)
         self.assertEqual(result.written.event_rows, 1)
