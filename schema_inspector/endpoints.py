@@ -449,21 +449,21 @@ EVENT_GRAPH_SEQUENCE_ENDPOINT = SofascoreEndpoint(
 EVENT_POINT_BY_POINT_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/point-by-point",
     envelope_key="root",
-    target_table="api_payload_snapshot",
-    notes="Tennis-specific event progression payload; retained as raw snapshot until a stable normalized schema is finalized.",
+    target_table="tennis_point_by_point",
+    notes="Tennis-specific event progression payload.",
 )
 
 EVENT_TENNIS_POWER_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/tennis-power",
     envelope_key="tennisPowerRankings",
-    target_table="api_payload_snapshot",
-    notes="Tennis-specific momentum/power payload; retained as raw snapshot until a stable normalized schema is finalized.",
+    target_table="tennis_power",
+    notes="Tennis-specific momentum/power payload.",
 )
 
 EVENT_BASEBALL_INNINGS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/innings",
     envelope_key="innings",
-    target_table="api_payload_snapshot",
+    target_table="baseball_inning",
     notes="Baseball-specific innings/score progression payload.",
 )
 
@@ -477,14 +477,14 @@ EVENT_BASEBALL_PITCHES_ENDPOINT = SofascoreEndpoint(
 EVENT_SHOTMAP_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/shotmap",
     envelope_key="shotmap",
-    target_table="api_payload_snapshot",
+    target_table="shotmap_point",
     notes="Shotmap/event-map style payload used by hockey-style sports.",
 )
 
 EVENT_ESPORTS_GAMES_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/esports-games",
     envelope_key="games",
-    target_table="api_payload_snapshot",
+    target_table="esports_game",
     notes="Esports match sub-games payload.",
 )
 

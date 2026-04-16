@@ -23,12 +23,13 @@ class EsportsGamesParser:
             )
 
         rows = []
-        for item in games:
+        for ordinal, item in enumerate(games):
             if not isinstance(item, Mapping):
                 continue
             rows.append(
                 {
                     "event_id": snapshot.context_event_id,
+                    "ordinal": ordinal,
                     "game_id": _as_int(item.get("id")),
                     "status": _as_str(item.get("status")),
                     "map_name": _as_str(item.get("mapName")),

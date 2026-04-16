@@ -11,6 +11,7 @@ from ..endpoints import (
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
     EVENT_ESPORTS_GAMES_ENDPOINT,
+    EVENT_GRAPH_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
@@ -403,7 +404,11 @@ class PilotOrchestrator:
         parsed = None
         if outcome.snapshot_id is not None:
             snapshot = self.snapshot_store.load_snapshot(outcome.snapshot_id)
-            parsed = self.normalize_worker.handle(snapshot)
+            handle_async = getattr(self.normalize_worker, "handle_async", None)
+            if callable(handle_async):
+                parsed = await handle_async(snapshot)
+            else:
+                parsed = self.normalize_worker.handle(snapshot)
         return outcome, parsed
 
     async def _run_final_sweep(
@@ -552,7 +557,7 @@ def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
         "statistics": EVENT_STATISTICS_ENDPOINT,
         "lineups": EVENT_LINEUPS_ENDPOINT,
         "incidents": EVENT_INCIDENTS_ENDPOINT,
-        "graph": None,
+        "graph": EVENT_GRAPH_ENDPOINT,
     }
     return mapping.get(edge_kind)
 

@@ -24,12 +24,13 @@ class BaseballInningsParser:
             )
 
         rows = []
-        for item in innings:
+        for ordinal, item in enumerate(innings):
             if not isinstance(item, Mapping):
                 continue
             rows.append(
                 {
                     "event_id": snapshot.context_event_id,
+                    "ordinal": ordinal,
                     "inning": _as_int(item.get("inning")),
                     "home_score": _as_int(item.get("homeScore")),
                     "away_score": _as_int(item.get("awayScore")),

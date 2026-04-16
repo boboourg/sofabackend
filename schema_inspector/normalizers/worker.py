@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Callable
 
 from ..parsers.base import ParseResult, RawSnapshot
@@ -15,5 +16,15 @@ class NormalizeWorker:
     def handle(self, snapshot: RawSnapshot) -> ParseResult:
         result = self.parser_registry.parse(snapshot)
         if self.result_sink is not None:
-            self.result_sink(result)
+            sink_result = self.result_sink(result)
+            if inspect.isawaitable(sink_result):
+                raise RuntimeError("Async result_sink requires NormalizeWorker.handle_async().")
+        return result
+
+    async def handle_async(self, snapshot: RawSnapshot) -> ParseResult:
+        result = self.parser_registry.parse(snapshot)
+        if self.result_sink is not None:
+            sink_result = self.result_sink(result)
+            if inspect.isawaitable(sink_result):
+                await sink_result
         return result

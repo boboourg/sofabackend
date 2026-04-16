@@ -16,7 +16,7 @@ class TennisPointByPointParser:
         points = payload.get("pointByPoint")
         rows: list[Mapping[str, object]] = []
         if isinstance(points, (list, tuple)):
-            for item in points:
+            for ordinal, item in enumerate(points):
                 point = _as_mapping(item)
                 if point is None:
                     continue
@@ -24,6 +24,7 @@ class TennisPointByPointParser:
                 rows.append(
                     {
                         "event_id": snapshot.context_event_id or snapshot.context_entity_id,
+                        "ordinal": ordinal,
                         "point_id": _as_int(point.get("id")),
                         "set_number": _as_int(point.get("set")),
                         "game_number": _as_int(point.get("game")),

@@ -28,10 +28,11 @@ class ShotmapParser:
             )
 
         rows = []
-        for item in points:
+        for ordinal, item in enumerate(points):
             rows.append(
                 {
                     "event_id": snapshot.context_event_id,
+                    "ordinal": ordinal,
                     "x": _as_float(item.get("x")),
                     "y": _as_float(item.get("y")),
                     "shot_type": _as_str(item.get("shotType")),

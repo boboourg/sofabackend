@@ -17,13 +17,14 @@ class EventIncidentsParser:
         incidents = payload.get("incidents")
         rows: list[Mapping[str, object]] = []
         if isinstance(incidents, (list, tuple)):
-            for item in incidents:
+            for ordinal, item in enumerate(incidents):
                 incident = _as_mapping(item)
                 if incident is None:
                     continue
                 rows.append(
                     {
                         "event_id": snapshot.context_event_id or snapshot.context_entity_id,
+                        "ordinal": ordinal,
                         "incident_id": _as_int(incident.get("id")),
                         "incident_type": _as_str(incident.get("incidentType")) or _as_str(incident.get("type")),
                         "time": _as_int(incident.get("time")),
