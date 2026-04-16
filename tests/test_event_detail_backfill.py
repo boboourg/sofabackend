@@ -114,7 +114,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
             [
                 (
                     ANY,
-                    (True, None, 5, 2),
+                    (True, None, None, None, None, 5, 2),
                 )
             ],
         )
@@ -133,7 +133,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(limit=0, offset=7, only_missing=False)
 
-        self.assertEqual(connection.fetch_calls, [(ANY, (False, None, 7))])
+        self.assertEqual(connection.fetch_calls, [(ANY, (False, None, None, None, None, 7))])
         self.assertEqual(result.total_candidates, 1)
         self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
 
@@ -145,7 +145,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(limit=3, offset=0, only_missing=False, unique_tournament_id=17)
 
-        self.assertEqual(connection.fetch_calls, [(ANY, (False, 17, 0, 3))])
+        self.assertEqual(connection.fetch_calls, [(ANY, (False, 17, None, None, None, 0, 3))])
         self.assertEqual(result.total_candidates, 1)
         self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
 

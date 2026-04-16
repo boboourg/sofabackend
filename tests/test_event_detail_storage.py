@@ -326,6 +326,36 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO event_market " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_vote_option" in sql for sql in statements))
 
+    async def test_event_detail_repository_drops_orphan_player_team_foreign_keys(self) -> None:
+        bundle = _build_bundle()
+        bundle = EventDetailBundle(
+            **{
+                **bundle.__dict__,
+                "players": (
+                    PlayerRecord(
+                        id=700,
+                        slug="saka",
+                        name="Bukayo Saka",
+                        team_id=1073591,
+                        country_alpha2="EN",
+                        position="F",
+                    ),
+                ),
+            }
+        )
+        executor = _FakeExecutor()
+        repository = EventDetailRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        player_insert = next(
+            args
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO player " in sql
+            for args in rows
+        )
+        self.assertIsNone(player_insert[6])
+
     async def test_event_detail_ingest_job_uses_transaction_and_repository(self) -> None:
         bundle = _build_bundle()
         parser = _FakeParser(bundle)

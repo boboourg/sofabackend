@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.endpoints import (
+    entities_registry_entries,
     PLAYER_ENDPOINT,
     PLAYER_SEASON_HEATMAP_OVERALL_ENDPOINT,
     PLAYER_SEASON_OVERALL_STATISTICS_ENDPOINT,
@@ -312,7 +313,7 @@ class EntitiesParserTests(unittest.IsolatedAsyncioTestCase):
             team_performance_graph_requests=(team_graph,),
         )
 
-        self.assertEqual(len(bundle.registry_entries), 11)
+        self.assertEqual(len(bundle.registry_entries), len(entities_registry_entries()))
         self.assertEqual(len(bundle.payload_snapshots), 11)
         self.assertEqual({item.id for item in bundle.players}, {1152})
         self.assertEqual({item.id for item in bundle.teams}, {30, 41})

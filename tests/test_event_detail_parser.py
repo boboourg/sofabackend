@@ -17,8 +17,9 @@ from schema_inspector.endpoints import (
     EVENT_TENNIS_POWER_ENDPOINT,
     EVENT_VOTES_ENDPOINT,
     EVENT_WINNING_ODDS_ENDPOINT,
+    event_detail_registry_entries,
 )
-from schema_inspector.event_detail_parser import EventDetailParser
+from schema_inspector.event_detail_parser import EventDetailParser, _EventDetailAccumulator
 from schema_inspector.runtime import RuntimeConfig, TransportAttempt, TransportResult
 from schema_inspector.sofascore_client import SofascoreClient, SofascoreHttpError, SofascoreResponse
 
@@ -65,6 +66,27 @@ class _FakeSofascoreClient(SofascoreClient):
 
 
 class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
+    def test_ingest_player_adds_embedded_team_dependency(self) -> None:
+        accumulator = _EventDetailAccumulator()
+
+        player_id = accumulator.ingest_player(
+            {
+                "id": 700,
+                "slug": "saka",
+                "name": "Bukayo Saka",
+                "team": {
+                    "id": 1073591,
+                    "slug": "arsenal-u21",
+                    "name": "Arsenal U21",
+                },
+            }
+        )
+        bundle = accumulator.to_bundle(sport_slug="football")
+
+        self.assertEqual(player_id, 700)
+        self.assertEqual(bundle.players[0].team_id, 1073591)
+        self.assertEqual({team.id for team in bundle.teams}, {1073591})
+
     def test_exact_endpoint_templates_match_sofascore_paths(self) -> None:
         self.assertEqual(
             EVENT_DETAIL_ENDPOINT.build_url(event_id=14083191),
@@ -413,7 +435,7 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         parser = EventDetailParser(fake_client)
         bundle = await parser.fetch_bundle(14083191, provider_ids=(1,))
 
-        self.assertEqual(len(bundle.registry_entries), 12)
+        self.assertEqual(len(bundle.registry_entries), len(event_detail_registry_entries(sport_slug="football")))
         self.assertEqual({item.id for item in bundle.events}, {14083191})
         self.assertEqual({item.id for item in bundle.teams}, {42, 43})
         self.assertEqual({item.id for item in bundle.managers}, {500, 501})
@@ -566,7 +588,7 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         parser = EventDetailParser(fake_client)
         bundle = await parser.fetch_bundle(15921219, provider_ids=())
 
-        self.assertEqual(len(bundle.registry_entries), 14)
+        self.assertEqual(len(bundle.registry_entries), len(event_detail_registry_entries(sport_slug="tennis")))
         self.assertEqual(len(bundle.payload_snapshots), 3)
         self.assertEqual({item.id for item in bundle.events}, {15921219})
         self.assertEqual({item.id for item in bundle.teams}, {199527, 199528})

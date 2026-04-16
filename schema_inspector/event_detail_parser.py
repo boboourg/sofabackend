@@ -1245,6 +1245,7 @@ class _EventDetailAccumulator:
         player_id = _as_int(payload.get("id"))
         if player_id is None:
             return None
+        embedded_team_id = self.ingest_team(_as_mapping(payload.get("team")))
         country_alpha2 = self.ingest_country(_as_mapping(payload.get("country")))
         manager_id = self.ingest_manager(_as_mapping(payload.get("manager")))
         positions = _as_string_sequence(payload.get("positions"))
@@ -1258,7 +1259,7 @@ class _EventDetailAccumulator:
                 "short_name": _as_str(payload.get("shortName")),
                 "first_name": _as_str(payload.get("firstName")),
                 "last_name": _as_str(payload.get("lastName")),
-                "team_id": team_id,
+                "team_id": team_id if team_id is not None else embedded_team_id,
                 "country_alpha2": country_alpha2,
                 "manager_id": manager_id,
                 "gender": _as_str(payload.get("gender")),
