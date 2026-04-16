@@ -1,8 +1,8 @@
-"""Basketball adapter metadata."""
+"""Futsal adapter metadata."""
 
 SPORT_ADAPTER = {
-    "sport_slug": "basketball",
-    "archetype": "regular_season_team",
+    "sport_slug": "futsal",
+    "archetype": "football_like",
     "core_event_edges": ("meta", "statistics", "lineups", "incidents"),
     "live_optional_edges": ("graph",),
     "special_families": (),

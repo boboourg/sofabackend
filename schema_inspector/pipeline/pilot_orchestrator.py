@@ -7,10 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..endpoints import (
+    EVENT_BASEBALL_INNINGS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
+    EVENT_ESPORTS_GAMES_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
+    EVENT_SHOTMAP_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
     MANAGER_ENDPOINT,
     PLAYER_ENDPOINT,
@@ -24,6 +27,7 @@ from ..endpoints import (
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
+from ..parsers.sports import resolve_sport_adapter
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
 from ..workers.live_worker import LiveWorker
 
@@ -369,11 +373,11 @@ class PilotOrchestrator:
     ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
         outcomes: list[FetchOutcomeEnvelope] = []
         parses: list[object] = []
-        for endpoint in (
-            EVENT_STATISTICS_ENDPOINT,
-            EVENT_LINEUPS_ENDPOINT,
-            EVENT_INCIDENTS_ENDPOINT,
-        ):
+        adapter = resolve_sport_adapter(sport_slug)
+        for edge_kind in adapter.core_event_edges:
+            endpoint = _endpoint_for_edge_kind(edge_kind)
+            if endpoint is None:
+                continue
             outcome, parsed = await self._fetch_and_parse(
                 endpoint=endpoint,
                 sport_slug=sport_slug,
@@ -439,9 +443,19 @@ def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
 
 
 def _special_endpoints_for_sport(sport_slug: str) -> tuple[SofascoreEndpoint, ...]:
-    if sport_slug == "tennis":
-        return (EVENT_POINT_BY_POINT_ENDPOINT, EVENT_TENNIS_POWER_ENDPOINT)
-    return ()
+    adapter = resolve_sport_adapter(sport_slug)
+    family_map = {
+        "tennis_point_by_point": EVENT_POINT_BY_POINT_ENDPOINT,
+        "tennis_power": EVENT_TENNIS_POWER_ENDPOINT,
+        "baseball_innings": EVENT_BASEBALL_INNINGS_ENDPOINT,
+        "shotmap": EVENT_SHOTMAP_ENDPOINT,
+        "esports_games": EVENT_ESPORTS_GAMES_ENDPOINT,
+    }
+    return tuple(
+        family_map[family]
+        for family in adapter.special_families
+        if family in family_map
+    )
 
 
 def _endpoint_for_widget_job(params: dict[str, Any]) -> SofascoreEndpoint | None:
@@ -463,7 +477,8 @@ def _entity_profile_targets(
     *,
     seen: set[tuple[str, int]],
 ) -> tuple[tuple[SofascoreEndpoint, str, int], ...]:
-    if sport_slug not in {"football", "basketball"}:
+    adapter = resolve_sport_adapter(sport_slug)
+    if not adapter.hydrate_entity_profiles:
         return ()
     planned: list[tuple[SofascoreEndpoint, str, int]] = []
     for result in parse_results:

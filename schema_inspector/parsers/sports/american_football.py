@@ -1,10 +1,10 @@
-"""Basketball adapter metadata."""
+"""American football adapter metadata."""
 
 SPORT_ADAPTER = {
-    "sport_slug": "basketball",
+    "sport_slug": "american-football",
     "archetype": "regular_season_team",
     "core_event_edges": ("meta", "statistics", "lineups", "incidents"),
-    "live_optional_edges": ("graph",),
+    "live_optional_edges": (),
     "special_families": (),
     "hydrate_entity_profiles": True,
 }

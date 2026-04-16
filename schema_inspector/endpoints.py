@@ -439,6 +439,34 @@ EVENT_TENNIS_POWER_ENDPOINT = SofascoreEndpoint(
     notes="Tennis-specific momentum/power payload; retained as raw snapshot until a stable normalized schema is finalized.",
 )
 
+EVENT_BASEBALL_INNINGS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/innings",
+    envelope_key="innings",
+    target_table="api_payload_snapshot",
+    notes="Baseball-specific innings/score progression payload.",
+)
+
+EVENT_BASEBALL_PITCHES_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches",
+    envelope_key="pitches",
+    target_table="api_payload_snapshot",
+    notes="Baseball-specific at-bat pitch breakdown payload.",
+)
+
+EVENT_SHOTMAP_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/shotmap",
+    envelope_key="shotmap",
+    target_table="api_payload_snapshot",
+    notes="Shotmap/event-map style payload used by hockey-style sports.",
+)
+
+EVENT_ESPORTS_GAMES_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/esports-games",
+    envelope_key="games",
+    target_table="api_payload_snapshot",
+    notes="Esports match sub-games payload.",
+)
+
 EVENT_HEATMAP_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/heatmap/{team_id}",
     envelope_key="playerPoints,goalkeeperPoints",
@@ -492,11 +520,29 @@ EVENT_DETAIL_TENNIS_ENDPOINTS = (
     EVENT_TENNIS_POWER_ENDPOINT,
 )
 
+EVENT_DETAIL_BASEBALL_ENDPOINTS = (
+    EVENT_BASEBALL_INNINGS_ENDPOINT,
+)
+
+EVENT_DETAIL_ICE_HOCKEY_ENDPOINTS = (
+    EVENT_SHOTMAP_ENDPOINT,
+)
+
+EVENT_DETAIL_ESPORTS_ENDPOINTS = (
+    EVENT_ESPORTS_GAMES_ENDPOINT,
+)
+
 
 def event_detail_endpoints(*, sport_slug: str | None = None) -> tuple[SofascoreEndpoint, ...]:
     normalized_sport_slug = str(sport_slug or "").strip().lower()
     if normalized_sport_slug == "tennis":
         return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_TENNIS_ENDPOINTS
+    if normalized_sport_slug == "baseball":
+        return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_BASEBALL_ENDPOINTS
+    if normalized_sport_slug == "ice-hockey":
+        return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_ICE_HOCKEY_ENDPOINTS
+    if normalized_sport_slug == "esports":
+        return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_ESPORTS_ENDPOINTS
     return EVENT_DETAIL_BASE_ENDPOINTS
 
 

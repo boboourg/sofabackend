@@ -5,6 +5,7 @@ import unittest
 from schema_inspector.endpoints import (
     category_live_events_count_endpoint,
     calendar_months_with_events_endpoint,
+    event_detail_endpoints,
     leaderboards_registry_entries_for_sport,
     season_last_events_endpoint,
     season_next_events_endpoint,
@@ -78,6 +79,15 @@ class EndpointRegistryTests(unittest.TestCase):
     def test_trending_top_players_endpoint_is_still_factory_based(self) -> None:
         endpoint = sport_trending_top_players_endpoint("basketball")
         self.assertEqual(endpoint.path_template, "/api/v1/sport/basketball/trending-top-players")
+
+    def test_event_detail_endpoints_include_sport_specific_special_routes(self) -> None:
+        baseball_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="baseball")}
+        ice_hockey_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="ice-hockey")}
+        esports_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="esports")}
+
+        self.assertIn("/api/v1/event/{event_id}/innings", baseball_patterns)
+        self.assertIn("/api/v1/event/{event_id}/shotmap", ice_hockey_patterns)
+        self.assertIn("/api/v1/event/{event_id}/esports-games", esports_patterns)
 
 
 if __name__ == "__main__":

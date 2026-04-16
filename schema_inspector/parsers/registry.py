@@ -11,6 +11,10 @@ from .families.event_incidents import EventIncidentsParser
 from .families.event_lineups import EventLineupsParser
 from .families.event_root import EventRootParser
 from .families.event_statistics import EventStatisticsParser
+from .special.baseball_innings import BaseballInningsParser
+from .special.baseball_pitches import BaseballPitchesParser
+from .special.esports_games import EsportsGamesParser
+from .special.shotmap import ShotmapParser
 from .special.tennis_point_by_point import TennisPointByPointParser
 from .special.tennis_power import TennisPowerParser
 
@@ -28,6 +32,10 @@ class ParserRegistry:
             EventLineupsParser(),
             EventIncidentsParser(),
             EntityProfilesParser(),
+            BaseballInningsParser(),
+            BaseballPitchesParser(),
+            ShotmapParser(),
+            EsportsGamesParser(),
             TennisPointByPointParser(),
             TennisPowerParser(),
         ):

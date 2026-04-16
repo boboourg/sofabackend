@@ -63,25 +63,20 @@ class _FakeRawSnapshotStore:
 
 
 class _FakeCapabilityRepository:
-    def __init__(self) -> None:
-        self.observations = []
-
     async def insert_observation(self, executor, record) -> None:
-        del executor
-        self.observations.append(record)
+        del executor, record
 
     async def upsert_rollup(self, executor, record) -> None:
         del executor, record
 
 
-class TennisHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tennis_pipeline_fetches_special_routes(self) -> None:
-        event_url = "https://www.sofascore.com/api/v1/event/15921219"
-        statistics_url = "https://www.sofascore.com/api/v1/event/15921219/statistics"
-        lineups_url = "https://www.sofascore.com/api/v1/event/15921219/lineups"
-        incidents_url = "https://www.sofascore.com/api/v1/event/15921219/incidents"
-        point_by_point_url = "https://www.sofascore.com/api/v1/event/15921219/point-by-point"
-        tennis_power_url = "https://www.sofascore.com/api/v1/event/15921219/tennis-power"
+class EsportsHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_esports_pipeline_uses_thin_special_adapter(self) -> None:
+        event_url = "https://www.sofascore.com/api/v1/event/20001"
+        statistics_url = "https://www.sofascore.com/api/v1/event/20001/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/20001/lineups"
+        esports_games_url = "https://www.sofascore.com/api/v1/event/20001/esports-games"
+        team_url = "https://www.sofascore.com/api/v1/team/9001"
 
         transport = _FakeTransport(
             {
@@ -89,21 +84,24 @@ class TennisHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                     event_url,
                     {
                         "event": {
-                            "id": 15921219,
-                            "slug": "sinner-alcaraz",
-                            "tournament": {"id": 300, "slug": "wimbledon", "name": "Wimbledon", "uniqueTournament": {"id": 2361, "slug": "wimbledon", "name": "Wimbledon"}},
-                            "season": {"id": 90001, "name": "Wimbledon 2026", "year": "2026"},
+                            "id": 20001,
+                            "slug": "spirit-vitality",
+                            "tournament": {
+                                "id": 501,
+                                "slug": "esl-pro-league",
+                                "name": "ESL Pro League",
+                                "uniqueTournament": {"id": 18501, "slug": "esl-pro-league", "name": "ESL Pro League"},
+                            },
+                            "season": {"id": 91001, "name": "EPL 2026", "year": "2026"},
                             "status": {"type": "inprogress"},
-                            "homeTeam": {"id": 101, "slug": "sinner", "name": "Jannik Sinner"},
-                            "awayTeam": {"id": 102, "slug": "alcaraz", "name": "Carlos Alcaraz"},
+                            "homeTeam": {"id": 9001, "slug": "spirit", "name": "Spirit"},
+                            "awayTeam": {"id": 9002, "slug": "vitality", "name": "Vitality"},
                         }
                     },
                 ),
                 statistics_url: _json_result(statistics_url, {"statistics": []}),
                 lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
-                incidents_url: _json_result(incidents_url, {"incidents": []}),
-                point_by_point_url: _json_result(point_by_point_url, {"pointByPoint": [{"id": 1, "set": 1, "game": 1, "server": "home", "score": {"home": 15, "away": 0}}]}),
-                tennis_power_url: _json_result(tennis_power_url, {"tennisPowerRankings": {"home": {"current": 0.61}, "away": {"current": 0.39}}}),
+                esports_games_url: _json_result(esports_games_url, {"games": [{"id": 1, "status": "finished", "mapName": "Dust2"}]}),
             }
         )
         raw_store = _FakeRawSnapshotStore()
@@ -111,22 +109,16 @@ class TennisHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
             fetch_executor=FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object()),
             snapshot_store=raw_store,
             normalize_worker=NormalizeWorker(ParserRegistry.default()),
-            planner=Planner(
-                capability_rollup={
-                    "/api/v1/event/{event_id}/graph": "unsupported",
-                    "/api/v1/event/{event_id}/incidents": "unsupported",
-                }
-            ),
+            planner=Planner(capability_rollup={"/api/v1/event/{event_id}/graph": "unsupported"}),
             capability_repository=_FakeCapabilityRepository(),
             sql_executor=object(),
         )
 
-        report = await orchestrator.run_event(event_id=15921219, sport_slug="tennis")
+        report = await orchestrator.run_event(event_id=20001, sport_slug="esports")
 
-        self.assertIn(point_by_point_url, transport.seen_urls)
-        self.assertIn(tennis_power_url, transport.seen_urls)
-        self.assertIn("tennis_point_by_point", {item.parser_family for item in report.parse_results})
-        self.assertIn("tennis_power", {item.parser_family for item in report.parse_results})
+        self.assertIn(esports_games_url, transport.seen_urls)
+        self.assertNotIn(team_url, transport.seen_urls)
+        self.assertIn("esports_games", {item.parser_family for item in report.parse_results})
 
 
 def _json_result(url: str, payload: object, *, status_code: int = 200) -> TransportResult:

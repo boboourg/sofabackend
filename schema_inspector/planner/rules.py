@@ -10,21 +10,20 @@ from ..jobs.types import (
     JOB_SYNC_SEASON_WIDGET,
     JOB_TRACK_LIVE_EVENT,
 )
+from ..parsers.sports import resolve_sport_adapter
 from ..sport_profiles import resolve_sport_profile
 
-CORE_EVENT_EDGE_KINDS = ("meta", "statistics", "lineups", "incidents")
-OPTIONAL_LIVE_EDGE_KINDS = ("graph",)
-
-
-def event_edge_candidates(status_type: str | None) -> tuple[str, ...]:
+def event_edge_candidates(*, sport_slug: str | None, status_type: str | None) -> tuple[str, ...]:
+    adapter = resolve_sport_adapter(str(sport_slug or ""))
     normalized = str(status_type or "").strip().lower()
     if normalized in {"inprogress", "live"}:
-        return CORE_EVENT_EDGE_KINDS + OPTIONAL_LIVE_EDGE_KINDS
-    return CORE_EVENT_EDGE_KINDS
+        return adapter.core_event_edges + adapter.live_optional_edges
+    return adapter.core_event_edges
 
 
-def should_schedule_edge(edge_kind: str, capability_rollup: dict[str, str] | None) -> bool:
-    if edge_kind in CORE_EVENT_EDGE_KINDS:
+def should_schedule_edge(edge_kind: str, capability_rollup: dict[str, str] | None, *, sport_slug: str | None) -> bool:
+    adapter = resolve_sport_adapter(str(sport_slug or ""))
+    if edge_kind in adapter.core_event_edges:
         return True
     if not capability_rollup:
         return True
@@ -38,8 +37,8 @@ def should_schedule_edge(edge_kind: str, capability_rollup: dict[str, str] | Non
 def edge_jobs_for_event(job, capability_rollup: dict[str, str] | None) -> tuple[object, ...]:
     status_type = str(job.params.get("status_type") or "").strip().lower()
     planned = []
-    for edge_kind in event_edge_candidates(status_type):
-        if not should_schedule_edge(edge_kind, capability_rollup):
+    for edge_kind in event_edge_candidates(sport_slug=job.sport_slug, status_type=status_type):
+        if not should_schedule_edge(edge_kind, capability_rollup, sport_slug=job.sport_slug):
             continue
         planned.append(
             job.spawn_child(

@@ -105,6 +105,26 @@ class PlannerTests(unittest.TestCase):
 
         self.assertTrue(any(item.job_type == JOB_FINALIZE_EVENT for item in planned))
 
+    def test_baseball_uses_adapter_specific_core_edges(self) -> None:
+        planner = Planner()
+        job = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="baseball",
+            entity_type="event",
+            entity_id=15507996,
+            scope="live",
+            params={"status_type": "inprogress"},
+            priority=1,
+            trace_id="trace-1",
+        )
+
+        planned = planner.expand(job)
+        kinds = {item.params.get("edge_kind") for item in planned if item.job_type == JOB_HYDRATE_EVENT_EDGE}
+
+        self.assertIn("statistics", kinds)
+        self.assertIn("lineups", kinds)
+        self.assertNotIn("incidents", kinds)
+
     def test_season_widgets_follow_sport_profile(self) -> None:
         planner = Planner()
 
