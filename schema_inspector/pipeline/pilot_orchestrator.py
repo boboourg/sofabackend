@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,8 +23,9 @@ from ..endpoints import (
 )
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
-from ..jobs.types import JOB_HYDRATE_EVENT_ROOT
+from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
+from ..workers.live_worker import LiveWorker
 
 
 EVENT_STATISTICS_ENDPOINT = SofascoreEndpoint(
@@ -39,6 +41,9 @@ class PilotRunReport:
     event_id: int
     fetch_outcomes: tuple[FetchOutcomeEnvelope, ...]
     parse_results: tuple[object, ...]
+    live_lane: str | None = None
+    live_stream: str | None = None
+    finalized: bool = False
 
 
 @dataclass
@@ -103,6 +108,10 @@ class PilotOrchestrator:
         planner,
         capability_repository,
         sql_executor,
+        live_worker=None,
+        live_state_store=None,
+        stream_queue=None,
+        now_ms_factory=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -110,6 +119,12 @@ class PilotOrchestrator:
         self.planner = planner
         self.capability_repository = capability_repository
         self.sql_executor = sql_executor
+        self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
+        self.live_worker = live_worker or LiveWorker(now_ms_factory=self.now_ms_factory)
+        if hasattr(self.live_worker, "now_ms_factory"):
+            self.live_worker.now_ms_factory = self.now_ms_factory
+        self.live_state_store = live_state_store
+        self.stream_queue = stream_queue
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
 
     async def run_event(self, *, event_id: int, sport_slug: str) -> PilotRunReport:
@@ -118,6 +133,9 @@ class PilotOrchestrator:
 
         fetch_outcomes: list[FetchOutcomeEnvelope] = []
         parse_results: list[object] = []
+        live_lane: str | None = None
+        live_stream: str | None = None
+        finalized = False
 
         root_outcome, root_parse = await self._fetch_and_parse(
             endpoint=EVENT_DETAIL_ENDPOINT,
@@ -135,12 +153,14 @@ class PilotOrchestrator:
         status_type = None
         season_id = None
         unique_tournament_id = None
+        start_timestamp = None
         if root_parse is not None:
             event_rows = root_parse.entity_upserts.get("event", ())
             season_rows = root_parse.entity_upserts.get("season", ())
             unique_tournament_rows = root_parse.entity_upserts.get("unique_tournament", ())
             if event_rows:
                 status_type = event_rows[0].get("status_type")
+                start_timestamp = event_rows[0].get("start_timestamp")
             if season_rows:
                 season_id = season_rows[0].get("id")
             if unique_tournament_rows:
@@ -156,7 +176,8 @@ class PilotOrchestrator:
             priority=0,
             trace_id=f"pilot:{sport_slug}:{event_id}",
         )
-        for edge_job in self.planner.expand(root_job):
+        planned_jobs = self.planner.expand(root_job)
+        for edge_job in planned_jobs:
             edge_kind = str(edge_job.params.get("edge_kind") or "")
             endpoint = _endpoint_for_edge_kind(edge_kind)
             if endpoint is None:
@@ -173,6 +194,58 @@ class PilotOrchestrator:
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
+
+        minutes_to_start = _minutes_to_start(
+            start_timestamp=start_timestamp,
+            now_ms=int(self.now_ms_factory()),
+        )
+        tracked_live = False
+        for planned_job in planned_jobs:
+            if planned_job.job_type == JOB_TRACK_LIVE_EVENT:
+                track_result = self.live_worker.track_event(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    status_type=status_type,
+                    minutes_to_start=minutes_to_start,
+                    trace_id=root_job.trace_id,
+                    live_state_store=self.live_state_store,
+                    stream_queue=self.stream_queue,
+                )
+                live_lane = track_result.decision.lane
+                live_stream = track_result.stream
+                tracked_live = True
+            if planned_job.job_type == JOB_FINALIZE_EVENT:
+                final_outcomes, final_parses = await self._run_final_sweep(
+                    event_id=event_id,
+                    sport_slug=sport_slug,
+                )
+                fetch_outcomes.extend(final_outcomes)
+                parse_results.extend(final_parses)
+                self.live_worker.finalize_event(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    status_type=status_type,
+                    live_state_store=self.live_state_store,
+                )
+                finalized = True
+
+        if (
+            not tracked_live
+            and not finalized
+            and minutes_to_start is not None
+            and minutes_to_start <= 30
+        ):
+            track_result = self.live_worker.track_event(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                status_type=status_type,
+                minutes_to_start=minutes_to_start,
+                trace_id=root_job.trace_id,
+                live_state_store=self.live_state_store,
+                stream_queue=self.stream_queue,
+            )
+            live_lane = track_result.decision.lane
+            live_stream = track_result.stream
 
         hydrated_entities: set[tuple[str, int]] = set()
         while True:
@@ -243,6 +316,9 @@ class PilotOrchestrator:
             event_id=event_id,
             fetch_outcomes=tuple(fetch_outcomes),
             parse_results=tuple(parse_results),
+            live_lane=live_lane,
+            live_stream=live_stream,
+            finalized=finalized,
         )
 
     def replay_snapshot(self, snapshot_id: int):
@@ -284,6 +360,33 @@ class PilotOrchestrator:
             snapshot = self.snapshot_store.load_snapshot(outcome.snapshot_id)
             parsed = self.normalize_worker.handle(snapshot)
         return outcome, parsed
+
+    async def _run_final_sweep(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str,
+    ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
+        outcomes: list[FetchOutcomeEnvelope] = []
+        parses: list[object] = []
+        for endpoint in (
+            EVENT_STATISTICS_ENDPOINT,
+            EVENT_LINEUPS_ENDPOINT,
+            EVENT_INCIDENTS_ENDPOINT,
+        ):
+            outcome, parsed = await self._fetch_and_parse(
+                endpoint=endpoint,
+                sport_slug=sport_slug,
+                path_params={"event_id": event_id},
+                context_entity_type="event",
+                context_entity_id=event_id,
+                context_event_id=event_id,
+                fetch_reason=JOB_FINALIZE_EVENT,
+            )
+            outcomes.append(outcome)
+            if parsed is not None:
+                parses.append(parsed)
+        return outcomes, parses
 
     async def _record_capability(
         self,
@@ -380,3 +483,10 @@ def _entity_profile_targets(
                 seen.add(("manager", manager_id))
                 planned.append((MANAGER_ENDPOINT, "manager", manager_id))
     return tuple(planned)
+
+
+def _minutes_to_start(*, start_timestamp: object, now_ms: int) -> int | None:
+    if not isinstance(start_timestamp, int):
+        return None
+    delta_seconds = start_timestamp - (now_ms // 1000)
+    return int(delta_seconds // 60)
