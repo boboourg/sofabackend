@@ -1046,12 +1046,13 @@ class EventDetailRepository(EventListRepository):
         )
 
     async def _upsert_event_lineup_players(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        known_team_ids = {item.id for item in bundle.teams}
         rows = [
             (
                 item.event_id,
                 item.side,
                 item.player_id,
-                item.team_id,
+                item.team_id if item.team_id in known_team_ids else None,
                 item.position,
                 item.substitute,
                 item.shirt_number,

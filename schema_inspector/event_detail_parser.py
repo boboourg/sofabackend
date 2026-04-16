@@ -1507,6 +1507,11 @@ class _EventDetailAccumulator:
                 player_id = self.ingest_player(_as_mapping(item.get("player")), team_id=_as_int(item.get("teamId")))
                 if player_id is None:
                     continue
+                resolved_team_id = _as_int(item.get("teamId"))
+                if resolved_team_id is None:
+                    player_row = self.players.get(player_id)
+                    if player_row:
+                        resolved_team_id = _as_int(player_row.get("team_id"))
                 self._merge(
                     self.event_lineup_players,
                     (event_id, side, player_id),
@@ -1514,7 +1519,7 @@ class _EventDetailAccumulator:
                         "event_id": event_id,
                         "side": side,
                         "player_id": player_id,
-                        "team_id": _as_int(item.get("teamId")),
+                        "team_id": resolved_team_id,
                         "position": _as_str(item.get("position")),
                         "substitute": _as_bool(item.get("substitute")),
                         "shirt_number": _as_int(item.get("shirtNumber")),

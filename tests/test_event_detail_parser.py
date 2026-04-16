@@ -87,6 +87,37 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bundle.players[0].team_id, 1073591)
         self.assertEqual({team.id for team in bundle.teams}, {1073591})
 
+    def test_ingest_lineup_player_adds_embedded_team_dependency(self) -> None:
+        accumulator = _EventDetailAccumulator()
+
+        accumulator.ingest_lineups(
+            14083191,
+            {
+                "home": {
+                    "players": [
+                        {
+                            "player": {
+                                "id": 700,
+                                "slug": "saka",
+                                "name": "Bukayo Saka",
+                                "team": {
+                                    "id": 1073591,
+                                    "slug": "arsenal-u21",
+                                    "name": "Arsenal U21",
+                                },
+                            },
+                            "position": "F",
+                            "substitute": False,
+                        }
+                    ]
+                }
+            },
+        )
+        bundle = accumulator.to_bundle(sport_slug="football")
+
+        self.assertEqual({team.id for team in bundle.teams}, {1073591})
+        self.assertEqual(bundle.event_lineup_players[0].team_id, 1073591)
+
     def test_exact_endpoint_templates_match_sofascore_paths(self) -> None:
         self.assertEqual(
             EVENT_DETAIL_ENDPOINT.build_url(event_id=14083191),

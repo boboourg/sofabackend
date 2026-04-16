@@ -356,6 +356,39 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(player_insert[6])
 
+    async def test_event_detail_repository_drops_orphan_lineup_player_team_foreign_keys(self) -> None:
+        bundle = _build_bundle()
+        bundle = EventDetailBundle(
+            **{
+                **bundle.__dict__,
+                "event_lineup_players": (
+                    EventLineupPlayerRecord(
+                        event_id=14083191,
+                        side="home",
+                        player_id=700,
+                        team_id=1073591,
+                        position="F",
+                        substitute=False,
+                        shirt_number=7,
+                        jersey_number="7",
+                        avg_rating=7.1,
+                    ),
+                ),
+            }
+        )
+        executor = _FakeExecutor()
+        repository = EventDetailRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        lineup_player_insert = next(
+            args
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO event_lineup_player (" in sql
+            for args in rows
+        )
+        self.assertIsNone(lineup_player_insert[3])
+
     async def test_event_detail_ingest_job_uses_transaction_and_repository(self) -> None:
         bundle = _build_bundle()
         parser = _FakeParser(bundle)
