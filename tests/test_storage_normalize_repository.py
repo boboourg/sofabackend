@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.normalizers.sink import DurableNormalizeSink
-from schema_inspector.parsers.base import ParseResult
+from schema_inspector.parsers.base import ParseResult, RawSnapshot
+from schema_inspector.parsers.families.event_root import EventRootParser
 from schema_inspector.storage.normalize_repository import NormalizeRepository
 
 
@@ -192,6 +193,69 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO baseball_inning" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO shotmap_point" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO esports_game" in sql for sql in statements))
+
+    async def test_persists_event_root_entities_in_dependency_order(self) -> None:
+        parser = EventRootParser()
+        snapshot = RawSnapshot(
+            snapshot_id=900,
+            endpoint_pattern="/api/v1/event/{event_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14083191",
+            resolved_url="https://www.sofascore.com/api/v1/event/14083191",
+            envelope_key="event",
+            http_status=200,
+            payload={
+                "event": {
+                    "id": 14083191,
+                    "slug": "arsenal-chelsea",
+                    "tournament": {
+                        "id": 100,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category": {
+                            "id": 1,
+                            "slug": "england",
+                            "name": "England",
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                        "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                    },
+                    "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                    "venue": {"id": 55, "slug": "emirates-stadium", "name": "Emirates Stadium"},
+                    "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                    "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                    "status": {"type": "inprogress"},
+                    "startTimestamp": 1775779200,
+                }
+            },
+            fetched_at="2026-04-17T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=14083191,
+            context_event_id=14083191,
+        )
+        result = parser.parse(snapshot)
+        executor = _FakeExecutor()
+
+        await NormalizeRepository().persist_parse_result(executor, result)
+
+        statements = [query for query, _ in executor.executemany_calls]
+        sport_index = next(i for i, sql in enumerate(statements) if "INSERT INTO sport" in sql)
+        category_index = next(i for i, sql in enumerate(statements) if "INSERT INTO category" in sql)
+        unique_tournament_index = next(i for i, sql in enumerate(statements) if "INSERT INTO unique_tournament" in sql)
+        tournament_index = next(i for i, sql in enumerate(statements) if "INSERT INTO tournament" in sql)
+        team_index = next(i for i, sql in enumerate(statements) if "INSERT INTO team" in sql)
+        event_index = next(i for i, sql in enumerate(statements) if "INSERT INTO event" in sql)
+
+        self.assertLess(sport_index, category_index)
+        self.assertLess(category_index, unique_tournament_index)
+        self.assertLess(unique_tournament_index, tournament_index)
+        self.assertLess(tournament_index, team_index)
+        self.assertLess(team_index, event_index)
+
+        event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event" in sql)
+        self.assertEqual(event_rows[0][2], 100)
+        self.assertEqual(event_rows[0][3], 17)
+        self.assertEqual(event_rows[0][4], 76986)
 
 
 if __name__ == "__main__":

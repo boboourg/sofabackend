@@ -79,22 +79,28 @@ def _normalize_entity(
         if entity_id is None:
             return None
         sport = _as_mapping(mapping.get("sport"))
+        country = _as_mapping(mapping.get("country"))
         return {
             "id": entity_id,
             "slug": _as_str(mapping.get("slug")),
             "name": _as_str(mapping.get("name")),
             "sport_id": _as_int(sport.get("id")) if sport is not None else None,
+            "country_alpha2": _as_str(country.get("alpha2")) if country is not None else None,
         }
     if entity_type == "unique_tournament":
         entity_id = _as_int(mapping.get("id"))
         if entity_id is None:
             return None
         category = _as_mapping(mapping.get("category"))
+        if category is None and parent_mapping is not None:
+            category = _as_mapping(parent_mapping.get("category"))
+        country = _as_mapping(mapping.get("country"))
         return {
             "id": entity_id,
             "slug": _as_str(mapping.get("slug")),
             "name": _as_str(mapping.get("name")),
             "category_id": _as_int(category.get("id")) if category is not None else None,
+            "country_alpha2": _as_str(country.get("alpha2")) if country is not None else None,
         }
     if entity_type == "tournament":
         entity_id = _as_int(mapping.get("id"))
@@ -129,10 +135,12 @@ def _normalize_entity(
         home_team = _as_mapping(mapping.get("homeTeam"))
         away_team = _as_mapping(mapping.get("awayTeam"))
         status = _as_mapping(mapping.get("status"))
+        unique_tournament = _as_mapping(tournament.get("uniqueTournament")) if tournament is not None else None
         return {
             "id": entity_id,
             "slug": _as_str(mapping.get("slug")),
             "tournament_id": _as_int(tournament.get("id")) if tournament is not None else None,
+            "unique_tournament_id": _as_int(unique_tournament.get("id")) if unique_tournament is not None else None,
             "season_id": _as_int(season.get("id")) if season is not None else None,
             "venue_id": _as_int(venue.get("id")) if venue is not None else None,
             "home_team_id": _as_int(home_team.get("id")) if home_team is not None else None,
@@ -145,12 +153,36 @@ def _normalize_entity(
         if entity_id is None:
             return None
         manager = _as_mapping(mapping.get("manager"))
+        venue = _as_mapping(mapping.get("venue"))
+        sport = _as_mapping(mapping.get("sport"))
+        category = _as_mapping(mapping.get("category"))
+        country = _as_mapping(mapping.get("country"))
+        tournament = _as_mapping(mapping.get("tournament"))
+        primary_unique_tournament = _as_mapping(mapping.get("primaryUniqueTournament"))
+        if parent_mapping is not None:
+            parent_tournament = _as_mapping(parent_mapping.get("tournament"))
+            if tournament is None:
+                tournament = parent_tournament
+            if primary_unique_tournament is None and parent_tournament is not None:
+                primary_unique_tournament = _as_mapping(parent_tournament.get("uniqueTournament"))
+            if category is None and parent_tournament is not None:
+                category = _as_mapping(parent_tournament.get("category"))
+            if sport is None and category is not None:
+                sport = _as_mapping(category.get("sport"))
         return {
             "id": entity_id,
             "slug": _as_str(mapping.get("slug")),
             "name": _as_str(mapping.get("name")),
             "short_name": _as_str(mapping.get("shortName")),
             "manager_id": _as_int(manager.get("id")) if manager is not None else None,
+            "venue_id": _as_int(venue.get("id")) if venue is not None else None,
+            "sport_id": _as_int(sport.get("id")) if sport is not None else None,
+            "category_id": _as_int(category.get("id")) if category is not None else None,
+            "country_alpha2": _as_str(country.get("alpha2")) if country is not None else None,
+            "tournament_id": _as_int(tournament.get("id")) if tournament is not None else None,
+            "primary_unique_tournament_id": (
+                _as_int(primary_unique_tournament.get("id")) if primary_unique_tournament is not None else None
+            ),
         }
     if entity_type == "player":
         entity_id = _as_int(mapping.get("id"))

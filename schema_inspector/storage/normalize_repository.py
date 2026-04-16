@@ -84,6 +84,10 @@ class NormalizeRepository:
         entity_upserts: dict[str, tuple[Mapping[str, object], ...]],
     ) -> dict[str, set[int]]:
         inserted: dict[str, set[int]] = {
+            "sport": set(),
+            "category": set(),
+            "unique_tournament": set(),
+            "tournament": set(),
             "season": set(),
             "venue": set(),
             "manager": set(),
@@ -91,6 +95,128 @@ class NormalizeRepository:
             "player": set(),
             "event": set(),
         }
+
+        sport_rows = [
+            (row.get("id"), row.get("slug"), row.get("name"))
+            for row in entity_upserts.get("sport", ())
+            if row.get("id") is not None and row.get("slug") and row.get("name")
+        ]
+        if sport_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO sport (id, slug, name)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name
+                """,
+                sport_rows,
+            )
+            inserted["sport"].update(int(row[0]) for row in sport_rows if row[0] is not None)
+
+        category_rows = []
+        for row in entity_upserts.get("category", ()):
+            category_id = row.get("id")
+            sport_id = row.get("sport_id")
+            if category_id is None or not row.get("slug") or not row.get("name") or sport_id not in inserted["sport"]:
+                continue
+            category_rows.append(
+                (
+                    category_id,
+                    row.get("slug"),
+                    row.get("name"),
+                    sport_id,
+                    row.get("country_alpha2"),
+                )
+            )
+        if category_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO category (id, slug, name, sport_id, country_alpha2)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    sport_id = EXCLUDED.sport_id,
+                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, category.country_alpha2)
+                """,
+                category_rows,
+            )
+            inserted["category"].update(int(row[0]) for row in category_rows if row[0] is not None)
+
+        unique_tournament_rows = []
+        for row in entity_upserts.get("unique_tournament", ()):
+            unique_tournament_id = row.get("id")
+            category_id = row.get("category_id")
+            if (
+                unique_tournament_id is None
+                or not row.get("slug")
+                or not row.get("name")
+                or category_id not in inserted["category"]
+            ):
+                continue
+            unique_tournament_rows.append(
+                (
+                    unique_tournament_id,
+                    row.get("slug"),
+                    row.get("name"),
+                    category_id,
+                    row.get("country_alpha2"),
+                )
+            )
+        if unique_tournament_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO unique_tournament (id, slug, name, category_id, country_alpha2)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    category_id = EXCLUDED.category_id,
+                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, unique_tournament.country_alpha2)
+                """,
+                unique_tournament_rows,
+            )
+            inserted["unique_tournament"].update(int(row[0]) for row in unique_tournament_rows if row[0] is not None)
+
+        tournament_rows = []
+        for row in entity_upserts.get("tournament", ()):
+            tournament_id = row.get("id")
+            category_id = row.get("category_id")
+            unique_tournament_id = row.get("unique_tournament_id")
+            if tournament_id is None or not row.get("name"):
+                continue
+            if category_id not in inserted["category"]:
+                continue
+            if unique_tournament_id is not None and unique_tournament_id not in inserted["unique_tournament"]:
+                unique_tournament_id = None
+            tournament_rows.append(
+                (
+                    tournament_id,
+                    row.get("slug"),
+                    row.get("name"),
+                    category_id,
+                    unique_tournament_id,
+                )
+            )
+        if tournament_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO tournament (id, slug, name, category_id, unique_tournament_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = COALESCE(EXCLUDED.slug, tournament.slug),
+                    name = EXCLUDED.name,
+                    category_id = EXCLUDED.category_id,
+                    unique_tournament_id = COALESCE(EXCLUDED.unique_tournament_id, tournament.unique_tournament_id)
+                """,
+                tournament_rows,
+            )
+            inserted["tournament"].update(int(row[0]) for row in tournament_rows if row[0] is not None)
 
         season_rows = [
             (row.get("id"), row.get("name"), row.get("year"), row.get("editor"))
@@ -157,25 +283,62 @@ class NormalizeRepository:
             team_id = row.get("id")
             if team_id is None or not row.get("slug") or not row.get("name"):
                 continue
+            sport_id = row.get("sport_id")
+            if sport_id not in inserted["sport"]:
+                sport_id = None
+            category_id = row.get("category_id")
+            if category_id not in inserted["category"]:
+                category_id = None
             manager_id = row.get("manager_id")
             if manager_id not in inserted["manager"]:
                 manager_id = None
             venue_id = row.get("venue_id")
             if venue_id not in inserted["venue"]:
                 venue_id = None
-            team_rows.append((team_id, row.get("slug"), row.get("name"), row.get("short_name"), manager_id, venue_id))
+            tournament_id = row.get("tournament_id")
+            if tournament_id not in inserted["tournament"]:
+                tournament_id = None
+            primary_unique_tournament_id = row.get("primary_unique_tournament_id")
+            if primary_unique_tournament_id not in inserted["unique_tournament"]:
+                primary_unique_tournament_id = None
+            team_rows.append(
+                (
+                    team_id,
+                    row.get("slug"),
+                    row.get("name"),
+                    row.get("short_name"),
+                    sport_id,
+                    category_id,
+                    row.get("country_alpha2"),
+                    manager_id,
+                    venue_id,
+                    tournament_id,
+                    primary_unique_tournament_id,
+                )
+            )
         if team_rows:
             await _executemany(
                 executor,
                 """
-                INSERT INTO team (id, slug, name, short_name, manager_id, venue_id)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO team (
+                    id, slug, name, short_name, sport_id, category_id, country_alpha2,
+                    manager_id, venue_id, tournament_id, primary_unique_tournament_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT (id) DO UPDATE SET
                     slug = EXCLUDED.slug,
                     name = EXCLUDED.name,
-                    short_name = EXCLUDED.short_name,
-                    manager_id = EXCLUDED.manager_id,
-                    venue_id = EXCLUDED.venue_id
+                    short_name = COALESCE(EXCLUDED.short_name, team.short_name),
+                    sport_id = COALESCE(EXCLUDED.sport_id, team.sport_id),
+                    category_id = COALESCE(EXCLUDED.category_id, team.category_id),
+                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, team.country_alpha2),
+                    manager_id = COALESCE(EXCLUDED.manager_id, team.manager_id),
+                    venue_id = COALESCE(EXCLUDED.venue_id, team.venue_id),
+                    tournament_id = COALESCE(EXCLUDED.tournament_id, team.tournament_id),
+                    primary_unique_tournament_id = COALESCE(
+                        EXCLUDED.primary_unique_tournament_id,
+                        team.primary_unique_tournament_id
+                    )
                 """,
                 team_rows,
             )
@@ -211,6 +374,12 @@ class NormalizeRepository:
             event_id = row.get("id")
             if event_id is None:
                 continue
+            tournament_id = row.get("tournament_id")
+            if tournament_id not in inserted["tournament"]:
+                tournament_id = None
+            unique_tournament_id = row.get("unique_tournament_id")
+            if unique_tournament_id not in inserted["unique_tournament"]:
+                unique_tournament_id = None
             season_id = row.get("season_id")
             if season_id not in inserted["season"]:
                 season_id = None
@@ -223,19 +392,36 @@ class NormalizeRepository:
             venue_id = row.get("venue_id")
             if venue_id not in inserted["venue"]:
                 venue_id = None
-            event_rows.append((event_id, row.get("slug"), season_id, home_team_id, away_team_id, venue_id, row.get("start_timestamp")))
+            event_rows.append(
+                (
+                    event_id,
+                    row.get("slug"),
+                    tournament_id,
+                    unique_tournament_id,
+                    season_id,
+                    home_team_id,
+                    away_team_id,
+                    venue_id,
+                    row.get("start_timestamp"),
+                )
+            )
         if event_rows:
             await _executemany(
                 executor,
                 """
-                INSERT INTO event (id, slug, season_id, home_team_id, away_team_id, venue_id, start_timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO event (
+                    id, slug, tournament_id, unique_tournament_id, season_id,
+                    home_team_id, away_team_id, venue_id, start_timestamp
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (id) DO UPDATE SET
-                    slug = EXCLUDED.slug,
-                    season_id = EXCLUDED.season_id,
-                    home_team_id = EXCLUDED.home_team_id,
-                    away_team_id = EXCLUDED.away_team_id,
-                    venue_id = EXCLUDED.venue_id,
+                    slug = COALESCE(EXCLUDED.slug, event.slug),
+                    tournament_id = COALESCE(EXCLUDED.tournament_id, event.tournament_id),
+                    unique_tournament_id = COALESCE(EXCLUDED.unique_tournament_id, event.unique_tournament_id),
+                    season_id = COALESCE(EXCLUDED.season_id, event.season_id),
+                    home_team_id = COALESCE(EXCLUDED.home_team_id, event.home_team_id),
+                    away_team_id = COALESCE(EXCLUDED.away_team_id, event.away_team_id),
+                    venue_id = COALESCE(EXCLUDED.venue_id, event.venue_id),
                     start_timestamp = EXCLUDED.start_timestamp
                 """,
                 event_rows,
