@@ -32,6 +32,7 @@ from .endpoints import (
     sport_trending_top_players_endpoint,
 )
 from .entities_parser import _PLAYER_STATISTICS_INTEGER_COLUMNS, _PLAYER_STATISTICS_METRIC_COLUMN_MAP
+from .sport_profiles import resolve_sport_profile
 from .statistics_parser import _INTEGER_METRIC_COLUMNS, _METRIC_COLUMN_MAP
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -378,6 +379,9 @@ def _build_sport_specific_core_paths(op) -> dict[str, Any]:
 def _build_sport_specific_leaderboard_paths(op) -> dict[str, Any]:
     paths: dict[str, Any] = {}
     for sport_slug in LOCAL_API_SUPPORTED_SPORTS:
+        profile = resolve_sport_profile(sport_slug)
+        if not profile.include_trending_top_players:
+            continue
         prefix = _sport_operation_prefix(sport_slug)
         paths[sport_trending_top_players_endpoint(sport_slug).path_template] = op(
             path_template=sport_trending_top_players_endpoint(sport_slug).path_template,

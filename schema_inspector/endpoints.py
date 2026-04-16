@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
+from .sport_profiles import resolve_sport_profile
+
 SOFASCORE_BASE_URL = "https://www.sofascore.com"
 
 LOCAL_API_SUPPORTED_SPORTS = ("football", "basketball", "tennis")
@@ -157,6 +159,36 @@ def sport_scheduled_tournaments_endpoint(sport_slug: str = "football") -> Sofasc
     )
 
 
+def sport_live_categories_endpoint(sport_slug: str = "football") -> SofascoreEndpoint:
+    normalized_sport_slug = _normalize_sport_slug(sport_slug)
+    return SofascoreEndpoint(
+        path_template=f"/api/v1/sport/{normalized_sport_slug}/live-categories",
+        envelope_key="categories",
+        target_table="api_payload_snapshot",
+        notes=f"Live category discovery surface for {normalized_sport_slug}.",
+    )
+
+
+def sport_live_tournaments_endpoint(sport_slug: str = "football") -> SofascoreEndpoint:
+    normalized_sport_slug = _normalize_sport_slug(sport_slug)
+    return SofascoreEndpoint(
+        path_template=f"/api/v1/sport/{normalized_sport_slug}/live-tournaments",
+        envelope_key="tournaments",
+        target_table="api_payload_snapshot",
+        notes=f"Live tournament discovery surface for {normalized_sport_slug}.",
+    )
+
+
+def sport_finished_upcoming_tournaments_endpoint(sport_slug: str = "football") -> SofascoreEndpoint:
+    normalized_sport_slug = _normalize_sport_slug(sport_slug)
+    return SofascoreEndpoint(
+        path_template=f"/api/v1/sport/{normalized_sport_slug}/finished-upcoming-tournaments",
+        envelope_key="tournaments",
+        target_table="api_payload_snapshot",
+        notes=f"Finished/upcoming tournament window for {normalized_sport_slug}.",
+    )
+
+
 CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/category/{category_id}/unique-tournaments",
     envelope_key="groups",
@@ -221,6 +253,46 @@ UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT = SofascoreEndpoint(
     target_table="event",
 )
 
+
+def season_rounds_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds",
+        envelope_key="rounds",
+        target_table="api_payload_snapshot",
+    )
+
+
+def season_last_events_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}",
+        envelope_key="events",
+        target_table="event",
+    )
+
+
+def season_next_events_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}",
+        envelope_key="events",
+        target_table="event",
+    )
+
+
+def calendar_months_with_events_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/calendar/unique-tournament/{unique_tournament_id}/season/{season_id}/months-with-events",
+        envelope_key="months",
+        target_table="api_payload_snapshot",
+    )
+
+
+def category_live_events_count_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/category/{category_id}/events/live-count",
+        envelope_key="count",
+        target_table="api_payload_snapshot",
+    )
+
 def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoint, ...]:
     return (
         sport_scheduled_events_endpoint(sport_slug),
@@ -235,28 +307,34 @@ EVENT_LIST_ENDPOINTS = event_list_endpoints("football")
 
 
 def sport_local_leaderboard_endpoints(sport_slug: str) -> tuple[SofascoreEndpoint, ...]:
-    normalized_sport_slug = _normalize_sport_slug(sport_slug)
-    endpoints: list[SofascoreEndpoint] = []
-
-    if normalized_sport_slug == "football":
-        return LEADERBOARDS_ENDPOINTS
-
-    if normalized_sport_slug == "basketball":
-        endpoints.extend(
-            (
-                unique_tournament_top_players_endpoint("regularSeason"),
-                unique_tournament_top_players_per_game_endpoint("all/regularSeason"),
-                team_scoped_top_players_endpoint("overall"),
-                unique_tournament_top_teams_endpoint("regularSeason"),
-                sport_trending_top_players_endpoint(normalized_sport_slug),
-            )
+    profile = resolve_sport_profile(sport_slug)
+    return tuple(
+        endpoint
+        for endpoint in (
+            unique_tournament_top_players_endpoint(profile.top_players_suffix)
+            if profile.top_players_suffix
+            else None,
+            UNIQUE_TOURNAMENT_TOP_RATINGS_OVERALL_ENDPOINT if profile.include_top_ratings else None,
+            unique_tournament_top_players_per_game_endpoint(profile.top_players_per_game_suffix)
+            if profile.top_players_per_game_suffix
+            else None,
+            team_scoped_top_players_endpoint(profile.team_top_players_suffix)
+            if profile.team_top_players_suffix
+            else None,
+            UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_RACE_ENDPOINT if profile.include_player_of_the_season_race else None,
+            unique_tournament_top_teams_endpoint(profile.top_teams_suffix) if profile.top_teams_suffix else None,
+            UNIQUE_TOURNAMENT_VENUES_ENDPOINT if profile.include_venues else None,
+            UNIQUE_TOURNAMENT_GROUPS_ENDPOINT if profile.include_groups else None,
+            UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT if profile.include_player_of_the_season else None,
+            UNIQUE_TOURNAMENT_TEAM_OF_THE_WEEK_PERIODS_ENDPOINT if profile.include_team_of_the_week else None,
+            UNIQUE_TOURNAMENT_TEAM_OF_THE_WEEK_ENDPOINT if profile.include_team_of_the_week else None,
+            UNIQUE_TOURNAMENT_PLAYER_STATISTICS_TYPES_ENDPOINT if profile.include_statistics_types else None,
+            UNIQUE_TOURNAMENT_TEAM_STATISTICS_TYPES_ENDPOINT if profile.include_statistics_types else None,
+            UNIQUE_TOURNAMENT_TEAM_EVENTS_ENDPOINT if profile.include_team_events else None,
+            sport_trending_top_players_endpoint(profile.sport_slug) if profile.include_trending_top_players else None,
         )
-        return tuple(endpoints)
-
-    if normalized_sport_slug == "tennis":
-        return (sport_trending_top_players_endpoint(normalized_sport_slug),)
-
-    return (sport_trending_top_players_endpoint(normalized_sport_slug),)
+        if endpoint is not None
+    )
 
 
 def local_api_endpoints(sport_slugs: tuple[str, ...] = LOCAL_API_SUPPORTED_SPORTS) -> tuple[SofascoreEndpoint, ...]:
@@ -336,6 +414,12 @@ EVENT_GRAPH_ENDPOINT = SofascoreEndpoint(
     target_table="event_graph",
 )
 
+EVENT_GRAPH_SEQUENCE_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/graph/sequence",
+    envelope_key="graphPoints",
+    target_table="api_payload_snapshot",
+)
+
 EVENT_POINT_BY_POINT_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/point-by-point",
     envelope_key="root",
@@ -374,6 +458,12 @@ EVENT_WINNING_ODDS_ENDPOINT = SofascoreEndpoint(
     target_table="event_winning_odds",
 )
 
+EVENT_WEATHER_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/weather",
+    envelope_key="weather",
+    target_table="api_payload_snapshot",
+)
+
 EVENT_DETAIL_BASE_ENDPOINTS = (
     EVENT_DETAIL_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
@@ -383,10 +473,12 @@ EVENT_DETAIL_BASE_ENDPOINTS = (
     EVENT_VOTES_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_GRAPH_ENDPOINT,
+    EVENT_GRAPH_SEQUENCE_ENDPOINT,
     EVENT_HEATMAP_ENDPOINT,
     EVENT_ODDS_ALL_ENDPOINT,
     EVENT_ODDS_FEATURED_ENDPOINT,
     EVENT_WINNING_ODDS_ENDPOINT,
+    EVENT_WEATHER_ENDPOINT,
 )
 
 EVENT_DETAIL_TENNIS_ENDPOINTS = (
@@ -761,3 +853,8 @@ def leaderboards_registry_entries(
         sport_trending_top_players_endpoint(sport_slug),
     )
     return tuple(endpoint.registry_entry() for endpoint in endpoints)
+
+
+def leaderboards_registry_entries_for_sport(sport_slug: str) -> tuple[EndpointRegistryEntry, ...]:
+    profile = resolve_sport_profile(sport_slug)
+    return tuple(endpoint.registry_entry() for endpoint in sport_local_leaderboard_endpoints(profile.sport_slug))
