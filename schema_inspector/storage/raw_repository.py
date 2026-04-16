@@ -11,6 +11,10 @@ class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
 
 
+class SqlReturningExecutor(SqlExecutor, Protocol):
+    async def fetchval(self, query: str, *args: object) -> Any: ...
+
+
 @dataclass(frozen=True)
 class ApiRequestLogRecord:
     trace_id: str | None
@@ -164,6 +168,69 @@ class RawRepository:
             record.is_valid_json,
             record.is_soft_error_payload,
         )
+
+    async def insert_payload_snapshot_returning_id(
+        self,
+        executor: SqlExecutor,
+        record: PayloadSnapshotRecord,
+    ) -> int | None:
+        query = """
+            INSERT INTO api_payload_snapshot (
+                endpoint_pattern,
+                source_url,
+                resolved_url,
+                envelope_key,
+                context_entity_type,
+                context_entity_id,
+                context_unique_tournament_id,
+                context_season_id,
+                context_event_id,
+                payload,
+                fetched_at,
+                trace_id,
+                job_id,
+                sport_slug,
+                http_status,
+                payload_hash,
+                payload_size_bytes,
+                content_type,
+                is_valid_json,
+                is_soft_error_payload
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+            )
+            RETURNING id
+        """
+        args = (
+            record.endpoint_pattern,
+            record.source_url,
+            record.resolved_url,
+            record.envelope_key,
+            record.context_entity_type,
+            record.context_entity_id,
+            record.context_unique_tournament_id,
+            record.context_season_id,
+            record.context_event_id,
+            _jsonb(record.payload),
+            record.fetched_at,
+            record.trace_id,
+            record.job_id,
+            record.sport_slug,
+            record.http_status,
+            record.payload_hash,
+            record.payload_size_bytes,
+            record.content_type,
+            record.is_valid_json,
+            record.is_soft_error_payload,
+        )
+        fetchval = getattr(executor, "fetchval", None)
+        if callable(fetchval):
+            result = await fetchval(query, *args)
+            return int(result) if result is not None else None
+        await executor.execute(query.replace("RETURNING id", ""), *args)
+        return None
 
     async def upsert_snapshot_head(self, executor: SqlExecutor, record: ApiSnapshotHeadRecord) -> None:
         await executor.execute(
