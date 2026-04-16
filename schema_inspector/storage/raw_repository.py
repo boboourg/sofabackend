@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
+from ..parsers.base import RawSnapshot
+
 
 class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
@@ -13,6 +15,10 @@ class SqlExecutor(Protocol):
 
 class SqlReturningExecutor(SqlExecutor, Protocol):
     async def fetchval(self, query: str, *args: object) -> Any: ...
+
+
+class SqlFetchExecutor(SqlExecutor, Protocol):
+    async def fetchrow(self, query: str, *args: object) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -262,8 +268,56 @@ class RawRepository:
             record.latest_fetched_at,
         )
 
+    async def fetch_payload_snapshot(self, executor: SqlFetchExecutor, snapshot_id: int) -> RawSnapshot:
+        row = await executor.fetchrow(
+            """
+            SELECT
+                id,
+                endpoint_pattern,
+                sport_slug,
+                source_url,
+                resolved_url,
+                envelope_key,
+                http_status,
+                payload,
+                fetched_at,
+                context_entity_type,
+                context_entity_id,
+                context_unique_tournament_id,
+                context_season_id,
+                context_event_id
+            FROM api_payload_snapshot
+            WHERE id = $1
+            """,
+            snapshot_id,
+        )
+        if row is None:
+            raise KeyError(snapshot_id)
+        return RawSnapshot(
+            snapshot_id=int(row["id"]),
+            endpoint_pattern=str(row["endpoint_pattern"]),
+            sport_slug=str(row["sport_slug"] or ""),
+            source_url=str(row["source_url"]),
+            resolved_url=str(row["resolved_url"] or row["source_url"]),
+            envelope_key=str(row["envelope_key"] or "payload"),
+            http_status=int(row["http_status"]) if row["http_status"] is not None else None,
+            payload=row["payload"],
+            fetched_at=str(row["fetched_at"] or ""),
+            context_entity_type=row["context_entity_type"],
+            context_entity_id=_maybe_int(row["context_entity_id"]),
+            context_unique_tournament_id=_maybe_int(row["context_unique_tournament_id"]),
+            context_season_id=_maybe_int(row["context_season_id"]),
+            context_event_id=_maybe_int(row["context_event_id"]),
+        )
+
 
 def _jsonb(value: object) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _maybe_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)

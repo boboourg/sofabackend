@@ -10,6 +10,10 @@ class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
 
 
+class SqlFetchExecutor(SqlExecutor, Protocol):
+    async def fetch(self, query: str, *args: object) -> Any: ...
+
+
 @dataclass(frozen=True)
 class EventLiveStateHistoryRecord:
     event_id: int
@@ -75,3 +79,60 @@ class LiveStateRepository:
             record.finalized_at,
             record.final_snapshot_id,
         )
+
+    async def fetch_latest_live_state_history(
+        self,
+        executor: SqlFetchExecutor,
+    ) -> tuple[EventLiveStateHistoryRecord, ...]:
+        rows = await executor.fetch(
+            """
+            SELECT DISTINCT ON (event_id)
+                event_id,
+                observed_status_type,
+                poll_profile,
+                home_score,
+                away_score,
+                period_label,
+                observed_at
+            FROM event_live_state_history
+            ORDER BY event_id, observed_at DESC
+            """
+        )
+        return tuple(
+            EventLiveStateHistoryRecord(
+                event_id=int(row["event_id"]),
+                observed_status_type=row["observed_status_type"],
+                poll_profile=row["poll_profile"],
+                home_score=_maybe_int(row["home_score"]),
+                away_score=_maybe_int(row["away_score"]),
+                period_label=row["period_label"],
+                observed_at=str(row["observed_at"]),
+            )
+            for row in rows
+        )
+
+    async def fetch_terminal_states(
+        self,
+        executor: SqlFetchExecutor,
+    ) -> tuple[EventTerminalStateRecord, ...]:
+        rows = await executor.fetch(
+            """
+            SELECT event_id, terminal_status, finalized_at, final_snapshot_id
+            FROM event_terminal_state
+            """
+        )
+        return tuple(
+            EventTerminalStateRecord(
+                event_id=int(row["event_id"]),
+                terminal_status=str(row["terminal_status"]),
+                finalized_at=str(row["finalized_at"]),
+                final_snapshot_id=_maybe_int(row["final_snapshot_id"]),
+            )
+            for row in rows
+        )
+
+
+def _maybe_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)
