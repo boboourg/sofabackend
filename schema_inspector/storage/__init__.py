@@ -2,6 +2,7 @@
 
 from .capability_repository import CapabilityObservationRecord, CapabilityRepository, CapabilityRollupRecord
 from .job_repository import JobEffectRecord, JobRepository, JobRunRecord, ReplayLogRecord
+from .live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord, LiveStateRepository
 from .raw_repository import ApiRequestLogRecord, ApiSnapshotHeadRecord, PayloadSnapshotRecord, RawRepository
 
 __all__ = [
@@ -16,4 +17,7 @@ __all__ = [
     "CapabilityObservationRecord",
     "CapabilityRollupRecord",
     "CapabilityRepository",
+    "EventLiveStateHistoryRecord",
+    "EventTerminalStateRecord",
+    "LiveStateRepository",
 ]

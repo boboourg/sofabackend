@@ -29,6 +29,7 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
 from ..parsers.sports import resolve_sport_adapter
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
+from ..storage.live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord
 from ..workers.live_worker import LiveWorker
 
 
@@ -114,6 +115,7 @@ class PilotOrchestrator:
         sql_executor,
         live_worker=None,
         live_state_store=None,
+        live_state_repository=None,
         stream_queue=None,
         now_ms_factory=None,
     ) -> None:
@@ -128,6 +130,7 @@ class PilotOrchestrator:
         if hasattr(self.live_worker, "now_ms_factory"):
             self.live_worker.now_ms_factory = self.now_ms_factory
         self.live_state_store = live_state_store
+        self.live_state_repository = live_state_repository
         self.stream_queue = stream_queue
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
 
@@ -218,6 +221,12 @@ class PilotOrchestrator:
                 live_lane = track_result.decision.lane
                 live_stream = track_result.stream
                 tracked_live = True
+                await self._record_live_state_history(
+                    event_id=event_id,
+                    status_type=status_type,
+                    poll_profile=track_result.decision.lane,
+                    observed_at=root_outcome.fetched_at,
+                )
             if planned_job.job_type == JOB_FINALIZE_EVENT:
                 final_outcomes, final_parses = await self._run_final_sweep(
                     event_id=event_id,
@@ -230,6 +239,19 @@ class PilotOrchestrator:
                     event_id=event_id,
                     status_type=status_type,
                     live_state_store=self.live_state_store,
+                )
+                final_snapshot_id = _latest_snapshot_id(final_outcomes) or root_outcome.snapshot_id
+                await self._record_live_state_history(
+                    event_id=event_id,
+                    status_type=status_type,
+                    poll_profile="terminal",
+                    observed_at=_latest_fetched_at(final_outcomes) or root_outcome.fetched_at,
+                )
+                await self._record_terminal_state(
+                    event_id=event_id,
+                    status_type=status_type,
+                    finalized_at=_latest_fetched_at(final_outcomes) or root_outcome.fetched_at,
+                    final_snapshot_id=final_snapshot_id,
                 )
                 finalized = True
 
@@ -250,6 +272,12 @@ class PilotOrchestrator:
             )
             live_lane = track_result.decision.lane
             live_stream = track_result.stream
+            await self._record_live_state_history(
+                event_id=event_id,
+                status_type=status_type,
+                poll_profile=track_result.decision.lane,
+                observed_at=root_outcome.fetched_at,
+            )
 
         hydrated_entities: set[tuple[str, int]] = set()
         while True:
@@ -430,6 +458,49 @@ class PilotOrchestrator:
         await self.capability_repository.upsert_rollup(self.sql_executor, rollup)
         self.planner.capability_rollup[outcome.endpoint_pattern] = rollup.support_level
 
+    async def _record_live_state_history(
+        self,
+        *,
+        event_id: int,
+        status_type: str | None,
+        poll_profile: str | None,
+        observed_at: str | None,
+    ) -> None:
+        if self.live_state_repository is None:
+            return
+        await self.live_state_repository.insert_live_state_history(
+            self.sql_executor,
+            EventLiveStateHistoryRecord(
+                event_id=event_id,
+                observed_status_type=status_type,
+                poll_profile=poll_profile,
+                home_score=None,
+                away_score=None,
+                period_label=None,
+                observed_at=observed_at or "",
+            ),
+        )
+
+    async def _record_terminal_state(
+        self,
+        *,
+        event_id: int,
+        status_type: str | None,
+        finalized_at: str | None,
+        final_snapshot_id: int | None,
+    ) -> None:
+        if self.live_state_repository is None:
+            return
+        await self.live_state_repository.upsert_terminal_state(
+            self.sql_executor,
+            EventTerminalStateRecord(
+                event_id=event_id,
+                terminal_status=str(status_type or "finished"),
+                finalized_at=finalized_at or "",
+                final_snapshot_id=final_snapshot_id,
+            ),
+        )
+
 
 def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
     mapping = {
@@ -505,3 +576,17 @@ def _minutes_to_start(*, start_timestamp: object, now_ms: int) -> int | None:
         return None
     delta_seconds = start_timestamp - (now_ms // 1000)
     return int(delta_seconds // 60)
+
+
+def _latest_snapshot_id(outcomes: list[FetchOutcomeEnvelope]) -> int | None:
+    for outcome in reversed(outcomes):
+        if outcome.snapshot_id is not None:
+            return outcome.snapshot_id
+    return None
+
+
+def _latest_fetched_at(outcomes: list[FetchOutcomeEnvelope]) -> str | None:
+    for outcome in reversed(outcomes):
+        if outcome.fetched_at:
+            return outcome.fetched_at
+    return None
