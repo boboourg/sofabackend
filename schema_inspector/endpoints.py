@@ -553,6 +553,12 @@ PLAYER_ENDPOINT = SofascoreEndpoint(
     target_table="player",
 )
 
+MANAGER_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/manager/{manager_id}",
+    envelope_key="manager",
+    target_table="manager",
+)
+
 PLAYER_STATISTICS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/player/{player_id}/statistics",
     envelope_key="seasons,typesMap",
@@ -610,6 +616,7 @@ TEAM_PERFORMANCE_GRAPH_ENDPOINT = SofascoreEndpoint(
 ENTITIES_ENDPOINTS = (
     TEAM_ENDPOINT,
     PLAYER_ENDPOINT,
+    MANAGER_ENDPOINT,
     PLAYER_STATISTICS_ENDPOINT,
     PLAYER_TRANSFER_HISTORY_ENDPOINT,
     PLAYER_STATISTICS_SEASONS_ENDPOINT,

@@ -11,6 +11,7 @@ from ..endpoints import (
     EVENT_LINEUPS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
+    MANAGER_ENDPOINT,
     PLAYER_ENDPOINT,
     SofascoreEndpoint,
     TEAM_ENDPOINT,
@@ -173,19 +174,29 @@ class PilotOrchestrator:
             if parsed is not None:
                 parse_results.append(parsed)
 
-        for entity_endpoint, entity_type, entity_id in _entity_profile_targets(sport_slug, parse_results):
-            outcome, parsed = await self._fetch_and_parse(
-                endpoint=entity_endpoint,
-                sport_slug=sport_slug,
-                path_params={f"{entity_type}_id": entity_id},
-                context_entity_type=entity_type,
-                context_entity_id=entity_id,
-                context_event_id=event_id,
-                fetch_reason="hydrate_entity_profile",
+        hydrated_entities: set[tuple[str, int]] = set()
+        while True:
+            next_targets = _entity_profile_targets(
+                sport_slug,
+                parse_results,
+                seen=hydrated_entities,
             )
-            fetch_outcomes.append(outcome)
-            if parsed is not None:
-                parse_results.append(parsed)
+            if not next_targets:
+                break
+            for entity_endpoint, entity_type, entity_id in next_targets:
+                hydrated_entities.add((entity_type, entity_id))
+                outcome, parsed = await self._fetch_and_parse(
+                    endpoint=entity_endpoint,
+                    sport_slug=sport_slug,
+                    path_params={f"{entity_type}_id": entity_id},
+                    context_entity_type=entity_type,
+                    context_entity_id=entity_id,
+                    context_event_id=event_id,
+                    fetch_reason="hydrate_entity_profile",
+                )
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
 
         for endpoint in _special_endpoints_for_sport(sport_slug):
             outcome, parsed = await self._fetch_and_parse(
@@ -346,10 +357,11 @@ def _endpoint_for_widget_job(params: dict[str, Any]) -> SofascoreEndpoint | None
 def _entity_profile_targets(
     sport_slug: str,
     parse_results: list[object],
+    *,
+    seen: set[tuple[str, int]],
 ) -> tuple[tuple[SofascoreEndpoint, str, int], ...]:
     if sport_slug not in {"football", "basketball"}:
         return ()
-    seen: set[tuple[str, int]] = set()
     planned: list[tuple[SofascoreEndpoint, str, int]] = []
     for result in parse_results:
         for team in result.entity_upserts.get("team", ()):
@@ -362,4 +374,9 @@ def _entity_profile_targets(
             if isinstance(player_id, int) and ("player", player_id) not in seen:
                 seen.add(("player", player_id))
                 planned.append((PLAYER_ENDPOINT, "player", player_id))
+        for manager in result.entity_upserts.get("manager", ()):
+            manager_id = manager.get("id")
+            if isinstance(manager_id, int) and ("manager", manager_id) not in seen:
+                seen.add(("manager", manager_id))
+                planned.append((MANAGER_ENDPOINT, "manager", manager_id))
     return tuple(planned)

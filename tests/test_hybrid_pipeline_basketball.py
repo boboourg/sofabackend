@@ -86,6 +86,8 @@ class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         team_away_url = "https://www.sofascore.com/api/v1/team/45"
         player_home_url = "https://www.sofascore.com/api/v1/player/800"
         player_away_url = "https://www.sofascore.com/api/v1/player/801"
+        manager_home_url = "https://www.sofascore.com/api/v1/manager/600"
+        manager_away_url = "https://www.sofascore.com/api/v1/manager/601"
         top_players_url = "https://www.sofascore.com/api/v1/unique-tournament/132/season/84695/top-players/regularSeason"
         top_players_per_game_url = "https://www.sofascore.com/api/v1/unique-tournament/132/season/84695/top-players-per-game/all/regularSeason"
         top_teams_url = "https://www.sofascore.com/api/v1/unique-tournament/132/season/84695/top-teams/regularSeason"
@@ -140,6 +142,14 @@ class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                     player_away_url,
                     {"player": {"id": 801, "slug": "markkanen", "name": "Lauri Markkanen", "team": {"id": 45, "slug": "jazz", "name": "Jazz"}}},
                 ),
+                manager_home_url: _json_result(
+                    manager_home_url,
+                    {"manager": {"id": 600, "slug": "reddick", "name": "JJ Redick"}},
+                ),
+                manager_away_url: _json_result(
+                    manager_away_url,
+                    {"manager": {"id": 601, "slug": "hardy", "name": "Will Hardy"}},
+                ),
                 top_players_url: _json_result(top_players_url, {"topPlayers": {"points": []}}),
                 top_players_per_game_url: _json_result(top_players_per_game_url, {"topPlayers": {"points": []}}),
                 top_teams_url: _json_result(top_teams_url, {"topTeams": {"wins": []}}),
@@ -173,6 +183,8 @@ class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(team_away_url, transport.seen_urls)
         self.assertIn(player_home_url, transport.seen_urls)
         self.assertIn(player_away_url, transport.seen_urls)
+        self.assertIn(manager_home_url, transport.seen_urls)
+        self.assertIn(manager_away_url, transport.seen_urls)
         self.assertEqual(report.sport_slug, "basketball")
         self.assertTrue(any(item.endpoint_pattern.endswith("/top-players/regularSeason") for item in report.fetch_outcomes))
         self.assertTrue(any(item.support_level == "supported" for item in capability_repository.rollups))

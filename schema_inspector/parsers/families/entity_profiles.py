@@ -20,13 +20,14 @@ class EntityProfilesParser:
 
         team = _as_mapping(payload.get("team"))
         player = _as_mapping(payload.get("player"))
-        if team is None and player is None:
+        manager = _as_mapping(payload.get("manager"))
+        if team is None and player is None and manager is None:
             return ParseResult.empty(
                 snapshot=snapshot,
                 parser_family=self.parser_family,
                 parser_version=self.parser_version,
                 status=PARSE_STATUS_UNSUPPORTED,
-                warnings=("Missing team/player envelope.",),
+                warnings=("Missing team/player/manager envelope.",),
             )
 
         if team is not None:

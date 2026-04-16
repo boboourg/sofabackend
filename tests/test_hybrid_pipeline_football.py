@@ -90,6 +90,8 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         team_away_url = "https://www.sofascore.com/api/v1/team/43"
         player_home_url = "https://www.sofascore.com/api/v1/player/700"
         player_away_url = "https://www.sofascore.com/api/v1/player/701"
+        manager_home_url = "https://www.sofascore.com/api/v1/manager/500"
+        manager_away_url = "https://www.sofascore.com/api/v1/manager/501"
 
         transport = _FakeTransport(
             {
@@ -211,6 +213,26 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         }
                     },
                 ),
+                manager_home_url: _json_result(
+                    manager_home_url,
+                    {
+                        "manager": {
+                            "id": 500,
+                            "slug": "arteta",
+                            "name": "Mikel Arteta",
+                        }
+                    },
+                ),
+                manager_away_url: _json_result(
+                    manager_away_url,
+                    {
+                        "manager": {
+                            "id": 501,
+                            "slug": "maresca",
+                            "name": "Enzo Maresca",
+                        }
+                    },
+                ),
             }
         )
         raw_store = _FakeRawSnapshotStore()
@@ -240,6 +262,8 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(team_away_url, transport.seen_urls)
         self.assertIn(player_home_url, transport.seen_urls)
         self.assertIn(player_away_url, transport.seen_urls)
+        self.assertIn(manager_home_url, transport.seen_urls)
+        self.assertIn(manager_away_url, transport.seen_urls)
         self.assertEqual(report.sport_slug, "football")
         self.assertEqual(
             {item.parser_family for item in report.parse_results},

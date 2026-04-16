@@ -24,11 +24,12 @@ class PilotLegacyContractTests(unittest.TestCase):
         required = {
             "/api/v1/event/{event_id}",
             "/api/v1/event/{event_id}/statistics",
-            "/api/v1/event/{event_id}/lineups",
-            "/api/v1/event/{event_id}/incidents",
-            "/api/v1/team/{team_id}",
-            "/api/v1/player/{player_id}",
-        }
+        "/api/v1/event/{event_id}/lineups",
+        "/api/v1/event/{event_id}/incidents",
+        "/api/v1/team/{team_id}",
+        "/api/v1/player/{player_id}",
+        "/api/v1/manager/{manager_id}",
+    }
         self.assertTrue(required.issubset(patterns))
 
     def test_tennis_pilot_patterns_include_special_routes_from_event_detail_family(self) -> None:

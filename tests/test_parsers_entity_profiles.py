@@ -67,6 +67,34 @@ class EntityProfilesParserTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in result.entity_upserts["player"]}, {700})
         self.assertEqual(len(result.relation_upserts["player_team"]), 1)
 
+    def test_manager_profile_parser_extracts_manager_entity(self) -> None:
+        parser = EntityProfilesParser()
+        snapshot = RawSnapshot(
+            snapshot_id=703,
+            endpoint_pattern="/api/v1/manager/{manager_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/manager/500",
+            resolved_url="https://www.sofascore.com/api/v1/manager/500",
+            envelope_key="manager",
+            http_status=200,
+            payload={
+                "manager": {
+                    "id": 500,
+                    "slug": "arteta",
+                    "name": "Mikel Arteta",
+                    "shortName": "M. Arteta",
+                }
+            },
+            fetched_at="2026-04-16T12:00:00+00:00",
+            context_entity_type="manager",
+            context_entity_id=500,
+        )
+
+        result = parser.parse(snapshot)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual({item["id"] for item in result.entity_upserts["manager"]}, {500})
+
 
 if __name__ == "__main__":
     unittest.main()
