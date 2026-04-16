@@ -85,6 +85,7 @@ class NormalizeRepository:
     ) -> dict[str, set[int]]:
         inserted: dict[str, set[int]] = {
             "sport": set(),
+            "country": set(),
             "category": set(),
             "unique_tournament": set(),
             "tournament": set(),
@@ -115,19 +116,42 @@ class NormalizeRepository:
             )
             inserted["sport"].update(int(row[0]) for row in sport_rows if row[0] is not None)
 
+        country_rows = [
+            (row.get("alpha2"), row.get("alpha3"), row.get("slug"), row.get("name"))
+            for row in entity_upserts.get("country", ())
+            if row.get("alpha2") is not None and row.get("name")
+        ]
+        if country_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO country (alpha2, alpha3, slug, name)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (alpha2) DO UPDATE SET
+                    alpha3 = COALESCE(EXCLUDED.alpha3, country.alpha3),
+                    slug = COALESCE(EXCLUDED.slug, country.slug),
+                    name = EXCLUDED.name
+                """,
+                country_rows,
+            )
+            inserted["country"].update(str(row[0]) for row in country_rows if row[0] is not None)
+
         category_rows = []
         for row in entity_upserts.get("category", ()):
             category_id = row.get("id")
             sport_id = row.get("sport_id")
             if category_id is None or not row.get("slug") or not row.get("name") or sport_id not in inserted["sport"]:
                 continue
+            country_alpha2 = row.get("country_alpha2")
+            if country_alpha2 not in inserted["country"]:
+                country_alpha2 = None
             category_rows.append(
                 (
                     category_id,
                     row.get("slug"),
                     row.get("name"),
                     sport_id,
-                    row.get("country_alpha2"),
+                    country_alpha2,
                 )
             )
         if category_rows:
@@ -146,6 +170,26 @@ class NormalizeRepository:
             )
             inserted["category"].update(int(row[0]) for row in category_rows if row[0] is not None)
 
+        season_rows = [
+            (row.get("id"), row.get("name"), row.get("year"), row.get("editor"))
+            for row in entity_upserts.get("season", ())
+            if row.get("id") is not None
+        ]
+        if season_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO season (id, name, year, editor)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    year = EXCLUDED.year,
+                    editor = EXCLUDED.editor
+                """,
+                season_rows,
+            )
+            inserted["season"].update(int(row[0]) for row in season_rows if row[0] is not None)
+
         unique_tournament_rows = []
         for row in entity_upserts.get("unique_tournament", ()):
             unique_tournament_id = row.get("id")
@@ -157,13 +201,16 @@ class NormalizeRepository:
                 or category_id not in inserted["category"]
             ):
                 continue
+            country_alpha2 = row.get("country_alpha2")
+            if country_alpha2 not in inserted["country"]:
+                country_alpha2 = None
             unique_tournament_rows.append(
                 (
                     unique_tournament_id,
                     row.get("slug"),
                     row.get("name"),
                     category_id,
-                    row.get("country_alpha2"),
+                    country_alpha2,
                 )
             )
         if unique_tournament_rows:
@@ -218,28 +265,13 @@ class NormalizeRepository:
             )
             inserted["tournament"].update(int(row[0]) for row in tournament_rows if row[0] is not None)
 
-        season_rows = [
-            (row.get("id"), row.get("name"), row.get("year"), row.get("editor"))
-            for row in entity_upserts.get("season", ())
-            if row.get("id") is not None
-        ]
-        if season_rows:
-            await _executemany(
-                executor,
-                """
-                INSERT INTO season (id, name, year, editor)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (id) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    year = EXCLUDED.year,
-                    editor = EXCLUDED.editor
-                """,
-                season_rows,
-            )
-            inserted["season"].update(int(row[0]) for row in season_rows if row[0] is not None)
-
         venue_rows = [
-            (row.get("id"), row.get("slug"), row.get("name"))
+            (
+                row.get("id"),
+                row.get("slug"),
+                row.get("name"),
+                row.get("country_alpha2") if row.get("country_alpha2") in inserted["country"] else None,
+            )
             for row in entity_upserts.get("venue", ())
             if row.get("id") is not None and row.get("name")
         ]
@@ -247,11 +279,12 @@ class NormalizeRepository:
             await _executemany(
                 executor,
                 """
-                INSERT INTO venue (id, slug, name)
-                VALUES ($1, $2, $3)
+                INSERT INTO venue (id, slug, name, country_alpha2)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (id) DO UPDATE SET
                     slug = EXCLUDED.slug,
-                    name = EXCLUDED.name
+                    name = EXCLUDED.name,
+                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, venue.country_alpha2)
                 """,
                 venue_rows,
             )

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 ENTITY_KEY_TO_TYPE = {
     "sport": "sport",
+    "country": "country",
     "category": "category",
     "uniqueTournament": "unique_tournament",
     "tournament": "tournament",
@@ -74,6 +75,17 @@ def _normalize_entity(
         if entity_id is None:
             return None
         return {"id": entity_id, "slug": _as_str(mapping.get("slug")), "name": _as_str(mapping.get("name"))}
+    if entity_type == "country":
+        alpha2 = _as_str(mapping.get("alpha2"))
+        name = _as_str(mapping.get("name"))
+        if alpha2 is None or name is None:
+            return None
+        return {
+            "alpha2": alpha2,
+            "alpha3": _as_str(mapping.get("alpha3")),
+            "slug": _as_str(mapping.get("slug")),
+            "name": name,
+        }
     if entity_type == "category":
         entity_id = _as_int(mapping.get("id"))
         if entity_id is None:
@@ -213,7 +225,13 @@ def _normalize_entity(
         entity_id = _as_int(mapping.get("id"))
         if entity_id is None:
             return None
-        return {"id": entity_id, "slug": _as_str(mapping.get("slug")), "name": _as_str(mapping.get("name"))}
+        country = _as_mapping(mapping.get("country"))
+        return {
+            "id": entity_id,
+            "slug": _as_str(mapping.get("slug")),
+            "name": _as_str(mapping.get("name")),
+            "country_alpha2": _as_str(country.get("alpha2")) if country is not None else None,
+        }
     return None
 
 

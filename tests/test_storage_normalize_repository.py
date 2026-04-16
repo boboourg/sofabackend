@@ -216,12 +216,18 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                             "id": 1,
                             "slug": "england",
                             "name": "England",
+                            "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
                             "sport": {"id": 1, "slug": "football", "name": "Football"},
                         },
                         "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
                     },
                     "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
-                    "venue": {"id": 55, "slug": "emirates-stadium", "name": "Emirates Stadium"},
+                    "venue": {
+                        "id": 55,
+                        "slug": "emirates-stadium",
+                        "name": "Emirates Stadium",
+                        "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
+                    },
                     "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
                     "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
                     "status": {"type": "inprogress"},
@@ -240,16 +246,22 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         statements = [query for query, _ in executor.executemany_calls]
         sport_index = next(i for i, sql in enumerate(statements) if "INSERT INTO sport" in sql)
+        country_index = next(i for i, sql in enumerate(statements) if "INSERT INTO country" in sql)
         category_index = next(i for i, sql in enumerate(statements) if "INSERT INTO category" in sql)
+        season_index = next(i for i, sql in enumerate(statements) if "INSERT INTO season" in sql)
         unique_tournament_index = next(i for i, sql in enumerate(statements) if "INSERT INTO unique_tournament" in sql)
         tournament_index = next(i for i, sql in enumerate(statements) if "INSERT INTO tournament" in sql)
+        venue_index = next(i for i, sql in enumerate(statements) if "INSERT INTO venue" in sql)
         team_index = next(i for i, sql in enumerate(statements) if "INSERT INTO team" in sql)
         event_index = next(i for i, sql in enumerate(statements) if "INSERT INTO event" in sql)
 
-        self.assertLess(sport_index, category_index)
-        self.assertLess(category_index, unique_tournament_index)
+        self.assertLess(sport_index, country_index)
+        self.assertLess(country_index, category_index)
+        self.assertLess(category_index, season_index)
+        self.assertLess(season_index, unique_tournament_index)
         self.assertLess(unique_tournament_index, tournament_index)
-        self.assertLess(tournament_index, team_index)
+        self.assertLess(tournament_index, venue_index)
+        self.assertLess(venue_index, team_index)
         self.assertLess(team_index, event_index)
 
         event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event" in sql)

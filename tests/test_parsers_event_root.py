@@ -29,12 +29,18 @@ class EventRootParserTests(unittest.TestCase):
                             "id": 1,
                             "slug": "england",
                             "name": "England",
+                            "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
                             "sport": {"id": 1, "slug": "football", "name": "Football"},
                         },
                         "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
                     },
                     "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
-                    "venue": {"id": 55, "slug": "emirates-stadium", "name": "Emirates Stadium"},
+                    "venue": {
+                        "id": 55,
+                        "slug": "emirates-stadium",
+                        "name": "Emirates Stadium",
+                        "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
+                    },
                     "homeTeam": {
                         "id": 42,
                         "slug": "arsenal",
@@ -61,6 +67,7 @@ class EventRootParserTests(unittest.TestCase):
 
         self.assertEqual(result.status, "parsed")
         self.assertEqual(result.entity_upserts["sport"][0]["slug"], "football")
+        self.assertEqual(result.entity_upserts["country"][0]["alpha2"], "EN")
         self.assertEqual(result.entity_upserts["category"][0]["id"], 1)
         self.assertEqual(result.entity_upserts["unique_tournament"][0]["id"], 17)
         self.assertEqual(result.entity_upserts["unique_tournament"][0]["category_id"], 1)
@@ -69,6 +76,7 @@ class EventRootParserTests(unittest.TestCase):
         self.assertEqual(result.entity_upserts["team"][0]["tournament_id"], 100)
         self.assertEqual(result.entity_upserts["season"][0]["id"], 76986)
         self.assertEqual(result.entity_upserts["venue"][0]["id"], 55)
+        self.assertEqual(result.entity_upserts["venue"][0]["country_alpha2"], "EN")
         self.assertEqual({item["id"] for item in result.entity_upserts["manager"]}, {500, 501})
         self.assertEqual(len(result.relation_upserts["event_team"]), 2)
 
