@@ -81,6 +81,11 @@ class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         event_url = "https://www.sofascore.com/api/v1/event/14439306"
         statistics_url = "https://www.sofascore.com/api/v1/event/14439306/statistics"
         lineups_url = "https://www.sofascore.com/api/v1/event/14439306/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/14439306/incidents"
+        team_home_url = "https://www.sofascore.com/api/v1/team/44"
+        team_away_url = "https://www.sofascore.com/api/v1/team/45"
+        player_home_url = "https://www.sofascore.com/api/v1/player/800"
+        player_away_url = "https://www.sofascore.com/api/v1/player/801"
         top_players_url = "https://www.sofascore.com/api/v1/unique-tournament/132/season/84695/top-players/regularSeason"
         top_players_per_game_url = "https://www.sofascore.com/api/v1/unique-tournament/132/season/84695/top-players-per-game/all/regularSeason"
         top_teams_url = "https://www.sofascore.com/api/v1/unique-tournament/132/season/84695/top-teams/regularSeason"
@@ -108,12 +113,32 @@ class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ),
                 statistics_url: _json_result(statistics_url, {"statistics": []}),
+                incidents_url: _json_result(
+                    incidents_url,
+                    {"incidents": [{"id": 1, "incidentType": "scoreChange", "time": 1, "player": {"id": 800, "name": "LeBron James"}}]},
+                ),
                 lineups_url: _json_result(
                     lineups_url,
                     {
                         "home": {"players": [{"position": "G", "teamId": 44, "player": {"id": 800, "slug": "lebron", "name": "LeBron James"}}]},
                         "away": {"players": [{"position": "G", "teamId": 45, "player": {"id": 801, "slug": "markkanen", "name": "Lauri Markkanen"}}]},
                     },
+                ),
+                team_home_url: _json_result(
+                    team_home_url,
+                    {"team": {"id": 44, "slug": "lakers", "name": "Lakers", "manager": {"id": 600, "slug": "reddick", "name": "JJ Redick"}}},
+                ),
+                team_away_url: _json_result(
+                    team_away_url,
+                    {"team": {"id": 45, "slug": "jazz", "name": "Jazz", "manager": {"id": 601, "slug": "hardy", "name": "Will Hardy"}}},
+                ),
+                player_home_url: _json_result(
+                    player_home_url,
+                    {"player": {"id": 800, "slug": "lebron", "name": "LeBron James", "team": {"id": 44, "slug": "lakers", "name": "Lakers"}}},
+                ),
+                player_away_url: _json_result(
+                    player_away_url,
+                    {"player": {"id": 801, "slug": "markkanen", "name": "Lauri Markkanen", "team": {"id": 45, "slug": "jazz", "name": "Jazz"}}},
                 ),
                 top_players_url: _json_result(top_players_url, {"topPlayers": {"points": []}}),
                 top_players_per_game_url: _json_result(top_players_per_game_url, {"topPlayers": {"points": []}}),
@@ -143,6 +168,11 @@ class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(top_players_per_game_url, transport.seen_urls)
         self.assertIn(top_teams_url, transport.seen_urls)
         self.assertIn(player_of_season_url, transport.seen_urls)
+        self.assertIn(incidents_url, transport.seen_urls)
+        self.assertIn(team_home_url, transport.seen_urls)
+        self.assertIn(team_away_url, transport.seen_urls)
+        self.assertIn(player_home_url, transport.seen_urls)
+        self.assertIn(player_away_url, transport.seen_urls)
         self.assertEqual(report.sport_slug, "basketball")
         self.assertTrue(any(item.endpoint_pattern.endswith("/top-players/regularSeason") for item in report.fetch_outcomes))
         self.assertTrue(any(item.support_level == "supported" for item in capability_repository.rollups))

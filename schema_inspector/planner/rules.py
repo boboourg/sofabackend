@@ -24,6 +24,8 @@ def event_edge_candidates(status_type: str | None) -> tuple[str, ...]:
 
 
 def should_schedule_edge(edge_kind: str, capability_rollup: dict[str, str] | None) -> bool:
+    if edge_kind in CORE_EVENT_EDGE_KINDS:
+        return True
     if not capability_rollup:
         return True
     pattern = _edge_kind_pattern(edge_kind)

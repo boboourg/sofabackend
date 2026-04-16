@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 
 from .base import PARSE_STATUS_SOFT_ERROR, PARSE_STATUS_UNSUPPORTED, ParseResult, RawSnapshot, SnapshotParser
 from .classifier import classify_snapshot, is_soft_error_payload
+from .families.entity_profiles import EntityProfilesParser
+from .families.event_incidents import EventIncidentsParser
 from .families.event_lineups import EventLineupsParser
 from .families.event_root import EventRootParser
 from .families.event_statistics import EventStatisticsParser
@@ -24,6 +26,8 @@ class ParserRegistry:
             EventRootParser(),
             EventStatisticsParser(),
             EventLineupsParser(),
+            EventIncidentsParser(),
+            EntityProfilesParser(),
             TennisPointByPointParser(),
             TennisPowerParser(),
         ):

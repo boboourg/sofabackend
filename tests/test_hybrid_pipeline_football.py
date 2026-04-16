@@ -85,6 +85,11 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         event_url = "https://www.sofascore.com/api/v1/event/14083191"
         statistics_url = "https://www.sofascore.com/api/v1/event/14083191/statistics"
         lineups_url = "https://www.sofascore.com/api/v1/event/14083191/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/14083191/incidents"
+        team_home_url = "https://www.sofascore.com/api/v1/team/42"
+        team_away_url = "https://www.sofascore.com/api/v1/team/43"
+        player_home_url = "https://www.sofascore.com/api/v1/player/700"
+        player_away_url = "https://www.sofascore.com/api/v1/player/701"
 
         transport = _FakeTransport(
             {
@@ -125,6 +130,22 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         ]
                     },
                 ),
+                incidents_url: _json_result(
+                    incidents_url,
+                    {
+                        "incidents": [
+                            {
+                                "id": 1,
+                                "incidentType": "goal",
+                                "time": 17,
+                                "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                                "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                                "homeScore": 1,
+                                "awayScore": 0,
+                            }
+                        ]
+                    },
+                ),
                 lineups_url: _json_result(
                     lineups_url,
                     {
@@ -140,6 +161,54 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                                 {"position": "M", "teamId": 43, "player": {"id": 701, "slug": "palmer", "name": "Cole Palmer"}}
                             ],
                         },
+                    },
+                ),
+                team_home_url: _json_result(
+                    team_home_url,
+                    {
+                        "team": {
+                            "id": 42,
+                            "slug": "arsenal",
+                            "name": "Arsenal",
+                            "manager": {"id": 500, "slug": "arteta", "name": "Mikel Arteta"},
+                            "venue": {"id": 55, "slug": "emirates", "name": "Emirates Stadium"},
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        }
+                    },
+                ),
+                team_away_url: _json_result(
+                    team_away_url,
+                    {
+                        "team": {
+                            "id": 43,
+                            "slug": "chelsea",
+                            "name": "Chelsea",
+                            "manager": {"id": 501, "slug": "maresca", "name": "Enzo Maresca"},
+                            "venue": {"id": 56, "slug": "bridge", "name": "Stamford Bridge"},
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        }
+                    },
+                ),
+                player_home_url: _json_result(
+                    player_home_url,
+                    {
+                        "player": {
+                            "id": 700,
+                            "slug": "saka",
+                            "name": "Bukayo Saka",
+                            "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                        }
+                    },
+                ),
+                player_away_url: _json_result(
+                    player_away_url,
+                    {
+                        "player": {
+                            "id": 701,
+                            "slug": "palmer",
+                            "name": "Cole Palmer",
+                            "team": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                        }
                     },
                 ),
             }
@@ -166,8 +235,16 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(event_url, transport.seen_urls)
         self.assertIn(statistics_url, transport.seen_urls)
         self.assertIn(lineups_url, transport.seen_urls)
+        self.assertIn(incidents_url, transport.seen_urls)
+        self.assertIn(team_home_url, transport.seen_urls)
+        self.assertIn(team_away_url, transport.seen_urls)
+        self.assertIn(player_home_url, transport.seen_urls)
+        self.assertIn(player_away_url, transport.seen_urls)
         self.assertEqual(report.sport_slug, "football")
-        self.assertEqual({item.parser_family for item in report.parse_results}, {"event_root", "event_statistics", "event_lineups"})
+        self.assertEqual(
+            {item.parser_family for item in report.parse_results},
+            {"event_root", "event_statistics", "event_lineups", "event_incidents", "entity_profiles"},
+        )
         observed_patterns = {item.endpoint_pattern for item in capability_repository.observations}
         self.assertIn("/api/v1/event/{event_id}", observed_patterns)
         self.assertIn("/api/v1/event/{event_id}/statistics", observed_patterns)

@@ -377,6 +377,11 @@ EVENT_LINEUPS_ENDPOINT = SofascoreEndpoint(
     envelope_key="home,away",
     target_table="event_lineup",
 )
+EVENT_INCIDENTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/incidents",
+    envelope_key="incidents",
+    target_table="event_incident",
+)
 
 EVENT_MANAGERS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/managers",
@@ -467,6 +472,7 @@ EVENT_WEATHER_ENDPOINT = SofascoreEndpoint(
 EVENT_DETAIL_BASE_ENDPOINTS = (
     EVENT_DETAIL_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
+    EVENT_INCIDENTS_ENDPOINT,
     EVENT_MANAGERS_ENDPOINT,
     EVENT_H2H_ENDPOINT,
     EVENT_PREGAME_FORM_ENDPOINT,

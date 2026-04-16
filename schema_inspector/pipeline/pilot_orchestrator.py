@@ -7,10 +7,13 @@ from typing import Any
 
 from ..endpoints import (
     EVENT_DETAIL_ENDPOINT,
+    EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
+    PLAYER_ENDPOINT,
     SofascoreEndpoint,
+    TEAM_ENDPOINT,
     UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT,
     unique_tournament_top_players_endpoint,
     unique_tournament_top_players_per_game_endpoint,
@@ -170,6 +173,20 @@ class PilotOrchestrator:
             if parsed is not None:
                 parse_results.append(parsed)
 
+        for entity_endpoint, entity_type, entity_id in _entity_profile_targets(sport_slug, parse_results):
+            outcome, parsed = await self._fetch_and_parse(
+                endpoint=entity_endpoint,
+                sport_slug=sport_slug,
+                path_params={f"{entity_type}_id": entity_id},
+                context_entity_type=entity_type,
+                context_entity_id=entity_id,
+                context_event_id=event_id,
+                fetch_reason="hydrate_entity_profile",
+            )
+            fetch_outcomes.append(outcome)
+            if parsed is not None:
+                parse_results.append(parsed)
+
         for endpoint in _special_endpoints_for_sport(sport_slug):
             outcome, parsed = await self._fetch_and_parse(
                 endpoint=endpoint,
@@ -301,7 +318,7 @@ def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
         "meta": None,
         "statistics": EVENT_STATISTICS_ENDPOINT,
         "lineups": EVENT_LINEUPS_ENDPOINT,
-        "incidents": None,
+        "incidents": EVENT_INCIDENTS_ENDPOINT,
         "graph": None,
     }
     return mapping.get(edge_kind)
@@ -324,3 +341,25 @@ def _endpoint_for_widget_job(params: dict[str, Any]) -> SofascoreEndpoint | None
     if widget_kind == "player_of_the_season":
         return UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT
     return None
+
+
+def _entity_profile_targets(
+    sport_slug: str,
+    parse_results: list[object],
+) -> tuple[tuple[SofascoreEndpoint, str, int], ...]:
+    if sport_slug not in {"football", "basketball"}:
+        return ()
+    seen: set[tuple[str, int]] = set()
+    planned: list[tuple[SofascoreEndpoint, str, int]] = []
+    for result in parse_results:
+        for team in result.entity_upserts.get("team", ()):
+            team_id = team.get("id")
+            if isinstance(team_id, int) and ("team", team_id) not in seen:
+                seen.add(("team", team_id))
+                planned.append((TEAM_ENDPOINT, "team", team_id))
+        for player in result.entity_upserts.get("player", ()):
+            player_id = player.get("id")
+            if isinstance(player_id, int) and ("player", player_id) not in seen:
+                seen.add(("player", player_id))
+                planned.append((PLAYER_ENDPOINT, "player", player_id))
+    return tuple(planned)

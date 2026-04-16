@@ -62,6 +62,32 @@ class PlannerTests(unittest.TestCase):
         graph_jobs = [item for item in planned if item.params.get("edge_kind") == "graph"]
         self.assertEqual(graph_jobs, [])
 
+    def test_event_root_keeps_core_edges_even_if_rollup_is_unsupported(self) -> None:
+        planner = Planner(
+            capability_rollup={
+                "/api/v1/event/{event_id}/incidents": "unsupported",
+                "/api/v1/event/{event_id}/statistics": "unsupported",
+                "/api/v1/event/{event_id}/lineups": "unsupported",
+            }
+        )
+        job = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="football",
+            entity_type="event",
+            entity_id=14083191,
+            scope="live",
+            params={"status_type": "inprogress"},
+            priority=1,
+            trace_id="trace-1",
+        )
+
+        planned = planner.expand(job)
+        kinds = {(item.job_type, item.params.get("edge_kind")) for item in planned}
+
+        self.assertIn((JOB_HYDRATE_EVENT_EDGE, "statistics"), kinds)
+        self.assertIn((JOB_HYDRATE_EVENT_EDGE, "lineups"), kinds)
+        self.assertIn((JOB_HYDRATE_EVENT_EDGE, "incidents"), kinds)
+
     def test_finished_event_schedules_finalize(self) -> None:
         planner = Planner()
         job = JobEnvelope.create(
