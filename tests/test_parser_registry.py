@@ -130,6 +130,34 @@ class ParserRegistryTests(unittest.TestCase):
         self.assertEqual(result.parser_family, "esports_games")
         self.assertEqual(result.status, "parsed")
 
+    def test_registry_dispatches_event_player_statistics_snapshot(self) -> None:
+        registry = ParserRegistry.default()
+        snapshot = RawSnapshot(
+            snapshot_id=105,
+            endpoint_pattern="/api/v1/event/{event_id}/player/{player_id}/statistics",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14023987/player/804508/statistics",
+            resolved_url="https://www.sofascore.com/api/v1/event/14023987/player/804508/statistics",
+            envelope_key="player,team,position,statistics,extra",
+            http_status=200,
+            payload={
+                "player": {"id": 804508, "slug": "player-a", "name": "Player A"},
+                "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                "position": "F",
+                "statistics": {"goals": 1, "rating": 7.8},
+                "extra": None,
+            },
+            fetched_at="2026-04-16T12:00:00+00:00",
+            context_entity_type="player",
+            context_entity_id=804508,
+            context_event_id=14023987,
+        )
+
+        result = registry.parse(snapshot)
+
+        self.assertEqual(result.parser_family, "event_player_statistics")
+        self.assertEqual(result.status, "parsed")
+
 
 if __name__ == "__main__":
     unittest.main()

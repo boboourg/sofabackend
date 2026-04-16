@@ -8,10 +8,13 @@ from typing import Any
 
 from ..endpoints import (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
+    EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
     EVENT_ESPORTS_GAMES_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
+    EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+    EVENT_PLAYER_STATISTICS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_SHOTMAP_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
@@ -201,6 +204,16 @@ class PilotOrchestrator:
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
+                followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
+                for followup_job in followup_jobs:
+                    special_outcome, special_parse = await self._run_special_job(
+                        job=followup_job,
+                        sport_slug=sport_slug,
+                        event_id=event_id,
+                    )
+                    fetch_outcomes.append(special_outcome)
+                    if special_parse is not None:
+                        parse_results.append(special_parse)
 
         minutes_to_start = _minutes_to_start(
             start_timestamp=start_timestamp,
@@ -420,6 +433,37 @@ class PilotOrchestrator:
                 parses.append(parsed)
         return outcomes, parses
 
+    async def _run_special_job(
+        self,
+        *,
+        job,
+        sport_slug: str,
+        event_id: int,
+    ) -> tuple[FetchOutcomeEnvelope, object | None]:
+        special_kind = str(job.params.get("special_kind") or "")
+        endpoint = _endpoint_for_special_kind(special_kind)
+        if endpoint is None:
+            raise RuntimeError(f"Unsupported special_kind: {special_kind}")
+
+        path_params: dict[str, Any] = {"event_id": event_id}
+        context_entity_type = "event"
+        context_entity_id = event_id
+        if special_kind in {"event_player_statistics", "event_player_rating_breakdown"}:
+            player_id = int(job.params["player_id"])
+            path_params["player_id"] = player_id
+            context_entity_type = "player"
+            context_entity_id = player_id
+
+        return await self._fetch_and_parse(
+            endpoint=endpoint,
+            sport_slug=sport_slug,
+            path_params=path_params,
+            context_entity_type=context_entity_type,
+            context_entity_id=context_entity_id,
+            context_event_id=event_id,
+            fetch_reason=job.job_type,
+        )
+
     async def _record_capability(
         self,
         *,
@@ -511,6 +555,15 @@ def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
         "graph": None,
     }
     return mapping.get(edge_kind)
+
+
+def _endpoint_for_special_kind(special_kind: str) -> SofascoreEndpoint | None:
+    mapping = {
+        "best_players_summary": EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
+        "event_player_statistics": EVENT_PLAYER_STATISTICS_ENDPOINT,
+        "event_player_rating_breakdown": EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+    }
+    return mapping.get(special_kind)
 
 
 def _special_endpoints_for_sport(sport_slug: str) -> tuple[SofascoreEndpoint, ...]:

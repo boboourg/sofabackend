@@ -7,6 +7,7 @@ from typing import Iterable
 from ..jobs.types import (
     JOB_FINALIZE_EVENT,
     JOB_HYDRATE_EVENT_EDGE,
+    JOB_HYDRATE_SPECIAL_ROUTE,
     JOB_SYNC_SEASON_WIDGET,
     JOB_TRACK_LIVE_EVENT,
 )
@@ -167,6 +168,69 @@ def season_widget_jobs(*, sport_slug: str, unique_tournament_id: int, season_id:
     return tuple(planned)
 
 
+def lineup_followup_jobs(job, parse_result, capability_rollup: dict[str, str] | None) -> tuple[object, ...]:
+    if getattr(parse_result, "parser_family", None) != "event_lineups":
+        return ()
+    if str(job.sport_slug or "").strip().lower() != "football":
+        return ()
+
+    starters = sorted(
+        {
+            int(player_id)
+            for row in parse_result.relation_upserts.get("event_lineup_player", ())
+            for player_id in (row.get("player_id"),)
+            if isinstance(player_id, int) and row.get("substitute") is False
+        }
+    )
+    if not starters:
+        return ()
+
+    planned = []
+    if _special_kind_supported("best_players_summary", capability_rollup):
+        planned.append(
+            job.spawn_child(
+                job_type=JOB_HYDRATE_SPECIAL_ROUTE,
+                entity_type="event",
+                entity_id=job.entity_id,
+                scope="event_player_analytics",
+                params={"special_kind": "best_players_summary"},
+                priority=1,
+            )
+        )
+    for player_id in starters:
+        if _special_kind_supported("event_player_statistics", capability_rollup):
+            planned.append(
+                job.spawn_child(
+                    job_type=JOB_HYDRATE_SPECIAL_ROUTE,
+                    entity_type="player",
+                    entity_id=player_id,
+                    scope="event_player_analytics",
+                    params={
+                        "special_kind": "event_player_statistics",
+                        "event_id": job.entity_id,
+                        "player_id": player_id,
+                    },
+                    priority=1,
+                )
+            )
+        if _special_kind_supported("event_player_rating_breakdown", capability_rollup):
+            planned.append(
+                job.spawn_child(
+                    job_type=JOB_HYDRATE_SPECIAL_ROUTE,
+                    entity_type="player",
+                    entity_id=player_id,
+                    scope="event_player_analytics",
+                    params={
+                        "special_kind": "event_player_rating_breakdown",
+                        "event_id": job.entity_id,
+                        "player_id": player_id,
+                    },
+                    priority=1,
+                )
+            )
+    return tuple(planned)
+
+
 def _edge_kind_pattern(edge_kind: str) -> str | None:
     mapping = {
         "graph": "/api/v1/event/{event_id}/graph",
@@ -176,3 +240,22 @@ def _edge_kind_pattern(edge_kind: str) -> str | None:
         "incidents": "/api/v1/event/{event_id}/incidents",
     }
     return mapping.get(edge_kind)
+
+
+def _special_kind_supported(special_kind: str, capability_rollup: dict[str, str] | None) -> bool:
+    if not capability_rollup:
+        return True
+    pattern = _special_kind_pattern(special_kind)
+    if pattern is None:
+        return True
+    support_level = capability_rollup.get(pattern, "unknown")
+    return support_level not in {"unsupported", "deprecated_candidate"}
+
+
+def _special_kind_pattern(special_kind: str) -> str | None:
+    mapping = {
+        "best_players_summary": "/api/v1/event/{event_id}/best-players/summary",
+        "event_player_statistics": "/api/v1/event/{event_id}/player/{player_id}/statistics",
+        "event_player_rating_breakdown": "/api/v1/event/{event_id}/player/{player_id}/rating-breakdown",
+    }
+    return mapping.get(special_kind)

@@ -7,12 +7,15 @@ from dataclasses import dataclass, field
 from .base import PARSE_STATUS_SOFT_ERROR, PARSE_STATUS_UNSUPPORTED, ParseResult, RawSnapshot, SnapshotParser
 from .classifier import classify_snapshot, is_soft_error_payload
 from .families.entity_profiles import EntityProfilesParser
+from .families.event_best_players import EventBestPlayersParser
 from .families.event_incidents import EventIncidentsParser
 from .families.event_lineups import EventLineupsParser
+from .families.event_player_statistics import EventPlayerStatisticsParser
 from .families.event_root import EventRootParser
 from .families.event_statistics import EventStatisticsParser
 from .special.baseball_innings import BaseballInningsParser
 from .special.baseball_pitches import BaseballPitchesParser
+from .special.event_player_rating_breakdown import EventPlayerRatingBreakdownParser
 from .special.esports_games import EsportsGamesParser
 from .special.shotmap import ShotmapParser
 from .special.tennis_point_by_point import TennisPointByPointParser
@@ -31,9 +34,12 @@ class ParserRegistry:
             EventStatisticsParser(),
             EventLineupsParser(),
             EventIncidentsParser(),
+            EventBestPlayersParser(),
+            EventPlayerStatisticsParser(),
             EntityProfilesParser(),
             BaseballInningsParser(),
             BaseballPitchesParser(),
+            EventPlayerRatingBreakdownParser(),
             ShotmapParser(),
             EsportsGamesParser(),
             TennisPointByPointParser(),

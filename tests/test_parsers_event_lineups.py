@@ -22,6 +22,7 @@ class EventLineupsParserTests(unittest.TestCase):
                     "formation": "4-3-3",
                     "players": [
                         {
+                            "avgRating": 7.4,
                             "position": "F",
                             "jerseyNumber": "7",
                             "substitute": False,
@@ -55,6 +56,7 @@ class EventLineupsParserTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in result.entity_upserts["player"]}, {700, 701})
         self.assertEqual(len(result.metric_rows["event_lineup_side"]), 2)
         self.assertEqual(len(result.relation_upserts["event_lineup_player"]), 2)
+        self.assertEqual(result.relation_upserts["event_lineup_player"][0]["avg_rating"], 7.4)
 
 
 if __name__ == "__main__":

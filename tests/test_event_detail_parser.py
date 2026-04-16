@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.endpoints import (
+    EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
     EVENT_GRAPH_ENDPOINT,
@@ -12,6 +13,8 @@ from schema_inspector.endpoints import (
     EVENT_MANAGERS_ENDPOINT,
     EVENT_ODDS_ALL_ENDPOINT,
     EVENT_ODDS_FEATURED_ENDPOINT,
+    EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+    EVENT_PLAYER_STATISTICS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_PREGAME_FORM_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
@@ -175,6 +178,18 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
             EVENT_WINNING_ODDS_ENDPOINT.build_url(event_id=14083191, provider_id=1),
             "https://www.sofascore.com/api/v1/event/14083191/provider/1/winning-odds",
         )
+        self.assertEqual(
+            EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT.build_url(event_id=14083191),
+            "https://www.sofascore.com/api/v1/event/14083191/best-players/summary",
+        )
+        self.assertEqual(
+            EVENT_PLAYER_STATISTICS_ENDPOINT.build_url(event_id=14083191, player_id=700),
+            "https://www.sofascore.com/api/v1/event/14083191/player/700/statistics",
+        )
+        self.assertEqual(
+            EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT.build_url(event_id=14083191, player_id=700),
+            "https://www.sofascore.com/api/v1/event/14083191/player/700/rating-breakdown",
+        )
 
     async def test_event_detail_parser_builds_bundle_and_skips_optional_404(self) -> None:
         event_url = EVENT_DETAIL_ENDPOINT.build_url(event_id=14083191)
@@ -190,6 +205,9 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         odds_all_url = EVENT_ODDS_ALL_ENDPOINT.build_url(event_id=14083191, provider_id=1)
         odds_featured_url = EVENT_ODDS_FEATURED_ENDPOINT.build_url(event_id=14083191, provider_id=1)
         winning_odds_url = EVENT_WINNING_ODDS_ENDPOINT.build_url(event_id=14083191, provider_id=1)
+        best_players_url = EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT.build_url(event_id=14083191)
+        player_statistics_url = EVENT_PLAYER_STATISTICS_ENDPOINT.build_url(event_id=14083191, player_id=700)
+        player_rating_breakdown_url = EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT.build_url(event_id=14083191, player_id=700)
 
         fake_client = _FakeSofascoreClient(
             {
@@ -460,6 +478,55 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
                     "home": {"id": 1, "actual": 52, "expected": 49, "fractionalValue": "1/1"},
                     "away": {"id": 2, "actual": 24, "expected": 30, "fractionalValue": "3/1"},
                 },
+                best_players_url: {
+                    "bestHomeTeamPlayers": [
+                        {
+                            "label": "rating",
+                            "value": "7.9",
+                            "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka", "shortName": "B. Saka"},
+                        }
+                    ],
+                    "bestAwayTeamPlayers": [
+                        {
+                            "label": "rating",
+                            "value": "7.1",
+                            "player": {"id": 701, "slug": "james", "name": "Reece James", "shortName": "R. James"},
+                        }
+                    ],
+                    "playerOfTheMatch": {
+                        "label": "rating",
+                        "value": "7.9",
+                        "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka", "shortName": "B. Saka"},
+                    },
+                },
+                player_statistics_url: {
+                    "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka", "shortName": "B. Saka"},
+                    "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                    "position": "F",
+                    "statistics": {
+                        "minutesPlayed": 90,
+                        "goals": 1,
+                        "rating": 7.9,
+                        "ratingVersions": {"original": 7.8, "alternative": 7.6},
+                        "statisticsType": {"statisticsType": "player", "sportSlug": "football"},
+                    },
+                    "extra": None,
+                },
+                player_rating_breakdown_url: {
+                    "passes": [
+                        {
+                            "eventActionType": "pass",
+                            "isHome": True,
+                            "keypass": False,
+                            "outcome": True,
+                            "playerCoordinates": {"x": 80.5, "y": 58.9},
+                            "passEndCoordinates": {"x": 96.9, "y": 60.3},
+                        }
+                    ],
+                    "dribbles": [],
+                    "defensive": [],
+                    "ball-carries": [],
+                },
             }
         )
 
@@ -488,6 +555,11 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bundle.event_markets), 1)
         self.assertEqual(len(bundle.event_market_choices), 1)
         self.assertEqual(len(bundle.event_winning_odds), 2)
+        self.assertEqual(len(bundle.event_best_player_entries), 3)
+        self.assertEqual(len(bundle.event_player_statistics), 1)
+        self.assertEqual(len(bundle.event_player_stat_values), 2)
+        self.assertEqual(len(bundle.event_player_rating_breakdown_actions), 1)
+        self.assertEqual(bundle.event_lineup_players[0].avg_rating, 7.1)
         self.assertEqual(
             {(item.side, item.manager_id) for item in bundle.event_manager_assignments},
             {("home", 500), ("away", 501)},
@@ -497,6 +569,9 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(graph_url, fake_client.seen_urls)
         self.assertIn(home_heatmap_url, fake_client.seen_urls)
         self.assertIn(away_heatmap_url, fake_client.seen_urls)
+        self.assertIn(best_players_url, fake_client.seen_urls)
+        self.assertIn(player_statistics_url, fake_client.seen_urls)
+        self.assertIn(player_rating_breakdown_url, fake_client.seen_urls)
 
     async def test_notstarted_event_skips_live_only_detail_endpoints(self) -> None:
         event_url = EVENT_DETAIL_ENDPOINT.build_url(event_id=14083192)

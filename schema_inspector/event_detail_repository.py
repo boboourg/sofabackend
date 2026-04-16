@@ -55,6 +55,10 @@ class EventDetailWriteResult:
     event_lineup_rows: int
     event_lineup_player_rows: int
     event_lineup_missing_player_rows: int
+    event_best_player_entry_rows: int = 0
+    event_player_statistics_rows: int = 0
+    event_player_stat_value_rows: int = 0
+    event_player_rating_breakdown_action_rows: int = 0
 
 
 class EventDetailRepository(EventListRepository):
@@ -105,6 +109,10 @@ class EventDetailRepository(EventListRepository):
         await self._upsert_event_lineups(executor, bundle)
         await self._upsert_event_lineup_players(executor, bundle)
         await self._upsert_event_lineup_missing_players(executor, bundle)
+        await self._upsert_event_best_player_entries(executor, bundle)
+        await self._upsert_event_player_statistics(executor, bundle)
+        await self._upsert_event_player_stat_values(executor, bundle)
+        await self._upsert_event_player_rating_breakdown_actions(executor, bundle)
         await self._insert_payload_snapshots(executor, bundle)
 
         return EventDetailWriteResult(
@@ -152,6 +160,10 @@ class EventDetailRepository(EventListRepository):
             event_lineup_rows=len(bundle.event_lineups),
             event_lineup_player_rows=len(bundle.event_lineup_players),
             event_lineup_missing_player_rows=len(bundle.event_lineup_missing_players),
+            event_best_player_entry_rows=len(bundle.event_best_player_entries),
+            event_player_statistics_rows=len(bundle.event_player_statistics),
+            event_player_stat_value_rows=len(bundle.event_player_stat_values),
+            event_player_rating_breakdown_action_rows=len(bundle.event_player_rating_breakdown_actions),
         )
 
     async def _upsert_tournaments(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
@@ -1107,6 +1119,143 @@ class EventDetailRepository(EventListRepository):
                 external_type = EXCLUDED.external_type,
                 reason = EXCLUDED.reason,
                 type = EXCLUDED.type
+            """,
+            rows,
+        )
+
+    async def _upsert_event_best_player_entries(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (
+                item.event_id,
+                item.bucket,
+                item.ordinal,
+                item.player_id,
+                item.label,
+                item.value_text,
+                item.value_numeric,
+                item.is_player_of_the_match,
+            )
+            for item in bundle.event_best_player_entries
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_best_player_entry (
+                event_id, bucket, ordinal, player_id, label,
+                value_text, value_numeric, is_player_of_the_match
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (event_id, bucket, ordinal) DO UPDATE SET
+                player_id = EXCLUDED.player_id,
+                label = EXCLUDED.label,
+                value_text = EXCLUDED.value_text,
+                value_numeric = EXCLUDED.value_numeric,
+                is_player_of_the_match = EXCLUDED.is_player_of_the_match
+            """,
+            rows,
+        )
+
+    async def _upsert_event_player_statistics(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        known_team_ids = {item.id for item in bundle.teams}
+        rows = [
+            (
+                item.event_id,
+                item.player_id,
+                item.team_id if item.team_id in known_team_ids else None,
+                item.position,
+                item.rating,
+                item.rating_original,
+                item.rating_alternative,
+                item.statistics_type,
+                item.sport_slug,
+                _jsonb(item.extra_json),
+            )
+            for item in bundle.event_player_statistics
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_player_statistics (
+                event_id, player_id, team_id, position, rating, rating_original,
+                rating_alternative, statistics_type, sport_slug, extra_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+            ON CONFLICT (event_id, player_id) DO UPDATE SET
+                team_id = EXCLUDED.team_id,
+                position = EXCLUDED.position,
+                rating = EXCLUDED.rating,
+                rating_original = EXCLUDED.rating_original,
+                rating_alternative = EXCLUDED.rating_alternative,
+                statistics_type = EXCLUDED.statistics_type,
+                sport_slug = EXCLUDED.sport_slug,
+                extra_json = EXCLUDED.extra_json
+            """,
+            rows,
+        )
+
+    async def _upsert_event_player_stat_values(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (
+                item.event_id,
+                item.player_id,
+                item.stat_name,
+                item.stat_value_numeric,
+                item.stat_value_text,
+                _jsonb(item.stat_value_json),
+            )
+            for item in bundle.event_player_stat_values
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_player_stat_value (
+                event_id, player_id, stat_name,
+                stat_value_numeric, stat_value_text, stat_value_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            ON CONFLICT (event_id, player_id, stat_name) DO UPDATE SET
+                stat_value_numeric = EXCLUDED.stat_value_numeric,
+                stat_value_text = EXCLUDED.stat_value_text,
+                stat_value_json = EXCLUDED.stat_value_json
+            """,
+            rows,
+        )
+
+    async def _upsert_event_player_rating_breakdown_actions(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
+        rows = [
+            (
+                item.event_id,
+                item.player_id,
+                item.action_group,
+                item.ordinal,
+                item.event_action_type,
+                item.is_home,
+                item.keypass,
+                item.outcome,
+                item.start_x,
+                item.start_y,
+                item.end_x,
+                item.end_y,
+            )
+            for item in bundle.event_player_rating_breakdown_actions
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_player_rating_breakdown_action (
+                event_id, player_id, action_group, ordinal, event_action_type,
+                is_home, keypass, outcome, start_x, start_y, end_x, end_y
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (event_id, player_id, action_group, ordinal) DO UPDATE SET
+                event_action_type = EXCLUDED.event_action_type,
+                is_home = EXCLUDED.is_home,
+                keypass = EXCLUDED.keypass,
+                outcome = EXCLUDED.outcome,
+                start_x = EXCLUDED.start_x,
+                start_y = EXCLUDED.start_y,
+                end_x = EXCLUDED.end_x,
+                end_y = EXCLUDED.end_y
             """,
             rows,
         )

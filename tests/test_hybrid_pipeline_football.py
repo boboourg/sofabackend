@@ -86,6 +86,11 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         statistics_url = "https://www.sofascore.com/api/v1/event/14083191/statistics"
         lineups_url = "https://www.sofascore.com/api/v1/event/14083191/lineups"
         incidents_url = "https://www.sofascore.com/api/v1/event/14083191/incidents"
+        best_players_url = "https://www.sofascore.com/api/v1/event/14083191/best-players/summary"
+        player_statistics_home_url = "https://www.sofascore.com/api/v1/event/14083191/player/700/statistics"
+        player_statistics_away_url = "https://www.sofascore.com/api/v1/event/14083191/player/701/statistics"
+        player_breakdown_home_url = "https://www.sofascore.com/api/v1/event/14083191/player/700/rating-breakdown"
+        player_breakdown_away_url = "https://www.sofascore.com/api/v1/event/14083191/player/701/rating-breakdown"
         team_home_url = "https://www.sofascore.com/api/v1/team/42"
         team_away_url = "https://www.sofascore.com/api/v1/team/43"
         player_home_url = "https://www.sofascore.com/api/v1/player/700"
@@ -154,15 +159,118 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         "home": {
                             "formation": "4-3-3",
                             "players": [
-                                {"position": "F", "teamId": 42, "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"}}
+                                {
+                                    "avgRating": 7.9,
+                                    "position": "F",
+                                    "teamId": 42,
+                                    "substitute": False,
+                                    "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                                }
                             ],
                         },
                         "away": {
                             "formation": "4-2-3-1",
                             "players": [
-                                {"position": "M", "teamId": 43, "player": {"id": 701, "slug": "palmer", "name": "Cole Palmer"}}
+                                {
+                                    "avgRating": 7.1,
+                                    "position": "M",
+                                    "teamId": 43,
+                                    "substitute": False,
+                                    "player": {"id": 701, "slug": "palmer", "name": "Cole Palmer"},
+                                }
                             ],
                         },
+                    },
+                ),
+                best_players_url: _json_result(
+                    best_players_url,
+                    {
+                        "bestHomeTeamPlayers": [
+                            {
+                                "label": "rating",
+                                "value": "7.9",
+                                "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                            }
+                        ],
+                        "bestAwayTeamPlayers": [
+                            {
+                                "label": "rating",
+                                "value": "7.1",
+                                "player": {"id": 701, "slug": "palmer", "name": "Cole Palmer"},
+                            }
+                        ],
+                        "playerOfTheMatch": {
+                            "label": "rating",
+                            "value": "7.9",
+                            "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                        },
+                    },
+                ),
+                player_statistics_home_url: _json_result(
+                    player_statistics_home_url,
+                    {
+                        "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                        "team": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                        "position": "F",
+                        "statistics": {
+                            "minutesPlayed": 90,
+                            "goals": 1,
+                            "rating": 7.9,
+                            "ratingVersions": {"original": 7.8, "alternative": 7.6},
+                            "statisticsType": {"statisticsType": "player", "sportSlug": "football"},
+                        },
+                        "extra": None,
+                    },
+                ),
+                player_statistics_away_url: _json_result(
+                    player_statistics_away_url,
+                    {
+                        "player": {"id": 701, "slug": "palmer", "name": "Cole Palmer"},
+                        "team": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                        "position": "M",
+                        "statistics": {
+                            "minutesPlayed": 90,
+                            "goals": 0,
+                            "rating": 7.1,
+                            "ratingVersions": {"original": 7.0, "alternative": 6.9},
+                            "statisticsType": {"statisticsType": "player", "sportSlug": "football"},
+                        },
+                        "extra": None,
+                    },
+                ),
+                player_breakdown_home_url: _json_result(
+                    player_breakdown_home_url,
+                    {
+                        "passes": [
+                            {
+                                "eventActionType": "pass",
+                                "isHome": True,
+                                "keypass": False,
+                                "outcome": True,
+                                "playerCoordinates": {"x": 80.5, "y": 58.9},
+                                "passEndCoordinates": {"x": 96.9, "y": 60.3},
+                            }
+                        ],
+                        "dribbles": [],
+                        "defensive": [],
+                        "ball-carries": [],
+                    },
+                ),
+                player_breakdown_away_url: _json_result(
+                    player_breakdown_away_url,
+                    {
+                        "passes": [],
+                        "dribbles": [
+                            {
+                                "eventActionType": "dribble",
+                                "isHome": False,
+                                "keypass": False,
+                                "outcome": True,
+                                "playerCoordinates": {"x": 60.0, "y": 40.0},
+                            }
+                        ],
+                        "defensive": [],
+                        "ball-carries": [],
                     },
                 ),
                 team_home_url: _json_result(
@@ -258,6 +366,11 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(statistics_url, transport.seen_urls)
         self.assertIn(lineups_url, transport.seen_urls)
         self.assertIn(incidents_url, transport.seen_urls)
+        self.assertIn(best_players_url, transport.seen_urls)
+        self.assertIn(player_statistics_home_url, transport.seen_urls)
+        self.assertIn(player_statistics_away_url, transport.seen_urls)
+        self.assertIn(player_breakdown_home_url, transport.seen_urls)
+        self.assertIn(player_breakdown_away_url, transport.seen_urls)
         self.assertIn(team_home_url, transport.seen_urls)
         self.assertIn(team_away_url, transport.seen_urls)
         self.assertIn(player_home_url, transport.seen_urls)
@@ -267,12 +380,24 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.sport_slug, "football")
         self.assertEqual(
             {item.parser_family for item in report.parse_results},
-            {"event_root", "event_statistics", "event_lineups", "event_incidents", "entity_profiles"},
+            {
+                "event_root",
+                "event_statistics",
+                "event_lineups",
+                "event_incidents",
+                "event_best_players",
+                "event_player_statistics",
+                "event_player_rating_breakdown",
+                "entity_profiles",
+            },
         )
         observed_patterns = {item.endpoint_pattern for item in capability_repository.observations}
         self.assertIn("/api/v1/event/{event_id}", observed_patterns)
         self.assertIn("/api/v1/event/{event_id}/statistics", observed_patterns)
         self.assertIn("/api/v1/event/{event_id}/lineups", observed_patterns)
+        self.assertIn("/api/v1/event/{event_id}/best-players/summary", observed_patterns)
+        self.assertIn("/api/v1/event/{event_id}/player/{player_id}/statistics", observed_patterns)
+        self.assertIn("/api/v1/event/{event_id}/player/{player_id}/rating-breakdown", observed_patterns)
 
 
 def _json_result(url: str, payload: object, *, status_code: int = 200) -> TransportResult:

@@ -383,6 +383,27 @@ EVENT_INCIDENTS_ENDPOINT = SofascoreEndpoint(
     target_table="event_incident",
 )
 
+EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/best-players/summary",
+    envelope_key="bestHomeTeamPlayers,bestAwayTeamPlayers,playerOfTheMatch",
+    target_table="event_best_player_entry",
+    notes="Best-player summary including player of the match / MVP.",
+)
+
+EVENT_PLAYER_STATISTICS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/player/{player_id}/statistics",
+    envelope_key="player,team,position,statistics,extra",
+    target_table="event_player_statistics",
+    notes="Per-player event statistics payload for football-style detailed analytics.",
+)
+
+EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/player/{player_id}/rating-breakdown",
+    envelope_key="passes,dribbles,defensive,ball-carries",
+    target_table="event_player_rating_breakdown_action",
+    notes="Per-player rating-breakdown action feed used to explain Sofascore ratings.",
+)
+
 EVENT_MANAGERS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/managers",
     envelope_key="homeManager,awayManager",
@@ -532,6 +553,12 @@ EVENT_DETAIL_ESPORTS_ENDPOINTS = (
     EVENT_ESPORTS_GAMES_ENDPOINT,
 )
 
+EVENT_DETAIL_FOOTBALL_ANALYTICS_ENDPOINTS = (
+    EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
+    EVENT_PLAYER_STATISTICS_ENDPOINT,
+    EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+)
+
 
 def event_detail_endpoints(*, sport_slug: str | None = None) -> tuple[SofascoreEndpoint, ...]:
     normalized_sport_slug = str(sport_slug or "").strip().lower()
@@ -543,6 +570,8 @@ def event_detail_endpoints(*, sport_slug: str | None = None) -> tuple[SofascoreE
         return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_ICE_HOCKEY_ENDPOINTS
     if normalized_sport_slug == "esports":
         return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_ESPORTS_ENDPOINTS
+    if normalized_sport_slug == "football":
+        return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_FOOTBALL_ANALYTICS_ENDPOINTS
     return EVENT_DETAIL_BASE_ENDPOINTS
 
 

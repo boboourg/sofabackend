@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..jobs.types import JOB_HYDRATE_EVENT_ROOT
-from .rules import edge_jobs_for_event, season_widget_jobs
+from .rules import edge_jobs_for_event, lineup_followup_jobs, season_widget_jobs
 
 
 @dataclass
@@ -29,3 +29,6 @@ class Planner:
             unique_tournament_id=unique_tournament_id,
             season_id=season_id,
         )
+
+    def plan_lineup_followups(self, job, parse_result) -> tuple[object, ...]:
+        return lineup_followup_jobs(job, parse_result, self.capability_rollup)

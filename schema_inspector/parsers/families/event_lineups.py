@@ -50,6 +50,7 @@ class EventLineupsParser:
                         "side": side_name,
                         "position": _as_str(item_mapping.get("position")),
                         "jersey_number": _as_str(item_mapping.get("jerseyNumber")),
+                        "avg_rating": _as_float(item_mapping.get("avgRating")),
                         "order_value": order,
                         "substitute": _as_bool(item_mapping.get("substitute")),
                     }
@@ -89,4 +90,17 @@ def _as_int(value: object) -> int | None:
         return int(value)
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
+    return None
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
     return None
