@@ -16,6 +16,7 @@ ENTITY_KEY_TO_TYPE = {
     "event": "event",
     "homeTeam": "team",
     "awayTeam": "team",
+    "parentTeam": "team",
     "team": "team",
     "player": "player",
     "manager": "manager",
@@ -171,6 +172,7 @@ def _normalize_entity(
         country = _as_mapping(mapping.get("country"))
         tournament = _as_mapping(mapping.get("tournament"))
         primary_unique_tournament = _as_mapping(mapping.get("primaryUniqueTournament"))
+        parent_team = _as_mapping(mapping.get("parentTeam"))
         if parent_mapping is not None:
             parent_tournament = _as_mapping(parent_mapping.get("tournament"))
             if tournament is None:
@@ -195,6 +197,7 @@ def _normalize_entity(
             "primary_unique_tournament_id": (
                 _as_int(primary_unique_tournament.get("id")) if primary_unique_tournament is not None else None
             ),
+            "parent_team_id": _as_int(parent_team.get("id")) if parent_team is not None else None,
         }
     if entity_type == "player":
         entity_id = _as_int(mapping.get("id"))

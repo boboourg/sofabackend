@@ -38,6 +38,41 @@ class EntityProfilesParserTests(unittest.TestCase):
         self.assertEqual({item["id"] for item in result.entity_upserts["venue"]}, {55})
         self.assertEqual(len(result.relation_upserts["team_manager"]), 1)
 
+    def test_team_profile_parser_extracts_parent_team_entity(self) -> None:
+        parser = EntityProfilesParser()
+        snapshot = RawSnapshot(
+            snapshot_id=704,
+            endpoint_pattern="/api/v1/team/{team_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/team/45",
+            resolved_url="https://www.sofascore.com/api/v1/team/45",
+            envelope_key="team",
+            http_status=200,
+            payload={
+                "team": {
+                    "id": 45,
+                    "slug": "manchester-city",
+                    "name": "Manchester City",
+                    "parentTeam": {
+                        "id": 440,
+                        "slug": "city-football-group",
+                        "name": "City Football Group",
+                    },
+                    "sport": {"id": 1, "slug": "football", "name": "Football"},
+                }
+            },
+            fetched_at="2026-04-17T12:00:00+00:00",
+            context_entity_type="team",
+            context_entity_id=45,
+        )
+
+        result = parser.parse(snapshot)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual({item["id"] for item in result.entity_upserts["team"]}, {45, 440})
+        child = next(item for item in result.entity_upserts["team"] if item["id"] == 45)
+        self.assertEqual(child["parent_team_id"], 440)
+
     def test_player_profile_parser_extracts_player_team_relation(self) -> None:
         parser = EntityProfilesParser()
         snapshot = RawSnapshot(

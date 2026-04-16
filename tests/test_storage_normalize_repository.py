@@ -257,8 +257,8 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLess(sport_index, country_index)
         self.assertLess(country_index, category_index)
-        self.assertLess(category_index, season_index)
-        self.assertLess(season_index, unique_tournament_index)
+        self.assertLess(category_index, unique_tournament_index)
+        self.assertLess(unique_tournament_index, season_index)
         self.assertLess(unique_tournament_index, tournament_index)
         self.assertLess(tournament_index, venue_index)
         self.assertLess(venue_index, team_index)
@@ -268,6 +268,44 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event_rows[0][2], 100)
         self.assertEqual(event_rows[0][3], 17)
         self.assertEqual(event_rows[0][4], 76986)
+
+    async def test_persists_parent_team_before_child_team(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=901,
+            parser_family="entity_profiles",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+                "team": (
+                    {
+                        "id": 45,
+                        "slug": "manchester-city",
+                        "name": "Manchester City",
+                        "short_name": "Man City",
+                        "sport_id": 1,
+                        "parent_team_id": 440,
+                    },
+                    {
+                        "id": 440,
+                        "slug": "city-root",
+                        "name": "City Root",
+                        "short_name": "City Root",
+                        "sport_id": 1,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        team_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO team" in sql)
+        self.assertEqual(team_rows[0][0], 440)
+        self.assertIsNone(team_rows[0][11])
+        self.assertEqual(team_rows[1][0], 45)
+        self.assertEqual(team_rows[1][11], 440)
 
 
 if __name__ == "__main__":
