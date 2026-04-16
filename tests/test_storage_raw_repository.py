@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import unittest
 
 from schema_inspector.storage.raw_repository import (
@@ -87,6 +88,13 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO api_request_log" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO api_payload_snapshot" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO api_snapshot_head" in sql for sql in statements))
+        request_args = executor.execute_calls[0][1]
+        snapshot_args = executor.execute_calls[1][1]
+        head_args = executor.execute_calls[2][1]
+        self.assertIsInstance(request_args[13], datetime)
+        self.assertIsInstance(request_args[14], datetime)
+        self.assertIsInstance(snapshot_args[10], datetime)
+        self.assertIsInstance(head_args[6], datetime)
 
 
 if __name__ == "__main__":

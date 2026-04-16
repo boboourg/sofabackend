@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ._temporal import coerce_timestamptz
+
 
 class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
@@ -105,12 +107,12 @@ class JobRepository:
             record.attempt,
             record.worker_id,
             record.status,
-            record.started_at,
-            record.finished_at,
+            coerce_timestamptz(record.started_at),
+            coerce_timestamptz(record.finished_at),
             record.duration_ms,
             record.error_class,
             record.error_message,
-            record.retry_scheduled_for,
+            coerce_timestamptz(record.retry_scheduled_for),
             record.parser_version,
             record.normalizer_version,
             record.schema_version,
@@ -161,7 +163,7 @@ class JobRepository:
             record.source_snapshot_id,
             record.replay_reason,
             record.parser_version,
-            record.started_at,
-            record.finished_at,
+            coerce_timestamptz(record.started_at),
+            coerce_timestamptz(record.finished_at),
             record.status,
         )

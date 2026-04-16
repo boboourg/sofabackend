@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import unittest
 
 from schema_inspector.storage.job_repository import (
@@ -79,6 +80,12 @@ class JobRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO etl_job_run" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO etl_job_effect" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO etl_replay_log" in sql for sql in statements))
+        run_args = executor.execute_calls[0][1]
+        replay_args = executor.execute_calls[2][1]
+        self.assertIsInstance(run_args[13], datetime)
+        self.assertIsInstance(run_args[14], datetime)
+        self.assertIsInstance(replay_args[4], datetime)
+        self.assertIsInstance(replay_args[5], datetime)
 
 
 if __name__ == "__main__":

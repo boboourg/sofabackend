@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 from ..parsers.base import RawSnapshot
+from ._temporal import coerce_timestamptz
 
 
 class SqlExecutor(Protocol):
@@ -118,8 +119,8 @@ class RawRepository:
             record.transport_attempt,
             record.http_status,
             record.challenge_reason,
-            record.started_at,
-            record.finished_at,
+            coerce_timestamptz(record.started_at),
+            coerce_timestamptz(record.finished_at),
             record.latency_ms,
         )
 
@@ -163,7 +164,7 @@ class RawRepository:
             record.context_season_id,
             record.context_event_id,
             _jsonb(record.payload),
-            record.fetched_at,
+            coerce_timestamptz(record.fetched_at),
             record.trace_id,
             record.job_id,
             record.sport_slug,
@@ -220,7 +221,7 @@ class RawRepository:
             record.context_season_id,
             record.context_event_id,
             _jsonb(record.payload),
-            record.fetched_at,
+            coerce_timestamptz(record.fetched_at),
             record.trace_id,
             record.job_id,
             record.sport_slug,
@@ -265,7 +266,7 @@ class RawRepository:
             record.context_entity_id,
             record.latest_snapshot_id,
             record.latest_payload_hash,
-            record.latest_fetched_at,
+            coerce_timestamptz(record.latest_fetched_at),
         )
 
     async def fetch_payload_snapshot(self, executor: SqlFetchExecutor, snapshot_id: int) -> RawSnapshot:

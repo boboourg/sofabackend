@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ._temporal import coerce_timestamptz
+
 
 class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
@@ -56,7 +58,7 @@ class LiveStateRepository:
             record.home_score,
             record.away_score,
             record.period_label,
-            record.observed_at,
+            coerce_timestamptz(record.observed_at),
         )
 
     async def upsert_terminal_state(self, executor: SqlExecutor, record: EventTerminalStateRecord) -> None:
@@ -76,7 +78,7 @@ class LiveStateRepository:
             """,
             record.event_id,
             record.terminal_status,
-            record.finalized_at,
+            coerce_timestamptz(record.finalized_at),
             record.final_snapshot_id,
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import unittest
 
 from schema_inspector.storage.live_state_repository import (
@@ -48,6 +49,10 @@ class LiveStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
         statements = [sql for sql, _ in executor.execute_calls]
         self.assertTrue(any("INSERT INTO event_live_state_history" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_terminal_state" in sql for sql in statements))
+        history_args = executor.execute_calls[0][1]
+        terminal_args = executor.execute_calls[1][1]
+        self.assertIsInstance(history_args[6], datetime)
+        self.assertIsInstance(terminal_args[2], datetime)
 
 
 if __name__ == "__main__":

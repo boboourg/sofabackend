@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import unittest
 
 from schema_inspector.storage.capability_repository import (
@@ -60,6 +61,10 @@ class CapabilityRepositoryTests(unittest.IsolatedAsyncioTestCase):
         statements = [sql for sql, _ in executor.execute_calls]
         self.assertTrue(any("INSERT INTO endpoint_capability_observation" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO endpoint_capability_rollup" in sql for sql in statements))
+        observation_args = executor.execute_calls[0][1]
+        rollup_args = executor.execute_calls[1][1]
+        self.assertIsInstance(observation_args[9], datetime)
+        self.assertIsInstance(rollup_args[4], datetime)
 
 
 if __name__ == "__main__":

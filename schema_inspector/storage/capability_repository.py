@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ._temporal import coerce_timestamptz
+
 
 class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
@@ -72,7 +74,7 @@ class CapabilityRepository:
             _jsonb(record.payload_root_keys),
             record.is_empty_payload,
             record.is_soft_error_payload,
-            record.observed_at,
+            coerce_timestamptz(record.observed_at),
             record.sample_snapshot_id,
         )
 
@@ -110,9 +112,9 @@ class CapabilityRepository:
             record.endpoint_pattern,
             record.support_level,
             record.confidence,
-            record.last_success_at,
-            record.last_404_at,
-            record.last_soft_error_at,
+            coerce_timestamptz(record.last_success_at),
+            coerce_timestamptz(record.last_404_at),
+            coerce_timestamptz(record.last_soft_error_at),
             record.success_count,
             record.not_found_count,
             record.soft_error_count,
