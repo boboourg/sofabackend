@@ -149,6 +149,7 @@ class HybridApp:
         await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
         async with self.database.transaction() as connection:
             snapshot_store = HybridSnapshotStore(self.raw_repository, connection)
+            skip_entity_parser_families = {"event_root"} if hydration_mode == "core" else set()
             orchestrator = PilotOrchestrator(
                 fetch_executor=FetchExecutor(
                     transport=self.transport,
@@ -158,7 +159,11 @@ class HybridApp:
                 snapshot_store=snapshot_store,
                 normalize_worker=NormalizeWorker(
                     ParserRegistry.default(),
-                    result_sink=DurableNormalizeSink(self.normalize_repository, connection),
+                    result_sink=DurableNormalizeSink(
+                        self.normalize_repository,
+                        connection,
+                        skip_entity_parser_families=skip_entity_parser_families,
+                    ),
                 ),
                 planner=Planner(capability_rollup=self.capability_rollup),
                 capability_repository=self.capability_repository,

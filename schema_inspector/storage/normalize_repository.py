@@ -17,8 +17,16 @@ class SqlExecutor(Protocol):
 class NormalizeRepository:
     """Persists normalized parser output into PostgreSQL fact tables."""
 
-    async def persist_parse_result(self, executor: SqlExecutor, result: ParseResult) -> None:
-        inserted = await self._upsert_minimal_entities(executor, result.entity_upserts)
+    async def persist_parse_result(
+        self,
+        executor: SqlExecutor,
+        result: ParseResult,
+        *,
+        skip_entity_upserts: bool = False,
+    ) -> None:
+        inserted = _empty_inserted_tracker()
+        if not skip_entity_upserts:
+            inserted = await self._upsert_minimal_entities(executor, result.entity_upserts)
         await self._persist_lineups(executor, result, inserted)
         await self._persist_event_statistics(executor, result.metric_rows.get("event_statistic", ()))
         await self._persist_event_incidents(executor, result.metric_rows.get("event_incident", ()))
@@ -844,3 +852,19 @@ def _as_scalar_text(value: object) -> str | None:
     if value is None or isinstance(value, (dict, Mapping, list, tuple)):
         return None
     return str(value)
+
+
+def _empty_inserted_tracker() -> dict[str, set[int]]:
+    return {
+        "sport": set(),
+        "country": set(),
+        "category": set(),
+        "unique_tournament": set(),
+        "tournament": set(),
+        "season": set(),
+        "venue": set(),
+        "manager": set(),
+        "team": set(),
+        "player": set(),
+        "event": set(),
+    }

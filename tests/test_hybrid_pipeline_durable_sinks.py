@@ -173,6 +173,93 @@ class HybridPipelineDurableSinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO event_graph" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_graph_point" in sql for sql in statements))
 
+    async def test_core_pipeline_skips_root_entity_hierarchy_writes(self) -> None:
+        event_id = 14083191
+        event_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        statistics_url = f"https://www.sofascore.com/api/v1/event/{event_id}/statistics"
+        lineups_url = f"https://www.sofascore.com/api/v1/event/{event_id}/lineups"
+        incidents_url = f"https://www.sofascore.com/api/v1/event/{event_id}/incidents"
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": event_id,
+                            "slug": "arsenal-chelsea",
+                            "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                            "status": {"type": "notstarted"},
+                            "startTimestamp": 1_800_000_000,
+                            "tournament": {
+                                "id": 100,
+                                "slug": "premier-league",
+                                "name": "Premier League",
+                                "category": {
+                                    "id": 1,
+                                    "slug": "england",
+                                    "name": "England",
+                                    "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
+                                    "sport": {"id": 1, "slug": "football", "name": "Football"},
+                                },
+                                "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                            },
+                            "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                            "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(
+                    statistics_url,
+                    {
+                        "statistics": [
+                            {"period": "ALL", "groups": [{"groupName": "Overview", "statisticsItems": [{"name": "Shots", "home": 5, "away": 3}]}]}
+                        ]
+                    },
+                ),
+                lineups_url: _json_result(
+                    lineups_url,
+                    {
+                        "home": {"formation": "4-3-3", "players": [{"teamId": 42, "substitute": False, "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"}}]},
+                        "away": {"formation": "4-2-3-1", "players": []},
+                    },
+                ),
+                incidents_url: _json_result(
+                    incidents_url,
+                    {"incidents": [{"id": 1, "incidentType": "goal", "time": 17, "homeScore": 1, "awayScore": 0}]},
+                ),
+            }
+        )
+        raw_store = _FakeRawSnapshotStore()
+        sql_executor = _FakeSqlExecutor()
+        orchestrator = PilotOrchestrator(
+            fetch_executor=FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=sql_executor),
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(
+                ParserRegistry.default(),
+                result_sink=DurableNormalizeSink(
+                    NormalizeRepository(),
+                    sql_executor,
+                    skip_entity_parser_families={"event_root"},
+                ),
+            ),
+            planner=Planner(capability_rollup={}),
+            capability_repository=_FakeCapabilityRepository(),
+            sql_executor=sql_executor,
+        )
+
+        await orchestrator.run_event(event_id=event_id, sport_slug="football", hydration_mode="core")
+
+        statements = [sql for sql, _ in sql_executor.executemany_calls]
+        self.assertFalse(any("INSERT INTO sport" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO country" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO category" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO unique_tournament" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO season" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO tournament" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_statistic" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_lineup" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_incident" in sql for sql in statements))
+
     async def test_special_routes_are_persisted_for_tennis_baseball_hockey_and_esports(self) -> None:
         sql_executor = _FakeSqlExecutor()
         raw_store = _FakeRawSnapshotStore()

@@ -251,6 +251,56 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO shotmap_point" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO esports_game" in sql for sql in statements))
 
+    async def test_durable_sink_can_skip_event_root_entity_upserts(self) -> None:
+        parser = EventRootParser()
+        snapshot = RawSnapshot(
+            snapshot_id=904,
+            endpoint_pattern="/api/v1/event/{event_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14083191",
+            resolved_url="https://www.sofascore.com/api/v1/event/14083191",
+            envelope_key="event",
+            http_status=200,
+            payload={
+                "event": {
+                    "id": 14083191,
+                    "slug": "arsenal-chelsea",
+                    "tournament": {
+                        "id": 100,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category": {
+                            "id": 1,
+                            "slug": "england",
+                            "name": "England",
+                            "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                        "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                    },
+                    "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                    "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                    "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                }
+            },
+            fetched_at="2026-04-17T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=14083191,
+            context_event_id=14083191,
+        )
+        result = parser.parse(snapshot)
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(
+            NormalizeRepository(),
+            executor,
+            skip_entity_parser_families={"event_root"},
+        )
+
+        await sink(result)
+
+        self.assertEqual(executor.execute_calls, [])
+        self.assertEqual(executor.executemany_calls, [])
+
     async def test_persists_event_root_entities_in_dependency_order(self) -> None:
         parser = EventRootParser()
         snapshot = RawSnapshot(
