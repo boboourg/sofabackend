@@ -6,6 +6,32 @@ import unittest
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
+        from schema_inspector.cli import HybridApp
+        from schema_inspector.runtime import RuntimeConfig
+
+        database = _FakeDatabase()
+        app = HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+        repository = _FakeRawRepository()
+        app.raw_repository = repository
+        app.transport = object()
+        app.capability_repository = object()
+        app.live_state_repository = object()
+        app.normalize_repository = object()
+
+        original_orchestrator = getattr(__import__("schema_inspector.cli", fromlist=["PilotOrchestrator"]), "PilotOrchestrator")
+        fake_orchestrator = _FakePilotOrchestrator()
+        try:
+            import schema_inspector.cli as hybrid_cli
+
+            hybrid_cli.PilotOrchestrator = lambda **kwargs: fake_orchestrator
+            result = await app.run_event(event_id=11, sport_slug="football", hydration_mode="core")
+        finally:
+            hybrid_cli.PilotOrchestrator = original_orchestrator
+
+        self.assertEqual(result["hydration_mode"], "core")
+        self.assertEqual(fake_orchestrator.calls, [(11, "football", "core")])
+
     async def test_run_event_command_limits_batch_concurrency(self) -> None:
         from schema_inspector.cli import run_event_command
 
@@ -146,6 +172,15 @@ class _FakeRawRepository:
     async def upsert_endpoint_registry_entries(self, executor, entries) -> None:
         del executor
         self.calls.append(tuple(item.pattern for item in entries))
+
+
+class _FakePilotOrchestrator:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str = "full"):
+        self.calls.append((event_id, sport_slug, hydration_mode))
+        return {"event_id": event_id, "sport_slug": sport_slug, "hydration_mode": hydration_mode}
 
 
 if __name__ == "__main__":

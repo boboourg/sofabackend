@@ -129,7 +129,13 @@ class HybridApp:
             await self.raw_repository.upsert_endpoint_registry_entries(connection, registry_entries)
         self._seeded_endpoint_registry_sports.add(normalized_sport_slug)
 
-    async def run_event(self, *, event_id: int, sport_slug: str | None):
+    async def run_event(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str | None,
+        hydration_mode: str = "full",
+    ):
         resolved_sport_slug = sport_slug or await self.resolve_event_sport_slug(event_id)
         await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
         async with self.database.transaction() as connection:
@@ -155,6 +161,7 @@ class HybridApp:
             return await orchestrator.run_event(
                 event_id=event_id,
                 sport_slug=str(resolved_sport_slug or "football"),
+                hydration_mode=hydration_mode,
             )
 
     async def replay_snapshot(self, snapshot_id: int):
