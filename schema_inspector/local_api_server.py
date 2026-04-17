@@ -166,6 +166,8 @@ class LocalApiApplication:
         route, path_params = route_match
         payload = await self._fetch_snapshot_payload(route, path, raw_query, path_params)
         if payload is None:
+            payload = await self._fetch_normalized_payload(route, path, raw_query, path_params)
+        if payload is None:
             return ApiResponse(
                 status_code=HTTPStatus.NOT_FOUND,
                 payload={
@@ -236,6 +238,138 @@ class LocalApiApplication:
         if route.endpoint.query_template and not raw_query:
             return latest_path_match
         return None
+
+    async def _fetch_normalized_payload(
+        self,
+        route: RouteSpec,
+        path: str,
+        raw_query: str,
+        path_params: dict[str, str],
+    ) -> Any | None:
+        if raw_query:
+            return None
+
+        sport_slug = _extract_sport_slug_from_categories_path(path)
+        if sport_slug is not None:
+            return await self._fetch_sport_categories_payload(sport_slug)
+
+        category_seed = _extract_category_seed_request(path, path_params)
+        if category_seed is not None:
+            sport_slug, observed_date, timezone_offset_seconds = category_seed
+            return await self._fetch_sport_category_seed_payload(
+                sport_slug=sport_slug,
+                observed_date=observed_date,
+                timezone_offset_seconds=timezone_offset_seconds,
+            )
+
+        return None
+
+    async def _fetch_sport_categories_payload(self, sport_slug: str) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    c.id,
+                    c.slug,
+                    c.name,
+                    c.flag,
+                    c.alpha2,
+                    c.priority,
+                    c.country_alpha2,
+                    c.field_translations,
+                    s.id AS sport_id,
+                    s.slug AS sport_slug,
+                    s.name AS sport_name
+                FROM category AS c
+                JOIN sport AS s ON s.id = c.sport_id
+                WHERE s.slug = $1
+                ORDER BY c.priority NULLS LAST, c.name, c.id
+                """,
+                sport_slug,
+            )
+        finally:
+            await connection.close()
+
+        if not rows:
+            return None
+        return {"categories": [_serialize_category_row(row) for row in rows]}
+
+    async def _fetch_sport_category_seed_payload(
+        self,
+        *,
+        sport_slug: str,
+        observed_date: str,
+        timezone_offset_seconds: int,
+    ) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    cds.observed_date,
+                    cds.timezone_offset_seconds,
+                    cds.total_events,
+                    cds.total_event_player_statistics,
+                    cds.total_videos,
+                    c.id,
+                    c.slug,
+                    c.name,
+                    c.flag,
+                    c.alpha2,
+                    c.priority,
+                    c.country_alpha2,
+                    c.field_translations,
+                    s.id AS sport_id,
+                    s.slug AS sport_slug,
+                    s.name AS sport_name,
+                    COALESCE((
+                        SELECT array_agg(cdut.unique_tournament_id ORDER BY cdut.ordinal)
+                        FROM category_daily_unique_tournament AS cdut
+                        WHERE cdut.observed_date = cds.observed_date
+                          AND cdut.timezone_offset_seconds = cds.timezone_offset_seconds
+                          AND cdut.category_id = cds.category_id
+                    ), ARRAY[]::BIGINT[]) AS unique_tournament_ids,
+                    COALESCE((
+                        SELECT array_agg(cdt.team_id ORDER BY cdt.ordinal)
+                        FROM category_daily_team AS cdt
+                        WHERE cdt.observed_date = cds.observed_date
+                          AND cdt.timezone_offset_seconds = cds.timezone_offset_seconds
+                          AND cdt.category_id = cds.category_id
+                    ), ARRAY[]::BIGINT[]) AS team_ids
+                FROM category_daily_summary AS cds
+                JOIN category AS c ON c.id = cds.category_id
+                JOIN sport AS s ON s.id = c.sport_id
+                WHERE s.slug = $1
+                  AND cds.observed_date = $2::date
+                  AND cds.timezone_offset_seconds = $3
+                ORDER BY c.priority NULLS LAST, c.name, c.id
+                """,
+                sport_slug,
+                observed_date,
+                timezone_offset_seconds,
+            )
+        finally:
+            await connection.close()
+
+        if not rows:
+            return None
+
+        return {
+            "categories": [
+                {
+                    "observedDate": _serialize_scalar(row["observed_date"]),
+                    "timezoneOffsetSeconds": int(row["timezone_offset_seconds"] or 0),
+                    "category": _serialize_category_row(row),
+                    "totalEvents": _serialize_optional_int(row["total_events"]),
+                    "totalEventPlayerStatistics": _serialize_optional_int(row["total_event_player_statistics"]),
+                    "totalVideos": _serialize_optional_int(row["total_videos"]),
+                    "uniqueTournamentIds": [int(value) for value in (row["unique_tournament_ids"] or [])],
+                    "teamIds": [int(value) for value in (row["team_ids"] or [])],
+                }
+                for row in rows
+            ]
+        }
 
     async def _fetch_ops_health_payload(self) -> dict[str, Any]:
         connection = await self._connect()
@@ -594,12 +728,64 @@ def _serialize_scalar(value: Any) -> Any:
     return value
 
 
+def _serialize_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, datetime):
         return value.isoformat()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _serialize_category_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "slug": _serialize_scalar(row["slug"]),
+        "name": _serialize_scalar(row["name"]),
+        "flag": _serialize_scalar(row["flag"]),
+        "alpha2": _serialize_scalar(row["alpha2"]),
+        "priority": _serialize_optional_int(row["priority"]),
+        "countryAlpha2": _serialize_scalar(row["country_alpha2"]),
+        "fieldTranslations": _serialize_scalar(row["field_translations"]),
+        "sport": {
+            "id": int(row["sport_id"]),
+            "slug": _serialize_scalar(row["sport_slug"]),
+            "name": _serialize_scalar(row["sport_name"]),
+        },
+    }
+
+
+def _extract_sport_slug_from_categories_path(path: str) -> str | None:
+    match = re.fullmatch(r"/api/v1/sport/(?P<sport_slug>[^/]+)/categories(?:/all)?", path)
+    if match is None:
+        return None
+    return str(match.group("sport_slug"))
+
+
+def _extract_category_seed_request(
+    path: str,
+    path_params: dict[str, str],
+) -> tuple[str, str, int] | None:
+    match = re.fullmatch(
+        r"/api/v1/sport/(?P<sport_slug>[^/]+)/(?P<date>\d{4}-\d{2}-\d{2})/(?P<timezone_offset_seconds>-?\d+)/categories",
+        path,
+    )
+    if match is None:
+        return None
+    try:
+        timezone_offset_seconds = int(path_params.get("timezone_offset_seconds", match.group("timezone_offset_seconds")))
+    except ValueError:
+        return None
+    return (
+        str(match.group("sport_slug")),
+        str(path_params.get("date", match.group("date"))),
+        timezone_offset_seconds,
+    )
 
 
 def _load_optional_redis_backend(redis_url: str | None) -> Any | None:

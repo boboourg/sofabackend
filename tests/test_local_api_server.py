@@ -141,5 +141,54 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Route is not registered", response.payload["error"])
 
 
+class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_api_get_uses_normalized_category_fallback_when_snapshot_missing(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fake_snapshot(route, path, raw_query, path_params):
+            return None
+
+        async def fake_normalized(route, path, raw_query, path_params):
+            if path == "/api/v1/sport/baseball/categories":
+                return {
+                    "categories": [
+                        {
+                            "id": 42,
+                            "slug": "usa",
+                            "name": "USA",
+                            "sport": {"id": 5, "slug": "baseball", "name": "Baseball"},
+                        }
+                    ]
+                }
+            return None
+
+        application._fetch_snapshot_payload = fake_snapshot
+        application._fetch_normalized_payload = fake_normalized
+
+        response = await application.handle_api_get("/api/v1/sport/baseball/categories", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["categories"][0]["sport"]["slug"], "baseball")
+
+    async def test_handle_api_get_keeps_contract_404_when_no_snapshot_or_normalized_data(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fake_snapshot(route, path, raw_query, path_params):
+            return None
+
+        async def fake_normalized(route, path, raw_query, path_params):
+            return None
+
+        application._fetch_snapshot_payload = fake_snapshot
+        application._fetch_normalized_payload = fake_normalized
+
+        response = await application.handle_api_get("/api/v1/sport/baseball/categories", "")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.payload["endpointPattern"], "/api/v1/sport/baseball/categories")
+
+
 if __name__ == "__main__":
     unittest.main()
