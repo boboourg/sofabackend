@@ -18,6 +18,7 @@ class SportAdapterTests(unittest.TestCase):
 
         self.assertEqual(adapter.archetype, "regular_season_team")
         self.assertIn("baseball_innings", adapter.special_families)
+        self.assertIn("event_comments", adapter.special_families)
         self.assertIn("incidents", adapter.core_event_edges)
         self.assertTrue(adapter.hydrate_entity_profiles)
 

@@ -10,6 +10,7 @@ from ..endpoints import (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
     EVENT_BASEBALL_PITCHES_ENDPOINT,
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
+    EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
     EVENT_ESPORTS_GAMES_ENDPOINT,
     EVENT_GRAPH_ENDPOINT,
@@ -366,6 +367,12 @@ class PilotOrchestrator:
                         parse_results.append(parsed)
 
         for endpoint in _special_endpoints_for_sport(sport_slug, core_only=core_only):
+            if (
+                sport_slug == "baseball"
+                and endpoint.pattern == EVENT_COMMENTS_ENDPOINT.pattern
+                and baseball_seen_at_bats
+            ):
+                continue
             outcome, parsed = await self._fetch_and_parse(
                 endpoint=endpoint,
                 sport_slug=sport_slug,
@@ -514,7 +521,11 @@ class PilotOrchestrator:
         if (
             sport_slug != "baseball"
             or parent_outcome.snapshot_id is None
-            or parent_endpoint.pattern not in {EVENT_INCIDENTS_ENDPOINT.pattern, EVENT_BASEBALL_INNINGS_ENDPOINT.pattern}
+            or parent_endpoint.pattern not in {
+                EVENT_INCIDENTS_ENDPOINT.pattern,
+                EVENT_BASEBALL_INNINGS_ENDPOINT.pattern,
+                EVENT_COMMENTS_ENDPOINT.pattern,
+            }
         ):
             return [], []
 
@@ -673,10 +684,11 @@ def _special_endpoints_for_sport(sport_slug: str, *, core_only: bool = False) ->
         "tennis_point_by_point": EVENT_POINT_BY_POINT_ENDPOINT,
         "tennis_power": EVENT_TENNIS_POWER_ENDPOINT,
         "baseball_innings": EVENT_BASEBALL_INNINGS_ENDPOINT,
+        "event_comments": EVENT_COMMENTS_ENDPOINT,
         "shotmap": EVENT_SHOTMAP_ENDPOINT,
         "esports_games": EVENT_ESPORTS_GAMES_ENDPOINT,
     }
-    core_enabled_families = {"baseball_innings", "esports_games"}
+    core_enabled_families = {"baseball_innings", "event_comments", "esports_games"}
     return tuple(
         family_map[family]
         for family in adapter.special_families
