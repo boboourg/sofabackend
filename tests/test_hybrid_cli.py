@@ -106,6 +106,15 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         historical_discovery = parser.parse_args(
             ["worker-historical-discovery", "--consumer-name", "historical-discovery-1"]
         )
+        historical_tournament_planner = parser.parse_args(
+            ["historical-tournament-planner-daemon", "--consumer-name", "historical-tournament-planner-1"]
+        )
+        historical_tournament = parser.parse_args(
+            ["worker-historical-tournament", "--consumer-name", "historical-tournament-1"]
+        )
+        historical_enrichment = parser.parse_args(
+            ["worker-historical-enrichment", "--consumer-name", "historical-enrichment-1"]
+        )
         hydrate = parser.parse_args(["worker-hydrate", "--consumer-name", "hydrate-1"])
         historical_hydrate = parser.parse_args(
             ["worker-historical-hydrate", "--consumer-name", "historical-hydrate-1"]
@@ -124,6 +133,9 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(historical_planner.date_to, "2025-01-31")
         self.assertEqual(discovery.command, "worker-discovery")
         self.assertEqual(historical_discovery.command, "worker-historical-discovery")
+        self.assertEqual(historical_tournament_planner.command, "historical-tournament-planner-daemon")
+        self.assertEqual(historical_tournament.command, "worker-historical-tournament")
+        self.assertEqual(historical_enrichment.command, "worker-historical-enrichment")
         self.assertEqual(hydrate.command, "worker-hydrate")
         self.assertEqual(historical_hydrate.command, "worker-historical-hydrate")
         self.assertEqual(live_hot.command, "worker-live-hot")
@@ -173,6 +185,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(("stream:etl:historical_discovery", "cg:historical_discovery", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:historical_hydrate", "cg:historical_hydrate", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:historical_tournament", "cg:historical_tournament", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:historical_enrichment", "cg:historical_enrichment", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:historical_maintenance", "cg:historical_maintenance", "0-0"), fake_stream_queue.groups)
 
     def test_load_redis_backend_fails_without_url_when_memory_fallback_disabled(self) -> None:

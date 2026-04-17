@@ -6,13 +6,16 @@ from .leases import Lease, LeaseManager
 from .proxy_state import PROXY_COOLDOWN_ZSET, ProxyState, ProxyStateStore
 from .ratelimit_state import RateLimitState, RateLimitStateStore
 from .streams import (
+    ConsumerGroupInfo,
     PendingEntry,
     PendingSummary,
     STREAM_DISCOVERY,
     STREAM_DLQ,
     STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HISTORICAL_MAINTENANCE,
+    STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
@@ -27,6 +30,8 @@ __all__ = [
     "STREAM_HYDRATE",
     "STREAM_NORMALIZE",
     "STREAM_HISTORICAL_DISCOVERY",
+    "STREAM_HISTORICAL_TOURNAMENT",
+    "STREAM_HISTORICAL_ENRICHMENT",
     "STREAM_HISTORICAL_HYDRATE",
     "STREAM_HISTORICAL_MAINTENANCE",
     "STREAM_LIVE_HOT",
@@ -37,6 +42,7 @@ __all__ = [
     "StreamEntry",
     "PendingSummary",
     "PendingEntry",
+    "ConsumerGroupInfo",
     "RedisStreamQueue",
     "DelayedJob",
     "DelayedJobScheduler",

@@ -7,8 +7,10 @@ from schema_inspector.queue import (
     STREAM_DISCOVERY,
     STREAM_DLQ,
     STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HISTORICAL_MAINTENANCE,
+    STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
@@ -16,7 +18,7 @@ from schema_inspector.queue import (
     STREAM_NORMALIZE,
 )
 from schema_inspector.queue.delayed import DelayedJobScheduler
-from schema_inspector.queue.streams import PendingEntry, PendingSummary, RedisStreamQueue
+from schema_inspector.queue.streams import ConsumerGroupInfo, PendingEntry, PendingSummary, RedisStreamQueue
 
 
 class _FakeStreamBackend:
@@ -102,6 +104,27 @@ class _FakeStreamBackend:
             "max": message_ids[-1] if message_ids else None,
             "consumers": consumers,
         }
+
+    def xlen(self, stream: str) -> int:
+        return len(self.streams.get(stream, ()))
+
+    def xinfo_groups(self, stream: str) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for current_stream, group in sorted(self.group_offsets):
+            if current_stream != stream:
+                continue
+            pending_meta = self.pending_meta.setdefault((stream, group), {})
+            rows.append(
+                {
+                    "name": group,
+                    "consumers": len({str(item["consumer"]) for item in pending_meta.values()}),
+                    "pending": len(pending_meta),
+                    "last-delivered-id": None if not self.streams.get(stream) else self.streams[stream][-1][0],
+                    "entries-read": self.group_offsets[(stream, group)],
+                    "lag": max(0, len(self.streams.get(stream, ())) - self.group_offsets[(stream, group)]),
+                }
+            )
+        return rows
 
     def xpending_range(
         self,
@@ -215,6 +238,8 @@ class QueueStreamsTests(unittest.TestCase):
         self.assertEqual(STREAM_HYDRATE, "stream:etl:hydrate")
         self.assertEqual(STREAM_NORMALIZE, "stream:etl:normalize")
         self.assertEqual(STREAM_HISTORICAL_DISCOVERY, "stream:etl:historical_discovery")
+        self.assertEqual(STREAM_HISTORICAL_TOURNAMENT, "stream:etl:historical_tournament")
+        self.assertEqual(STREAM_HISTORICAL_ENRICHMENT, "stream:etl:historical_enrichment")
         self.assertEqual(STREAM_HISTORICAL_HYDRATE, "stream:etl:historical_hydrate")
         self.assertEqual(STREAM_HISTORICAL_MAINTENANCE, "stream:etl:historical_maintenance")
         self.assertEqual(STREAM_LIVE_HOT, "stream:etl:live_hot")
@@ -300,6 +325,27 @@ class QueueStreamsTests(unittest.TestCase):
         self.assertEqual(claimed[0].values["job_id"], "job-1")
         self.assertEqual(backend.claimed_by[(STREAM_HYDRATE, "cg:hydrate")]["1-1"], "worker-b")
         self.assertEqual(backend.pending_meta[(STREAM_HYDRATE, "cg:hydrate")]["1-1"]["deliveries"], 2)
+
+    def test_stream_queue_can_report_length_and_group_info(self) -> None:
+        backend = _FakeStreamBackend()
+        queue = RedisStreamQueue(backend)
+
+        queue.ensure_group(STREAM_HYDRATE, "cg:hydrate")
+        queue.publish(STREAM_HYDRATE, {"job_id": "job-1"})
+        queue.publish(STREAM_HYDRATE, {"job_id": "job-2"})
+        queue.read_group(STREAM_HYDRATE, "cg:hydrate", "worker-a", count=1)
+
+        self.assertEqual(queue.stream_length(STREAM_HYDRATE), 2)
+        self.assertEqual(
+            queue.group_info(STREAM_HYDRATE, "cg:hydrate"),
+            ConsumerGroupInfo(
+                consumers=1,
+                pending=1,
+                last_delivered_id="1-2",
+                entries_read=1,
+                lag=1,
+            ),
+        )
 
     def test_delayed_scheduler_returns_due_jobs_in_score_order(self) -> None:
         scheduler = DelayedJobScheduler(_FakeSortedSetBackend())

@@ -27,8 +27,10 @@ from .queue.streams import (
     RedisStreamQueue,
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HISTORICAL_MAINTENANCE,
+    STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
@@ -48,6 +50,8 @@ _QUEUE_GROUPS = (
     (STREAM_DISCOVERY, "cg:discovery"),
     (STREAM_HYDRATE, "cg:hydrate"),
     (STREAM_HISTORICAL_DISCOVERY, "cg:historical_discovery"),
+    (STREAM_HISTORICAL_TOURNAMENT, "cg:historical_tournament"),
+    (STREAM_HISTORICAL_ENRICHMENT, "cg:historical_enrichment"),
     (STREAM_HISTORICAL_HYDRATE, "cg:historical_hydrate"),
     (STREAM_LIVE_HOT, "cg:live_hot"),
     (STREAM_LIVE_WARM, "cg:live_warm"),
@@ -444,14 +448,27 @@ class LocalApiApplication:
                     summary = self.stream_queue.pending_summary(stream_name, group_name)
                 except Exception:
                     summary = None
+                try:
+                    stream_length = self.stream_queue.stream_length(stream_name)
+                except Exception:
+                    stream_length = 0
+                try:
+                    group_info = self.stream_queue.group_info(stream_name, group_name)
+                except Exception:
+                    group_info = None
                 streams.append(
                     {
                         "stream": stream_name,
                         "group": group_name,
+                        "length": int(stream_length),
                         "pending_total": 0 if summary is None else int(summary.total),
                         "smallest_id": None if summary is None else summary.smallest_id,
                         "largest_id": None if summary is None else summary.largest_id,
                         "consumers": {} if summary is None else dict(summary.consumers),
+                        "group_consumers": 0 if group_info is None else int(group_info.consumers),
+                        "entries_read": None if group_info is None else group_info.entries_read,
+                        "lag": None if group_info is None else group_info.lag,
+                        "last_delivered_id": None if group_info is None else group_info.last_delivered_id,
                     }
                 )
         delayed_total = 0

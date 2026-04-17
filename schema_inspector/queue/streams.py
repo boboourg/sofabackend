@@ -9,6 +9,8 @@ STREAM_DISCOVERY = "stream:etl:discovery"
 STREAM_HYDRATE = "stream:etl:hydrate"
 STREAM_NORMALIZE = "stream:etl:normalize"
 STREAM_HISTORICAL_DISCOVERY = "stream:etl:historical_discovery"
+STREAM_HISTORICAL_TOURNAMENT = "stream:etl:historical_tournament"
+STREAM_HISTORICAL_ENRICHMENT = "stream:etl:historical_enrichment"
 STREAM_HISTORICAL_HYDRATE = "stream:etl:historical_hydrate"
 STREAM_HISTORICAL_MAINTENANCE = "stream:etl:historical_maintenance"
 STREAM_LIVE_HOT = "stream:etl:live_hot"
@@ -38,6 +40,15 @@ class PendingEntry:
     consumer: str
     idle_ms: int
     delivery_count: int
+
+
+@dataclass(frozen=True)
+class ConsumerGroupInfo:
+    consumers: int
+    pending: int
+    last_delivered_id: str | None
+    entries_read: int | None
+    lag: int | None
 
 
 class RedisStreamQueue:
@@ -139,6 +150,25 @@ class RedisStreamQueue:
             raise TypeError(f"Unsupported XPENDING range row: {row!r}")
         return tuple(entries)
 
+    def stream_length(self, stream: str) -> int:
+        return int(self.backend.xlen(stream))
+
+    def group_info(self, stream: str, group: str) -> ConsumerGroupInfo | None:
+        rows = self.backend.xinfo_groups(stream)
+        for row in rows:
+            if str(_mapping_get(row, "name") or "") != str(group):
+                continue
+            return ConsumerGroupInfo(
+                consumers=int(_mapping_get(row, "consumers", 0) or 0),
+                pending=int(_mapping_get(row, "pending", 0) or 0),
+                last_delivered_id=_optional_string(
+                    _mapping_get(row, "last-delivered-id") or _mapping_get(row, "last_delivered_id")
+                ),
+                entries_read=_optional_int(_mapping_get(row, "entries-read") or _mapping_get(row, "entries_read")),
+                lag=_optional_int(_mapping_get(row, "lag")),
+            )
+        return None
+
     def claim_stale(
         self,
         stream: str,
@@ -189,3 +219,18 @@ def _optional_string(value: object) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mapping_get(row: object, key: str, default: object = None) -> object:
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    return default

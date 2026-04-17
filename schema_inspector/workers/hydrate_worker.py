@@ -24,6 +24,7 @@ class HydrateWorker:
         block_ms: int = 5_000,
         now_ms_factory=None,
         default_sport_slug: str = "football",
+        job_audit_logger=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
@@ -45,6 +46,7 @@ class HydrateWorker:
             completion_store=completion_store,
             block_ms=block_ms,
             now_ms_factory=self.now_ms_factory,
+            job_audit_logger=job_audit_logger,
         )
 
     async def handle(self, entry: StreamEntry) -> str:

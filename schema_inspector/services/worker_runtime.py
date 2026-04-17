@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import signal
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..queue.streams import StreamEntry
@@ -14,6 +16,7 @@ from .retry_policy import is_retryable_db_error, retry_delay_ms
 
 StreamHandler = Callable[[StreamEntry], object]
 RetryHandler = Callable[[StreamEntry, Exception], object]
+logger = logging.getLogger(__name__)
 
 
 class WorkerRuntime:
@@ -34,6 +37,7 @@ class WorkerRuntime:
         now_ms_factory=None,
         block_ms: int = 5_000,
         idle_sleep_s: float = 0.05,
+        job_audit_logger=None,
     ) -> None:
         self.name = name
         self.queue = queue
@@ -47,6 +51,7 @@ class WorkerRuntime:
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.block_ms = block_ms
         self.idle_sleep_s = idle_sleep_s
+        self.job_audit_logger = job_audit_logger
         self.shutdown_requested = False
         self.accepting_new_work = True
         self._signal_handlers_installed = False
@@ -104,15 +109,38 @@ class WorkerRuntime:
         task.add_done_callback(self._inflight.discard)
 
     async def _handle_entry(self, entry: StreamEntry) -> object:
+        started_at = _utc_now_iso()
+        started_perf = time.perf_counter()
         try:
             outcome = await _await_maybe(self.handler(entry))
         except Exception as exc:
             if self.retry_handler is not None and is_retryable_db_error(exc):
                 delay_ms = retry_delay_ms(attempt=_entry_attempt(entry))
                 await _await_maybe(self.retry_handler(entry, exc, delay_ms=delay_ms))
+                await self._record_job_run(
+                    entry,
+                    status="retry_scheduled",
+                    started_at=started_at,
+                    duration_ms=_duration_ms(started_perf),
+                    error=exc,
+                    retry_delay_ms=delay_ms,
+                )
                 self.queue.ack(entry.stream, self.group, (entry.message_id,))
                 return "requeued"
+            await self._record_job_run(
+                entry,
+                status="failed",
+                started_at=started_at,
+                duration_ms=_duration_ms(started_perf),
+                error=exc,
+            )
             raise
+        await self._record_job_run(
+            entry,
+            status="succeeded",
+            started_at=started_at,
+            duration_ms=_duration_ms(started_perf),
+        )
         self.mark_entry_completed(entry)
         self.queue.ack(entry.stream, self.group, (entry.message_id,))
         return outcome
@@ -145,6 +173,39 @@ class WorkerRuntime:
             )
         )
 
+    async def _record_job_run(
+        self,
+        entry: StreamEntry,
+        *,
+        status: str,
+        started_at: str,
+        duration_ms: int,
+        error: Exception | None = None,
+        retry_delay_ms: int | None = None,
+    ) -> None:
+        if self.job_audit_logger is None:
+            return
+        retry_scheduled_for = None
+        if retry_delay_ms is not None:
+            retry_at = datetime.now(timezone.utc) + timedelta(milliseconds=int(retry_delay_ms))
+            retry_scheduled_for = retry_at.isoformat()
+        try:
+            await _await_maybe(
+                self.job_audit_logger.record_run(
+                    values=entry.values,
+                    fallback_job_id=entry.message_id,
+                    worker_id=self.consumer,
+                    status=status,
+                    started_at=started_at,
+                    finished_at=_utc_now_iso(),
+                    duration_ms=duration_ms,
+                    error=error,
+                    retry_scheduled_for=retry_scheduled_for,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - best-effort guard
+            logger.warning("Job audit logging failed for worker=%s status=%s: %s", self.consumer, status, exc)
+
 
 async def _await_maybe(value: object) -> object:
     if inspect.isawaitable(value):
@@ -163,3 +224,11 @@ def _entry_attempt(entry: StreamEntry) -> int:
 def _completion_key(entry: StreamEntry) -> str:
     job_id = entry.values.get("job_id") or entry.message_id
     return f"completed:job:{job_id}"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _duration_ms(started_perf: float) -> int:
+    return max(0, int((time.perf_counter() - float(started_perf)) * 1000))

@@ -50,6 +50,7 @@ class MaintenanceWorker:
         max_delivery_count: int = 5,
         reclaim_consumer: str | None = None,
         now_ms_factory=None,
+        job_audit_logger=None,
     ) -> None:
         self.handler = handler
         self.queue = queue
@@ -73,6 +74,7 @@ class MaintenanceWorker:
             block_ms=block_ms,
             completion_store=completion_store,
             now_ms_factory=self.now_ms_factory,
+            job_audit_logger=job_audit_logger,
         )
 
     async def handle(self, item: StreamEntry):

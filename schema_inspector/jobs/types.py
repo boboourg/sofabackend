@@ -1,6 +1,8 @@
 """Canonical job type identifiers for the hybrid ETL planner."""
 
 JOB_DISCOVER_SPORT_SURFACE = "discover_sport_surface"
+JOB_SYNC_TOURNAMENT_ARCHIVE = "sync_tournament_archive"
+JOB_ENRICH_TOURNAMENT_ARCHIVE = "enrich_tournament_archive"
 JOB_EXPAND_CATEGORY = "expand_category"
 JOB_SYNC_UNIQUE_TOURNAMENT = "sync_unique_tournament"
 JOB_SYNC_SEASON_INDEX = "sync_season_index"

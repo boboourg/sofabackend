@@ -13,8 +13,10 @@ from ..queue.dedupe import DedupeStore
 from ..queue.streams import (
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HISTORICAL_MAINTENANCE,
+    STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
@@ -23,10 +25,17 @@ from ..queue.streams import (
     StreamEntry,
 )
 from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
+from .historical_tournament_planner import (
+    HistoricalTournamentCursorStore,
+    HistoricalTournamentPlannerDaemon,
+    HistoricalTournamentPlanningTarget,
+)
+from .job_audit_logger import JobAuditLogger
 from .planner_daemon import PlannerDaemon, ScheduledPlanningTarget
 from ..workers._stream_jobs import decode_stream_payload
 from ..workers.discovery_worker import DiscoveryWorker
 from ..workers.hydrate_worker import HydrateWorker
+from ..workers.historical_archive_worker import HistoricalEnrichmentWorker, HistoricalTournamentWorker
 from ..workers.live_worker_service import LiveWorkerService
 from ..workers.maintenance_worker import MaintenanceWorker
 from ..workers.maintenance_worker import ReclaimTarget
@@ -60,6 +69,8 @@ DEFAULT_CONSUMER_GROUPS = (
 
 HISTORICAL_CONSUMER_GROUPS = (
     (STREAM_HISTORICAL_DISCOVERY, "cg:historical_discovery"),
+    (STREAM_HISTORICAL_TOURNAMENT, "cg:historical_tournament"),
+    (STREAM_HISTORICAL_ENRICHMENT, "cg:historical_enrichment"),
     (STREAM_HISTORICAL_HYDRATE, "cg:historical_hydrate"),
     (STREAM_HISTORICAL_MAINTENANCE, "cg:historical_maintenance"),
 )
@@ -112,6 +123,9 @@ class ServiceApp:
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
         self.completion_store = DedupeStore(self.app.redis_backend)
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
+        self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
+        database = getattr(self.app, "database", None)
+        self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
     def ensure_consumer_groups(self) -> None:
         for stream, group in DEFAULT_CONSUMER_GROUPS:
@@ -172,6 +186,27 @@ class ServiceApp:
             loop_interval_s=loop_interval_seconds,
         )
 
+    def build_historical_tournament_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        tournaments_per_tick: int = 10,
+        loop_interval_seconds: float = 10.0,
+    ) -> HistoricalTournamentPlannerDaemon:
+        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        targets = tuple(
+            HistoricalTournamentPlanningTarget(sport_slug=sport_slug)
+            for sport_slug in normalized_sports
+        )
+        return HistoricalTournamentPlannerDaemon(
+            queue=self.stream_queue,
+            cursor_store=self.historical_tournament_cursor_store,
+            selector=self.app.select_unique_tournament_ids_after_cursor,
+            targets=targets,
+            tournaments_per_tick=tournaments_per_tick,
+            loop_interval_s=loop_interval_seconds,
+        )
+
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
         self.ensure_consumer_groups()
         return HydrateWorker(
@@ -182,6 +217,7 @@ class ServiceApp:
             queue=self.stream_queue,
             consumer=consumer_name,
             block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
@@ -196,6 +232,7 @@ class ServiceApp:
             group="cg:historical_hydrate",
             stream=STREAM_HISTORICAL_HYDRATE,
             block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_discovery_worker(
@@ -215,6 +252,7 @@ class ServiceApp:
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_historical_discovery_worker(
@@ -237,6 +275,38 @@ class ServiceApp:
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
+            job_audit_logger=self.job_audit_logger,
+        )
+
+    def build_historical_tournament_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HistoricalTournamentWorker:
+        self.ensure_historical_consumer_groups()
+        return HistoricalTournamentWorker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
+        )
+
+    def build_historical_enrichment_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+    ) -> HistoricalEnrichmentWorker:
+        self.ensure_historical_consumer_groups()
+        return HistoricalEnrichmentWorker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> LiveWorkerService:
@@ -250,6 +320,7 @@ class ServiceApp:
             lane=lane,
             consumer=consumer_name,
             block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:
@@ -262,6 +333,7 @@ class ServiceApp:
             queue=self.stream_queue,
             consumer=consumer_name,
             block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:
@@ -278,8 +350,11 @@ class ServiceApp:
             block_ms=block_ms,
             reclaim_targets=(
                 ReclaimTarget(stream=STREAM_HISTORICAL_DISCOVERY, group="cg:historical_discovery"),
+                ReclaimTarget(stream=STREAM_HISTORICAL_TOURNAMENT, group="cg:historical_tournament"),
+                ReclaimTarget(stream=STREAM_HISTORICAL_ENRICHMENT, group="cg:historical_enrichment"),
                 ReclaimTarget(stream=STREAM_HISTORICAL_HYDRATE, group="cg:historical_hydrate"),
             ),
+            job_audit_logger=self.job_audit_logger,
         )
 
     async def run_planner_daemon(
@@ -317,6 +392,21 @@ class ServiceApp:
         )
         await daemon.run_forever()
 
+    async def run_historical_tournament_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        tournaments_per_tick: int = 10,
+        loop_interval_seconds: float = 10.0,
+    ) -> None:
+        self.ensure_historical_consumer_groups()
+        daemon = self.build_historical_tournament_planner_daemon(
+            sport_slugs=sport_slugs,
+            tournaments_per_tick=tournaments_per_tick,
+            loop_interval_seconds=loop_interval_seconds,
+        )
+        await daemon.run_forever()
+
     async def run_discovery_worker(
         self,
         *,
@@ -343,6 +433,14 @@ class ServiceApp:
             block_ms=block_ms,
             timeout_s=timeout_s,
         )
+        await worker.run_forever()
+
+    async def run_historical_tournament_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        worker = self.build_historical_tournament_worker(consumer_name=consumer_name, block_ms=block_ms)
+        await worker.run_forever()
+
+    async def run_historical_enrichment_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        worker = self.build_historical_enrichment_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
     async def run_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:

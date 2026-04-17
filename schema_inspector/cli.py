@@ -30,6 +30,12 @@ from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue
 from .runtime import load_runtime_config
+from .services.historical_archive_service import (
+    run_historical_tournament_archive as run_historical_tournament_archive_service,
+)
+from .services.historical_archive_service import (
+    run_historical_tournament_enrichment as run_historical_tournament_enrichment_service,
+)
 from .services.service_app import ServiceApp
 from .sofascore_client import SofascoreClient
 from .storage.capability_repository import CapabilityRepository
@@ -206,6 +212,52 @@ class HybridApp:
     async def discover_scheduled_event_ids(self, *, sport_slug: str, date: str, timeout: float) -> tuple[int, ...]:
         result = await self.event_list_job.run_scheduled(date, sport_slug=sport_slug, timeout=timeout)
         return tuple(int(item.id) for item in result.parsed.events)
+
+    async def select_unique_tournament_ids_after_cursor(
+        self,
+        *,
+        sport_slug: str,
+        after_unique_tournament_id: int,
+        limit: int,
+    ) -> tuple[int, ...]:
+        async with self.database.connection() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT ut.id
+                FROM unique_tournament AS ut
+                JOIN category AS c ON c.id = ut.category_id
+                JOIN sport AS s ON s.id = c.sport_id
+                WHERE s.slug = $1
+                  AND ut.id > $2
+                ORDER BY ut.id
+                LIMIT $3
+                """,
+                sport_slug,
+                int(after_unique_tournament_id),
+                max(1, int(limit)),
+            )
+        return tuple(int(row["id"]) for row in rows if row["id"] is not None)
+
+    async def run_historical_tournament_archive(self, *, unique_tournament_id: int, sport_slug: str):
+        return await run_historical_tournament_archive_service(
+            self,
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+        )
+
+    async def run_historical_tournament_enrichment(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        season_ids: tuple[int, ...] = (),
+    ):
+        return await run_historical_tournament_enrichment_service(
+            self,
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            season_ids=season_ids,
+        )
 
     async def select_event_ids(self, *, limit: int | None, offset: int, sport_slug: str | None) -> tuple[int, ...]:
         async with self.database.connection() as connection:
@@ -502,6 +554,14 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "historical-tournament-planner-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_tournament_planner_daemon(
+                    sport_slugs=tuple(args.sport_slug or ()),
+                    tournaments_per_tick=args.tournaments_per_tick,
+                    loop_interval_seconds=args.loop_interval_seconds,
+                )
+                return 0
             if args.command == "worker-discovery":
                 service_app = ServiceApp(app)
                 await service_app.run_discovery_worker(
@@ -516,6 +576,20 @@ async def _dispatch(args) -> int:
                     consumer_name=args.consumer_name,
                     block_ms=args.block_ms,
                     timeout_s=args.timeout,
+                )
+                return 0
+            if args.command == "worker-historical-tournament":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_tournament_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-historical-enrichment":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_enrichment_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
                 )
                 return 0
             if args.command == "worker-hydrate":
@@ -634,6 +708,12 @@ def _build_parser() -> argparse.ArgumentParser:
     historical_planner_daemon.add_argument("--dates-per-tick", type=int, default=1, help="Maximum archival dates to publish per sport on each planner tick.")
     historical_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
 
+    historical_tournament_planner_daemon = subparsers.add_parser("historical-tournament-planner-daemon", help="Run the historical tournament/season planner loop.")
+    historical_tournament_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
+    historical_tournament_planner_daemon.add_argument("--consumer-name", default="historical-tournament-planner-1", help="Opaque planner instance label for logs and tmux naming.")
+    historical_tournament_planner_daemon.add_argument("--tournaments-per-tick", type=int, default=10, help="Maximum archival tournaments to publish per sport on each planner tick.")
+    historical_tournament_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=10.0, help="Daemon tick loop interval.")
+
     worker_discovery = subparsers.add_parser("worker-discovery", help="Run the discovery consumer group loop.")
     worker_discovery.add_argument("--consumer-name", default="worker-discovery-1", help="Redis consumer name for the discovery worker.")
     worker_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
@@ -641,6 +721,14 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_historical_discovery = subparsers.add_parser("worker-historical-discovery", help="Run the archival discovery consumer group loop.")
     worker_historical_discovery.add_argument("--consumer-name", default="worker-historical-discovery-1", help="Redis consumer name for the archival discovery worker.")
     worker_historical_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_historical_tournament = subparsers.add_parser("worker-historical-tournament", help="Run the archival tournament/season consumer group loop.")
+    worker_historical_tournament.add_argument("--consumer-name", default="worker-historical-tournament-1", help="Redis consumer name for the archival tournament worker.")
+    worker_historical_tournament.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_historical_enrichment = subparsers.add_parser("worker-historical-enrichment", help="Run the archival enrichment consumer group loop.")
+    worker_historical_enrichment.add_argument("--consumer-name", default="worker-historical-enrichment-1", help="Redis consumer name for the archival enrichment worker.")
+    worker_historical_enrichment.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_hydrate = subparsers.add_parser("worker-hydrate", help="Run the hydrate consumer group loop.")
     worker_hydrate.add_argument("--consumer-name", default="worker-hydrate-1", help="Redis consumer name for the hydrate worker.")
@@ -870,6 +958,27 @@ class _MemoryRedisBackend:
             "max": message_ids[-1] if message_ids else None,
             "consumers": consumers,
         }
+
+    def xlen(self, stream: str) -> int:
+        return len(self.streams.get(stream, ()))
+
+    def xinfo_groups(self, stream: str) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for current_stream, group in sorted(self.group_offsets):
+            if current_stream != stream:
+                continue
+            pending_meta = self.pending_meta.setdefault((stream, group), {})
+            rows.append(
+                {
+                    "name": group,
+                    "consumers": len({str(item["consumer"]) for item in pending_meta.values()}),
+                    "pending": len(pending_meta),
+                    "last-delivered-id": None if not self.streams.get(stream) else self.streams[stream][-1][0],
+                    "entries-read": int(self.group_offsets.get((stream, group), 0)),
+                    "lag": max(0, len(self.streams.get(stream, ())) - int(self.group_offsets.get((stream, group), 0))),
+                }
+            )
+        return rows
 
     def xpending_range(self, stream: str, group: str, min: str, max: str, count: int, consumername: str | None = None):
         del min, max

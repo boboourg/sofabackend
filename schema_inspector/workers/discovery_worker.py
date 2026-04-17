@@ -26,6 +26,7 @@ class DiscoveryWorker:
         delayed_payload_store=None,
         completion_store=None,
         now_ms_factory=None,
+        job_audit_logger=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.queue = queue
@@ -48,6 +49,7 @@ class DiscoveryWorker:
             completion_store=completion_store,
             block_ms=block_ms,
             now_ms_factory=self.now_ms_factory,
+            job_audit_logger=job_audit_logger,
         )
 
     async def handle(self, entry: StreamEntry) -> str:

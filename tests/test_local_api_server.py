@@ -152,8 +152,14 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         stream_names = {item["stream"] for item in payload["streams"]}
         self.assertIn("stream:etl:historical_discovery", stream_names)
         self.assertIn("stream:etl:historical_hydrate", stream_names)
+        self.assertIn("stream:etl:historical_tournament", stream_names)
+        self.assertIn("stream:etl:historical_enrichment", stream_names)
         self.assertIn("stream:etl:historical_maintenance", stream_names)
         self.assertGreaterEqual(len(_QUEUE_GROUPS), 8)
+        first_stream = payload["streams"][0]
+        self.assertIn("length", first_stream)
+        self.assertIn("lag", first_stream)
+        self.assertIn("group_consumers", first_stream)
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -215,3 +221,19 @@ class _FakePendingQueue:
         from schema_inspector.queue.streams import PendingSummary
 
         return PendingSummary(total=0, smallest_id=None, largest_id=None, consumers={})
+
+    def stream_length(self, stream: str) -> int:
+        del stream
+        return 12
+
+    def group_info(self, stream: str, group: str):
+        del stream, group
+        from schema_inspector.queue.streams import ConsumerGroupInfo
+
+        return ConsumerGroupInfo(
+            consumers=2,
+            pending=0,
+            last_delivered_id="1-99",
+            entries_read=42,
+            lag=7,
+        )
