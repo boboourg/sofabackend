@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from schema_inspector.endpoints import LOCAL_API_SUPPORTED_SPORTS
 from schema_inspector.local_swagger_builder import (
@@ -111,17 +112,18 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         )
 
     def test_resolve_openapi_base_urls_prefers_public_then_local_fallbacks(self) -> None:
-        self.assertEqual(
-            resolve_openapi_base_urls(
-                primary_base_url="http://0.0.0.0:8000",
-                public_base_urls=("https://api.example.com",),
-            ),
-            (
-                "https://api.example.com",
-                "http://127.0.0.1:8000",
-                "http://localhost:8000",
-            ),
-        )
+        with patch("schema_inspector.local_swagger_builder._load_project_env", return_value={}):
+            self.assertEqual(
+                resolve_openapi_base_urls(
+                    primary_base_url="http://0.0.0.0:8000",
+                    public_base_urls=("https://api.example.com",),
+                ),
+                (
+                    "https://api.example.com",
+                    "http://127.0.0.1:8000",
+                    "http://localhost:8000",
+                ),
+            )
 
 
 if __name__ == "__main__":
