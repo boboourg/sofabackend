@@ -666,6 +666,23 @@ class _MemoryRedisBackend:
         self.group_offsets = {}
         self.counters = {}
         self.created_groups = []
+        self.values = {}
+
+    def set(self, key: str, value: str, *, nx: bool = False, px: int | None = None, now_ms: int | None = None) -> bool:
+        observed_at = int(now_ms if now_ms is not None else 0)
+        self._expire_scalar_key(key, now_ms=observed_at)
+        if nx and key in self.values:
+            return False
+        self.values[key] = {
+            "value": str(value),
+            "expires_at": None if px is None else observed_at + int(px),
+        }
+        return True
+
+    def exists(self, key: str, *, now_ms: int | None = None) -> bool:
+        observed_at = int(now_ms if now_ms is not None else 0)
+        self._expire_scalar_key(key, now_ms=observed_at)
+        return key in self.values
 
     def hset(self, key: str, mapping: dict[str, object]) -> int:
         bucket = self.hashes.setdefault(key, {})
@@ -819,6 +836,14 @@ class _MemoryRedisBackend:
             if current_message_id == message_id:
                 return values
         raise KeyError(message_id)
+
+    def _expire_scalar_key(self, key: str, *, now_ms: int) -> None:
+        current = self.values.get(key)
+        if current is None:
+            return
+        expires_at = current.get("expires_at")
+        if expires_at is not None and int(expires_at) <= int(now_ms):
+            del self.values[key]
 
 
 if __name__ == "__main__":

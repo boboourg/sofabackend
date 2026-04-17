@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import signal
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -28,6 +29,9 @@ class WorkerRuntime:
         consumer: str,
         handler: StreamHandler,
         retry_handler: Callable[..., object] | None = None,
+        completion_store=None,
+        completion_ttl_ms: int = 86_400_000,
+        now_ms_factory=None,
         block_ms: int = 5_000,
         idle_sleep_s: float = 0.05,
     ) -> None:
@@ -38,6 +42,9 @@ class WorkerRuntime:
         self.consumer = consumer
         self.handler = handler
         self.retry_handler = retry_handler
+        self.completion_store = completion_store
+        self.completion_ttl_ms = int(completion_ttl_ms)
+        self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.block_ms = block_ms
         self.idle_sleep_s = idle_sleep_s
         self.shutdown_requested = False
@@ -106,12 +113,37 @@ class WorkerRuntime:
                 self.queue.ack(entry.stream, self.group, (entry.message_id,))
                 return "requeued"
             raise
+        self.mark_entry_completed(entry)
         self.queue.ack(entry.stream, self.group, (entry.message_id,))
         return outcome
+
+    async def handle_reclaimed_entry(self, entry: StreamEntry) -> object:
+        if self.is_entry_completed(entry):
+            return "skipped_completed"
+        return await self._handle_entry(entry)
 
     def _fallback_signal_handler(self, signum: int, frame) -> None:
         del signum, frame
         self.request_shutdown()
+
+    def mark_entry_completed(self, entry: StreamEntry) -> None:
+        if self.completion_store is None:
+            return
+        self.completion_store.mark_fresh(
+            _completion_key(entry),
+            ttl_ms=self.completion_ttl_ms,
+            now_ms=int(self.now_ms_factory()),
+        )
+
+    def is_entry_completed(self, entry: StreamEntry) -> bool:
+        if self.completion_store is None:
+            return False
+        return bool(
+            self.completion_store.is_fresh(
+                _completion_key(entry),
+                now_ms=int(self.now_ms_factory()),
+            )
+        )
 
 
 async def _await_maybe(value: object) -> object:
@@ -126,3 +158,8 @@ def _entry_attempt(entry: StreamEntry) -> int:
         return max(1, int(raw)) if raw is not None else 1
     except (TypeError, ValueError):
         return 1
+
+
+def _completion_key(entry: StreamEntry) -> str:
+    job_id = entry.values.get("job_id") or entry.message_id
+    return f"completed:job:{job_id}"

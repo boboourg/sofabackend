@@ -16,6 +16,7 @@ class HydrateWorker:
         orchestrator,
         delayed_scheduler,
         delayed_payload_store=None,
+        completion_store=None,
         queue,
         consumer: str,
         group: str = "cg:hydrate",
@@ -41,7 +42,9 @@ class HydrateWorker:
             consumer=consumer,
             handler=self.handle,
             retry_handler=self.retry_later,
+            completion_store=completion_store,
             block_ms=block_ms,
+            now_ms_factory=self.now_ms_factory,
         )
 
     async def handle(self, entry: StreamEntry) -> str:

@@ -9,6 +9,7 @@ from typing import Any
 
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
+from ..queue.dedupe import DedupeStore
 from ..queue.streams import (
     STREAM_DISCOVERY,
     STREAM_HYDRATE,
@@ -94,6 +95,7 @@ class ServiceApp:
         self.live_state_store = self.app.live_state_store
         self.delayed_scheduler = DelayedJobScheduler(self.app.redis_backend)
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
+        self.completion_store = DedupeStore(self.app.redis_backend)
 
     def ensure_consumer_groups(self) -> None:
         for stream, group in DEFAULT_CONSUMER_GROUPS:
@@ -130,6 +132,7 @@ class ServiceApp:
             orchestrator=self.app,
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
             queue=self.stream_queue,
             consumer=consumer_name,
             block_ms=block_ms,
@@ -141,6 +144,7 @@ class ServiceApp:
             orchestrator=self.app,
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
             queue=self.stream_queue,
             lane=lane,
             consumer=consumer_name,
@@ -153,6 +157,7 @@ class ServiceApp:
             handler=self._handle_maintenance,
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
             queue=self.stream_queue,
             consumer=consumer_name,
             block_ms=block_ms,
@@ -166,6 +171,7 @@ class ServiceApp:
         loop_interval_seconds: float = 5.0,
     ) -> None:
         self.ensure_consumer_groups()
+        await self._recover_live_state()
         daemon = self.build_planner_daemon(
             sport_slugs=sport_slugs,
             scheduled_interval_seconds=scheduled_interval_seconds,
@@ -178,6 +184,7 @@ class ServiceApp:
         await worker.run_forever()
 
     async def run_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> None:
+        await self._recover_live_state()
         worker = self.build_live_worker(lane=lane, consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
@@ -201,3 +208,8 @@ class ServiceApp:
         from datetime import datetime, timezone
 
         return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date().isoformat()
+
+    async def _recover_live_state(self) -> None:
+        recover = getattr(self.app, "recover_live_state", None)
+        if callable(recover):
+            await recover()
