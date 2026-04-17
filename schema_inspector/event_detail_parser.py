@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
 from .endpoints import (
     EndpointRegistryEntry,
+    EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
     EVENT_GRAPH_ENDPOINT,
@@ -19,6 +20,8 @@ from .endpoints import (
     EVENT_MANAGERS_ENDPOINT,
     EVENT_ODDS_ALL_ENDPOINT,
     EVENT_ODDS_FEATURED_ENDPOINT,
+    EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+    EVENT_PLAYER_STATISTICS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_PREGAME_FORM_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
@@ -425,6 +428,58 @@ class EventLineupMissingPlayerRecord:
 
 
 @dataclass(frozen=True)
+class EventBestPlayerEntryRecord:
+    event_id: int
+    bucket: str
+    ordinal: int
+    player_id: int | None = None
+    label: str | None = None
+    value_text: str | None = None
+    value_numeric: float | None = None
+    is_player_of_the_match: bool | None = None
+
+
+@dataclass(frozen=True)
+class EventPlayerStatisticsRecord:
+    event_id: int
+    player_id: int
+    team_id: int | None = None
+    position: str | None = None
+    rating: float | None = None
+    rating_original: float | None = None
+    rating_alternative: float | None = None
+    statistics_type: str | None = None
+    sport_slug: str | None = None
+    extra_json: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EventPlayerStatValueRecord:
+    event_id: int
+    player_id: int
+    stat_name: str
+    stat_value_numeric: float | None = None
+    stat_value_text: str | None = None
+    stat_value_json: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EventPlayerRatingBreakdownActionRecord:
+    event_id: int
+    player_id: int
+    action_group: str
+    ordinal: int
+    event_action_type: str | None = None
+    is_home: bool | None = None
+    keypass: bool | None = None
+    outcome: bool | None = None
+    start_x: float | None = None
+    start_y: float | None = None
+    end_x: float | None = None
+    end_y: float | None = None
+
+
+@dataclass(frozen=True)
 class EventDetailBundle:
     registry_entries: tuple[EndpointRegistryEntry, ...]
     payload_snapshots: tuple[ApiPayloadSnapshotRecord, ...]
@@ -470,6 +525,10 @@ class EventDetailBundle:
     event_lineups: tuple[EventLineupRecord, ...]
     event_lineup_players: tuple[EventLineupPlayerRecord, ...]
     event_lineup_missing_players: tuple[EventLineupMissingPlayerRecord, ...]
+    event_best_player_entries: tuple[EventBestPlayerEntryRecord, ...]
+    event_player_statistics: tuple[EventPlayerStatisticsRecord, ...]
+    event_player_stat_values: tuple[EventPlayerStatValueRecord, ...]
+    event_player_rating_breakdown_actions: tuple[EventPlayerRatingBreakdownActionRecord, ...]
 
 
 class EventDetailParserError(RuntimeError):
@@ -524,14 +583,27 @@ class EventDetailParser:
             )
 
         await asyncio.gather(*tasks)
+        analytics_tasks = []
+        if state.supports_event_player_analytics(event_id):
+            analytics_tasks.append(self._fetch_best_players_summary(event_id, state, timeout=timeout))
+            for player_id in state.starting_lineup_player_ids(event_id):
+                analytics_tasks.extend(
+                    (
+                        self._fetch_player_statistics(event_id, player_id, state, timeout=timeout),
+                        self._fetch_player_rating_breakdown(event_id, player_id, state, timeout=timeout),
+                    )
+                )
+        if analytics_tasks:
+            await asyncio.gather(*analytics_tasks)
         self.logger.debug(
-            "Event detail bundle collected: event_id=%s players=%s markets=%s lineups=%s comments=%s heatmaps=%s",
+            "Event detail bundle collected: event_id=%s players=%s markets=%s lineups=%s comments=%s heatmaps=%s player_stats=%s",
             event_id,
             len(state.players),
             len(state.event_markets),
             len(state.event_lineups),
             len(state.event_comments),
             len(state.event_team_heatmaps),
+            len(state.event_player_statistics),
         )
         return state.to_bundle(sport_slug=sport_slug)
 
@@ -785,6 +857,61 @@ class EventDetailParser:
             state.ingest_provider_payloads(payload, default_provider_id=provider_id)
             state.ingest_winning_odds(event_id, provider_id, payload)
 
+    async def _fetch_best_players_summary(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT
+        payload = await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
+        if payload is not None:
+            state.ingest_best_players_summary(event_id, payload)
+
+    async def _fetch_player_statistics(
+        self,
+        event_id: int,
+        player_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_PLAYER_STATISTICS_ENDPOINT
+        payload = await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            player_id=player_id,
+            state=state,
+            timeout=timeout,
+        )
+        if payload is not None:
+            state.ingest_event_player_statistics(event_id, player_id, payload)
+
+    async def _fetch_player_rating_breakdown(
+        self,
+        event_id: int,
+        player_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        endpoint = EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT
+        payload = await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            player_id=player_id,
+            state=state,
+            timeout=timeout,
+        )
+        if payload is not None:
+            state.ingest_player_rating_breakdown(event_id, player_id, payload)
+
     async def _fetch_optional_root_payload(
         self,
         endpoint,
@@ -867,6 +994,10 @@ class _EventDetailAccumulator:
         self.event_lineups: dict[tuple[int, str], dict[str, Any]] = {}
         self.event_lineup_players: dict[tuple[int, str, int], dict[str, Any]] = {}
         self.event_lineup_missing_players: dict[tuple[int, str, int], dict[str, Any]] = {}
+        self.event_best_player_entries: dict[tuple[int, str, int], dict[str, Any]] = {}
+        self.event_player_statistics: dict[tuple[int, int], dict[str, Any]] = {}
+        self.event_player_stat_values: dict[tuple[int, int, str], dict[str, Any]] = {}
+        self.event_player_rating_breakdown_actions: dict[tuple[int, int, str, int], dict[str, Any]] = {}
 
     def supports_match_live_detail_resources(self, event_id: int) -> bool:
         event = self.events.get(event_id)
@@ -890,6 +1021,16 @@ class _EventDetailAccumulator:
             if isinstance(team_id, int) and team_id not in team_ids:
                 team_ids.append(team_id)
         return tuple(team_ids)
+
+    def starting_lineup_player_ids(self, event_id: int) -> tuple[int, ...]:
+        player_ids = sorted(
+            {
+                player_id
+                for (row_event_id, _, player_id), row in self.event_lineup_players.items()
+                if row_event_id == event_id and row.get("substitute") is False
+            }
+        )
+        return tuple(player_ids)
 
     def event_sport_slug(self, event_id: int) -> str | None:
         event = self.events.get(event_id)
@@ -915,6 +1056,12 @@ class _EventDetailAccumulator:
             return None
         slug = sport.get("slug")
         return slug if isinstance(slug, str) else None
+
+    def supports_event_player_analytics(self, event_id: int) -> bool:
+        event = self.events.get(event_id)
+        if not event:
+            return False
+        return event.get("has_event_player_statistics") is True
 
     def add_payload_snapshot(
         self,
@@ -1245,6 +1392,7 @@ class _EventDetailAccumulator:
         player_id = _as_int(payload.get("id"))
         if player_id is None:
             return None
+        embedded_team_id = self.ingest_team(_as_mapping(payload.get("team")))
         country_alpha2 = self.ingest_country(_as_mapping(payload.get("country")))
         manager_id = self.ingest_manager(_as_mapping(payload.get("manager")))
         positions = _as_string_sequence(payload.get("positions"))
@@ -1258,7 +1406,7 @@ class _EventDetailAccumulator:
                 "short_name": _as_str(payload.get("shortName")),
                 "first_name": _as_str(payload.get("firstName")),
                 "last_name": _as_str(payload.get("lastName")),
-                "team_id": team_id,
+                "team_id": team_id if team_id is not None else embedded_team_id,
                 "country_alpha2": country_alpha2,
                 "manager_id": manager_id,
                 "gender": _as_str(payload.get("gender")),
@@ -1506,6 +1654,11 @@ class _EventDetailAccumulator:
                 player_id = self.ingest_player(_as_mapping(item.get("player")), team_id=_as_int(item.get("teamId")))
                 if player_id is None:
                     continue
+                resolved_team_id = _as_int(item.get("teamId"))
+                if resolved_team_id is None:
+                    player_row = self.players.get(player_id)
+                    if player_row:
+                        resolved_team_id = _as_int(player_row.get("team_id"))
                 self._merge(
                     self.event_lineup_players,
                     (event_id, side, player_id),
@@ -1513,7 +1666,7 @@ class _EventDetailAccumulator:
                         "event_id": event_id,
                         "side": side,
                         "player_id": player_id,
-                        "team_id": _as_int(item.get("teamId")),
+                        "team_id": resolved_team_id,
                         "position": _as_str(item.get("position")),
                         "substitute": _as_bool(item.get("substitute")),
                         "shirt_number": _as_int(item.get("shirtNumber")),
@@ -1869,6 +2022,117 @@ class _EventDetailAccumulator:
                 "fractional_value": _as_scalar_text(item.get("fractionalValue")),
             }
 
+    def ingest_best_players_summary(self, event_id: int, payload: Mapping[str, Any]) -> None:
+        for bucket, key in (("best_home", "bestHomeTeamPlayers"), ("best_away", "bestAwayTeamPlayers")):
+            for ordinal, item in enumerate(_iter_mappings(payload.get(key))):
+                player_id = self.ingest_player(_as_mapping(item.get("player")))
+                self._merge(
+                    self.event_best_player_entries,
+                    (event_id, bucket, ordinal),
+                    {
+                        "event_id": event_id,
+                        "bucket": bucket,
+                        "ordinal": ordinal,
+                        "player_id": player_id,
+                        "label": _as_str(item.get("label")),
+                        "value_text": _as_scalar_text(item.get("value")),
+                        "value_numeric": _as_float(item.get("value")),
+                        "is_player_of_the_match": False,
+                    },
+                )
+
+        player_of_match = _as_mapping(payload.get("playerOfTheMatch"))
+        if player_of_match:
+            player_id = self.ingest_player(_as_mapping(player_of_match.get("player")))
+            self._merge(
+                self.event_best_player_entries,
+                (event_id, "player_of_the_match", 0),
+                {
+                    "event_id": event_id,
+                    "bucket": "player_of_the_match",
+                    "ordinal": 0,
+                    "player_id": player_id,
+                    "label": _as_str(player_of_match.get("label")),
+                    "value_text": _as_scalar_text(player_of_match.get("value")),
+                    "value_numeric": _as_float(player_of_match.get("value")),
+                    "is_player_of_the_match": True,
+                },
+            )
+
+    def ingest_event_player_statistics(self, event_id: int, player_id: int, payload: Mapping[str, Any]) -> None:
+        team_id = self.ingest_team(_as_mapping(payload.get("team")))
+        ingested_player_id = self.ingest_player(_as_mapping(payload.get("player")), team_id=team_id)
+        resolved_player_id = ingested_player_id or player_id
+        statistics = _as_mapping(payload.get("statistics"))
+        if not statistics:
+            return
+
+        rating_versions = _as_mapping(statistics.get("ratingVersions"))
+        statistics_type = _as_mapping(statistics.get("statisticsType"))
+        self._merge(
+            self.event_player_statistics,
+            (event_id, resolved_player_id),
+            {
+                "event_id": event_id,
+                "player_id": resolved_player_id,
+                "team_id": team_id,
+                "position": _as_str(payload.get("position")),
+                "rating": _as_float(statistics.get("rating")),
+                "rating_original": _as_float(rating_versions.get("original")) if rating_versions else None,
+                "rating_alternative": _as_float(rating_versions.get("alternative")) if rating_versions else None,
+                "statistics_type": _as_str(statistics_type.get("statisticsType")) if statistics_type else None,
+                "sport_slug": _as_str(statistics_type.get("sportSlug")) if statistics_type else None,
+                "extra_json": _as_mapping(payload.get("extra")),
+            },
+        )
+
+        for stat_name, stat_value in statistics.items():
+            if stat_name in {"rating", "ratingVersions", "statisticsType"}:
+                continue
+            numeric_value = _as_float(stat_value)
+            text_value = _as_scalar_text(stat_value)
+            json_value = _as_mapping(stat_value) if isinstance(stat_value, Mapping) else None
+            if numeric_value is None and text_value is None and json_value is None:
+                continue
+            self._merge(
+                self.event_player_stat_values,
+                (event_id, resolved_player_id, stat_name),
+                {
+                    "event_id": event_id,
+                    "player_id": resolved_player_id,
+                    "stat_name": stat_name,
+                    "stat_value_numeric": numeric_value,
+                    "stat_value_text": text_value,
+                    "stat_value_json": json_value,
+                },
+            )
+
+    def ingest_player_rating_breakdown(self, event_id: int, player_id: int, payload: Mapping[str, Any]) -> None:
+        for action_group, values in payload.items():
+            if not isinstance(values, list):
+                continue
+            for ordinal, item in enumerate(_iter_mappings(values)):
+                player_coordinates = _as_mapping(item.get("playerCoordinates"))
+                end_coordinates = _as_mapping(item.get("passEndCoordinates"))
+                self._merge(
+                    self.event_player_rating_breakdown_actions,
+                    (event_id, player_id, str(action_group), ordinal),
+                    {
+                        "event_id": event_id,
+                        "player_id": player_id,
+                        "action_group": str(action_group),
+                        "ordinal": ordinal,
+                        "event_action_type": _as_str(item.get("eventActionType")),
+                        "is_home": _as_bool(item.get("isHome")),
+                        "keypass": _as_bool(item.get("keypass")),
+                        "outcome": _as_bool(item.get("outcome")),
+                        "start_x": _as_float(player_coordinates.get("x")) if player_coordinates else None,
+                        "start_y": _as_float(player_coordinates.get("y")) if player_coordinates else None,
+                        "end_x": _as_float(end_coordinates.get("x")) if end_coordinates else None,
+                        "end_y": _as_float(end_coordinates.get("y")) if end_coordinates else None,
+                    },
+                )
+
     def to_bundle(self, *, sport_slug: str | None = None) -> EventDetailBundle:
         return EventDetailBundle(
             registry_entries=event_detail_registry_entries(sport_slug=sport_slug),
@@ -1959,6 +2223,19 @@ class _EventDetailAccumulator:
             event_lineup_missing_players=tuple(
                 EventLineupMissingPlayerRecord(**row)
                 for _, row in sorted(self.event_lineup_missing_players.items())
+            ),
+            event_best_player_entries=tuple(
+                EventBestPlayerEntryRecord(**row) for _, row in sorted(self.event_best_player_entries.items())
+            ),
+            event_player_statistics=tuple(
+                EventPlayerStatisticsRecord(**row) for _, row in sorted(self.event_player_statistics.items())
+            ),
+            event_player_stat_values=tuple(
+                EventPlayerStatValueRecord(**row) for _, row in sorted(self.event_player_stat_values.items())
+            ),
+            event_player_rating_breakdown_actions=tuple(
+                EventPlayerRatingBreakdownActionRecord(**row)
+                for _, row in sorted(self.event_player_rating_breakdown_actions.items())
             ),
         )
 

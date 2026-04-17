@@ -15,12 +15,16 @@ from schema_inspector.event_detail_parser import (
     EventDuelRecord,
     EventGraphPointRecord,
     EventGraphRecord,
+    EventBestPlayerEntryRecord,
     EventLineupMissingPlayerRecord,
     EventLineupPlayerRecord,
     EventLineupRecord,
     EventManagerAssignmentRecord,
     EventMarketChoiceRecord,
     EventMarketRecord,
+    EventPlayerRatingBreakdownActionRecord,
+    EventPlayerStatisticsRecord,
+    EventPlayerStatValueRecord,
     EventPregameFormItemRecord,
     EventPregameFormRecord,
     EventPregameFormSideRecord,
@@ -71,12 +75,17 @@ class _FakeParser:
 
 
 class _FakeRepository:
-    def __init__(self, result: EventDetailWriteResult) -> None:
+    def __init__(self, result: EventDetailWriteResult | None, *, error: Exception | None = None) -> None:
         self.result = result
+        self.error = error
         self.calls: list[tuple[object, EventDetailBundle]] = []
 
     async def upsert_bundle(self, executor, bundle: EventDetailBundle) -> EventDetailWriteResult:
         self.calls.append((executor, bundle))
+        if self.error is not None:
+            raise self.error
+        if self.result is None:
+            raise RuntimeError("result is required when error is not set")
         return self.result
 
 
@@ -104,7 +113,7 @@ class _FakeDatabase:
 
 def _build_bundle() -> EventDetailBundle:
     return EventDetailBundle(
-        registry_entries=event_detail_registry_entries(),
+        registry_entries=event_detail_registry_entries(sport_slug="football"),
         payload_snapshots=(
             ApiPayloadSnapshotRecord(
                 endpoint_pattern="/api/v1/event/{event_id}",
@@ -297,6 +306,44 @@ def _build_bundle() -> EventDetailBundle:
         ),
         event_lineup_players=(EventLineupPlayerRecord(event_id=14083191, side="home", player_id=700, team_id=42, position="F", substitute=False, shirt_number=7, jersey_number="7", avg_rating=7.1),),
         event_lineup_missing_players=(EventLineupMissingPlayerRecord(event_id=14083191, side="away", player_id=700, description="Hamstring", expected_end_date="2026-05-01", external_type=72, reason=1, type="missing"),),
+        event_best_player_entries=(
+            EventBestPlayerEntryRecord(event_id=14083191, bucket="best_home", ordinal=0, player_id=700, label="rating", value_text="7.9", value_numeric=7.9, is_player_of_the_match=False),
+            EventBestPlayerEntryRecord(event_id=14083191, bucket="player_of_the_match", ordinal=0, player_id=700, label="rating", value_text="7.9", value_numeric=7.9, is_player_of_the_match=True),
+        ),
+        event_player_statistics=(
+            EventPlayerStatisticsRecord(
+                event_id=14083191,
+                player_id=700,
+                team_id=42,
+                position="F",
+                rating=7.9,
+                rating_original=7.8,
+                rating_alternative=7.6,
+                statistics_type="player",
+                sport_slug="football",
+                extra_json={"captain": True},
+            ),
+        ),
+        event_player_stat_values=(
+            EventPlayerStatValueRecord(event_id=14083191, player_id=700, stat_name="minutesPlayed", stat_value_numeric=90.0, stat_value_text="90", stat_value_json=None),
+            EventPlayerStatValueRecord(event_id=14083191, player_id=700, stat_name="goals", stat_value_numeric=1.0, stat_value_text="1", stat_value_json=None),
+        ),
+        event_player_rating_breakdown_actions=(
+            EventPlayerRatingBreakdownActionRecord(
+                event_id=14083191,
+                player_id=700,
+                action_group="passes",
+                ordinal=0,
+                event_action_type="pass",
+                is_home=True,
+                keypass=False,
+                outcome=True,
+                start_x=80.5,
+                start_y=58.9,
+                end_x=96.9,
+                end_y=60.3,
+            ),
+        ),
     )
 
 
@@ -311,6 +358,7 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.event_rows, 1)
         self.assertEqual(result.player_rows, 1)
         self.assertEqual(result.event_market_rows, 1)
+        self.assertEqual(result.event_player_statistics_rows, 1)
         statements = [sql for sql, _ in executor.executemany_calls]
         self.assertTrue(any("INSERT INTO venue" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO referee" in sql for sql in statements))
@@ -325,6 +373,73 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO provider_configuration " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_market " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_vote_option" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_best_player_entry " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_player_statistics " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_player_stat_value " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_player_rating_breakdown_action " in sql for sql in statements))
+
+    async def test_event_detail_repository_drops_orphan_player_team_foreign_keys(self) -> None:
+        bundle = _build_bundle()
+        bundle = EventDetailBundle(
+            **{
+                **bundle.__dict__,
+                "players": (
+                    PlayerRecord(
+                        id=700,
+                        slug="saka",
+                        name="Bukayo Saka",
+                        team_id=1073591,
+                        country_alpha2="EN",
+                        position="F",
+                    ),
+                ),
+            }
+        )
+        executor = _FakeExecutor()
+        repository = EventDetailRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        player_insert = next(
+            args
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO player " in sql
+            for args in rows
+        )
+        self.assertIsNone(player_insert[6])
+
+    async def test_event_detail_repository_drops_orphan_lineup_player_team_foreign_keys(self) -> None:
+        bundle = _build_bundle()
+        bundle = EventDetailBundle(
+            **{
+                **bundle.__dict__,
+                "event_lineup_players": (
+                    EventLineupPlayerRecord(
+                        event_id=14083191,
+                        side="home",
+                        player_id=700,
+                        team_id=1073591,
+                        position="F",
+                        substitute=False,
+                        shirt_number=7,
+                        jersey_number="7",
+                        avg_rating=7.1,
+                    ),
+                ),
+            }
+        )
+        executor = _FakeExecutor()
+        repository = EventDetailRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        lineup_player_insert = next(
+            args
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO event_lineup_player (" in sql
+            for args in rows
+        )
+        self.assertIsNone(lineup_player_insert[3])
 
     async def test_event_detail_ingest_job_uses_transaction_and_repository(self) -> None:
         bundle = _build_bundle()
@@ -374,6 +489,10 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
             event_lineup_rows=2,
             event_lineup_player_rows=1,
             event_lineup_missing_player_rows=1,
+            event_best_player_entry_rows=2,
+            event_player_statistics_rows=1,
+            event_player_stat_value_rows=2,
+            event_player_rating_breakdown_action_rows=1,
         )
         repository = _FakeRepository(repository_result)
         connection = object()
@@ -388,6 +507,19 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.event_id, 14083191)
         self.assertEqual(result.provider_ids, (1, 2))
         self.assertEqual(result.written.event_market_rows, 1)
+
+    async def test_event_detail_ingest_job_raises_actionable_error_for_missing_tables(self) -> None:
+        bundle = _build_bundle()
+        parser = _FakeParser(bundle)
+        undefined_table_error = type("UndefinedTableError", (RuntimeError,), {})(
+            'relation "event_best_player_entry" does not exist'
+        )
+        repository = _FakeRepository(None, error=undefined_table_error)
+        database = _FakeDatabase(object())
+        job = EventDetailIngestJob(parser, repository, database)
+
+        with self.assertRaisesRegex(RuntimeError, "db_setup_cli"):
+            await job.run(14083191, provider_ids=(1,), timeout=12.5)
 
 
 if __name__ == "__main__":

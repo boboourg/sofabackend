@@ -29,6 +29,23 @@ class SportProfile:
     include_categories_all_discovery: bool = False
 
 
+SUPPORTED_SPORT_SLUGS = (
+    "football",
+    "tennis",
+    "basketball",
+    "volleyball",
+    "baseball",
+    "american-football",
+    "handball",
+    "table-tennis",
+    "ice-hockey",
+    "rugby",
+    "cricket",
+    "futsal",
+    "esports",
+)
+
+
 FOOTBALL_PROFILE = SportProfile(
     sport_slug="football",
     standings_scopes=("total", "home", "away"),
@@ -47,6 +64,7 @@ FOOTBALL_PROFILE = SportProfile(
     include_team_events=True,
     include_trending_top_players=True,
     use_daily_categories_seed=True,
+    include_categories_all_discovery=True,
 )
 
 
@@ -58,8 +76,6 @@ BASKETBALL_PROFILE = SportProfile(
     top_players_per_game_suffix="all/regularSeason",
     team_top_players_suffix="overall",
     top_teams_suffix="regularSeason",
-    include_top_ratings=False,
-    include_player_of_the_season_race=False,
     include_player_of_the_season=True,
     include_venues=True,
     include_groups=True,
@@ -68,6 +84,7 @@ BASKETBALL_PROFILE = SportProfile(
     include_team_events=True,
     include_trending_top_players=True,
     use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
 )
 
 
@@ -94,6 +111,138 @@ TENNIS_PROFILE = SportProfile(
 )
 
 
+VOLLEYBALL_PROFILE = SportProfile(
+    sport_slug="volleyball",
+    standings_scopes=("total",),
+    team_event_scopes=("total",),
+    top_players_suffix="overall",
+    top_players_per_game_suffix="all/overall",
+    team_top_players_suffix="overall",
+    top_teams_suffix="overall",
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_groups=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_daily_categories_seed=True,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
+)
+
+
+BASEBALL_PROFILE = SportProfile(
+    sport_slug="baseball",
+    standings_scopes=("total", "home", "away"),
+    team_event_scopes=("total",),
+    top_players_suffix="regularSeason",
+    top_players_per_game_suffix="all/regularSeason",
+    team_top_players_suffix="overall",
+    top_teams_suffix="regularSeason",
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
+)
+
+
+AMERICAN_FOOTBALL_PROFILE = SportProfile(
+    sport_slug="american-football",
+    standings_scopes=("total", "home", "away"),
+    team_event_scopes=("total",),
+    top_players_suffix="regularSeason",
+    top_players_per_game_suffix="all/regularSeason",
+    team_top_players_suffix="overall",
+    top_teams_suffix="regularSeason",
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_groups=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
+)
+
+
+HANDBALL_PROFILE = SportProfile(
+    sport_slug="handball",
+    standings_scopes=("total",),
+    team_event_scopes=("total",),
+    top_players_suffix="overall",
+    top_players_per_game_suffix="all/overall",
+    team_top_players_suffix="overall",
+    top_teams_suffix="overall",
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_groups=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_daily_categories_seed=True,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
+)
+
+
+TABLE_TENNIS_PROFILE = SportProfile(
+    sport_slug="table-tennis",
+    standings_scopes=(),
+    team_event_scopes=(),
+    top_players_suffix=None,
+    top_players_per_game_suffix=None,
+    team_top_players_suffix=None,
+    top_teams_suffix=None,
+    include_top_ratings=False,
+    include_player_of_the_season_race=False,
+    include_player_of_the_season=False,
+    include_venues=False,
+    include_groups=False,
+    include_team_of_the_week=False,
+    include_statistics_types=False,
+    include_team_events=False,
+    include_trending_top_players=False,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=False,
+)
+
+
+ICE_HOCKEY_PROFILE = SportProfile(
+    sport_slug="ice-hockey",
+    standings_scopes=("total", "home", "away"),
+    team_event_scopes=("home", "away", "total"),
+    top_players_suffix="regularSeason",
+    top_players_per_game_suffix="all/regularSeason",
+    team_top_players_suffix="overall",
+    top_teams_suffix="regularSeason",
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_groups=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
+)
+
+
+RUGBY_PROFILE = SportProfile(
+    sport_slug="rugby",
+    standings_scopes=("total",),
+    team_event_scopes=("total",),
+    top_players_suffix="overall",
+    top_players_per_game_suffix="all/overall",
+    team_top_players_suffix="overall",
+    top_teams_suffix="overall",
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_groups=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_daily_categories_seed=True,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=True,
+)
+
+
 CRICKET_PROFILE = SportProfile(
     sport_slug="cricket",
     standings_scopes=("total",),
@@ -112,6 +261,49 @@ CRICKET_PROFILE = SportProfile(
     include_team_events=False,
     include_trending_top_players=False,
     use_scheduled_tournaments=True,
+)
+
+
+FUTSAL_PROFILE = SportProfile(
+    sport_slug="futsal",
+    standings_scopes=("total", "home", "away"),
+    team_event_scopes=("home", "away", "total"),
+    top_players_suffix="overall",
+    top_players_per_game_suffix="all/overall",
+    team_top_players_suffix="overall",
+    top_teams_suffix="overall",
+    include_top_ratings=True,
+    include_player_of_the_season_race=True,
+    include_player_of_the_season=True,
+    include_venues=True,
+    include_groups=True,
+    include_team_of_the_week=True,
+    include_statistics_types=True,
+    include_team_events=True,
+    use_daily_categories_seed=True,
+    include_categories_all_discovery=True,
+)
+
+
+ESPORTS_PROFILE = SportProfile(
+    sport_slug="esports",
+    standings_scopes=(),
+    team_event_scopes=(),
+    top_players_suffix=None,
+    top_players_per_game_suffix=None,
+    team_top_players_suffix=None,
+    top_teams_suffix=None,
+    include_top_ratings=False,
+    include_player_of_the_season_race=False,
+    include_player_of_the_season=False,
+    include_venues=False,
+    include_groups=False,
+    include_team_of_the_week=False,
+    include_statistics_types=False,
+    include_team_events=False,
+    include_trending_top_players=False,
+    use_scheduled_tournaments=True,
+    include_categories_all_discovery=False,
 )
 
 
@@ -138,9 +330,18 @@ GENERIC_PROFILE = SportProfile(
 
 _PROFILES: dict[str, SportProfile] = {
     FOOTBALL_PROFILE.sport_slug: FOOTBALL_PROFILE,
-    BASKETBALL_PROFILE.sport_slug: BASKETBALL_PROFILE,
     TENNIS_PROFILE.sport_slug: TENNIS_PROFILE,
+    BASKETBALL_PROFILE.sport_slug: BASKETBALL_PROFILE,
+    VOLLEYBALL_PROFILE.sport_slug: VOLLEYBALL_PROFILE,
+    BASEBALL_PROFILE.sport_slug: BASEBALL_PROFILE,
+    AMERICAN_FOOTBALL_PROFILE.sport_slug: AMERICAN_FOOTBALL_PROFILE,
+    HANDBALL_PROFILE.sport_slug: HANDBALL_PROFILE,
+    TABLE_TENNIS_PROFILE.sport_slug: TABLE_TENNIS_PROFILE,
+    ICE_HOCKEY_PROFILE.sport_slug: ICE_HOCKEY_PROFILE,
+    RUGBY_PROFILE.sport_slug: RUGBY_PROFILE,
     CRICKET_PROFILE.sport_slug: CRICKET_PROFILE,
+    FUTSAL_PROFILE.sport_slug: FUTSAL_PROFILE,
+    ESPORTS_PROFILE.sport_slug: ESPORTS_PROFILE,
 }
 
 

@@ -212,7 +212,7 @@ CREATE TABLE team (
 
 CREATE TABLE manager (
     id BIGINT PRIMARY KEY,
-    slug TEXT UNIQUE,
+    slug TEXT,
     name TEXT NOT NULL,
     short_name TEXT,
     sport_id BIGINT REFERENCES sport(id),
@@ -821,6 +821,102 @@ CREATE TABLE event_graph_point (
     PRIMARY KEY (event_id, ordinal)
 );
 
+CREATE TABLE event_statistic (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    period TEXT NOT NULL,
+    group_name TEXT NOT NULL,
+    stat_name TEXT NOT NULL,
+    home_value_numeric NUMERIC,
+    home_value_text TEXT,
+    home_value_json JSONB,
+    away_value_numeric NUMERIC,
+    away_value_text TEXT,
+    away_value_json JSONB,
+    compare_code TEXT,
+    statistics_type TEXT,
+    PRIMARY KEY (event_id, period, group_name, stat_name)
+);
+
+CREATE TABLE event_incident (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    incident_id BIGINT,
+    incident_type TEXT,
+    minute INTEGER,
+    home_score_text TEXT,
+    away_score_text TEXT,
+    text_value TEXT,
+    PRIMARY KEY (event_id, ordinal)
+);
+
+CREATE TABLE tennis_point_by_point (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    point_id BIGINT,
+    set_number INTEGER,
+    game_number INTEGER,
+    server TEXT,
+    home_score TEXT,
+    away_score TEXT,
+    PRIMARY KEY (event_id, ordinal)
+);
+
+CREATE TABLE tennis_power (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    set_number INTEGER,
+    game_number INTEGER,
+    value_numeric NUMERIC,
+    value_text TEXT,
+    break_occurred BOOLEAN,
+    PRIMARY KEY (event_id, ordinal)
+);
+
+CREATE TABLE baseball_inning (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    inning INTEGER,
+    home_score INTEGER,
+    away_score INTEGER,
+    PRIMARY KEY (event_id, ordinal)
+);
+
+CREATE TABLE baseball_pitch (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    at_bat_id BIGINT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    pitch_id BIGINT,
+    pitch_speed NUMERIC,
+    pitch_type TEXT,
+    pitch_zone TEXT,
+    pitch_x NUMERIC,
+    pitch_y NUMERIC,
+    mlb_x NUMERIC,
+    mlb_y NUMERIC,
+    outcome TEXT,
+    pitcher_id BIGINT REFERENCES player(id),
+    hitter_id BIGINT REFERENCES player(id),
+    PRIMARY KEY (event_id, at_bat_id, ordinal)
+);
+
+CREATE TABLE shotmap_point (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    x NUMERIC,
+    y NUMERIC,
+    shot_type TEXT,
+    PRIMARY KEY (event_id, ordinal)
+);
+
+CREATE TABLE esports_game (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    game_id BIGINT,
+    status TEXT,
+    map_name TEXT,
+    PRIMARY KEY (event_id, ordinal)
+);
+
 CREATE TABLE event_team_heatmap (
     event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
     team_id BIGINT NOT NULL REFERENCES team(id),
@@ -941,6 +1037,68 @@ CREATE TABLE event_lineup_missing_player (
         REFERENCES event_lineup(event_id, side)
         ON DELETE CASCADE
 );
+
+CREATE TABLE event_best_player_entry (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    bucket TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    player_id BIGINT REFERENCES player(id),
+    label TEXT,
+    value_text TEXT,
+    value_numeric NUMERIC,
+    is_player_of_the_match BOOLEAN,
+    PRIMARY KEY (event_id, bucket, ordinal)
+);
+
+CREATE INDEX event_best_player_entry_player_idx ON event_best_player_entry(player_id);
+
+CREATE TABLE event_player_statistics (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    player_id BIGINT NOT NULL REFERENCES player(id),
+    team_id BIGINT REFERENCES team(id),
+    position TEXT,
+    rating NUMERIC,
+    rating_original NUMERIC,
+    rating_alternative NUMERIC,
+    statistics_type TEXT,
+    sport_slug TEXT,
+    extra_json JSONB,
+    PRIMARY KEY (event_id, player_id)
+);
+
+CREATE INDEX event_player_statistics_team_idx ON event_player_statistics(team_id);
+
+CREATE TABLE event_player_stat_value (
+    event_id BIGINT NOT NULL,
+    player_id BIGINT NOT NULL,
+    stat_name TEXT NOT NULL,
+    stat_value_numeric NUMERIC,
+    stat_value_text TEXT,
+    stat_value_json JSONB,
+    PRIMARY KEY (event_id, player_id, stat_name),
+    FOREIGN KEY (event_id, player_id)
+        REFERENCES event_player_statistics(event_id, player_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE event_player_rating_breakdown_action (
+    event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    player_id BIGINT NOT NULL REFERENCES player(id),
+    action_group TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    event_action_type TEXT,
+    is_home BOOLEAN,
+    keypass BOOLEAN,
+    outcome BOOLEAN,
+    start_x NUMERIC,
+    start_y NUMERIC,
+    end_x NUMERIC,
+    end_y NUMERIC,
+    PRIMARY KEY (event_id, player_id, action_group, ordinal)
+);
+
+CREATE INDEX event_player_rating_breakdown_player_idx
+    ON event_player_rating_breakdown_action(player_id);
 
 CREATE TABLE standing_promotion (
     id BIGINT PRIMARY KEY,

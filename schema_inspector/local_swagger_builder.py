@@ -32,6 +32,7 @@ from .endpoints import (
     sport_trending_top_players_endpoint,
 )
 from .entities_parser import _PLAYER_STATISTICS_INTEGER_COLUMNS, _PLAYER_STATISTICS_METRIC_COLUMN_MAP
+from .sport_profiles import resolve_sport_profile
 from .statistics_parser import _INTEGER_METRIC_COLUMNS, _METRIC_COLUMN_MAP
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,10 +41,13 @@ DEFAULT_OPENAPI_FILE = "multisport.openapi.json"
 DEFAULT_VIEWER_FILE = "index.html"
 
 _SUPPORTED_TABLES = (
+    "api_request_log",
     "api_payload_snapshot",
+    "api_snapshot_head",
     "category_daily_summary",
     "category_daily_unique_tournament",
     "category_daily_team",
+    "endpoint_capability_rollup",
     "event",
     "event_comment",
     "event_comment_feed",
@@ -51,13 +55,18 @@ _SUPPORTED_TABLES = (
     "event_graph",
     "event_graph_point",
     "event_lineup",
+    "event_lineup_player",
+    "event_live_state_history",
     "event_manager_assignment",
     "event_market",
     "event_pregame_form",
     "event_team_heatmap",
     "event_team_heatmap_point",
+    "event_terminal_state",
     "event_vote_option",
     "event_winning_odds",
+    "etl_job_effect",
+    "etl_job_run",
     "period",
     "player",
     "player_season_statistics",
@@ -230,6 +239,7 @@ def build_openapi_document(summary: SwaggerDataSummary) -> dict[str, Any]:
             {"name": "Statistics", "description": "Season statistics config and leaderboard-style snapshot results."},
             {"name": "Entities", "description": "Player/team entities, player season statistics and enrichment endpoints."},
             {"name": "Leaderboards", "description": "Top players, top teams, venues, groups, team-of-the-week and related season widgets."},
+            {"name": "Operations", "description": "Operational monitoring endpoints for the Hybrid ETL control plane and Autopilot services."},
         ],
         "paths": paths,
         "components": components,
@@ -241,7 +251,88 @@ def _build_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
     paths.update(_build_core_paths(summary))
     paths.update(_build_statistics_and_entities_paths(summary))
     paths.update(_build_leaderboard_paths(summary))
+    paths.update(_build_operations_paths(summary))
     return paths
+
+
+def _build_operations_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
+    snapshot_rows = int(summary.table_counts.get("api_payload_snapshot", 0))
+    job_run_rows = int(summary.table_counts.get("etl_job_run", 0))
+    live_history_rows = int(summary.table_counts.get("event_live_state_history", 0))
+    return {
+        "/ops/health": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getOperationalHealth",
+                "summary": "Operational health status",
+                "description": (
+                    "Returns the local Hybrid ETL runtime gate summary, including PostgreSQL connectivity, "
+                    "Redis availability and current live lane counts.\n\n"
+                    f"- Snapshot rows in summary: `{snapshot_rows}`\n"
+                    f"- Live history rows in summary: `{live_history_rows}`"
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Operational health status",
+                        "content": {"application/json": {"schema": _ref("OperationalHealth")}},
+                    }
+                },
+            }
+        },
+        "/ops/snapshots/summary": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getSnapshotSummary",
+                "summary": "Snapshot ingestion summary",
+                "description": (
+                    "Aggregated raw-ingestion counters sourced from `api_payload_snapshot` and `api_request_log`.\n\n"
+                    f"- Snapshot rows in summary: `{snapshot_rows}`"
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Snapshot summary",
+                        "content": {"application/json": {"schema": _ref("SnapshotSummary")}},
+                    }
+                },
+            }
+        },
+        "/ops/queues/summary": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getQueueSummary",
+                "summary": "Queue and live-lane summary",
+                "description": (
+                    "Shows pending Redis Streams work, delayed jobs and current live lane occupancy for the Autopilot services."
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Queue and live-lane summary",
+                        "content": {"application/json": {"schema": _ref("QueueSummary")}},
+                    }
+                },
+            }
+        },
+        "/ops/jobs/runs": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getRecentJobRuns",
+                "summary": "Recent ETL job runs",
+                "description": (
+                    "Returns recent rows from `etl_job_run` together with aggregate status counts for the control plane.\n\n"
+                    f"- Job run rows in summary: `{job_run_rows}`"
+                ),
+                "parameters": [
+                    _query_param("limit", "integer", "Maximum number of recent job runs to return."),
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Recent ETL job runs",
+                        "content": {"application/json": {"schema": _ref("JobRunsEnvelope")}},
+                    }
+                },
+            }
+        },
+    }
 
 
 def _make_operation_builder(summary: SwaggerDataSummary):
@@ -378,6 +469,9 @@ def _build_sport_specific_core_paths(op) -> dict[str, Any]:
 def _build_sport_specific_leaderboard_paths(op) -> dict[str, Any]:
     paths: dict[str, Any] = {}
     for sport_slug in LOCAL_API_SUPPORTED_SPORTS:
+        profile = resolve_sport_profile(sport_slug)
+        if not profile.include_trending_top_players:
+            continue
         prefix = _sport_operation_prefix(sport_slug)
         paths[sport_trending_top_players_endpoint(sport_slug).path_template] = op(
             path_template=sport_trending_top_players_endpoint(sport_slug).path_template,
@@ -1714,6 +1808,85 @@ def _build_schemas() -> dict[str, Any]:
                     "ordinal": _int32(),
                 }
             ),
+            "OperationalHealth": _obj(
+                {
+                    "service": {"type": "string"},
+                    "snapshot_count": _int64(),
+                    "capability_rollup_count": _int64(),
+                    "live_hot_count": _int64(),
+                    "live_warm_count": _int64(),
+                    "live_cold_count": _int64(),
+                    "database_ok": {"type": "boolean"},
+                    "redis_ok": {"type": "boolean"},
+                    "redis_backend_kind": {"type": "string"},
+                }
+            ),
+            "SnapshotSummary": _obj(
+                {
+                    "raw_requests": _int64(),
+                    "raw_snapshots": _int64(),
+                    "trace_count": _int64(),
+                    "endpoint_pattern_count": _int64(),
+                    "event_context_count": _int64(),
+                    "http_200_count": _int64(),
+                    "http_404_count": _int64(),
+                    "http_5xx_count": _int64(),
+                    "latest_fetched_at": {"type": "string", "format": "date-time"},
+                }
+            ),
+            "QueueStreamSummary": _obj(
+                {
+                    "stream": {"type": "string"},
+                    "group": {"type": "string"},
+                    "pending_total": _int64(),
+                    "smallest_id": {"type": "string"},
+                    "largest_id": {"type": "string"},
+                    "consumers": {"type": "object", "additionalProperties": _int64()},
+                }
+            ),
+            "QueueSummary": _obj(
+                {
+                    "redis_backend_kind": {"type": "string"},
+                    "live_lanes": {
+                        "type": "object",
+                        "properties": {
+                            "hot": _int64(),
+                            "warm": _int64(),
+                            "cold": _int64(),
+                        },
+                    },
+                    "streams": _array(_ref("QueueStreamSummary")),
+                    "delayed_total": _int64(),
+                    "delayed_due": _int64(),
+                }
+            ),
+            "JobRunEntry": _obj(
+                {
+                    "job_run_id": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "job_type": {"type": "string"},
+                    "sport_slug": {"type": "string"},
+                    "entity_type": {"type": "string"},
+                    "entity_id": _int64(),
+                    "scope": {"type": "string"},
+                    "worker_id": {"type": "string"},
+                    "attempt": _int32(),
+                    "status": {"type": "string"},
+                    "started_at": {"type": "string", "format": "date-time"},
+                    "finished_at": {"type": "string", "format": "date-time"},
+                    "duration_ms": _int64(),
+                    "error_class": {"type": "string"},
+                    "error_message": {"type": "string"},
+                    "retry_scheduled_for": {"type": "string", "format": "date-time"},
+                }
+            ),
+            "JobRunsEnvelope": _obj(
+                {
+                    "limit": _int32(),
+                    "status_counts": {"type": "object", "additionalProperties": _int64()},
+                    "jobRuns": _array(_ref("JobRunEntry")),
+                }
+            ),
         }
     )
     return schemas
@@ -1746,7 +1919,7 @@ def _build_viewer_html(openapi_file_name: str) -> str:
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Football Local Swagger</title>
+    <title>Sofascore Local Swagger</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
     <style>
       body {{
