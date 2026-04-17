@@ -356,6 +356,50 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080"])
         self.assertEqual(slept, [30.0])
 
+    async def test_transport_reuses_cached_session_for_same_proxy(self) -> None:
+        config = load_runtime_config(
+            env={},
+            proxy_urls=["http://proxy-1.local:8080"],
+            max_attempts=1,
+        )
+        sessions: list[_FakeAsyncSession] = []
+
+        def fake_session_factory(**kwargs):
+            session = _FakeAsyncSession(**kwargs)
+            sessions.append(session)
+            return session
+
+        with patch("schema_inspector.transport.AsyncSession", side_effect=fake_session_factory):
+            transport = InspectorTransport(config)
+            try:
+                first = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+                second = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+            finally:
+                await transport.close()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(len(sessions[0].get_calls), 2)
+
+    async def test_transport_close_closes_all_cached_sessions(self) -> None:
+        config = load_runtime_config(env={}, proxy_urls=["http://proxy-1.local:8080"], max_attempts=1)
+        sessions: list[_FakeAsyncSession] = []
+
+        def fake_session_factory(**kwargs):
+            session = _FakeAsyncSession(**kwargs)
+            sessions.append(session)
+            return session
+
+        with patch("schema_inspector.transport.AsyncSession", side_effect=fake_session_factory):
+            transport = InspectorTransport(config)
+            await transport._execute_once("https://example.test/direct", {}, 10.0, None)
+            await transport._execute_once("https://example.test/proxy", {}, 10.0, "http://proxy-1.local:8080")
+            await transport.close()
+
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual([session.closed for session in sessions], [True, True])
+
     async def test_fetch_json_raises_on_challenge_response(self) -> None:
         config = RuntimeConfig()
         with patch(
@@ -443,3 +487,31 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeAsyncResponse:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.status_code = 200
+        self.headers = {"Content-Type": "application/json"}
+        self.content = b'{"ok": true}'
+
+
+class _FakeAsyncSession:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.get_calls: list[dict[str, object]] = []
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+    async def get(self, url: str, **kwargs):
+        self.get_calls.append({"url": url, **kwargs})
+        return _FakeAsyncResponse(url)
+
+    def close(self) -> None:
+        self.closed = True

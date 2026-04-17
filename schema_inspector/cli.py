@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -119,6 +120,14 @@ class HybridApp:
             EventListRepository(),
             database,
         )
+
+    async def close(self) -> None:
+        await self.transport.close()
+        close_backend = getattr(self.redis_backend, "close", None)
+        if callable(close_backend):
+            maybe_awaitable = close_backend()
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
 
     async def ensure_endpoint_registry(self, sport_slug: str) -> None:
         normalized_sport_slug = str(sport_slug or "").strip().lower() or "football"
@@ -358,73 +367,76 @@ async def _dispatch(args) -> int:
             runtime_config=runtime_config,
             redis_backend=_load_redis_backend(args.redis_url),
         )
-        if args.command == "event":
-            if args.event_concurrency is None:
-                args.event_concurrency = 1
-            args.hydration_mode = "full"
-            report = await run_event_command(args, orchestrator=app)
-            _print_batch_report("event_hydrate", report)
-            return 0
-        if args.command == "live":
-            event_ids = await app.discover_live_event_ids(sport_slug=args.sport_slug, timeout=args.timeout)
-            report = await run_event_command(
-                argparse.Namespace(
-                    event_id=event_ids,
-                    sport_slug=args.sport_slug,
-                    hydration_mode="full",
-                    event_concurrency=args.event_concurrency or 1,
-                ),
-                orchestrator=app,
-            )
-            _print_batch_report("live_hydrate", report)
-            return 0
-        if args.command == "scheduled":
-            event_ids = await app.discover_scheduled_event_ids(sport_slug=args.sport_slug, date=args.date, timeout=args.timeout)
-            report = await run_event_command(
-                argparse.Namespace(
-                    event_id=event_ids,
-                    sport_slug=args.sport_slug,
-                    hydration_mode="core",
-                    event_concurrency=args.event_concurrency or 6,
-                ),
-                orchestrator=app,
-            )
-            _print_batch_report("scheduled_hydrate", report)
-            return 0
-        if args.command == "full-backfill":
-            if args.event_concurrency is None:
-                args.event_concurrency = 1
-            args.hydration_mode = "full"
-            report = await run_full_backfill_command(args, orchestrator=app, event_selector=app)
-            _print_batch_report("full_backfill", report)
-            return 0
-        if args.command == "replay":
-            report = await run_replay_command(args, replay_service=app)
-            print(
-                "replay "
-                f"snapshots={','.join(str(item) for item in report.snapshot_ids)} "
-                f"families={','.join(report.parser_families)}"
-            )
-            return 0
-        if args.command == "health":
-            report = await app.collect_health()
-            print(
-                "health "
-                f"snapshots={report.snapshot_count} "
-                f"rollups={report.capability_rollup_count} "
-                f"live_hot={report.live_hot_count} "
-                f"live_warm={report.live_warm_count} "
-                f"live_cold={report.live_cold_count}"
-            )
-            return 0
-        if args.command == "recover-live-state":
-            report = await app.recover_live_state()
-            print(
-                "recover_live_state "
-                f"hot={report.restored_hot} warm={report.restored_warm} "
-                f"cold={report.restored_cold} terminal={report.restored_terminal}"
-            )
-            return 0
+        try:
+            if args.command == "event":
+                if args.event_concurrency is None:
+                    args.event_concurrency = 1
+                args.hydration_mode = "full"
+                report = await run_event_command(args, orchestrator=app)
+                _print_batch_report("event_hydrate", report)
+                return 0
+            if args.command == "live":
+                event_ids = await app.discover_live_event_ids(sport_slug=args.sport_slug, timeout=args.timeout)
+                report = await run_event_command(
+                    argparse.Namespace(
+                        event_id=event_ids,
+                        sport_slug=args.sport_slug,
+                        hydration_mode="full",
+                        event_concurrency=args.event_concurrency or 1,
+                    ),
+                    orchestrator=app,
+                )
+                _print_batch_report("live_hydrate", report)
+                return 0
+            if args.command == "scheduled":
+                event_ids = await app.discover_scheduled_event_ids(sport_slug=args.sport_slug, date=args.date, timeout=args.timeout)
+                report = await run_event_command(
+                    argparse.Namespace(
+                        event_id=event_ids,
+                        sport_slug=args.sport_slug,
+                        hydration_mode="core",
+                        event_concurrency=args.event_concurrency or 6,
+                    ),
+                    orchestrator=app,
+                )
+                _print_batch_report("scheduled_hydrate", report)
+                return 0
+            if args.command == "full-backfill":
+                if args.event_concurrency is None:
+                    args.event_concurrency = 1
+                args.hydration_mode = "full"
+                report = await run_full_backfill_command(args, orchestrator=app, event_selector=app)
+                _print_batch_report("full_backfill", report)
+                return 0
+            if args.command == "replay":
+                report = await run_replay_command(args, replay_service=app)
+                print(
+                    "replay "
+                    f"snapshots={','.join(str(item) for item in report.snapshot_ids)} "
+                    f"families={','.join(report.parser_families)}"
+                )
+                return 0
+            if args.command == "health":
+                report = await app.collect_health()
+                print(
+                    "health "
+                    f"snapshots={report.snapshot_count} "
+                    f"rollups={report.capability_rollup_count} "
+                    f"live_hot={report.live_hot_count} "
+                    f"live_warm={report.live_warm_count} "
+                    f"live_cold={report.live_cold_count}"
+                )
+                return 0
+            if args.command == "recover-live-state":
+                report = await app.recover_live_state()
+                print(
+                    "recover_live_state "
+                    f"hot={report.restored_hot} warm={report.restored_warm} "
+                    f"cold={report.restored_cold} terminal={report.restored_terminal}"
+                )
+                return 0
+        finally:
+            await app.close()
     return 1
 
 

@@ -6,6 +6,57 @@ import unittest
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hybrid_app_close_closes_transport(self) -> None:
+        from schema_inspector.cli import HybridApp
+        from schema_inspector.runtime import RuntimeConfig
+
+        app = HybridApp(database=_FakeDatabase(), runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+        transport = _FakeClosableTransport()
+        app.transport = transport
+
+        await app.close()
+
+        self.assertTrue(transport.closed)
+
+    async def test_dispatch_closes_hybrid_app_before_return(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="health",
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(fake_app.closed)
+
     async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
         from schema_inspector.cli import HybridApp
         from schema_inspector.runtime import RuntimeConfig
@@ -181,6 +232,46 @@ class _FakePilotOrchestrator:
     async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str = "full"):
         self.calls.append((event_id, sport_slug, hydration_mode))
         return {"event_id": event_id, "sport_slug": sport_slug, "hydration_mode": hydration_mode}
+
+
+class _FakeClosableTransport:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeDispatchHybridApp:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def collect_health(self):
+        return type(
+            "HealthReport",
+            (),
+            {
+                "snapshot_count": 1,
+                "capability_rollup_count": 2,
+                "live_hot_count": 3,
+                "live_warm_count": 4,
+                "live_cold_count": 5,
+            },
+        )()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeAsyncpgDatabaseContext:
+    def __init__(self, config) -> None:
+        self.config = config
+
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
 
 
 if __name__ == "__main__":

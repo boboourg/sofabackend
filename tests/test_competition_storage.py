@@ -188,6 +188,16 @@ def _build_bundle() -> CompetitionBundle:
 
 
 class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
+    def test_load_database_config_uses_higher_pool_defaults(self) -> None:
+        config = load_database_config(
+            env={
+                "SOFASCORE_DATABASE_URL": "postgresql://user:pass@localhost:5432/sofascore",
+            }
+        )
+
+        self.assertEqual(config.min_size, 20)
+        self.assertEqual(config.max_size, 50)
+
     def test_load_database_config_reads_env(self) -> None:
         config = load_database_config(
             env={

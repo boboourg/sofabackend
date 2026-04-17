@@ -14,8 +14,8 @@ class DatabaseConfig:
     """Connection settings for PostgreSQL."""
 
     dsn: str
-    min_size: int = 1
-    max_size: int = 10
+    min_size: int = 20
+    max_size: int = 50
     command_timeout: float = 60.0
 
 
@@ -99,8 +99,8 @@ def load_database_config(
 
     return DatabaseConfig(
         dsn=resolved_dsn,
-        min_size=min_size or _env_int(env, "SOFASCORE_PG_MIN_SIZE", 1),
-        max_size=max_size or _env_int(env, "SOFASCORE_PG_MAX_SIZE", 10),
+        min_size=min_size or _env_int(env, "SOFASCORE_PG_MIN_SIZE", 20),
+        max_size=max_size or _env_int(env, "SOFASCORE_PG_MAX_SIZE", 50),
         command_timeout=command_timeout or _env_float(env, "SOFASCORE_PG_COMMAND_TIMEOUT", 60.0),
     )
 

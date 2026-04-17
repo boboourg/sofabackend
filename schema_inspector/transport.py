@@ -46,6 +46,8 @@ class InspectorTransport:
         self.sleeper = sleeper or asyncio.sleep
         self.clock = clock or time.monotonic
         self.proxy_pool = ProxyPool(runtime_config.proxy_endpoints, clock=self.clock)
+        self._session_cache: dict[str, AsyncSession] = {}
+        self._session_lock = asyncio.Lock()
 
     async def fetch(
         self,
@@ -138,6 +140,7 @@ class InspectorTransport:
 
             except (URLError, RequestsError) as exc:
                 error_msg = str(getattr(exc, "reason", exc))
+                await self._discard_session(proxy_url)
                 attempts.append(
                     TransportAttempt(
                         attempt_number=attempt_number,
@@ -182,20 +185,12 @@ class InspectorTransport:
             return await asyncio.to_thread(self._execute_local_file_once, url, headers, timeout)
 
         # 2. STEALTH MODE for HTTP/HTTPS
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-
-        # Safely extract impersonate profile, fallback to "chrome120" if not set in runtime.py yet
-        tls_policy = getattr(self.runtime_config, "tls_policy", None)
-        impersonate_profile = getattr(tls_policy, "impersonate", "chrome120")
-
-        async with AsyncSession() as session:
-            response = await session.get(
-                url,
-                headers=dict(headers),
-                proxies=proxies,
-                timeout=timeout,
-                impersonate=impersonate_profile,
-            )
+        session = await self._get_session(proxy_url)
+        response = await session.get(
+            url,
+            headers=dict(headers),
+            timeout=timeout,
+        )
 
         return _RawResponse(
             resolved_url=response.url,
@@ -204,10 +199,61 @@ class InspectorTransport:
             body_bytes=response.content,
         )
 
+    async def close(self) -> None:
+        async with self._session_lock:
+            sessions = list(self._session_cache.values())
+            self._session_cache.clear()
+        for session in sessions:
+            await self._close_session(session)
+
     async def _sleep(self, delay: float) -> None:
         maybe_awaitable = self.sleeper(delay)
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
+
+    async def _get_session(self, proxy_url: str | None) -> AsyncSession:
+        session_key = self._session_key(proxy_url)
+        cached = self._session_cache.get(session_key)
+        if cached is not None:
+            return cached
+
+        async with self._session_lock:
+            cached = self._session_cache.get(session_key)
+            if cached is not None:
+                return cached
+            session = AsyncSession(**self._session_kwargs(proxy_url))
+            self._session_cache[session_key] = session
+            return session
+
+    async def _discard_session(self, proxy_url: str | None) -> None:
+        session_key = self._session_key(proxy_url)
+        async with self._session_lock:
+            session = self._session_cache.pop(session_key, None)
+        if session is not None:
+            await self._close_session(session)
+
+    async def _close_session(self, session: AsyncSession) -> None:
+        close = getattr(session, "close", None)
+        if close is None:
+            return
+        maybe_awaitable = close()
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
+
+    def _session_key(self, proxy_url: str | None) -> str:
+        return proxy_url or "__direct__"
+
+    def _session_kwargs(self, proxy_url: str | None) -> dict[str, object]:
+        tls_policy = getattr(self.runtime_config, "tls_policy", None)
+        impersonate_profile = getattr(tls_policy, "impersonate", "chrome120")
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        kwargs: dict[str, object] = {
+            "max_clients": max(20, len(self.runtime_config.proxy_endpoints) or 1),
+            "impersonate": impersonate_profile,
+        }
+        if proxies is not None:
+            kwargs["proxies"] = proxies
+        return kwargs
 
     @staticmethod
     def _execute_local_file_once(
