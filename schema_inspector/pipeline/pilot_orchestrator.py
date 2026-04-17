@@ -18,6 +18,7 @@ from ..endpoints import (
     EVENT_PLAYER_STATISTICS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_SHOTMAP_ENDPOINT,
+    EVENT_STATISTICS_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
     MANAGER_ENDPOINT,
     PLAYER_ENDPOINT,
@@ -35,13 +36,6 @@ from ..parsers.sports import resolve_sport_adapter
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
 from ..storage.live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord
 from ..workers.live_worker import LiveWorker
-
-
-EVENT_STATISTICS_ENDPOINT = SofascoreEndpoint(
-    path_template="/api/v1/event/{event_id}/statistics",
-    envelope_key="statistics",
-    target_table="event_statistic",
-)
 
 
 @dataclass(frozen=True)

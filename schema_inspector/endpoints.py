@@ -372,6 +372,12 @@ EVENT_DETAIL_ENDPOINT = SofascoreEndpoint(
     target_table="event",
 )
 
+EVENT_STATISTICS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/statistics",
+    envelope_key="statistics",
+    target_table="event_statistic",
+)
+
 EVENT_LINEUPS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/lineups",
     envelope_key="home,away",
@@ -520,6 +526,7 @@ EVENT_WEATHER_ENDPOINT = SofascoreEndpoint(
 
 EVENT_DETAIL_BASE_ENDPOINTS = (
     EVENT_DETAIL_ENDPOINT,
+    EVENT_STATISTICS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
     EVENT_MANAGERS_ENDPOINT,
@@ -946,3 +953,22 @@ def leaderboards_registry_entries(
 def leaderboards_registry_entries_for_sport(sport_slug: str) -> tuple[EndpointRegistryEntry, ...]:
     profile = resolve_sport_profile(sport_slug)
     return tuple(endpoint.registry_entry() for endpoint in sport_local_leaderboard_endpoints(profile.sport_slug))
+
+
+def hybrid_runtime_registry_entries_for_sport(sport_slug: str) -> tuple[EndpointRegistryEntry, ...]:
+    """Registry rows required by the hybrid cutover runtime before workers start fetching."""
+
+    entries: list[EndpointRegistryEntry] = []
+    seen_patterns: set[str] = set()
+
+    def add_many(items: tuple[EndpointRegistryEntry, ...]) -> None:
+        for item in items:
+            if item.pattern in seen_patterns:
+                continue
+            seen_patterns.add(item.pattern)
+            entries.append(item)
+
+    add_many(event_detail_registry_entries(sport_slug=sport_slug))
+    add_many(entities_registry_entries())
+    add_many(leaderboards_registry_entries_for_sport(sport_slug))
+    return tuple(entries)

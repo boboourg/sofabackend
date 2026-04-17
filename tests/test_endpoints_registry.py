@@ -81,10 +81,12 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(endpoint.path_template, "/api/v1/sport/basketball/trending-top-players")
 
     def test_event_detail_endpoints_include_sport_specific_special_routes(self) -> None:
+        football_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="football")}
         baseball_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="baseball")}
         ice_hockey_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="ice-hockey")}
         esports_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="esports")}
 
+        self.assertIn("/api/v1/event/{event_id}/statistics", football_patterns)
         self.assertIn("/api/v1/event/{event_id}/innings", baseball_patterns)
         self.assertIn("/api/v1/event/{event_id}/shotmap", ice_hockey_patterns)
         self.assertIn("/api/v1/event/{event_id}/esports-games", esports_patterns)

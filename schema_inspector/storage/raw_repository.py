@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 
+from ..endpoints import EndpointRegistryEntry
 from ..parsers.base import RawSnapshot
 from ._temporal import coerce_timestamptz
 
@@ -20,6 +21,10 @@ class SqlReturningExecutor(SqlExecutor, Protocol):
 
 class SqlFetchExecutor(SqlExecutor, Protocol):
     async def fetchrow(self, query: str, *args: object) -> Any: ...
+
+
+class SqlBatchExecutor(SqlExecutor, Protocol):
+    async def executemany(self, query: str, args: Iterable[tuple[object, ...]]) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,41 @@ class ApiSnapshotHeadRecord:
 
 class RawRepository:
     """Writes raw request and snapshot metadata for hybrid ETL control-plane flows."""
+
+    async def upsert_endpoint_registry_entries(
+        self,
+        executor: SqlExecutor,
+        entries: Iterable[EndpointRegistryEntry],
+    ) -> None:
+        rows = [
+            (
+                item.pattern,
+                item.path_template,
+                item.query_template,
+                item.envelope_key,
+                item.target_table,
+                item.notes,
+            )
+            for item in entries
+        ]
+        if not rows:
+            return
+        query = """
+            INSERT INTO endpoint_registry (pattern, path_template, query_template, envelope_key, target_table, notes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (pattern) DO UPDATE SET
+                path_template = EXCLUDED.path_template,
+                query_template = EXCLUDED.query_template,
+                envelope_key = EXCLUDED.envelope_key,
+                target_table = EXCLUDED.target_table,
+                notes = EXCLUDED.notes
+        """
+        executemany = getattr(executor, "executemany", None)
+        if callable(executemany):
+            await executemany(query, rows)
+            return
+        for row in rows:
+            await executor.execute(query, *row)
 
     async def insert_request_log(self, executor: SqlExecutor, record: ApiRequestLogRecord) -> None:
         await executor.execute(

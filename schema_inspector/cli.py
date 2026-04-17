@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 
 from .db import AsyncpgDatabase, load_database_config
+from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .event_list_job import EventListIngestJob
 from .event_list_parser import EventListParser
 from .event_list_repository import EventListRepository
@@ -108,6 +109,7 @@ class HybridApp:
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
         self.capability_rollup: dict[str, str] = {}
+        self._seeded_endpoint_registry_sports: set[str] = set()
 
         client = SofascoreClient(runtime_config, transport=self.transport)
         self.event_list_job = EventListIngestJob(
@@ -116,8 +118,18 @@ class HybridApp:
             database,
         )
 
+    async def ensure_endpoint_registry(self, sport_slug: str) -> None:
+        normalized_sport_slug = str(sport_slug or "").strip().lower() or "football"
+        if normalized_sport_slug in self._seeded_endpoint_registry_sports:
+            return
+        registry_entries = hybrid_runtime_registry_entries_for_sport(normalized_sport_slug)
+        async with self.database.transaction() as connection:
+            await self.raw_repository.upsert_endpoint_registry_entries(connection, registry_entries)
+        self._seeded_endpoint_registry_sports.add(normalized_sport_slug)
+
     async def run_event(self, *, event_id: int, sport_slug: str | None):
         resolved_sport_slug = sport_slug or await self.resolve_event_sport_slug(event_id)
+        await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
         async with self.database.transaction() as connection:
             snapshot_store = HybridSnapshotStore(self.raw_repository, connection)
             orchestrator = PilotOrchestrator(

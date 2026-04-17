@@ -5,6 +5,27 @@ import unittest
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hybrid_app_bootstraps_endpoint_registry_once_per_sport(self) -> None:
+        from schema_inspector.cli import HybridApp
+        from schema_inspector.runtime import RuntimeConfig
+
+        database = _FakeDatabase()
+        app = HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+        repository = _FakeRawRepository()
+        app.raw_repository = repository
+
+        await app.ensure_endpoint_registry("football")
+        await app.ensure_endpoint_registry("football")
+
+        self.assertEqual(database.transaction_calls, 1)
+        self.assertEqual(len(repository.calls), 1)
+        patterns = set(repository.calls[0])
+        self.assertIn("/api/v1/event/{event_id}/statistics", patterns)
+        self.assertIn("/api/v1/event/{event_id}/lineups", patterns)
+        self.assertIn("/api/v1/event/{event_id}/incidents", patterns)
+        self.assertIn("/api/v1/team/{team_id}", patterns)
+        self.assertIn("/api/v1/player/{player_id}", patterns)
+
     async def test_run_event_command_hydrates_each_event(self) -> None:
         from schema_inspector.cli import run_event_command
 
@@ -51,6 +72,36 @@ class _FakeEventSelector:
     async def select_event_ids(self, *, limit: int | None, offset: int, sport_slug: str | None):
         self.calls.append((limit, offset, sport_slug))
         return self.event_ids
+
+
+class _FakeDatabase:
+    def __init__(self) -> None:
+        self.transaction_calls = 0
+        self.connection = object()
+
+    def transaction(self):
+        self.transaction_calls += 1
+        return _FakeTransaction(self.connection)
+
+
+class _FakeTransaction:
+    def __init__(self, connection) -> None:
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+
+class _FakeRawRepository:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    async def upsert_endpoint_registry_entries(self, executor, entries) -> None:
+        del executor
+        self.calls.append(tuple(item.pattern for item in entries))
 
 
 if __name__ == "__main__":
