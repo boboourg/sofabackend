@@ -12,9 +12,12 @@ class HealthReport:
     live_hot_count: int
     live_warm_count: int
     live_cold_count: int
+    database_ok: bool
+    redis_ok: bool
+    redis_backend_kind: str
 
 
-async def collect_health_report(*, sql_executor, live_state_store=None) -> HealthReport:
+async def collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None) -> HealthReport:
     snapshot_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM api_payload_snapshot"))
     capability_rollup_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM endpoint_capability_rollup"))
     return HealthReport(
@@ -23,6 +26,9 @@ async def collect_health_report(*, sql_executor, live_state_store=None) -> Healt
         live_hot_count=_lane_count(live_state_store, "hot"),
         live_warm_count=_lane_count(live_state_store, "warm"),
         live_cold_count=_lane_count(live_state_store, "cold"),
+        database_ok=True,
+        redis_ok=_ping_redis(redis_backend),
+        redis_backend_kind=_backend_kind(redis_backend),
     )
 
 
@@ -49,3 +55,24 @@ def _lane_count(live_state_store, lane: str) -> int:
         float("inf"),
     )
     return len(tuple(members))
+
+
+def _ping_redis(redis_backend) -> bool:
+    if redis_backend is None:
+        return False
+    ping = getattr(redis_backend, "ping", None)
+    if not callable(ping):
+        return False
+    try:
+        return bool(ping())
+    except Exception:
+        return False
+
+
+def _backend_kind(redis_backend) -> str:
+    if redis_backend is None:
+        return "none"
+    class_name = type(redis_backend).__name__.lower().lstrip("_")
+    if class_name == "memoryredisbackend":
+        return "memory"
+    return class_name

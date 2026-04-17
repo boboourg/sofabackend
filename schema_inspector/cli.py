@@ -271,7 +271,11 @@ class HybridApp:
 
     async def collect_health(self):
         async with self.database.connection() as connection:
-            return await collect_health_report(sql_executor=connection, live_state_store=self.live_state_store)
+            return await collect_health_report(
+                sql_executor=connection,
+                live_state_store=self.live_state_store,
+                redis_backend=self.redis_backend,
+            )
 
     async def recover_live_state(self):
         async with self.database.connection() as connection:
@@ -429,6 +433,9 @@ async def _dispatch(args) -> int:
                 report = await app.collect_health()
                 print(
                     "health "
+                    f"db_ok={int(report.database_ok)} "
+                    f"redis_ok={int(report.redis_ok)} "
+                    f"redis_backend={report.redis_backend_kind} "
                     f"snapshots={report.snapshot_count} "
                     f"rollups={report.capability_rollup_count} "
                     f"live_hot={report.live_hot_count} "

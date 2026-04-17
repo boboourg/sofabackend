@@ -2,12 +2,37 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import types
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collect_health_report_includes_runtime_gate_fields(self) -> None:
+        from schema_inspector.ops.health import collect_health_report
+
+        report = await collect_health_report(
+            sql_executor=_FakeSqlExecutor(
+                {
+                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
+                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                }
+            ),
+            live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({"live:hot": ("1", "2"), "live:warm": ("3",)})),
+            redis_backend=_FakeRedis(),
+        )
+
+        self.assertTrue(report.database_ok)
+        self.assertTrue(report.redis_ok)
+        self.assertEqual(report.redis_backend_kind, "fakeredis")
+        self.assertEqual(report.snapshot_count, 7)
+        self.assertEqual(report.capability_rollup_count, 3)
+        self.assertEqual(report.live_hot_count, 2)
+        self.assertEqual(report.live_warm_count, 1)
+        self.assertEqual(report.live_cold_count, 0)
+
     def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -135,6 +160,52 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(fake_app.closed)
+
+    async def test_dispatch_health_prints_runtime_gate_fields(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        stdout = io.StringIO()
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+
+            with redirect_stdout(stdout):
+                exit_code = await hybrid_cli._dispatch(
+                    argparse.Namespace(
+                        command="health",
+                        timeout=20.0,
+                        proxy=[],
+                        user_agent=None,
+                        max_attempts=None,
+                        database_url=None,
+                        db_min_size=None,
+                        db_max_size=None,
+                        db_timeout=None,
+                        redis_url=None,
+                        allow_memory_redis=True,
+                        event_concurrency=None,
+                        log_level="INFO",
+                    )
+                )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue().strip()
+        self.assertIn("health ", output)
+        self.assertIn("db_ok=1", output)
+        self.assertIn("redis_ok=1", output)
+        self.assertIn("redis_backend=fakeredis", output)
 
     async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
         from schema_inspector.cli import HybridApp
@@ -330,6 +401,39 @@ class _FakeRedisBackend:
         return True
 
 
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.ping_calls = 0
+
+    def ping(self) -> bool:
+        self.ping_calls += 1
+        return True
+
+
+class _FakeLaneRedisBackend:
+    def __init__(self, members_by_key: dict[str, tuple[str, ...]]) -> None:
+        self.members_by_key = members_by_key
+
+    def zrangebyscore(self, key: str, _start: float, _end: float):
+        return self.members_by_key.get(key, ())
+
+
+class _FakeLiveStateStore:
+    def __init__(self, backend) -> None:
+        self.backend = backend
+
+    def _lane_key(self, lane: str) -> str:
+        return f"live:{lane}"
+
+
+class _FakeSqlExecutor:
+    def __init__(self, values_by_query: dict[str, int]) -> None:
+        self.values_by_query = values_by_query
+
+    async def fetchval(self, query: str):
+        return self.values_by_query[query]
+
+
 class _FakeDispatchHybridApp:
     def __init__(self) -> None:
         self.closed = False
@@ -345,6 +449,9 @@ class _FakeDispatchHybridApp:
                 "live_hot_count": 3,
                 "live_warm_count": 4,
                 "live_cold_count": 5,
+                "database_ok": True,
+                "redis_ok": True,
+                "redis_backend_kind": "fakeredis",
             },
         )()
 
