@@ -1,4 +1,4 @@
-"""Helpers for decoding stream payloads into job-like objects."""
+"""Helpers for encoding and decoding stream payloads into job-like objects."""
 
 from __future__ import annotations
 
@@ -11,6 +11,25 @@ from ..queue.streams import StreamEntry
 
 def decode_stream_job(entry: StreamEntry) -> JobEnvelope:
     return decode_stream_payload(entry.values, fallback_job_id=entry.message_id)
+
+
+def encode_stream_job(job: JobEnvelope) -> dict[str, object]:
+    return {
+        "job_id": job.job_id,
+        "job_type": job.job_type,
+        "sport_slug": job.sport_slug or "",
+        "entity_type": job.entity_type or "",
+        "entity_id": job.entity_id if job.entity_id is not None else "",
+        "scope": job.scope or "",
+        "params_json": json.dumps(job.params, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        "priority": job.priority,
+        "scheduled_at": job.scheduled_at,
+        "attempt": job.attempt,
+        "parent_job_id": job.parent_job_id or "",
+        "trace_id": job.trace_id or "",
+        "capability_hint": job.capability_hint or "",
+        "idempotency_key": job.idempotency_key,
+    }
 
 
 def decode_stream_payload(values: dict[str, object] | dict[str, str], *, fallback_job_id: str | None = None) -> JobEnvelope:

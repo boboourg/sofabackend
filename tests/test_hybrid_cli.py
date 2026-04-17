@@ -93,6 +93,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         parser = _build_parser()
 
         planner = parser.parse_args(["planner-daemon", "--sport-slug", "football"])
+        discovery = parser.parse_args(["worker-discovery", "--consumer-name", "discovery-1"])
         hydrate = parser.parse_args(["worker-hydrate", "--consumer-name", "hydrate-1"])
         live_hot = parser.parse_args(["worker-live-hot", "--consumer-name", "hot-1"])
         live_warm = parser.parse_args(["worker-live-warm", "--consumer-name", "warm-1"])
@@ -100,6 +101,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(planner.command, "planner-daemon")
         self.assertEqual(planner.sport_slug, ["football"])
+        self.assertEqual(discovery.command, "worker-discovery")
         self.assertEqual(hydrate.command, "worker-hydrate")
         self.assertEqual(live_hot.command, "worker-live-hot")
         self.assertEqual(live_warm.command, "worker-live-warm")
@@ -122,6 +124,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         service_app = ServiceApp(app)
         service_app.ensure_consumer_groups()
 
+        self.assertIn(("stream:etl:discovery", "cg:discovery", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:hydrate", "cg:hydrate", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:live_hot", "cg:live_hot", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:live_warm", "cg:live_warm", "0-0"), fake_stream_queue.groups)
@@ -524,6 +527,52 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(fake_service_app.calls, [("hydrate", "hydrate-a", 2500)])
+
+    async def test_dispatch_worker_discovery_runs_service_loop(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-discovery",
+                    consumer_name="discovery-a",
+                    block_ms=2100,
+                    timeout=17.5,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_service_app.calls, [("discovery", "discovery-a", 2100, 17.5)])
 
     async def test_dispatch_worker_live_and_maintenance_run_service_loops(self) -> None:
         import schema_inspector.cli as hybrid_cli
@@ -940,6 +989,9 @@ class _FakeServiceApp:
 
     async def run_planner_daemon(self, *, sport_slugs: tuple[str, ...], scheduled_interval_seconds: float, loop_interval_seconds: float) -> None:
         self.calls.append(("planner", sport_slugs, scheduled_interval_seconds, loop_interval_seconds))
+
+    async def run_discovery_worker(self, *, consumer_name: str, block_ms: int, timeout_s: float) -> None:
+        self.calls.append(("discovery", consumer_name, block_ms, timeout_s))
 
     async def run_hydrate_worker(self, *, consumer_name: str, block_ms: int) -> None:
         self.calls.append(("hydrate", consumer_name, block_ms))

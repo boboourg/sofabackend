@@ -492,6 +492,14 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "worker-discovery":
+                service_app = ServiceApp(app)
+                await service_app.run_discovery_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                    timeout_s=args.timeout,
+                )
+                return 0
             if args.command == "worker-hydrate":
                 service_app = ServiceApp(app)
                 await service_app.run_hydrate_worker(
@@ -586,6 +594,10 @@ def _build_parser() -> argparse.ArgumentParser:
     planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
     planner_daemon.add_argument("--scheduled-interval-seconds", type=float, default=300.0, help="Scheduled planning interval per sport.")
     planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
+    worker_discovery = subparsers.add_parser("worker-discovery", help="Run the discovery consumer group loop.")
+    worker_discovery.add_argument("--consumer-name", default="worker-discovery-1", help="Redis consumer name for the discovery worker.")
+    worker_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_hydrate = subparsers.add_parser("worker-hydrate", help="Run the hydrate consumer group loop.")
     worker_hydrate.add_argument("--consumer-name", default="worker-hydrate-1", help="Redis consumer name for the hydrate worker.")

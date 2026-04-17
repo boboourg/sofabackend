@@ -21,6 +21,7 @@ from ..queue.streams import (
 )
 from ..services.planner_daemon import PlannerDaemon, ScheduledPlanningTarget
 from ..workers._stream_jobs import decode_stream_payload
+from ..workers.discovery_worker import DiscoveryWorker
 from ..workers.hydrate_worker import HydrateWorker
 from ..workers.live_worker_service import LiveWorkerService
 from ..workers.maintenance_worker import MaintenanceWorker
@@ -141,6 +142,22 @@ class ServiceApp:
             block_ms=block_ms,
         )
 
+    def build_discovery_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+        timeout_s: float = 20.0,
+    ) -> DiscoveryWorker:
+        self.ensure_consumer_groups()
+        return DiscoveryWorker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            block_ms=block_ms,
+            timeout_s=timeout_s,
+        )
+
     def build_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> LiveWorkerService:
         self.ensure_consumer_groups()
         return LiveWorkerService(
@@ -181,6 +198,20 @@ class ServiceApp:
             loop_interval_seconds=loop_interval_seconds,
         )
         await daemon.run_forever()
+
+    async def run_discovery_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+        timeout_s: float = 20.0,
+    ) -> None:
+        worker = self.build_discovery_worker(
+            consumer_name=consumer_name,
+            block_ms=block_ms,
+            timeout_s=timeout_s,
+        )
+        await worker.run_forever()
 
     async def run_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
