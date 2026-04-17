@@ -75,12 +75,17 @@ class _FakeParser:
 
 
 class _FakeRepository:
-    def __init__(self, result: EventDetailWriteResult) -> None:
+    def __init__(self, result: EventDetailWriteResult | None, *, error: Exception | None = None) -> None:
         self.result = result
+        self.error = error
         self.calls: list[tuple[object, EventDetailBundle]] = []
 
     async def upsert_bundle(self, executor, bundle: EventDetailBundle) -> EventDetailWriteResult:
         self.calls.append((executor, bundle))
+        if self.error is not None:
+            raise self.error
+        if self.result is None:
+            raise RuntimeError("result is required when error is not set")
         return self.result
 
 
@@ -502,6 +507,19 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.event_id, 14083191)
         self.assertEqual(result.provider_ids, (1, 2))
         self.assertEqual(result.written.event_market_rows, 1)
+
+    async def test_event_detail_ingest_job_raises_actionable_error_for_missing_tables(self) -> None:
+        bundle = _build_bundle()
+        parser = _FakeParser(bundle)
+        undefined_table_error = type("UndefinedTableError", (RuntimeError,), {})(
+            'relation "event_best_player_entry" does not exist'
+        )
+        repository = _FakeRepository(None, error=undefined_table_error)
+        database = _FakeDatabase(object())
+        job = EventDetailIngestJob(parser, repository, database)
+
+        with self.assertRaisesRegex(RuntimeError, "db_setup_cli"):
+            await job.run(14083191, provider_ids=(1,), timeout=12.5)
 
 
 if __name__ == "__main__":

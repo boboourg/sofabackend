@@ -45,7 +45,17 @@ class EventDetailIngestJob:
         resolved_provider_ids = tuple(dict.fromkeys(provider_ids))
         bundle = await self.parser.fetch_bundle(event_id, provider_ids=resolved_provider_ids, timeout=timeout)
         async with self.database.transaction() as connection:
-            write_result = await self.repository.upsert_bundle(connection, bundle)
+            try:
+                write_result = await self.repository.upsert_bundle(connection, bundle)
+            except Exception as exc:
+                if _is_undefined_table_error(exc):
+                    raise RuntimeError(
+                        "Database schema is out of date for event-detail ingestion. "
+                        "Run `.\\.venv311\\Scripts\\python.exe -m schema_inspector.db_setup_cli` "
+                        "to apply the latest migrations, including "
+                        "`2026-04-17_event_player_analytics.sql`."
+                    ) from exc
+                raise
         self.logger.info(
             "Event-detail ingest completed: event_id=%s players=%s markets=%s",
             event_id,
@@ -58,3 +68,7 @@ class EventDetailIngestJob:
             parsed=bundle,
             written=write_result,
         )
+
+
+def _is_undefined_table_error(exc: Exception) -> bool:
+    return exc.__class__.__name__ == "UndefinedTableError"
