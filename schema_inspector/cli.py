@@ -10,6 +10,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .db import AsyncpgDatabase, load_database_config
 from .endpoints import hybrid_runtime_registry_entries_for_sport
@@ -637,7 +638,8 @@ def _configure_logging(level_name: str) -> None:
 
 
 def _load_redis_backend(redis_url: str | None, *, allow_memory_fallback: bool):
-    resolved_url = redis_url or os.environ.get("REDIS_URL") or os.environ.get("SOFASCORE_REDIS_URL")
+    env = _load_project_env()
+    resolved_url = redis_url or env.get("REDIS_URL") or env.get("SOFASCORE_REDIS_URL")
     if not resolved_url:
         if allow_memory_fallback:
             logger.warning("Redis URL missing; falling back to in-memory backend because --allow-memory-redis is enabled.")
@@ -653,6 +655,20 @@ def _load_redis_backend(redis_url: str | None, *, allow_memory_fallback: bool):
     backend = redis.Redis.from_url(resolved_url, decode_responses=True)
     backend.ping()
     return backend
+
+
+def _load_project_env() -> dict[str, str]:
+    merged = dict(os.environ)
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return merged
+    for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return merged
 
 
 class _MemoryRedisBackend:
