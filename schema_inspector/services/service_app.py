@@ -68,7 +68,10 @@ class DelayedEnvelopeStore:
         if not job_id:
             raise RuntimeError("Delayed envelope store requires a job_id.")
         encoded = json.dumps({str(key): value for key, value in payload.items()}, ensure_ascii=True, sort_keys=True)
-        self.backend.hset(self.hash_key, {job_id: encoded})
+        try:
+            self.backend.hset(self.hash_key, mapping={job_id: encoded})
+        except TypeError:
+            self.backend.hset(self.hash_key, {job_id: encoded})
 
     def load(self, job_id: str):
         raw_payload = self.backend.hgetall(self.hash_key).get(str(job_id))

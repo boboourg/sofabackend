@@ -48,7 +48,8 @@ class RateLimitStateStore:
             recent_403=recent_403,
             backoff_multiplier=backoff_multiplier,
         )
-        self.backend.hset(
+        _hset_mapping(
+            self.backend,
             self._key(scope_key),
             {
                 "cooldown_until": state.cooldown_until,
@@ -73,3 +74,10 @@ def _maybe_int(value: object) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def _hset_mapping(backend: Any, name: str, mapping: dict[str, object]) -> None:
+    try:
+        backend.hset(name, mapping=mapping)
+    except TypeError:
+        backend.hset(name, mapping)
