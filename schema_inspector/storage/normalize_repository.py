@@ -108,9 +108,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO sport (id, slug, name)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (id) DO UPDATE SET
-                    slug = EXCLUDED.slug,
-                    name = EXCLUDED.name
+                ON CONFLICT (id) DO NOTHING
                 """,
                 sport_rows,
             )
@@ -127,10 +125,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO country (alpha2, alpha3, slug, name)
                 VALUES ($1, $2, $3, $4)
-                ON CONFLICT (alpha2) DO UPDATE SET
-                    alpha3 = COALESCE(EXCLUDED.alpha3, country.alpha3),
-                    slug = COALESCE(EXCLUDED.slug, country.slug),
-                    name = EXCLUDED.name
+                ON CONFLICT (alpha2) DO NOTHING
                 """,
                 country_rows,
             )
@@ -160,11 +155,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO category (id, slug, name, sport_id, country_alpha2)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO UPDATE SET
-                    slug = EXCLUDED.slug,
-                    name = EXCLUDED.name,
-                    sport_id = EXCLUDED.sport_id,
-                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, category.country_alpha2)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 category_rows,
             )
@@ -199,11 +190,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO unique_tournament (id, slug, name, category_id, country_alpha2)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO UPDATE SET
-                    slug = EXCLUDED.slug,
-                    name = EXCLUDED.name,
-                    category_id = EXCLUDED.category_id,
-                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, unique_tournament.country_alpha2)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 unique_tournament_rows,
             )
@@ -220,10 +207,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO season (id, name, year, editor)
                 VALUES ($1, $2, $3, $4)
-                ON CONFLICT (id) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    year = EXCLUDED.year,
-                    editor = EXCLUDED.editor
+                ON CONFLICT (id) DO NOTHING
                 """,
                 season_rows,
             )
@@ -255,11 +239,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO tournament (id, slug, name, category_id, unique_tournament_id)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO UPDATE SET
-                    slug = COALESCE(EXCLUDED.slug, tournament.slug),
-                    name = EXCLUDED.name,
-                    category_id = EXCLUDED.category_id,
-                    unique_tournament_id = COALESCE(EXCLUDED.unique_tournament_id, tournament.unique_tournament_id)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 tournament_rows,
             )
@@ -281,10 +261,7 @@ class NormalizeRepository:
                 """
                 INSERT INTO venue (id, slug, name, country_alpha2)
                 VALUES ($1, $2, $3, $4)
-                ON CONFLICT (id) DO UPDATE SET
-                    slug = EXCLUDED.slug,
-                    name = EXCLUDED.name,
-                    country_alpha2 = COALESCE(EXCLUDED.country_alpha2, venue.country_alpha2)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 venue_rows,
             )

@@ -386,6 +386,46 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ON CONFLICT (id)", manager_insert_sql)
         self.assertNotIn("ON CONFLICT (slug)", manager_insert_sql)
 
+    async def test_shared_dimension_upserts_use_insert_if_missing_conflict_policy(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=903,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+                "country": ({"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},),
+                "category": (
+                    {"id": 10, "slug": "england", "name": "England", "sport_id": 1, "country_alpha2": "EN"},
+                ),
+                "unique_tournament": (
+                    {"id": 17, "slug": "premier-league", "name": "Premier League", "category_id": 10, "country_alpha2": "EN"},
+                ),
+                "season": (
+                    {"id": 76986, "name": "Premier League 25/26", "year": "25/26", "editor": False},
+                ),
+                "tournament": (
+                    {"id": 100, "slug": "premier-league", "name": "Premier League", "category_id": 10, "unique_tournament_id": 17},
+                ),
+                "venue": (
+                    {"id": 55, "slug": "emirates-stadium", "name": "Emirates Stadium", "country_alpha2": "EN"},
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        statements = {sql.split("(")[0].strip(): sql for sql, _ in executor.executemany_calls}
+        self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO sport"])
+        self.assertIn("ON CONFLICT (alpha2) DO NOTHING", statements["INSERT INTO country"])
+        self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO category"])
+        self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO unique_tournament"])
+        self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO season"])
+        self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO tournament"])
+        self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO venue"])
+
 
 if __name__ == "__main__":
     unittest.main()
