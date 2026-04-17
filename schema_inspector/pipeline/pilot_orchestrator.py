@@ -101,6 +101,12 @@ class CapabilityRollupAccumulator:
         )
 
 
+@dataclass(frozen=True)
+class DeferredCapabilityRecord:
+    observation: CapabilityObservationRecord
+    rollup: CapabilityRollupRecord
+
+
 class PilotOrchestrator:
     def __init__(
         self,
@@ -131,6 +137,7 @@ class PilotOrchestrator:
         self.live_state_repository = live_state_repository
         self.stream_queue = stream_queue
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
+        self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
     async def run_event(
         self,
@@ -139,6 +146,7 @@ class PilotOrchestrator:
         sport_slug: str,
         hydration_mode: str = "full",
     ) -> PilotRunReport:
+        self._pending_capability_records.clear()
         if self.fetch_executor is None:
             raise RuntimeError("fetch_executor is required for run_event")
 
@@ -360,6 +368,8 @@ class PilotOrchestrator:
                     if parsed is not None:
                         parse_results.append(parsed)
 
+        await self._flush_capabilities()
+
         return PilotRunReport(
             sport_slug=sport_slug,
             event_id=event_id,
@@ -499,7 +509,6 @@ class PilotOrchestrator:
             observed_at=outcome.fetched_at or "",
             sample_snapshot_id=outcome.snapshot_id,
         )
-        await self.capability_repository.insert_observation(self.sql_executor, observation)
 
         key = (sport_slug, outcome.endpoint_pattern)
         accumulator = self._rollups.setdefault(
@@ -507,8 +516,29 @@ class PilotOrchestrator:
             CapabilityRollupAccumulator(sport_slug=sport_slug, endpoint_pattern=outcome.endpoint_pattern),
         )
         rollup = accumulator.observe(outcome)
-        await self.capability_repository.upsert_rollup(self.sql_executor, rollup)
+        self._pending_capability_records.append(
+            DeferredCapabilityRecord(
+                observation=observation,
+                rollup=rollup,
+            )
+        )
         self.planner.capability_rollup[outcome.endpoint_pattern] = rollup.support_level
+
+    async def _flush_capabilities(self) -> None:
+        if self.capability_repository is None or not self._pending_capability_records:
+            return
+
+        observations = tuple(item.observation for item in self._pending_capability_records)
+        latest_rollups: dict[tuple[str, str], CapabilityRollupRecord] = {}
+        for item in self._pending_capability_records:
+            latest_rollups[(item.rollup.sport_slug, item.rollup.endpoint_pattern)] = item.rollup
+
+        for observation in observations:
+            await self.capability_repository.insert_observation(self.sql_executor, observation)
+        for rollup in latest_rollups.values():
+            await self.capability_repository.upsert_rollup(self.sql_executor, rollup)
+
+        self._pending_capability_records.clear()
 
     async def _record_live_state_history(
         self,

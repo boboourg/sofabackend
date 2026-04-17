@@ -12,13 +12,16 @@ from schema_inspector.runtime import TransportAttempt, TransportResult
 
 
 class _FakeTransport:
-    def __init__(self, responses: dict[str, TransportResult]) -> None:
+    def __init__(self, responses: dict[str, TransportResult], *, action_log: list[str] | None = None) -> None:
         self.responses = responses
         self.seen_urls: list[str] = []
+        self.action_log = action_log
 
     async def fetch(self, url: str, *, headers=None, timeout: float = 20.0) -> TransportResult:
         del headers, timeout
         self.seen_urls.append(url)
+        if self.action_log is not None:
+            self.action_log.append(f"fetch:{url}")
         return self.responses[url]
 
 
@@ -67,20 +70,111 @@ class _FakeRawSnapshotStore:
 
 
 class _FakeCapabilityRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, action_log: list[str] | None = None) -> None:
         self.observations = []
         self.rollups = []
+        self.action_log = action_log
 
     async def insert_observation(self, executor, record) -> None:
         del executor
         self.observations.append(record)
+        if self.action_log is not None:
+            self.action_log.append(f"observation:{record.endpoint_pattern}")
 
     async def upsert_rollup(self, executor, record) -> None:
         del executor
         self.rollups.append(record)
+        if self.action_log is not None:
+            self.action_log.append(f"rollup:{record.endpoint_pattern}")
 
 
 class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_football_core_mode_flushes_capabilities_after_fetch_phase(self) -> None:
+        action_log: list[str] = []
+        event_url = "https://www.sofascore.com/api/v1/event/14083191"
+        statistics_url = "https://www.sofascore.com/api/v1/event/14083191/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/14083191/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/14083191/incidents"
+
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": 14083191,
+                            "slug": "arsenal-chelsea",
+                            "tournament": {
+                                "id": 100,
+                                "slug": "premier-league",
+                                "name": "Premier League",
+                                "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                            },
+                            "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                            "status": {"type": "scheduled"},
+                            "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                            "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(
+                    statistics_url,
+                    {
+                        "statistics": [
+                            {
+                                "period": "ALL",
+                                "groups": [
+                                    {
+                                        "groupName": "Match overview",
+                                        "statisticsItems": [
+                                            {"name": "Possession", "home": "55%", "away": "45%"},
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                ),
+                incidents_url: _json_result(incidents_url, {"incidents": []}),
+                lineups_url: _json_result(
+                    lineups_url,
+                    {
+                        "home": {"formation": "4-3-3", "players": []},
+                        "away": {"formation": "4-2-3-1", "players": []},
+                    },
+                ),
+            },
+            action_log=action_log,
+        )
+        raw_store = _FakeRawSnapshotStore()
+        capability_repository = _FakeCapabilityRepository(action_log=action_log)
+        fetch_executor = FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object())
+        orchestrator = PilotOrchestrator(
+            fetch_executor=fetch_executor,
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(capability_rollup={}),
+            capability_repository=capability_repository,
+            sql_executor=object(),
+        )
+
+        await orchestrator.run_event(event_id=14083191, sport_slug="football", hydration_mode="core")
+
+        first_capability_index = next(
+            index
+            for index, item in enumerate(action_log)
+            if item.startswith("observation:") or item.startswith("rollup:")
+        )
+        self.assertEqual(
+            action_log[:first_capability_index],
+            [
+                f"fetch:{event_url}",
+                f"fetch:{statistics_url}",
+                f"fetch:{lineups_url}",
+                f"fetch:{incidents_url}",
+            ],
+        )
+
     async def test_football_core_mode_skips_heavy_followup_hydration(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/14083191"
         statistics_url = "https://www.sofascore.com/api/v1/event/14083191/statistics"
