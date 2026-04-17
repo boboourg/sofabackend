@@ -6,6 +6,8 @@ from .leases import Lease, LeaseManager
 from .proxy_state import PROXY_COOLDOWN_ZSET, ProxyState, ProxyStateStore
 from .ratelimit_state import RateLimitState, RateLimitStateStore
 from .streams import (
+    PendingEntry,
+    PendingSummary,
     STREAM_DISCOVERY,
     STREAM_DLQ,
     STREAM_HYDRATE,
@@ -27,6 +29,8 @@ __all__ = [
     "STREAM_DLQ",
     "DELAYED_JOBS_KEY",
     "StreamEntry",
+    "PendingSummary",
+    "PendingEntry",
     "RedisStreamQueue",
     "DelayedJob",
     "DelayedJobScheduler",
