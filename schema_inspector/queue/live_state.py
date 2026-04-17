@@ -74,6 +74,26 @@ class LiveEventStateStore:
     def due_events(self, *, lane: str, now_ms: int) -> tuple[int, ...]:
         return tuple(int(value) for value in self.backend.zrangebyscore(self._lane_key(lane), float("-inf"), float(now_ms)))
 
+    def fetch(self, event_id: int) -> LiveEventState | None:
+        payload = self.backend.hgetall(self._key(event_id))
+        if not payload:
+            return None
+        return LiveEventState(
+            event_id=int(event_id),
+            sport_slug=_as_text(payload.get("sport_slug")) or "unknown",
+            status_type=_as_text(payload.get("status_type")),
+            poll_profile=_as_text(payload.get("poll_profile")),
+            last_seen_at=_as_int(payload.get("last_seen_at")),
+            last_ingested_at=_as_int(payload.get("last_ingested_at")),
+            last_changed_at=_as_int(payload.get("last_changed_at")),
+            next_poll_at=_as_int(payload.get("next_poll_at")),
+            hot_until=_as_int(payload.get("hot_until")),
+            home_score=_as_int(payload.get("home_score")),
+            away_score=_as_int(payload.get("away_score")),
+            version_hint=_as_text(payload.get("version_hint")),
+            is_finalized=_as_bool(payload.get("is_finalized")),
+        )
+
     def _lane_key(self, lane: str) -> str:
         normalized = lane.strip().lower()
         if normalized == "hot":
@@ -85,3 +105,28 @@ class LiveEventStateStore:
     @staticmethod
     def _key(event_id: int) -> str:
         return f"live:event:{event_id}"
+
+
+def _as_text(value: object) -> str | None:
+    if value in (None, "", b""):
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
+def _as_int(value: object) -> int | None:
+    text = _as_text(value)
+    if text is None:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value: object) -> bool:
+    text = _as_text(value)
+    if text is None:
+        return False
+    return text.strip().lower() in {"1", "true", "yes", "y"}
