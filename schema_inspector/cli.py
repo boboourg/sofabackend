@@ -463,19 +463,23 @@ def _build_parser() -> argparse.ArgumentParser:
     event = subparsers.add_parser("event", help="Hydrate one or more explicit event ids.")
     event.add_argument("--sport-slug", required=True, help="Sport slug for adapter/planner selection.")
     event.add_argument("--event-id", type=int, action="append", required=True, help="Repeatable event id.")
+    event.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
 
     live = subparsers.add_parser("live", help="Discover live events for a sport and hydrate them.")
     live.add_argument("--sport-slug", required=True, help="Sport slug for discovery.")
+    live.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
 
     scheduled = subparsers.add_parser("scheduled", help="Discover scheduled events for a sport/date and hydrate them.")
     scheduled.add_argument("--sport-slug", required=True, help="Sport slug for discovery.")
     scheduled.add_argument("--date", required=True, help="Date in YYYY-MM-DD format.")
+    scheduled.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
 
     backfill = subparsers.add_parser("full-backfill", help="Hydrate explicit or database-seeded events through the hybrid backbone.")
     backfill.add_argument("--sport-slug", default=None, help="Optional sport filter when selecting from PostgreSQL.")
     backfill.add_argument("--event-id", type=int, action="append", default=[], help="Optional explicit event id.")
     backfill.add_argument("--limit", type=int, default=None, help="Optional event limit when selecting from PostgreSQL.")
     backfill.add_argument("--offset", type=int, default=0, help="Optional event offset when selecting from PostgreSQL.")
+    backfill.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
 
     replay = subparsers.add_parser("replay", help="Replay one or more payload snapshots through durable sinks.")
     replay.add_argument("--snapshot-id", type=int, action="append", required=True, help="Repeatable payload snapshot id.")

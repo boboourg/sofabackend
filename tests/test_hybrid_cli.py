@@ -6,6 +6,30 @@ import unittest
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    def test_parser_accepts_event_concurrency_after_scheduled_subcommand(self) -> None:
+        from schema_inspector.cli import _build_parser
+
+        parser = _build_parser()
+
+        args = parser.parse_args(
+            [
+                "--log-level",
+                "INFO",
+                "scheduled",
+                "--sport-slug",
+                "football",
+                "--date",
+                "2026-04-17",
+                "--event-concurrency",
+                "15",
+            ]
+        )
+
+        self.assertEqual(args.command, "scheduled")
+        self.assertEqual(args.sport_slug, "football")
+        self.assertEqual(args.date, "2026-04-17")
+        self.assertEqual(args.event_concurrency, 15)
+
     async def test_hybrid_app_close_closes_transport(self) -> None:
         from schema_inspector.cli import HybridApp
         from schema_inspector.runtime import RuntimeConfig
