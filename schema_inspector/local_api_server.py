@@ -4,21 +4,37 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
+import os
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .db import DatabaseConfig, load_database_config
 from .endpoints import SofascoreEndpoint, local_api_endpoints
+from .ops.health import collect_health_report
+from .queue.delayed import DELAYED_JOBS_KEY
+from .queue.live_state import LiveEventStateStore
+from .queue.streams import RedisStreamQueue, STREAM_DISCOVERY, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM, STREAM_MAINTENANCE
 
 from .local_swagger_builder import _build_viewer_html, _empty_summary, _load_summary, build_openapi_document
 
 _ALL_ENDPOINTS = local_api_endpoints()
+_QUEUE_GROUPS = (
+    (STREAM_DISCOVERY, "cg:discovery"),
+    (STREAM_HYDRATE, "cg:hydrate"),
+    (STREAM_LIVE_HOT, "cg:live_hot"),
+    (STREAM_LIVE_WARM, "cg:live_warm"),
+    (STREAM_MAINTENANCE, "cg:maintenance"),
+)
 
 
 @dataclass(frozen=True)
@@ -59,11 +75,20 @@ def main() -> int:
         default=None,
         help="Optional PostgreSQL DSN override. Falls back to SOFASCORE_DATABASE_URL / DATABASE_URL / POSTGRES_DSN.",
     )
+    parser.add_argument(
+        "--redis-url",
+        default=None,
+        help="Optional Redis URL for operational monitoring endpoints. Falls back to REDIS_URL / SOFASCORE_REDIS_URL.",
+    )
     args = parser.parse_args()
 
     database_config = load_database_config(dsn=args.database_url)
     base_url = f"http://{args.host}:{args.port}"
-    application = LocalApiApplication(database_config=database_config, base_url=base_url)
+    application = LocalApiApplication(
+        database_config=database_config,
+        base_url=base_url,
+        redis_backend=_load_optional_redis_backend(args.redis_url),
+    )
     server = LocalApiHttpServer((args.host, args.port), LocalApiRequestHandler, application)
     print(f"Serving local multi-sport API on {base_url}", flush=True)
     print(f"Swagger UI: {base_url}/", flush=True)
@@ -80,9 +105,12 @@ def main() -> int:
 class LocalApiApplication:
     """Local API application backed by api_payload_snapshot rows."""
 
-    def __init__(self, *, database_config: DatabaseConfig, base_url: str) -> None:
+    def __init__(self, *, database_config: DatabaseConfig, base_url: str, redis_backend: Any | None = None) -> None:
         self.database_config = database_config
         self.base_url = base_url.rstrip("/")
+        self.redis_backend = redis_backend
+        self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
+        self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.routes = build_route_specs()
         self.swagger_html = _build_viewer_html("openapi.json")
         self.openapi_document = asyncio.run(self._build_openapi_document())
@@ -130,6 +158,21 @@ class LocalApiApplication:
 
         return ApiResponse(status_code=HTTPStatus.OK, payload=payload)
 
+    async def handle_ops_get(self, path: str, raw_query: str) -> ApiResponse:
+        if path == "/ops/health":
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_health_payload())
+        if path == "/ops/snapshots/summary":
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_snapshots_summary_payload())
+        if path == "/ops/queues/summary":
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_queue_summary_payload())
+        if path == "/ops/jobs/runs":
+            limit = _query_int(raw_query, "limit", default=20, minimum=1, maximum=200)
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_job_runs_payload(limit))
+        return ApiResponse(
+            status_code=HTTPStatus.NOT_FOUND,
+            payload={"error": "Route is not registered in the operational API.", "path": path},
+        )
+
     async def _fetch_snapshot_payload(
         self,
         route: RouteSpec,
@@ -174,6 +217,166 @@ class LocalApiApplication:
             return latest_path_match
         return None
 
+    async def _fetch_ops_health_payload(self) -> dict[str, Any]:
+        connection = await self._connect()
+        try:
+            report = await collect_health_report(
+                sql_executor=connection,
+                live_state_store=self.live_state_store,
+                redis_backend=self.redis_backend,
+            )
+        finally:
+            await connection.close()
+        payload = dataclasses.asdict(report)
+        payload["service"] = "local-multisport-api"
+        return payload
+
+    async def _fetch_ops_snapshots_summary_payload(self) -> dict[str, Any]:
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::bigint AS raw_snapshots,
+                    COUNT(DISTINCT trace_id)::bigint AS trace_count,
+                    COUNT(DISTINCT endpoint_pattern)::bigint AS endpoint_pattern_count,
+                    COUNT(DISTINCT context_event_id)::bigint AS event_context_count,
+                    COUNT(*) FILTER (WHERE http_status = 200)::bigint AS http_200_count,
+                    COUNT(*) FILTER (WHERE http_status = 404)::bigint AS http_404_count,
+                    COUNT(*) FILTER (WHERE http_status >= 500)::bigint AS http_5xx_count,
+                    MAX(fetched_at) AS latest_fetched_at
+                FROM api_payload_snapshot
+                """
+            )
+            request_count = await connection.fetchval("SELECT COUNT(*) FROM api_request_log")
+        finally:
+            await connection.close()
+        return {
+            "raw_requests": int(request_count or 0),
+            "raw_snapshots": int(snapshot_row["raw_snapshots"] or 0),
+            "trace_count": int(snapshot_row["trace_count"] or 0),
+            "endpoint_pattern_count": int(snapshot_row["endpoint_pattern_count"] or 0),
+            "event_context_count": int(snapshot_row["event_context_count"] or 0),
+            "http_200_count": int(snapshot_row["http_200_count"] or 0),
+            "http_404_count": int(snapshot_row["http_404_count"] or 0),
+            "http_5xx_count": int(snapshot_row["http_5xx_count"] or 0),
+            "latest_fetched_at": _serialize_scalar(snapshot_row["latest_fetched_at"]),
+        }
+
+    async def _fetch_ops_queue_summary_payload(self) -> dict[str, Any]:
+        now_ms = int(time.time() * 1000)
+        lane_counts = {
+            "hot": _lane_count(self.live_state_store, "hot"),
+            "warm": _lane_count(self.live_state_store, "warm"),
+            "cold": _lane_count(self.live_state_store, "cold"),
+        }
+        streams: list[dict[str, Any]] = []
+        if self.stream_queue is not None:
+            for stream_name, group_name in _QUEUE_GROUPS:
+                try:
+                    summary = self.stream_queue.pending_summary(stream_name, group_name)
+                except Exception:
+                    summary = None
+                streams.append(
+                    {
+                        "stream": stream_name,
+                        "group": group_name,
+                        "pending_total": 0 if summary is None else int(summary.total),
+                        "smallest_id": None if summary is None else summary.smallest_id,
+                        "largest_id": None if summary is None else summary.largest_id,
+                        "consumers": {} if summary is None else dict(summary.consumers),
+                    }
+                )
+        delayed_total = 0
+        delayed_due = 0
+        if self.redis_backend is not None:
+            delayed_total = len(tuple(self.redis_backend.zrangebyscore(DELAYED_JOBS_KEY, float("-inf"), float("inf"))))
+            delayed_due = len(tuple(self.redis_backend.zrangebyscore(DELAYED_JOBS_KEY, float("-inf"), float(now_ms))))
+        return {
+            "redis_backend_kind": type(self.redis_backend).__name__ if self.redis_backend is not None else "none",
+            "live_lanes": lane_counts,
+            "streams": streams,
+            "delayed_total": delayed_total,
+            "delayed_due": delayed_due,
+        }
+
+    async def _fetch_ops_job_runs_payload(self, limit: int) -> dict[str, Any]:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    job_run_id,
+                    job_id,
+                    job_type,
+                    sport_slug,
+                    entity_type,
+                    entity_id,
+                    scope,
+                    worker_id,
+                    attempt,
+                    status,
+                    started_at,
+                    finished_at,
+                    duration_ms,
+                    error_class,
+                    error_message,
+                    retry_scheduled_for
+                FROM etl_job_run
+                ORDER BY started_at DESC
+                LIMIT $1
+                """,
+                int(limit),
+            )
+            status_rows = await connection.fetch(
+                """
+                SELECT status, COUNT(*)::bigint AS row_count
+                FROM etl_job_run
+                GROUP BY status
+                ORDER BY status
+                """
+            )
+        finally:
+            await connection.close()
+        return {
+            "limit": int(limit),
+            "status_counts": {
+                str(row["status"]): int(row["row_count"] or 0)
+                for row in status_rows
+            },
+            "jobRuns": [
+                {
+                    "job_run_id": str(row["job_run_id"]),
+                    "job_id": str(row["job_id"]),
+                    "job_type": str(row["job_type"]),
+                    "sport_slug": _serialize_scalar(row["sport_slug"]),
+                    "entity_type": _serialize_scalar(row["entity_type"]),
+                    "entity_id": _serialize_scalar(row["entity_id"]),
+                    "scope": _serialize_scalar(row["scope"]),
+                    "worker_id": _serialize_scalar(row["worker_id"]),
+                    "attempt": int(row["attempt"] or 0),
+                    "status": str(row["status"]),
+                    "started_at": _serialize_scalar(row["started_at"]),
+                    "finished_at": _serialize_scalar(row["finished_at"]),
+                    "duration_ms": _serialize_scalar(row["duration_ms"]),
+                    "error_class": _serialize_scalar(row["error_class"]),
+                    "error_message": _serialize_scalar(row["error_message"]),
+                    "retry_scheduled_for": _serialize_scalar(row["retry_scheduled_for"]),
+                }
+                for row in rows
+            ],
+        }
+
+    async def _connect(self):
+        try:
+            import asyncpg
+        except ImportError as exc:
+            raise RuntimeError("asyncpg is required to serve the local multi-sport API.") from exc
+        return await asyncpg.connect(
+            self.database_config.dsn,
+            command_timeout=self.database_config.command_timeout,
+        )
+
 
 class LocalApiHttpServer(ThreadingHTTPServer):
     """HTTP server that carries the local application instance."""
@@ -200,6 +403,10 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
         if path == "/healthz":
             payload = {"ok": True, "service": "local-multisport-api"}
             self._send_json(HTTPStatus.OK, payload)
+            return
+        if path.startswith("/ops/"):
+            response = asyncio.run(self.server.application.handle_ops_get(path, split.query))
+            self._send_json(response.status_code, response.payload)
             return
         if path.startswith("/api/"):
             response = asyncio.run(self.server.application.handle_api_get(path, split.query))
@@ -343,10 +550,67 @@ def _normalized_query_map(raw_query: str) -> dict[str, list[str]]:
     return {key: sorted(values) for key, values in parsed.items()}
 
 
+def _query_int(raw_query: str, name: str, *, default: int, minimum: int, maximum: int) -> int:
+    parsed = parse_qs(raw_query or "", keep_blank_values=True)
+    raw_value = next(iter(parsed.get(name, [])), None)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _lane_count(live_state_store: LiveEventStateStore | None, lane: str) -> int:
+    if live_state_store is None:
+        return 0
+    return len(tuple(live_state_store.backend.zrangebyscore(live_state_store._lane_key(lane), float("-inf"), float("inf"))))
+
+
+def _serialize_scalar(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _load_optional_redis_backend(redis_url: str | None) -> Any | None:
+    env = _load_project_env()
+    resolved_url = redis_url or env.get("REDIS_URL") or env.get("SOFASCORE_REDIS_URL")
+    if not resolved_url:
+        return None
+    try:
+        import redis
+    except ImportError:
+        return None
+    backend = redis.Redis.from_url(resolved_url, decode_responses=True)
+    try:
+        backend.ping()
+    except Exception:
+        return None
+    return backend
+
+
+def _load_project_env() -> dict[str, str]:
+    merged = dict(os.environ)
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return merged
+    for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return merged
 
 
 if __name__ == "__main__":

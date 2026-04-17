@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.local_api_server import (
+    ApiResponse,
+    LocalApiApplication,
     _compile_path_template,
     _decode_snapshot_payload,
     _normalized_query_map,
@@ -77,6 +79,60 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertEqual(route.context_entity_type, "team")
         self.assertEqual(route.context_param_name, "team_id")
         self.assertEqual(_parse_context_value(route, params), 42)
+
+
+class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_ops_get_routes_supported_monitoring_paths(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        calls: list[tuple[str, int | None]] = []
+
+        async def fake_health() -> dict[str, object]:
+            calls.append(("health", None))
+            return {"database_ok": True}
+
+        async def fake_snapshots() -> dict[str, object]:
+            calls.append(("snapshots", None))
+            return {"raw_snapshots": 12}
+
+        async def fake_queues() -> dict[str, object]:
+            calls.append(("queues", None))
+            return {"pending_total": 4}
+
+        async def fake_jobs(limit: int) -> dict[str, object]:
+            calls.append(("jobs", limit))
+            return {"jobRuns": []}
+
+        application._fetch_ops_health_payload = fake_health
+        application._fetch_ops_snapshots_summary_payload = fake_snapshots
+        application._fetch_ops_queue_summary_payload = fake_queues
+        application._fetch_ops_job_runs_payload = fake_jobs
+
+        health = await application.handle_ops_get("/ops/health", "")
+        snapshots = await application.handle_ops_get("/ops/snapshots/summary", "")
+        queues = await application.handle_ops_get("/ops/queues/summary", "")
+        jobs = await application.handle_ops_get("/ops/jobs/runs", "limit=5")
+
+        self.assertEqual(health, ApiResponse(status_code=200, payload={"database_ok": True}))
+        self.assertEqual(snapshots, ApiResponse(status_code=200, payload={"raw_snapshots": 12}))
+        self.assertEqual(queues, ApiResponse(status_code=200, payload={"pending_total": 4}))
+        self.assertEqual(jobs, ApiResponse(status_code=200, payload={"jobRuns": []}))
+        self.assertEqual(
+            calls,
+            [
+                ("health", None),
+                ("snapshots", None),
+                ("queues", None),
+                ("jobs", 5),
+            ],
+        )
+
+    async def test_handle_ops_get_rejects_unknown_operations_route(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+
+        response = await application.handle_ops_get("/ops/does-not-exist", "")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("Route is not registered", response.payload["error"])
 
 
 if __name__ == "__main__":
