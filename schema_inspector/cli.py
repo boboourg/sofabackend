@@ -34,6 +34,8 @@ from .storage.normalize_repository import NormalizeRepository
 from .storage.raw_repository import RawRepository
 from .transport import InspectorTransport
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class HydrationBatchReport:
@@ -264,7 +266,17 @@ async def run_event_command(args, *, orchestrator) -> HydrationBatchReport:
     event_ids = tuple(int(item) for item in args.event_id)
     results = []
     for event_id in event_ids:
+        logger.info(
+            "Hybrid hydrate start: sport=%s event_id=%s",
+            getattr(args, "sport_slug", None),
+            event_id,
+        )
         results.append(await orchestrator.run_event(event_id=event_id, sport_slug=args.sport_slug))
+        logger.info(
+            "Hybrid hydrate complete: sport=%s event_id=%s",
+            getattr(args, "sport_slug", None),
+            event_id,
+        )
     return HydrationBatchReport(processed_event_ids=event_ids, results=tuple(results))
 
 

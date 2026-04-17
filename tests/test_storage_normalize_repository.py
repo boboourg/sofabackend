@@ -109,6 +109,42 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO event_graph" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_graph_point" in sql for sql in statements))
 
+    async def test_repository_coerces_event_statistic_text_fields_to_strings(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=777,
+            parser_family="event_statistics",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={},
+            metric_rows={
+                "event_statistic": (
+                    {
+                        "event_id": 14083191,
+                        "period": "ALL",
+                        "group_name": "Overview",
+                        "name": "Big chances",
+                        "home_value": 2,
+                        "away_value": 1,
+                        "compare_code": 2,
+                        "statistics_type": 99,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        statistic_insert_rows = next(
+            rows for sql, rows in executor.executemany_calls if "INSERT INTO event_statistic" in sql
+        )
+        persisted_row = statistic_insert_rows[0]
+        self.assertEqual(persisted_row[5], "2")
+        self.assertEqual(persisted_row[8], "1")
+        self.assertEqual(persisted_row[10], "2")
+        self.assertEqual(persisted_row[11], "99")
+
     async def test_durable_sink_persists_special_metric_rows(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()

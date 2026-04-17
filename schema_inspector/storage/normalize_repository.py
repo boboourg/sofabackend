@@ -526,6 +526,24 @@ class NormalizeRepository:
         if event_id is None:
             return
         await executor.execute("DELETE FROM event_statistic WHERE event_id = $1", event_id)
+        normalized_rows = []
+        for row in rows:
+            normalized_rows.append(
+                (
+                    row.get("event_id"),
+                    _as_scalar_text(row.get("period")),
+                    _as_scalar_text(row.get("group_name")),
+                    _as_scalar_text(row.get("name")),
+                    _as_float(row.get("home_value")),
+                    _as_scalar_text(row.get("home_value")),
+                    _jsonb(_as_mapping(row.get("home_value")) if isinstance(row.get("home_value"), Mapping) else None),
+                    _as_float(row.get("away_value")),
+                    _as_scalar_text(row.get("away_value")),
+                    _jsonb(_as_mapping(row.get("away_value")) if isinstance(row.get("away_value"), Mapping) else None),
+                    _as_scalar_text(row.get("compare_code")),
+                    _as_scalar_text(row.get("statistics_type")),
+                )
+            )
         await _executemany(
             executor,
             """
@@ -537,23 +555,7 @@ class NormalizeRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11, $12)
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("period"),
-                    row.get("group_name"),
-                    row.get("name"),
-                    _as_float(row.get("home_value")),
-                    _as_scalar_text(row.get("home_value")),
-                    _jsonb(_as_mapping(row.get("home_value")) if isinstance(row.get("home_value"), Mapping) else None),
-                    _as_float(row.get("away_value")),
-                    _as_scalar_text(row.get("away_value")),
-                    _jsonb(_as_mapping(row.get("away_value")) if isinstance(row.get("away_value"), Mapping) else None),
-                    row.get("compare_code"),
-                    row.get("statistics_type"),
-                )
-                for row in rows
-            ],
+            normalized_rows,
         )
 
     async def _persist_event_incidents(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
