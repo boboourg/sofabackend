@@ -9,11 +9,12 @@ from schema_inspector.endpoints import (
     event_detail_registry_entries,
     leaderboards_registry_entries_for_sport,
 )
+from schema_inspector.sport_profiles import SUPPORTED_SPORT_SLUGS
 
 
 class PilotLegacyContractTests(unittest.TestCase):
-    def test_pilot_supported_sports_match_local_api_pilot_trio(self) -> None:
-        self.assertEqual(LOCAL_API_SUPPORTED_SPORTS, ("football", "basketball", "tennis"))
+    def test_local_api_supported_sports_match_multisport_runtime(self) -> None:
+        self.assertEqual(LOCAL_API_SUPPORTED_SPORTS, SUPPORTED_SPORT_SLUGS)
 
     def test_football_pilot_patterns_are_covered_by_legacy_registry_layers(self) -> None:
         patterns = {entry.pattern for entry in event_detail_registry_entries(sport_slug="football")}

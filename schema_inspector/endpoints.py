@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
-from .sport_profiles import resolve_sport_profile
+from .sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
 
 SOFASCORE_BASE_URL = "https://www.sofascore.com"
 
-LOCAL_API_SUPPORTED_SPORTS = ("football", "basketball", "tennis")
+LOCAL_API_SUPPORTED_SPORTS = SUPPORTED_SPORT_SLUGS
 
 
 @dataclass(frozen=True)

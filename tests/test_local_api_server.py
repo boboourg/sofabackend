@@ -24,6 +24,12 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertIn("/api/v1/event/{event_id}/graph", patterns)
         self.assertIn("/api/v1/event/{event_id}/heatmap/{team_id}", patterns)
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics", patterns)
+        self.assertIn("/api/v1/sport/handball/scheduled-events/{date}", patterns)
+        self.assertIn("/api/v1/sport/esports/events/live", patterns)
+        self.assertIn("/api/v1/event/{event_id}/innings", patterns)
+        self.assertIn("/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches", patterns)
+        self.assertIn("/api/v1/event/{event_id}/shotmap", patterns)
+        self.assertIn("/api/v1/event/{event_id}/esports-games", patterns)
 
     def test_compile_path_template_extracts_named_params(self) -> None:
         regex = _compile_path_template(

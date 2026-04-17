@@ -25,7 +25,13 @@ from .queue.delayed import DELAYED_JOBS_KEY
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue, STREAM_DISCOVERY, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM, STREAM_MAINTENANCE
 
-from .local_swagger_builder import _build_viewer_html, _empty_summary, _load_summary, build_openapi_document
+from .local_swagger_builder import (
+    _build_viewer_html,
+    _empty_summary,
+    _load_summary,
+    build_openapi_document,
+    resolve_openapi_base_urls,
+)
 
 _ALL_ENDPOINTS = local_api_endpoints()
 _QUEUE_GROUPS = (
@@ -80,6 +86,15 @@ def main() -> int:
         default=None,
         help="Optional Redis URL for operational monitoring endpoints. Falls back to REDIS_URL / SOFASCORE_REDIS_URL.",
     )
+    parser.add_argument(
+        "--public-base-url",
+        action="append",
+        default=None,
+        help=(
+            "Optional public base URL to publish in Swagger/OpenAPI servers. "
+            "Can be repeated and also falls back to LOCAL_API_PUBLIC_BASE_URLS."
+        ),
+    )
     args = parser.parse_args()
 
     database_config = load_database_config(dsn=args.database_url)
@@ -87,6 +102,10 @@ def main() -> int:
     application = LocalApiApplication(
         database_config=database_config,
         base_url=base_url,
+        openapi_base_urls=resolve_openapi_base_urls(
+            primary_base_url=base_url,
+            public_base_urls=tuple(args.public_base_url or ()),
+        ),
         redis_backend=_load_optional_redis_backend(args.redis_url),
     )
     server = LocalApiHttpServer((args.host, args.port), LocalApiRequestHandler, application)
@@ -105,9 +124,17 @@ def main() -> int:
 class LocalApiApplication:
     """Local API application backed by api_payload_snapshot rows."""
 
-    def __init__(self, *, database_config: DatabaseConfig, base_url: str, redis_backend: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        database_config: DatabaseConfig,
+        base_url: str,
+        openapi_base_urls: tuple[str, ...] | None = None,
+        redis_backend: Any | None = None,
+    ) -> None:
         self.database_config = database_config
         self.base_url = base_url.rstrip("/")
+        self.openapi_base_urls = tuple(openapi_base_urls or (self.base_url,))
         self.redis_backend = redis_backend
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
@@ -126,14 +153,7 @@ class LocalApiApplication:
             summary = await _load_summary(self.database_config.dsn)
         except Exception:
             summary = _empty_summary()
-        document = build_openapi_document(summary)
-        document["servers"] = [
-            {
-                "url": self.base_url,
-                "description": "Live local multi-sport API server backed by PostgreSQL snapshots",
-            }
-        ]
-        return document
+        return build_openapi_document(summary, base_urls=self.openapi_base_urls)
 
     async def handle_api_get(self, path: str, raw_query: str) -> ApiResponse:
         route_match = match_route(path, self.routes)

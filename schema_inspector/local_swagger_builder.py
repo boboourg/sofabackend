@@ -5,18 +5,27 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .db import load_database_config
 from .endpoints import (
     CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT,
     COMPETITION_ENDPOINTS,
     ENTITIES_ENDPOINTS,
+    EVENT_BASEBALL_INNINGS_ENDPOINT,
+    EVENT_BASEBALL_PITCHES_ENDPOINT,
     EVENT_DETAIL_ENDPOINTS,
+    EVENT_ESPORTS_GAMES_ENDPOINT,
     EVENT_LIST_ENDPOINTS,
+    EVENT_POINT_BY_POINT_ENDPOINT,
+    EVENT_SHOTMAP_ENDPOINT,
+    EVENT_TENNIS_POWER_ENDPOINT,
     LEADERBOARDS_ENDPOINTS,
     LOCAL_API_SUPPORTED_SPORTS,
     STANDINGS_ENDPOINTS,
@@ -39,6 +48,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "local_swagger"
 DEFAULT_OPENAPI_FILE = "multisport.openapi.json"
 DEFAULT_VIEWER_FILE = "index.html"
+DEFAULT_LOCAL_API_BASE_URLS = ("http://127.0.0.1:8000", "http://localhost:8000")
+_LOCAL_SWAGGER_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+_LOCAL_API_TAGS = (
+    ("Operations", "Operational monitoring endpoints for the Hybrid ETL control plane and Autopilot services."),
+    ("Event List", "Sport-specific scheduled/live/tournament event feeds."),
+    ("Event Detail", "Event detail, lineups, odds, managers, h2h and other event subresources."),
+    ("Special Routes", "Sport-specific specialist payloads such as tennis power, baseball innings, pitches, shotmaps and esports games."),
+    ("Categories", "Sport-specific category and tournament discovery endpoints."),
+    ("Competition", "Unique tournament and season metadata."),
+    ("Standings", "Standings and standings rows by unique tournament or tournament."),
+    ("Statistics", "Season statistics config and leaderboard-style snapshot results."),
+    ("Entities", "Player/team entities, player season statistics and enrichment endpoints."),
+    ("Leaderboards", "Top players, top teams, venues, groups, team-of-the-week and related season widgets."),
+)
 
 _SUPPORTED_TABLES = (
     "api_request_log",
@@ -128,6 +151,15 @@ def main() -> int:
         action="store_true",
         help="Build the document without querying PostgreSQL for live row/snapshot counts.",
     )
+    parser.add_argument(
+        "--public-base-url",
+        action="append",
+        default=None,
+        help=(
+            "Optional public base URL to publish in the OpenAPI servers list. "
+            "Can be repeated and also falls back to LOCAL_API_PUBLIC_BASE_URLS."
+        ),
+    )
     args = parser.parse_args()
     return asyncio.run(_run(args))
 
@@ -137,7 +169,10 @@ async def _run(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = await _load_summary(args.database_url) if not args.skip_db_summary else _empty_summary()
-    document = build_openapi_document(summary)
+    document = build_openapi_document(
+        summary,
+        base_urls=resolve_openapi_base_urls(public_base_urls=tuple(args.public_base_url or ())),
+    )
 
     openapi_path = output_dir / args.openapi_file
     viewer_path = output_dir / args.viewer_file
@@ -201,9 +236,14 @@ def _empty_summary() -> SwaggerDataSummary:
     )
 
 
-def build_openapi_document(summary: SwaggerDataSummary) -> dict[str, Any]:
+def build_openapi_document(
+    summary: SwaggerDataSummary,
+    *,
+    base_urls: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
     components = {"schemas": _build_schemas()}
     paths = _build_paths(summary)
+    resolved_base_urls = _normalize_openapi_base_urls(tuple(base_urls or resolve_openapi_base_urls()))
 
     total_snapshot_rows = sum(summary.snapshot_counts.values()) if summary.snapshot_counts else 0
     total_tables = len([name for name, count in summary.table_counts.items() if count > 0]) if summary.table_counts else 0
@@ -224,23 +264,8 @@ def build_openapi_document(summary: SwaggerDataSummary) -> dict[str, Any]:
             "version": "1.0.0",
             "description": info_description,
         },
-        "servers": [
-            {
-                "url": "http://localhost:8000",
-                "description": "Recommended base URL for the future local multi-sport API server",
-            }
-        ],
-        "tags": [
-            {"name": "Categories", "description": "Sport-specific category and tournament discovery endpoints."},
-            {"name": "Competition", "description": "Unique tournament and season metadata."},
-            {"name": "Event List", "description": "Sport-specific scheduled/live/tournament event feeds."},
-            {"name": "Event Detail", "description": "Event detail, lineups, odds, managers, h2h and other event subresources."},
-            {"name": "Standings", "description": "Standings and standings rows by unique tournament or tournament."},
-            {"name": "Statistics", "description": "Season statistics config and leaderboard-style snapshot results."},
-            {"name": "Entities", "description": "Player/team entities, player season statistics and enrichment endpoints."},
-            {"name": "Leaderboards", "description": "Top players, top teams, venues, groups, team-of-the-week and related season widgets."},
-            {"name": "Operations", "description": "Operational monitoring endpoints for the Hybrid ETL control plane and Autopilot services."},
-        ],
+        "servers": [_openapi_server_entry(url) for url in resolved_base_urls],
+        "tags": [{"name": name, "description": description} for name, description in _LOCAL_API_TAGS],
         "paths": paths,
         "components": components,
     }
@@ -716,23 +741,66 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
         ),
         "/api/v1/event/{event_id}/point-by-point": op(
             path_template="/api/v1/event/{event_id}/point-by-point",
-            tag="Event Detail",
+            tag="Special Routes",
             operation_id="getEventPointByPoint",
             summary_text="Tennis point-by-point payload",
             description="Latest stored raw point-by-point payload for one tennis event.",
             response_schema=_ref("FreeFormObject"),
             parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
-            source_tables=["api_payload_snapshot"],
+            source_tables=["api_payload_snapshot", "tennis_point_by_point"],
         ),
         "/api/v1/event/{event_id}/tennis-power": op(
             path_template="/api/v1/event/{event_id}/tennis-power",
-            tag="Event Detail",
+            tag="Special Routes",
             operation_id="getEventTennisPower",
             summary_text="Tennis power snapshot",
             description="Latest stored raw tennis-power payload for one tennis event.",
             response_schema=_ref("FreeFormObject"),
             parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
-            source_tables=["api_payload_snapshot"],
+            source_tables=["api_payload_snapshot", "tennis_power"],
+        ),
+        EVENT_BASEBALL_INNINGS_ENDPOINT.path_template: op(
+            path_template=EVENT_BASEBALL_INNINGS_ENDPOINT.path_template,
+            tag="Special Routes",
+            operation_id="getEventBaseballInnings",
+            summary_text="Baseball innings snapshot",
+            description="Latest stored raw innings payload for one baseball event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot", "baseball_inning"],
+        ),
+        EVENT_BASEBALL_PITCHES_ENDPOINT.path_template: op(
+            path_template=EVENT_BASEBALL_PITCHES_ENDPOINT.path_template,
+            tag="Special Routes",
+            operation_id="getEventBaseballPitches",
+            summary_text="Baseball pitches snapshot",
+            description="Latest stored raw at-bat pitches payload for one baseball event and at-bat.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[
+                _path_param("event_id", "integer", "Sofascore event ID."),
+                _path_param("at_bat_id", "integer", "Sofascore at-bat ID."),
+            ],
+            source_tables=["api_payload_snapshot", "baseball_pitch"],
+        ),
+        EVENT_SHOTMAP_ENDPOINT.path_template: op(
+            path_template=EVENT_SHOTMAP_ENDPOINT.path_template,
+            tag="Special Routes",
+            operation_id="getEventShotmap",
+            summary_text="Shotmap snapshot",
+            description="Latest stored raw shotmap payload for one event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot", "shotmap_point"],
+        ),
+        EVENT_ESPORTS_GAMES_ENDPOINT.path_template: op(
+            path_template=EVENT_ESPORTS_GAMES_ENDPOINT.path_template,
+            tag="Special Routes",
+            operation_id="getEventEsportsGames",
+            summary_text="Esports games snapshot",
+            description="Latest stored raw esports-games payload for one event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot", "esports_game"],
         ),
         "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}": op(
             path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
@@ -1939,6 +2007,7 @@ def _build_viewer_html(openapi_file_name: str) -> str:
     <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
     <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
     <script>
+      const tagOrder = {json.dumps([name for name, _ in _LOCAL_API_TAGS])};
       window.onload = () => {{
         window.ui = SwaggerUIBundle({{
           url: "./{openapi_file_name}",
@@ -1949,12 +2018,116 @@ def _build_viewer_html(openapi_file_name: str) -> str:
           docExpansion: "list",
           defaultModelsExpandDepth: 2,
           displayRequestDuration: true,
+          filter: true,
+          operationsSorter: (a, b) => {{
+            const methodOrder = ["get", "post", "put", "patch", "delete", "options", "trace"];
+            const methodDelta = methodOrder.indexOf(a.get("method")) - methodOrder.indexOf(b.get("method"));
+            if (methodDelta !== 0) {{
+              return methodDelta;
+            }}
+            return a.get("path").localeCompare(b.get("path"));
+          }},
+          tagsSorter: (a, b) => {{
+            const left = tagOrder.indexOf(String(a));
+            const right = tagOrder.indexOf(String(b));
+            const leftRank = left === -1 ? tagOrder.length : left;
+            const rightRank = right === -1 ? tagOrder.length : right;
+            if (leftRank !== rightRank) {{
+              return leftRank - rightRank;
+            }}
+            return String(a).localeCompare(String(b));
+          }},
         }});
       }};
     </script>
   </body>
 </html>
 """
+
+
+def resolve_openapi_base_urls(
+    *,
+    primary_base_url: str | None = None,
+    public_base_urls: tuple[str, ...] | list[str] | None = None,
+) -> tuple[str, ...]:
+    env = _load_project_env()
+    configured_public_urls = _split_public_base_urls(env.get("LOCAL_API_PUBLIC_BASE_URLS"))
+
+    candidates: list[str] = []
+    candidates.extend(str(url) for url in (public_base_urls or ()))
+    candidates.extend(configured_public_urls)
+    candidates.extend(_local_base_urls(primary_base_url))
+    candidates.extend(DEFAULT_LOCAL_API_BASE_URLS)
+    return _normalize_openapi_base_urls(tuple(candidates))
+
+
+def _normalize_openapi_base_urls(base_urls: tuple[str, ...]) -> tuple[str, ...]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw_url in base_urls:
+        cleaned_url = _clean_base_url(raw_url)
+        if not cleaned_url or cleaned_url in seen:
+            continue
+        seen.add(cleaned_url)
+        deduped.append(cleaned_url)
+    public_urls = [url for url in deduped if not _is_local_base_url(url)]
+    local_urls = [url for url in deduped if _is_local_base_url(url)]
+    return tuple(public_urls + local_urls)
+
+
+def _local_base_urls(primary_base_url: str | None) -> tuple[str, ...]:
+    cleaned_url = _clean_base_url(primary_base_url)
+    if not cleaned_url:
+        return ()
+    parsed = urlsplit(cleaned_url)
+    host = (parsed.hostname or "").lower()
+    if host == "0.0.0.0":
+        port = f":{parsed.port}" if parsed.port else ""
+        return (
+            f"{parsed.scheme}://127.0.0.1{port}",
+            f"{parsed.scheme}://localhost{port}",
+        )
+    return (cleaned_url,)
+
+
+def _split_public_base_urls(raw_value: str | None) -> tuple[str, ...]:
+    if not raw_value:
+        return ()
+    parts = re.split(r"[\s,;]+", raw_value.strip())
+    return tuple(part for part in (_clean_base_url(item) for item in parts) if part)
+
+
+def _load_project_env() -> dict[str, str]:
+    merged = dict(os.environ)
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return merged
+    for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        merged.setdefault(key.strip(), value.strip().strip("'\""))
+    return merged
+
+
+def _clean_base_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().rstrip("/")
+    if not normalized:
+        return None
+    return normalized
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    hostname = (urlsplit(base_url).hostname or "").lower()
+    return hostname in _LOCAL_SWAGGER_HOSTS
+
+
+def _openapi_server_entry(url: str) -> dict[str, str]:
+    description = "Public API base URL" if not _is_local_base_url(url) else "Local API base URL"
+    return {"url": url, "description": description}
 
 
 def _quote_identifier(value: str) -> str:
