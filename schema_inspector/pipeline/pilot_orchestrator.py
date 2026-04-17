@@ -132,10 +132,17 @@ class PilotOrchestrator:
         self.stream_queue = stream_queue
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
 
-    async def run_event(self, *, event_id: int, sport_slug: str) -> PilotRunReport:
+    async def run_event(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str,
+        hydration_mode: str = "full",
+    ) -> PilotRunReport:
         if self.fetch_executor is None:
             raise RuntimeError("fetch_executor is required for run_event")
 
+        core_only = str(hydration_mode or "full").strip().lower() == "core"
         fetch_outcomes: list[FetchOutcomeEnvelope] = []
         parse_results: list[object] = []
         live_lane: str | None = None
@@ -199,16 +206,17 @@ class PilotOrchestrator:
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
-                followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
-                for followup_job in followup_jobs:
-                    special_outcome, special_parse = await self._run_special_job(
-                        job=followup_job,
-                        sport_slug=sport_slug,
-                        event_id=event_id,
-                    )
-                    fetch_outcomes.append(special_outcome)
-                    if special_parse is not None:
-                        parse_results.append(special_parse)
+                if not core_only:
+                    followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
+                    for followup_job in followup_jobs:
+                        special_outcome, special_parse = await self._run_special_job(
+                            job=followup_job,
+                            sport_slug=sport_slug,
+                            event_id=event_id,
+                        )
+                        fetch_outcomes.append(special_outcome)
+                        if special_parse is not None:
+                            parse_results.append(special_parse)
 
         minutes_to_start = _minutes_to_start(
             start_timestamp=start_timestamp,
@@ -287,69 +295,70 @@ class PilotOrchestrator:
                 observed_at=root_outcome.fetched_at,
             )
 
-        hydrated_entities: set[tuple[str, int]] = set()
-        while True:
-            next_targets = _entity_profile_targets(
-                sport_slug,
-                parse_results,
-                seen=hydrated_entities,
-            )
-            if not next_targets:
-                break
-            for entity_endpoint, entity_type, entity_id in next_targets:
-                hydrated_entities.add((entity_type, entity_id))
-                outcome, parsed = await self._fetch_and_parse(
-                    endpoint=entity_endpoint,
-                    sport_slug=sport_slug,
-                    path_params={f"{entity_type}_id": entity_id},
-                    context_entity_type=entity_type,
-                    context_entity_id=entity_id,
-                    context_event_id=event_id,
-                    fetch_reason="hydrate_entity_profile",
+        if not core_only:
+            hydrated_entities: set[tuple[str, int]] = set()
+            while True:
+                next_targets = _entity_profile_targets(
+                    sport_slug,
+                    parse_results,
+                    seen=hydrated_entities,
                 )
-                fetch_outcomes.append(outcome)
-                if parsed is not None:
-                    parse_results.append(parsed)
+                if not next_targets:
+                    break
+                for entity_endpoint, entity_type, entity_id in next_targets:
+                    hydrated_entities.add((entity_type, entity_id))
+                    outcome, parsed = await self._fetch_and_parse(
+                        endpoint=entity_endpoint,
+                        sport_slug=sport_slug,
+                        path_params={f"{entity_type}_id": entity_id},
+                        context_entity_type=entity_type,
+                        context_entity_id=entity_id,
+                        context_event_id=event_id,
+                        fetch_reason="hydrate_entity_profile",
+                    )
+                    fetch_outcomes.append(outcome)
+                    if parsed is not None:
+                        parse_results.append(parsed)
 
-        for endpoint in _special_endpoints_for_sport(sport_slug):
-            outcome, parsed = await self._fetch_and_parse(
-                endpoint=endpoint,
-                sport_slug=sport_slug,
-                path_params={"event_id": event_id},
-                context_entity_type="event",
-                context_entity_id=event_id,
-                context_event_id=event_id,
-                fetch_reason="hydrate_special_route",
-            )
-            fetch_outcomes.append(outcome)
-            if parsed is not None:
-                parse_results.append(parsed)
-
-        if unique_tournament_id is not None and season_id is not None:
-            for widget_job in self.planner.plan_season_widgets(
-                sport_slug,
-                unique_tournament_id=int(unique_tournament_id),
-                season_id=int(season_id),
-            ):
-                endpoint = _endpoint_for_widget_job(widget_job.params)
-                if endpoint is None:
-                    continue
+            for endpoint in _special_endpoints_for_sport(sport_slug):
                 outcome, parsed = await self._fetch_and_parse(
                     endpoint=endpoint,
                     sport_slug=sport_slug,
-                    path_params={
-                        "unique_tournament_id": int(unique_tournament_id),
-                        "season_id": int(season_id),
-                    },
-                    context_entity_type="season",
-                    context_entity_id=int(season_id),
-                    context_unique_tournament_id=int(unique_tournament_id),
-                    context_season_id=int(season_id),
-                    fetch_reason=widget_job.job_type,
+                    path_params={"event_id": event_id},
+                    context_entity_type="event",
+                    context_entity_id=event_id,
+                    context_event_id=event_id,
+                    fetch_reason="hydrate_special_route",
                 )
                 fetch_outcomes.append(outcome)
                 if parsed is not None:
                     parse_results.append(parsed)
+
+            if unique_tournament_id is not None and season_id is not None:
+                for widget_job in self.planner.plan_season_widgets(
+                    sport_slug,
+                    unique_tournament_id=int(unique_tournament_id),
+                    season_id=int(season_id),
+                ):
+                    endpoint = _endpoint_for_widget_job(widget_job.params)
+                    if endpoint is None:
+                        continue
+                    outcome, parsed = await self._fetch_and_parse(
+                        endpoint=endpoint,
+                        sport_slug=sport_slug,
+                        path_params={
+                            "unique_tournament_id": int(unique_tournament_id),
+                            "season_id": int(season_id),
+                        },
+                        context_entity_type="season",
+                        context_entity_id=int(season_id),
+                        context_unique_tournament_id=int(unique_tournament_id),
+                        context_season_id=int(season_id),
+                        fetch_reason=widget_job.job_type,
+                    )
+                    fetch_outcomes.append(outcome)
+                    if parsed is not None:
+                        parse_results.append(parsed)
 
         return PilotRunReport(
             sport_slug=sport_slug,

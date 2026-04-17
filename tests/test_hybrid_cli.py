@@ -1,10 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import unittest
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_event_command_limits_batch_concurrency(self) -> None:
+        from schema_inspector.cli import run_event_command
+
+        orchestrator = _SlowFakeOrchestrator()
+        args = argparse.Namespace(
+            sport_slug="football",
+            event_id=[11, 12, 13, 14],
+            hydration_mode="core",
+            event_concurrency=2,
+        )
+
+        report = await run_event_command(args, orchestrator=orchestrator)
+
+        self.assertEqual(report.processed_event_ids, (11, 12, 13, 14))
+        self.assertEqual(orchestrator.max_active, 2)
+        self.assertEqual(
+            orchestrator.calls,
+            [
+                ("football", 11, "core"),
+                ("football", 12, "core"),
+                ("football", 13, "core"),
+                ("football", 14, "core"),
+            ],
+        )
+
     async def test_hybrid_app_bootstraps_endpoint_registry_once_per_sport(self) -> None:
         from schema_inspector.cli import HybridApp
         from schema_inspector.runtime import RuntimeConfig
@@ -34,7 +60,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         report = await run_event_command(args, orchestrator=orchestrator)
 
-        self.assertEqual(orchestrator.calls, [("football", 11), ("football", 12)])
+        self.assertEqual(orchestrator.calls, [("football", 11, "full"), ("football", 12, "full")])
         self.assertEqual(report.processed_event_ids, (11, 12))
 
     async def test_run_full_backfill_uses_selector_and_orchestrator(self) -> None:
@@ -52,16 +78,34 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selector.calls, [(3, 0, None)])
         self.assertEqual(report.processed_event_ids, (20, 21, 22))
-        self.assertEqual(orchestrator.calls, [(None, 20), (None, 21), (None, 22)])
+        self.assertEqual(
+            orchestrator.calls,
+            [(None, 20, "full"), (None, 21, "full"), (None, 22, "full")],
+        )
 
 
 class _FakeOrchestrator:
     def __init__(self) -> None:
         self.calls = []
 
-    async def run_event(self, *, event_id: int, sport_slug: str | None):
-        self.calls.append((sport_slug, event_id))
-        return {"event_id": event_id, "sport_slug": sport_slug}
+    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+        self.calls.append((sport_slug, event_id, hydration_mode))
+        return {"event_id": event_id, "sport_slug": sport_slug, "hydration_mode": hydration_mode}
+
+
+class _SlowFakeOrchestrator:
+    def __init__(self) -> None:
+        self.calls = []
+        self.active = 0
+        self.max_active = 0
+
+    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+        self.calls.append((sport_slug, event_id, hydration_mode))
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.01)
+        self.active -= 1
+        return {"event_id": event_id, "sport_slug": sport_slug, "hydration_mode": hydration_mode}
 
 
 class _FakeEventSelector:

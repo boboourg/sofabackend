@@ -264,19 +264,32 @@ class HybridApp:
 
 async def run_event_command(args, *, orchestrator) -> HydrationBatchReport:
     event_ids = tuple(int(item) for item in args.event_id)
-    results = []
-    for event_id in event_ids:
-        logger.info(
-            "Hybrid hydrate start: sport=%s event_id=%s",
-            getattr(args, "sport_slug", None),
-            event_id,
-        )
-        results.append(await orchestrator.run_event(event_id=event_id, sport_slug=args.sport_slug))
-        logger.info(
-            "Hybrid hydrate complete: sport=%s event_id=%s",
-            getattr(args, "sport_slug", None),
-            event_id,
-        )
+    hydration_mode = str(getattr(args, "hydration_mode", "full") or "full")
+    event_concurrency = max(1, int(getattr(args, "event_concurrency", 1) or 1))
+    semaphore = asyncio.Semaphore(event_concurrency)
+
+    async def hydrate_one(event_id: int):
+        async with semaphore:
+            logger.info(
+                "Hybrid hydrate start: sport=%s event_id=%s mode=%s",
+                getattr(args, "sport_slug", None),
+                event_id,
+                hydration_mode,
+            )
+            result = await orchestrator.run_event(
+                event_id=event_id,
+                sport_slug=args.sport_slug,
+                hydration_mode=hydration_mode,
+            )
+            logger.info(
+                "Hybrid hydrate complete: sport=%s event_id=%s mode=%s",
+                getattr(args, "sport_slug", None),
+                event_id,
+                hydration_mode,
+            )
+            return result
+
+    results = await asyncio.gather(*(hydrate_one(event_id) for event_id in event_ids))
     return HydrationBatchReport(processed_event_ids=event_ids, results=tuple(results))
 
 
@@ -292,10 +305,13 @@ async def run_full_backfill_command(args, *, orchestrator, event_selector) -> Hy
                 sport_slug=getattr(args, "sport_slug", None),
             )
         )
-    results = []
-    for event_id in event_ids:
-        results.append(await orchestrator.run_event(event_id=event_id, sport_slug=getattr(args, "sport_slug", None)))
-    return HydrationBatchReport(processed_event_ids=event_ids, results=tuple(results))
+    delegated_args = argparse.Namespace(
+        event_id=event_ids,
+        sport_slug=getattr(args, "sport_slug", None),
+        hydration_mode=getattr(args, "hydration_mode", "full"),
+        event_concurrency=getattr(args, "event_concurrency", 1),
+    )
+    return await run_event_command(delegated_args, orchestrator=orchestrator)
 
 
 async def run_replay_command(args, *, replay_service) -> ReplayBatchReport:
@@ -336,20 +352,42 @@ async def _dispatch(args) -> int:
             redis_backend=_load_redis_backend(args.redis_url),
         )
         if args.command == "event":
+            if args.event_concurrency is None:
+                args.event_concurrency = 1
+            args.hydration_mode = "full"
             report = await run_event_command(args, orchestrator=app)
             _print_batch_report("event_hydrate", report)
             return 0
         if args.command == "live":
             event_ids = await app.discover_live_event_ids(sport_slug=args.sport_slug, timeout=args.timeout)
-            report = await run_event_command(argparse.Namespace(event_id=event_ids, sport_slug=args.sport_slug), orchestrator=app)
+            report = await run_event_command(
+                argparse.Namespace(
+                    event_id=event_ids,
+                    sport_slug=args.sport_slug,
+                    hydration_mode="full",
+                    event_concurrency=args.event_concurrency or 1,
+                ),
+                orchestrator=app,
+            )
             _print_batch_report("live_hydrate", report)
             return 0
         if args.command == "scheduled":
             event_ids = await app.discover_scheduled_event_ids(sport_slug=args.sport_slug, date=args.date, timeout=args.timeout)
-            report = await run_event_command(argparse.Namespace(event_id=event_ids, sport_slug=args.sport_slug), orchestrator=app)
+            report = await run_event_command(
+                argparse.Namespace(
+                    event_id=event_ids,
+                    sport_slug=args.sport_slug,
+                    hydration_mode="core",
+                    event_concurrency=args.event_concurrency or 6,
+                ),
+                orchestrator=app,
+            )
             _print_batch_report("scheduled_hydrate", report)
             return 0
         if args.command == "full-backfill":
+            if args.event_concurrency is None:
+                args.event_concurrency = 1
+            args.hydration_mode = "full"
             report = await run_full_backfill_command(args, orchestrator=app, event_selector=app)
             _print_batch_report("full_backfill", report)
             return 0
@@ -394,6 +432,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db-max-size", type=int, default=None, help="Maximum asyncpg pool size.")
     parser.add_argument("--db-timeout", type=float, default=None, help="asyncpg command timeout in seconds.")
     parser.add_argument("--redis-url", default=None, help="Redis URL override.")
+    parser.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
     parser.add_argument("--log-level", default="INFO", help="Python log level.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)

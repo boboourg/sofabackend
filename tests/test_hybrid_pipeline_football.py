@@ -81,6 +81,121 @@ class _FakeCapabilityRepository:
 
 
 class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_football_core_mode_skips_heavy_followup_hydration(self) -> None:
+        event_url = "https://www.sofascore.com/api/v1/event/14083191"
+        statistics_url = "https://www.sofascore.com/api/v1/event/14083191/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/14083191/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/14083191/incidents"
+        best_players_url = "https://www.sofascore.com/api/v1/event/14083191/best-players/summary"
+        player_statistics_home_url = "https://www.sofascore.com/api/v1/event/14083191/player/700/statistics"
+        team_home_url = "https://www.sofascore.com/api/v1/team/42"
+
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": 14083191,
+                            "slug": "arsenal-chelsea",
+                            "tournament": {
+                                "id": 100,
+                                "slug": "premier-league",
+                                "name": "Premier League",
+                                "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                            },
+                            "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                            "status": {"type": "scheduled"},
+                            "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                            "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(
+                    statistics_url,
+                    {
+                        "statistics": [
+                            {
+                                "period": "ALL",
+                                "groups": [
+                                    {
+                                        "groupName": "Match overview",
+                                        "statisticsItems": [
+                                            {"name": "Possession", "home": "55%", "away": "45%"},
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                ),
+                incidents_url: _json_result(incidents_url, {"incidents": []}),
+                lineups_url: _json_result(
+                    lineups_url,
+                    {
+                        "home": {
+                            "formation": "4-3-3",
+                            "players": [
+                                {
+                                    "avgRating": 7.9,
+                                    "position": "F",
+                                    "teamId": 42,
+                                    "substitute": False,
+                                    "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                                }
+                            ],
+                        },
+                        "away": {
+                            "formation": "4-2-3-1",
+                            "players": [
+                                {
+                                    "avgRating": 7.1,
+                                    "position": "M",
+                                    "teamId": 43,
+                                    "substitute": False,
+                                    "player": {"id": 701, "slug": "palmer", "name": "Cole Palmer"},
+                                }
+                            ],
+                        },
+                    },
+                ),
+            }
+        )
+        raw_store = _FakeRawSnapshotStore()
+        capability_repository = _FakeCapabilityRepository()
+        fetch_executor = FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object())
+        orchestrator = PilotOrchestrator(
+            fetch_executor=fetch_executor,
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(
+                capability_rollup={
+                    "/api/v1/event/{event_id}/graph": "unsupported",
+                }
+            ),
+            capability_repository=capability_repository,
+            sql_executor=object(),
+        )
+
+        report = await orchestrator.run_event(event_id=14083191, sport_slug="football", hydration_mode="core")
+
+        self.assertIn(event_url, transport.seen_urls)
+        self.assertIn(statistics_url, transport.seen_urls)
+        self.assertIn(lineups_url, transport.seen_urls)
+        self.assertIn(incidents_url, transport.seen_urls)
+        self.assertNotIn(best_players_url, transport.seen_urls)
+        self.assertNotIn(player_statistics_home_url, transport.seen_urls)
+        self.assertNotIn(team_home_url, transport.seen_urls)
+        self.assertEqual(
+            {item.parser_family for item in report.parse_results},
+            {
+                "event_root",
+                "event_statistics",
+                "event_lineups",
+                "event_incidents",
+            },
+        )
+
     async def test_football_pipeline_fetches_root_statistics_and_lineups(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/14083191"
         statistics_url = "https://www.sofascore.com/api/v1/event/14083191/statistics"
