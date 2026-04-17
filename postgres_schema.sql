@@ -212,7 +212,7 @@ CREATE TABLE team (
 
 CREATE TABLE manager (
     id BIGINT PRIMARY KEY,
-    slug TEXT UNIQUE,
+    slug TEXT,
     name TEXT NOT NULL,
     short_name TEXT,
     sport_id BIGINT REFERENCES sport(id),

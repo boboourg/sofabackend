@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from schema_inspector.normalizers.sink import DurableNormalizeSink
 from schema_inspector.parsers.base import ParseResult, RawSnapshot
@@ -23,6 +24,26 @@ class _FakeExecutor:
 
 
 class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    def test_base_schema_does_not_require_unique_manager_slug(self) -> None:
+        schema_path = Path(__file__).resolve().parent.parent / "postgres_schema.sql"
+        sql = schema_path.read_text(encoding="utf-8")
+
+        manager_start = sql.index("CREATE TABLE manager (")
+        manager_end = sql.index(");", manager_start)
+        manager_block = sql[manager_start:manager_end]
+
+        team_start = sql.index("CREATE TABLE team (")
+        team_end = sql.index(");", team_start)
+        team_block = sql[team_start:team_end]
+
+        tournament_start = sql.index("CREATE TABLE tournament (")
+        tournament_end = sql.index(");", tournament_start)
+        tournament_block = sql[tournament_start:tournament_end]
+
+        self.assertNotIn("slug TEXT UNIQUE", manager_block)
+        self.assertNotIn("slug TEXT UNIQUE", team_block)
+        self.assertNotIn("slug TEXT UNIQUE", tournament_block)
+
     async def test_repository_persists_core_metric_rows(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()
@@ -342,6 +363,28 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(team_rows[0][11])
         self.assertEqual(team_rows[1][0], 45)
         self.assertEqual(team_rows[1][11], 440)
+
+    async def test_manager_upsert_uses_primary_key_conflict_target_only(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=902,
+            parser_family="entity_profiles",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "manager": (
+                    {"id": 101, "slug": "luis-garcia", "name": "Luis Garcia", "short_name": "L. Garcia"},
+                    {"id": 202, "slug": "luis-garcia", "name": "Luis Garcia II", "short_name": "L. Garcia"},
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        manager_insert_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO manager" in sql)
+        self.assertIn("ON CONFLICT (id)", manager_insert_sql)
+        self.assertNotIn("ON CONFLICT (slug)", manager_insert_sql)
 
 
 if __name__ == "__main__":
