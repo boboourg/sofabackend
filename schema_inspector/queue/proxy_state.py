@@ -96,7 +96,8 @@ class ProxyStateStore:
         return tuple(self.backend.zrangebyscore(self.cooldown_zset_key, float("-inf"), float(now_ms)))
 
     def _write(self, state: ProxyState) -> None:
-        self.backend.hset(
+        _hset_mapping(
+            self.backend,
             self._key(state.proxy_id),
             {
                 "status": state.status,
@@ -133,3 +134,10 @@ def _average_latency(previous: int | None, latest: int | None) -> int | None:
     if previous is None:
         return int(latest)
     return int(round((previous + latest) / 2))
+
+
+def _hset_mapping(backend: Any, name: str, mapping: dict[str, object]) -> None:
+    try:
+        backend.hset(name, mapping=mapping)
+    except TypeError:
+        backend.hset(name, mapping)

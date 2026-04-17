@@ -44,7 +44,8 @@ class LiveEventStateStore:
         self.cold_zset_key = cold_zset_key
 
     def upsert(self, state: LiveEventState, *, lane: str | None = None) -> None:
-        self.backend.hset(
+        _hset_mapping(
+            self.backend,
             self._key(state.event_id),
             {
                 "sport_slug": state.sport_slug,
@@ -130,3 +131,10 @@ def _as_bool(value: object) -> bool:
     if text is None:
         return False
     return text.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _hset_mapping(backend: Any, name: str, mapping: dict[str, object]) -> None:
+    try:
+        backend.hset(name, mapping=mapping)
+    except TypeError:
+        backend.hset(name, mapping)
