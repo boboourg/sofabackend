@@ -131,8 +131,9 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         import schema_inspector.cli as hybrid_cli
 
         with mock.patch.dict(hybrid_cli.os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "Redis is required for production runs"):
-                hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
+            with mock.patch.object(hybrid_cli, "_load_project_env", return_value={}):
+                with self.assertRaisesRegex(RuntimeError, "Redis is required for production runs"):
+                    hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
 
     def test_load_redis_backend_fails_without_redis_package_when_memory_fallback_disabled(self) -> None:
         import schema_inspector.cli as hybrid_cli
@@ -146,7 +147,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         import schema_inspector.cli as hybrid_cli
 
         with mock.patch.dict(hybrid_cli.os.environ, {}, clear=True):
-            backend = hybrid_cli._load_redis_backend(None, allow_memory_fallback=True)
+            with mock.patch.object(hybrid_cli, "_load_project_env", return_value={}):
+                backend = hybrid_cli._load_redis_backend(None, allow_memory_fallback=True)
 
         self.assertIsInstance(backend, hybrid_cli._MemoryRedisBackend)
 
@@ -161,6 +163,26 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(hybrid_cli.os.environ, {"REDIS_URL": "redis://127.0.0.1:6379/0"}, clear=True):
             with mock.patch.dict("sys.modules", {"redis": fake_redis_module}):
                 backend = hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
+
+        self.assertIs(backend, fake_backend)
+        self.assertEqual(fake_backend.ping_calls, 1)
+
+    def test_load_redis_backend_reads_url_from_project_env_when_process_env_is_empty(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_backend = _FakeRedisBackend()
+        fake_redis_module = types.SimpleNamespace(
+            Redis=types.SimpleNamespace(from_url=lambda *args, **kwargs: fake_backend),
+        )
+
+        with mock.patch.dict(hybrid_cli.os.environ, {}, clear=True):
+            with mock.patch.object(
+                hybrid_cli,
+                "_load_project_env",
+                return_value={"REDIS_URL": "redis://127.0.0.1:6379/0"},
+            ):
+                with mock.patch.dict("sys.modules", {"redis": fake_redis_module}):
+                    backend = hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
 
         self.assertIs(backend, fake_backend)
         self.assertEqual(fake_backend.ping_calls, 1)

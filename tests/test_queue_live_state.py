@@ -33,6 +33,35 @@ class QueueLiveStateTests(unittest.TestCase):
         self.assertIsInstance(backend.last_hset_mapping, dict)
         self.assertEqual(backend.last_hset_mapping["sport_slug"], "football")
 
+    def test_live_state_store_filters_none_values_before_hset(self) -> None:
+        backend = _StrictRedisStyleBackend()
+        store = LiveEventStateStore(backend)
+
+        store.upsert(
+            LiveEventState(
+                event_id=14019275,
+                sport_slug="football",
+                status_type="inprogress",
+                poll_profile="hot",
+                last_seen_at=1_800_000_000_000,
+                last_ingested_at=1_800_000_000_000,
+                last_changed_at=1_800_000_000_000,
+                next_poll_at=1_800_000_030_000,
+                hot_until=1_800_000_030_000,
+                home_score=None,
+                away_score=None,
+                version_hint=None,
+                is_finalized=False,
+            ),
+            lane="hot",
+        )
+
+        assert backend.last_hset_mapping is not None
+        self.assertNotIn("home_score", backend.last_hset_mapping)
+        self.assertNotIn("away_score", backend.last_hset_mapping)
+        self.assertNotIn("version_hint", backend.last_hset_mapping)
+        self.assertEqual(backend.last_hset_mapping["status_type"], "inprogress")
+
 
 class _StrictRedisStyleBackend:
     def __init__(self) -> None:
@@ -44,6 +73,8 @@ class _StrictRedisStyleBackend:
     def hset(self, name: str, key: str | None = None, value: object | None = None, mapping: dict[str, object] | None = None):
         if mapping is None:
             raise TypeError("mapping keyword is required for redis-style hset")
+        if any(item is None for item in mapping.values()):
+            raise TypeError("None values are not allowed in redis-style hset mapping")
         self.last_hset_name = name
         self.last_hset_mapping = dict(mapping)
         self.hashes.setdefault(name, {}).update(dict(mapping))

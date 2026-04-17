@@ -47,7 +47,8 @@ class LiveEventStateStore:
         _hset_mapping(
             self.backend,
             self._key(state.event_id),
-            {
+            _compact_mapping(
+                {
                 "sport_slug": state.sport_slug,
                 "status_type": state.status_type,
                 "poll_profile": state.poll_profile,
@@ -60,7 +61,8 @@ class LiveEventStateStore:
                 "away_score": state.away_score,
                 "version_hint": state.version_hint,
                 "is_finalized": int(state.is_finalized),
-            },
+                }
+            ),
         )
         if lane and state.next_poll_at is not None:
             self.move_lane(state.event_id, lane=lane, next_poll_at=state.next_poll_at)
@@ -138,3 +140,7 @@ def _hset_mapping(backend: Any, name: str, mapping: dict[str, object]) -> None:
         backend.hset(name, mapping=mapping)
     except TypeError:
         backend.hset(name, mapping)
+
+
+def _compact_mapping(mapping: dict[str, object | None]) -> dict[str, object]:
+    return {str(key): value for key, value in mapping.items() if value is not None}
