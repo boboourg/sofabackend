@@ -357,6 +357,19 @@ async def run_replay_command(args, *, replay_service) -> ReplayBatchReport:
     return ReplayBatchReport(snapshot_ids=snapshot_ids, parser_families=tuple(parser_families))
 
 
+async def _run_post_hydration_audit(args, *, app, report: HydrationBatchReport):
+    if not bool(getattr(args, "audit_db", False)):
+        return None
+    audit_report = await app.collect_db_audit(
+        sport_slug=str(getattr(args, "sport_slug", "") or ""),
+        event_ids=tuple(int(item) for item in report.processed_event_ids),
+    )
+    _print_db_audit_report(audit_report)
+    if int(audit_report.raw_snapshots) <= 0 or int(audit_report.events) <= 0:
+        raise RuntimeError("DB audit failed: raw or durable counts are empty.")
+    return audit_report
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if sys.platform == "win32":
@@ -396,32 +409,33 @@ async def _dispatch(args) -> int:
                 args.hydration_mode = "full"
                 report = await run_event_command(args, orchestrator=app)
                 _print_batch_report("event_hydrate", report)
+                await _run_post_hydration_audit(args, app=app, report=report)
                 return 0
             if args.command == "live":
                 event_ids = await app.discover_live_event_ids(sport_slug=args.sport_slug, timeout=args.timeout)
-                report = await run_event_command(
-                    argparse.Namespace(
+                command_args = argparse.Namespace(
                         event_id=event_ids,
                         sport_slug=args.sport_slug,
                         hydration_mode="full",
                         event_concurrency=args.event_concurrency or 1,
-                    ),
-                    orchestrator=app,
                 )
+                command_args.audit_db = bool(getattr(args, "audit_db", False))
+                report = await run_event_command(command_args, orchestrator=app)
                 _print_batch_report("live_hydrate", report)
+                await _run_post_hydration_audit(command_args, app=app, report=report)
                 return 0
             if args.command == "scheduled":
                 event_ids = await app.discover_scheduled_event_ids(sport_slug=args.sport_slug, date=args.date, timeout=args.timeout)
-                report = await run_event_command(
-                    argparse.Namespace(
+                command_args = argparse.Namespace(
                         event_id=event_ids,
                         sport_slug=args.sport_slug,
                         hydration_mode="core",
                         event_concurrency=args.event_concurrency or 6,
-                    ),
-                    orchestrator=app,
                 )
+                command_args.audit_db = bool(getattr(args, "audit_db", False))
+                report = await run_event_command(command_args, orchestrator=app)
                 _print_batch_report("scheduled_hydrate", report)
+                await _run_post_hydration_audit(command_args, app=app, report=report)
                 return 0
             if args.command == "full-backfill":
                 if args.event_concurrency is None:
@@ -429,6 +443,7 @@ async def _dispatch(args) -> int:
                 args.hydration_mode = "full"
                 report = await run_full_backfill_command(args, orchestrator=app, event_selector=app)
                 _print_batch_report("full_backfill", report)
+                await _run_post_hydration_audit(args, app=app, report=report)
                 return 0
             if args.command == "replay":
                 report = await run_replay_command(args, replay_service=app)
@@ -496,15 +511,18 @@ def _build_parser() -> argparse.ArgumentParser:
     event.add_argument("--sport-slug", required=True, help="Sport slug for adapter/planner selection.")
     event.add_argument("--event-id", type=int, action="append", required=True, help="Repeatable event id.")
     event.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
+    event.add_argument("--audit-db", action="store_true", help="Run a post-hydration database audit and fail if raw/durable rows are missing.")
 
     live = subparsers.add_parser("live", help="Discover live events for a sport and hydrate them.")
     live.add_argument("--sport-slug", required=True, help="Sport slug for discovery.")
     live.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
+    live.add_argument("--audit-db", action="store_true", help="Run a post-hydration database audit and fail if raw/durable rows are missing.")
 
     scheduled = subparsers.add_parser("scheduled", help="Discover scheduled events for a sport/date and hydrate them.")
     scheduled.add_argument("--sport-slug", required=True, help="Sport slug for discovery.")
     scheduled.add_argument("--date", required=True, help="Date in YYYY-MM-DD format.")
     scheduled.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
+    scheduled.add_argument("--audit-db", action="store_true", help="Run a post-hydration database audit and fail if raw/durable rows are missing.")
 
     backfill = subparsers.add_parser("full-backfill", help="Hydrate explicit or database-seeded events through the hybrid backbone.")
     backfill.add_argument("--sport-slug", default=None, help="Optional sport filter when selecting from PostgreSQL.")
@@ -512,6 +530,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--limit", type=int, default=None, help="Optional event limit when selecting from PostgreSQL.")
     backfill.add_argument("--offset", type=int, default=0, help="Optional event offset when selecting from PostgreSQL.")
     backfill.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
+    backfill.add_argument("--audit-db", action="store_true", help="Run a post-hydration database audit and fail if raw/durable rows are missing.")
 
     replay = subparsers.add_parser("replay", help="Replay one or more payload snapshots through durable sinks.")
     replay.add_argument("--snapshot-id", type=int, action="append", required=True, help="Repeatable payload snapshot id.")

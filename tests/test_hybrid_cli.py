@@ -47,6 +47,22 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(args.allow_memory_redis)
 
+    def test_parser_accepts_audit_db_on_hydration_commands(self) -> None:
+        from schema_inspector.cli import _build_parser
+
+        parser = _build_parser()
+        command_variants = (
+            ["event", "--sport-slug", "football", "--event-id", "11", "--audit-db"],
+            ["live", "--sport-slug", "football", "--audit-db"],
+            ["scheduled", "--sport-slug", "football", "--date", "2026-04-17", "--audit-db"],
+            ["full-backfill", "--sport-slug", "football", "--audit-db"],
+        )
+
+        for argv in command_variants:
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertTrue(args.audit_db)
+
     def test_parser_accepts_event_concurrency_after_scheduled_subcommand(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -256,6 +272,100 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("snapshots=4", output)
         self.assertIn("tennis_point_by_point=7", output)
         self.assertIn("tennis_power=3", output)
+
+    async def test_dispatch_scheduled_runs_post_hydration_audit_when_requested(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeHydrationDispatchApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        stdout = io.StringIO()
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+
+            with redirect_stdout(stdout):
+                exit_code = await hybrid_cli._dispatch(
+                    argparse.Namespace(
+                        command="scheduled",
+                        sport_slug="football",
+                        date="2026-04-17",
+                        audit_db=True,
+                        timeout=20.0,
+                        proxy=[],
+                        user_agent=None,
+                        max_attempts=None,
+                        database_url=None,
+                        db_min_size=None,
+                        db_max_size=None,
+                        db_timeout=None,
+                        redis_url=None,
+                        allow_memory_redis=True,
+                        event_concurrency=2,
+                        log_level="INFO",
+                    )
+                )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_app.audit_calls, [("football", (101, 202))])
+        output = stdout.getvalue().strip()
+        self.assertIn("scheduled_hydrate events=2 event_ids=101,202", output)
+        self.assertIn("db_audit sport=football", output)
+
+    async def test_dispatch_scheduled_raises_when_post_run_audit_is_empty(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeHydrationDispatchApp(
+            audit_report_overrides={
+                "raw_snapshots": 0,
+                "events": 0,
+            }
+        )
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+
+            with self.assertRaisesRegex(RuntimeError, "DB audit failed"):
+                await hybrid_cli._dispatch(
+                    argparse.Namespace(
+                        command="scheduled",
+                        sport_slug="football",
+                        date="2026-04-17",
+                        audit_db=True,
+                        timeout=20.0,
+                        proxy=[],
+                        user_agent=None,
+                        max_attempts=None,
+                        database_url=None,
+                        db_min_size=None,
+                        db_max_size=None,
+                        db_timeout=None,
+                        redis_url=None,
+                        allow_memory_redis=True,
+                        event_concurrency=2,
+                        log_level="INFO",
+                    )
+                )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
 
     async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
         from schema_inspector.cli import HybridApp
@@ -526,6 +636,43 @@ class _FakeDispatchHybridApp:
                 "special_counts": {"tennis_point_by_point": 7, "tennis_power": 3},
             },
         )()
+
+
+class _FakeHydrationDispatchApp:
+    def __init__(self, *, audit_report_overrides: dict[str, object] | None = None) -> None:
+        self.closed = False
+        self.redis_backend = _FakeRedisBackend()
+        self.audit_calls: list[tuple[str, tuple[int, ...]]] = []
+        self.run_event_calls: list[tuple[int, str | None, str]] = []
+        self.audit_report_overrides = dict(audit_report_overrides or {})
+
+    async def discover_scheduled_event_ids(self, *, sport_slug: str, date: str, timeout: float):
+        del sport_slug, date, timeout
+        return (101, 202)
+
+    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+        self.run_event_calls.append((event_id, sport_slug, hydration_mode))
+        return {"event_id": event_id}
+
+    async def collect_db_audit(self, *, sport_slug: str, event_ids: tuple[int, ...]):
+        self.audit_calls.append((sport_slug, event_ids))
+        payload = {
+            "sport_slug": sport_slug,
+            "event_count": len(event_ids),
+            "raw_requests": 6,
+            "raw_snapshots": 4,
+            "events": len(event_ids),
+            "statistics": 8,
+            "incidents": 3,
+            "lineup_sides": 2,
+            "lineup_players": 22,
+            "special_counts": {},
+        }
+        payload.update(self.audit_report_overrides)
+        return type("DatabaseAuditReport", (), payload)()
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class _FakeAsyncpgDatabaseContext:
