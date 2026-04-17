@@ -10,7 +10,10 @@ from ..queue.streams import StreamEntry
 
 
 def decode_stream_job(entry: StreamEntry) -> JobEnvelope:
-    values = entry.values
+    return decode_stream_payload(entry.values, fallback_job_id=entry.message_id)
+
+
+def decode_stream_payload(values: dict[str, object] | dict[str, str], *, fallback_job_id: str | None = None) -> JobEnvelope:
     entity_id = _as_int(values.get("entity_id"))
     if entity_id is None:
         entity_id = _as_int(values.get("event_id"))
@@ -24,7 +27,7 @@ def decode_stream_job(entry: StreamEntry) -> JobEnvelope:
         params["next_poll_at"] = next_poll_at
 
     return JobEnvelope(
-        job_id=_as_text(values.get("job_id")) or entry.message_id,
+        job_id=_as_text(values.get("job_id")) or str(fallback_job_id or ""),
         job_type=_as_text(values.get("job_type")) or "",
         sport_slug=_as_text(values.get("sport_slug")),
         entity_type=_as_text(values.get("entity_type")) or ("event" if entity_id is not None else None),

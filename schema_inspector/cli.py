@@ -29,6 +29,7 @@ from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue
 from .runtime import load_runtime_config
+from .services.service_app import ServiceApp
 from .sofascore_client import SofascoreClient
 from .storage.capability_repository import CapabilityRepository
 from .storage.live_state_repository import LiveStateRepository
@@ -482,6 +483,44 @@ async def _dispatch(args) -> int:
                     f"cold={report.restored_cold} terminal={report.restored_terminal}"
                 )
                 return 0
+            if args.command == "planner-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_planner_daemon(
+                    sport_slugs=tuple(args.sport_slug or ()),
+                    scheduled_interval_seconds=args.scheduled_interval_seconds,
+                    loop_interval_seconds=args.loop_interval_seconds,
+                )
+                return 0
+            if args.command == "worker-hydrate":
+                service_app = ServiceApp(app)
+                await service_app.run_hydrate_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-live-hot":
+                service_app = ServiceApp(app)
+                await service_app.run_live_worker(
+                    lane="hot",
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-live-warm":
+                service_app = ServiceApp(app)
+                await service_app.run_live_worker(
+                    lane="warm",
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-maintenance":
+                service_app = ServiceApp(app)
+                await service_app.run_maintenance_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
         finally:
             await app.close()
     return 1
@@ -541,6 +580,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
     subparsers.add_parser("recover-live-state", help="Rebuild Redis live-state indexes from PostgreSQL history.")
+
+    planner_daemon = subparsers.add_parser("planner-daemon", help="Run the continuous planner loop.")
+    planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
+    planner_daemon.add_argument("--scheduled-interval-seconds", type=float, default=300.0, help="Scheduled planning interval per sport.")
+    planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
+    worker_hydrate = subparsers.add_parser("worker-hydrate", help="Run the hydrate consumer group loop.")
+    worker_hydrate.add_argument("--consumer-name", default="worker-hydrate-1", help="Redis consumer name for the hydrate worker.")
+    worker_hydrate.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_live_hot = subparsers.add_parser("worker-live-hot", help="Run the live-hot consumer group loop.")
+    worker_live_hot.add_argument("--consumer-name", default="worker-live-hot-1", help="Redis consumer name for the live-hot worker.")
+    worker_live_hot.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_live_warm = subparsers.add_parser("worker-live-warm", help="Run the live-warm consumer group loop.")
+    worker_live_warm.add_argument("--consumer-name", default="worker-live-warm-1", help="Redis consumer name for the live-warm worker.")
+    worker_live_warm.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_maintenance = subparsers.add_parser("worker-maintenance", help="Run the maintenance/recovery consumer group loop.")
+    worker_maintenance.add_argument("--consumer-name", default="worker-maintenance-1", help="Redis consumer name for the maintenance worker.")
+    worker_maintenance.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
     return parser
 
 
@@ -601,15 +661,28 @@ class _MemoryRedisBackend:
         self.sorted_sets = {}
         self.streams = {}
         self.pending = {}
+        self.pending_meta = {}
+        self.claimed_by = {}
         self.group_offsets = {}
         self.counters = {}
+        self.created_groups = []
 
     def hset(self, key: str, mapping: dict[str, object]) -> int:
-        self.hashes[key] = dict(mapping)
-        return 1
+        bucket = self.hashes.setdefault(key, {})
+        bucket.update(dict(mapping))
+        return len(mapping)
 
     def hgetall(self, key: str) -> dict[str, object]:
         return dict(self.hashes.get(key, {}))
+
+    def hdel(self, key: str, *members: str) -> int:
+        bucket = self.hashes.setdefault(key, {})
+        removed = 0
+        for member in members:
+            if member in bucket:
+                del bucket[member]
+                removed += 1
+        return removed
 
     def zadd(self, key: str, mapping: dict[str, float]) -> int:
         bucket = self.sorted_sets.setdefault(key, {})
@@ -644,8 +717,18 @@ class _MemoryRedisBackend:
         self.streams.setdefault(stream, []).append((message_id, dict(fields)))
         return message_id
 
+    def xgroup_create(self, stream: str, group: str, *, id: str = "0-0", mkstream: bool = False) -> bool:
+        group_key = (stream, group)
+        if group_key in self.group_offsets:
+            raise RuntimeError("BUSYGROUP Consumer Group name already exists")
+        if mkstream:
+            self.streams.setdefault(stream, [])
+        self.group_offsets[group_key] = 0
+        self.created_groups.append((stream, group, id))
+        return True
+
     def xreadgroup(self, group: str, consumer: str, streams: dict[str, str], *, count: int | None = None, block: int | None = None):
-        del consumer, block
+        del block
         results = []
         for stream in streams:
             offset = self.group_offsets.get((stream, group), 0)
@@ -653,17 +736,89 @@ class _MemoryRedisBackend:
             if messages:
                 self.group_offsets[(stream, group)] = offset + len(messages)
                 self.pending.setdefault((stream, group), set()).update(message_id for message_id, _ in messages)
+                pending_meta = self.pending_meta.setdefault((stream, group), {})
+                claimed_by = self.claimed_by.setdefault((stream, group), {})
+                for message_id, _ in messages:
+                    pending_meta[message_id] = {
+                        "consumer": consumer,
+                        "idle": 0,
+                        "deliveries": 1,
+                    }
+                    claimed_by[message_id] = consumer
                 results.append((stream, messages))
         return results
 
     def xack(self, stream: str, group: str, *message_ids: str) -> int:
         pending = self.pending.setdefault((stream, group), set())
+        pending_meta = self.pending_meta.setdefault((stream, group), {})
+        claimed_by = self.claimed_by.setdefault((stream, group), {})
         acknowledged = 0
         for message_id in message_ids:
             if message_id in pending:
                 pending.remove(message_id)
+                pending_meta.pop(message_id, None)
+                claimed_by.pop(message_id, None)
                 acknowledged += 1
         return acknowledged
+
+    def xpending(self, stream: str, group: str) -> dict[str, object]:
+        pending_meta = self.pending_meta.setdefault((stream, group), {})
+        consumers = {}
+        for metadata in pending_meta.values():
+            consumer = str(metadata["consumer"])
+            consumers[consumer] = consumers.get(consumer, 0) + 1
+        message_ids = sorted(pending_meta)
+        return {
+            "pending": len(pending_meta),
+            "min": message_ids[0] if message_ids else None,
+            "max": message_ids[-1] if message_ids else None,
+            "consumers": consumers,
+        }
+
+    def xpending_range(self, stream: str, group: str, min: str, max: str, count: int, consumername: str | None = None):
+        del min, max
+        pending_meta = self.pending_meta.setdefault((stream, group), {})
+        rows = []
+        for message_id in sorted(pending_meta):
+            metadata = pending_meta[message_id]
+            if consumername is not None and metadata["consumer"] != consumername:
+                continue
+            rows.append(
+                {
+                    "message_id": message_id,
+                    "consumer": metadata["consumer"],
+                    "time_since_delivered": metadata["idle"],
+                    "times_delivered": metadata["deliveries"],
+                }
+            )
+            if len(rows) >= count:
+                break
+        return rows
+
+    def xautoclaim(self, stream: str, group: str, consumer: str, min_idle_time: int, start_id: str, *, count: int = 100):
+        del start_id
+        pending_meta = self.pending_meta.setdefault((stream, group), {})
+        claimed_by = self.claimed_by.setdefault((stream, group), {})
+        claimed = []
+        for message_id in sorted(pending_meta):
+            metadata = pending_meta[message_id]
+            if int(metadata["idle"]) < min_idle_time:
+                continue
+            metadata["consumer"] = consumer
+            metadata["idle"] = 0
+            metadata["deliveries"] = int(metadata["deliveries"]) + 1
+            claimed_by[message_id] = consumer
+            payload = self._lookup_message(stream, message_id)
+            claimed.append((message_id, dict(payload)))
+            if len(claimed) >= count:
+                break
+        return ("0-0", claimed, [])
+
+    def _lookup_message(self, stream: str, message_id: str) -> dict[str, str]:
+        for current_message_id, values in self.streams.get(stream, []):
+            if current_message_id == message_id:
+                return values
+        raise KeyError(message_id)
 
 
 if __name__ == "__main__":

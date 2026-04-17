@@ -15,6 +15,7 @@ class HydrateWorker:
         *,
         orchestrator,
         delayed_scheduler,
+        delayed_payload_store=None,
         queue,
         consumer: str,
         group: str = "cg:hydrate",
@@ -25,6 +26,7 @@ class HydrateWorker:
     ) -> None:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
+        self.delayed_payload_store = delayed_payload_store
         self.queue = queue
         self.consumer = consumer
         self.group = group
@@ -56,6 +58,8 @@ class HydrateWorker:
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
         del exc
         job = decode_stream_job(entry)
+        if self.delayed_payload_store is not None:
+            self.delayed_payload_store.save_entry(entry)
         self.delayed_scheduler.schedule(
             job.job_id,
             run_at_epoch_ms=int(self.now_ms_factory()) + int(delay_ms),

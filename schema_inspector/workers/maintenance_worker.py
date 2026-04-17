@@ -18,6 +18,7 @@ class MaintenanceWorker:
         queue,
         consumer: str,
         delayed_scheduler=None,
+        delayed_payload_store=None,
         group: str = "cg:maintenance",
         stream: str = STREAM_MAINTENANCE,
         block_ms: int = 5_000,
@@ -25,6 +26,7 @@ class MaintenanceWorker:
     ) -> None:
         self.handler = handler
         self.delayed_scheduler = delayed_scheduler
+        self.delayed_payload_store = delayed_payload_store
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.runtime = WorkerRuntime(
             name="maintenance-worker",
@@ -48,6 +50,8 @@ class MaintenanceWorker:
         if self.delayed_scheduler is None:
             return "ignored"
         job = decode_stream_job(entry)
+        if self.delayed_payload_store is not None:
+            self.delayed_payload_store.save_entry(entry)
         self.delayed_scheduler.schedule(
             job.job_id,
             run_at_epoch_ms=int(self.now_ms_factory()) + int(delay_ms),

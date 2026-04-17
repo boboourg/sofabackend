@@ -87,6 +87,46 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.date, "2026-04-17")
         self.assertEqual(args.event_concurrency, 15)
 
+    def test_parser_accepts_service_commands(self) -> None:
+        from schema_inspector.cli import _build_parser
+
+        parser = _build_parser()
+
+        planner = parser.parse_args(["planner-daemon", "--sport-slug", "football"])
+        hydrate = parser.parse_args(["worker-hydrate", "--consumer-name", "hydrate-1"])
+        live_hot = parser.parse_args(["worker-live-hot", "--consumer-name", "hot-1"])
+        live_warm = parser.parse_args(["worker-live-warm", "--consumer-name", "warm-1"])
+        maintenance = parser.parse_args(["worker-maintenance", "--consumer-name", "maint-1"])
+
+        self.assertEqual(planner.command, "planner-daemon")
+        self.assertEqual(planner.sport_slug, ["football"])
+        self.assertEqual(hydrate.command, "worker-hydrate")
+        self.assertEqual(live_hot.command, "worker-live-hot")
+        self.assertEqual(live_warm.command, "worker-live-warm")
+        self.assertEqual(maintenance.command, "worker-maintenance")
+
+    def test_service_app_ensures_consumer_groups(self) -> None:
+        from schema_inspector.services.service_app import ServiceApp
+
+        fake_stream_queue = _FakeStreamQueue()
+        app = type(
+            "App",
+            (),
+            {
+                "redis_backend": object(),
+                "stream_queue": fake_stream_queue,
+                "live_state_store": object(),
+            },
+        )()
+
+        service_app = ServiceApp(app)
+        service_app.ensure_consumer_groups()
+
+        self.assertIn(("stream:etl:hydrate", "cg:hydrate", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:live_hot", "cg:live_hot", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:live_warm", "cg:live_warm", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:maintenance", "cg:maintenance", "0-0"), fake_stream_queue.groups)
+
     def test_load_redis_backend_fails_without_url_when_memory_fallback_disabled(self) -> None:
         import schema_inspector.cli as hybrid_cli
 
@@ -366,6 +406,195 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             hybrid_cli.load_database_config = original_load_database_config
             hybrid_cli.AsyncpgDatabase = original_database_class
             hybrid_cli.HybridApp = original_hybrid_app
+
+    async def test_dispatch_planner_daemon_runs_service_loop(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="planner-daemon",
+                    sport_slug=["football", "tennis"],
+                    scheduled_interval_seconds=120.0,
+                    loop_interval_seconds=3.0,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            fake_service_app.calls,
+            [("planner", ("football", "tennis"), 120.0, 3.0)],
+        )
+
+    async def test_dispatch_worker_hydrate_runs_service_loop(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-hydrate",
+                    consumer_name="hydrate-a",
+                    block_ms=2500,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_service_app.calls, [("hydrate", "hydrate-a", 2500)])
+
+    async def test_dispatch_worker_live_and_maintenance_run_service_loops(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            live_hot_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-live-hot",
+                    consumer_name="live-hot-a",
+                    block_ms=1500,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+            live_warm_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-live-warm",
+                    consumer_name="live-warm-a",
+                    block_ms=1700,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+            maintenance_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-maintenance",
+                    consumer_name="maint-a",
+                    block_ms=1900,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(live_hot_exit, 0)
+        self.assertEqual(live_warm_exit, 0)
+        self.assertEqual(maintenance_exit, 0)
+        self.assertEqual(
+            fake_service_app.calls,
+            [
+                ("live", "hot", "live-hot-a", 1500),
+                ("live", "warm", "live-warm-a", 1700),
+                ("maintenance", "maint-a", 1900),
+            ],
+        )
 
     async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
         from schema_inspector.cli import HybridApp
@@ -673,6 +902,31 @@ class _FakeHydrationDispatchApp:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakeStreamQueue:
+    def __init__(self) -> None:
+        self.groups: list[tuple[str, str, str]] = []
+
+    def ensure_group(self, stream: str, group: str, *, start_id: str = "0-0") -> None:
+        self.groups.append((stream, group, start_id))
+
+
+class _FakeServiceApp:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def run_planner_daemon(self, *, sport_slugs: tuple[str, ...], scheduled_interval_seconds: float, loop_interval_seconds: float) -> None:
+        self.calls.append(("planner", sport_slugs, scheduled_interval_seconds, loop_interval_seconds))
+
+    async def run_hydrate_worker(self, *, consumer_name: str, block_ms: int) -> None:
+        self.calls.append(("hydrate", consumer_name, block_ms))
+
+    async def run_live_worker(self, *, lane: str, consumer_name: str, block_ms: int) -> None:
+        self.calls.append(("live", lane, consumer_name, block_ms))
+
+    async def run_maintenance_worker(self, *, consumer_name: str, block_ms: int) -> None:
+        self.calls.append(("maintenance", consumer_name, block_ms))
 
 
 class _FakeAsyncpgDatabaseContext:

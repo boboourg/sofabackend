@@ -15,6 +15,7 @@ class LiveWorkerService:
         *,
         orchestrator,
         delayed_scheduler,
+        delayed_payload_store=None,
         queue,
         lane: str,
         consumer: str,
@@ -28,6 +29,7 @@ class LiveWorkerService:
 
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
+        self.delayed_payload_store = delayed_payload_store
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
@@ -58,6 +60,8 @@ class LiveWorkerService:
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
         del exc
         job = decode_stream_job(entry)
+        if self.delayed_payload_store is not None:
+            self.delayed_payload_store.save_entry(entry)
         self.delayed_scheduler.schedule(
             job.job_id,
             run_at_epoch_ms=int(self.now_ms_factory()) + int(delay_ms),
