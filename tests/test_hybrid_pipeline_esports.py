@@ -71,6 +71,52 @@ class _FakeCapabilityRepository:
 
 
 class EsportsHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_esports_core_pipeline_still_fetches_games_special(self) -> None:
+        event_url = "https://www.sofascore.com/api/v1/event/20001"
+        statistics_url = "https://www.sofascore.com/api/v1/event/20001/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/20001/lineups"
+        esports_games_url = "https://www.sofascore.com/api/v1/event/20001/esports-games"
+
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": 20001,
+                            "slug": "spirit-vitality",
+                            "tournament": {
+                                "id": 501,
+                                "slug": "esl-pro-league",
+                                "name": "ESL Pro League",
+                                "uniqueTournament": {"id": 18501, "slug": "esl-pro-league", "name": "ESL Pro League"},
+                            },
+                            "season": {"id": 91001, "name": "EPL 2026", "year": "2026"},
+                            "status": {"type": "notstarted"},
+                            "homeTeam": {"id": 9001, "slug": "spirit", "name": "Spirit"},
+                            "awayTeam": {"id": 9002, "slug": "vitality", "name": "Vitality"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(statistics_url, {"statistics": []}),
+                lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+                esports_games_url: _json_result(esports_games_url, {"games": [{"id": 1, "status": "finished", "mapName": "Dust2"}]}),
+            }
+        )
+        raw_store = _FakeRawSnapshotStore()
+        orchestrator = PilotOrchestrator(
+            fetch_executor=FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object()),
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(capability_rollup={}),
+            capability_repository=_FakeCapabilityRepository(),
+            sql_executor=object(),
+        )
+
+        await orchestrator.run_event(event_id=20001, sport_slug="esports", hydration_mode="core")
+
+        self.assertIn(esports_games_url, transport.seen_urls)
+
     async def test_esports_pipeline_uses_thin_special_adapter(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/20001"
         statistics_url = "https://www.sofascore.com/api/v1/event/20001/statistics"

@@ -57,14 +57,15 @@ class NormalizeRepository:
             executor,
             "tennis_power",
             result.metric_rows.get("tennis_power", ()),
-            ("event_id", "side", "current_value_numeric", "current_value_text", "delta_value_numeric", "delta_value_text"),
+            ("event_id", "ordinal", "set_number", "game_number", "value_numeric", "value_text", "break_occurred"),
             row_mapper=lambda row: (
                 row.get("event_id"),
-                row.get("side"),
-                _as_float(row.get("current")),
-                _as_scalar_text(row.get("current")),
-                _as_float(row.get("delta")),
-                _as_scalar_text(row.get("delta")),
+                row.get("ordinal"),
+                row.get("set_number"),
+                row.get("game_number"),
+                _as_float(row.get("value", row.get("current"))),
+                _as_scalar_text(row.get("value", row.get("current"))),
+                row.get("break_occurred"),
             ),
         )
         await self._replace_event_rows(

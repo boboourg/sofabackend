@@ -71,6 +71,52 @@ class _FakeCapabilityRepository:
 
 
 class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_baseball_core_pipeline_still_fetches_innings_special(self) -> None:
+        event_url = "https://www.sofascore.com/api/v1/event/15507996"
+        statistics_url = "https://www.sofascore.com/api/v1/event/15507996/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/15507996/lineups"
+        innings_url = "https://www.sofascore.com/api/v1/event/15507996/innings"
+
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": 15507996,
+                            "slug": "dodgers-yankees",
+                            "tournament": {
+                                "id": 401,
+                                "slug": "mlb",
+                                "name": "MLB",
+                                "uniqueTournament": {"id": 11205, "slug": "mlb", "name": "MLB"},
+                            },
+                            "season": {"id": 84695, "name": "MLB 2026", "year": "2026"},
+                            "status": {"type": "notstarted"},
+                            "homeTeam": {"id": 601, "slug": "dodgers", "name": "Dodgers"},
+                            "awayTeam": {"id": 602, "slug": "yankees", "name": "Yankees"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(statistics_url, {"statistics": []}),
+                lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+                innings_url: _json_result(innings_url, {"innings": [{"inning": 1, "homeScore": 0, "awayScore": 1}]}),
+            }
+        )
+        raw_store = _FakeRawSnapshotStore()
+        orchestrator = PilotOrchestrator(
+            fetch_executor=FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object()),
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(capability_rollup={}),
+            capability_repository=_FakeCapabilityRepository(),
+            sql_executor=object(),
+        )
+
+        await orchestrator.run_event(event_id=15507996, sport_slug="baseball", hydration_mode="core")
+
+        self.assertIn(innings_url, transport.seen_urls)
+
     async def test_baseball_pipeline_uses_regular_season_adapter_and_innings_special(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/15507996"
         statistics_url = "https://www.sofascore.com/api/v1/event/15507996/statistics"

@@ -13,20 +13,37 @@ class TennisPowerParser:
 
     def parse(self, snapshot: RawSnapshot) -> ParseResult:
         payload = _as_mapping(snapshot.payload) or {}
-        rankings = _as_mapping(payload.get("tennisPowerRankings")) or {}
+        rankings = payload.get("tennisPowerRankings")
         rows: list[Mapping[str, object]] = []
-        for side_name in ("home", "away"):
-            side = _as_mapping(rankings.get(side_name))
-            if side is None:
-                continue
-            rows.append(
-                {
-                    "event_id": snapshot.context_event_id or snapshot.context_entity_id,
-                    "side": side_name,
-                    "current": side.get("current"),
-                    "delta": side.get("delta"),
-                }
-            )
+        if isinstance(rankings, list):
+            for ordinal, item in enumerate(rankings):
+                if not isinstance(item, Mapping):
+                    continue
+                rows.append(
+                    {
+                        "event_id": snapshot.context_event_id or snapshot.context_entity_id,
+                        "ordinal": ordinal,
+                        "set_number": _as_int(item.get("set")),
+                        "game_number": _as_int(item.get("game")),
+                        "value": item.get("value"),
+                        "break_occurred": _as_bool(item.get("breakOccurred")),
+                    }
+                )
+        else:
+            ranking_map = _as_mapping(rankings) or {}
+            for ordinal, side_name in enumerate(("home", "away")):
+                side = _as_mapping(ranking_map.get(side_name))
+                if side is None:
+                    continue
+                rows.append(
+                    {
+                        "event_id": snapshot.context_event_id or snapshot.context_entity_id,
+                        "ordinal": ordinal,
+                        "side": side_name,
+                        "current": side.get("current"),
+                        "delta": side.get("delta"),
+                    }
+                )
 
         return ParseResult(
             snapshot_id=snapshot.snapshot_id,
@@ -40,3 +57,21 @@ class TennisPowerParser:
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _as_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None

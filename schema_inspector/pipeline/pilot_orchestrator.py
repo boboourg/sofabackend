@@ -328,20 +328,6 @@ class PilotOrchestrator:
                     if parsed is not None:
                         parse_results.append(parsed)
 
-            for endpoint in _special_endpoints_for_sport(sport_slug):
-                outcome, parsed = await self._fetch_and_parse(
-                    endpoint=endpoint,
-                    sport_slug=sport_slug,
-                    path_params={"event_id": event_id},
-                    context_entity_type="event",
-                    context_entity_id=event_id,
-                    context_event_id=event_id,
-                    fetch_reason="hydrate_special_route",
-                )
-                fetch_outcomes.append(outcome)
-                if parsed is not None:
-                    parse_results.append(parsed)
-
             if unique_tournament_id is not None and season_id is not None:
                 for widget_job in self.planner.plan_season_widgets(
                     sport_slug,
@@ -367,6 +353,20 @@ class PilotOrchestrator:
                     fetch_outcomes.append(outcome)
                     if parsed is not None:
                         parse_results.append(parsed)
+
+        for endpoint in _special_endpoints_for_sport(sport_slug, core_only=core_only):
+            outcome, parsed = await self._fetch_and_parse(
+                endpoint=endpoint,
+                sport_slug=sport_slug,
+                path_params={"event_id": event_id},
+                context_entity_type="event",
+                context_entity_id=event_id,
+                context_event_id=event_id,
+                fetch_reason="hydrate_special_route",
+            )
+            fetch_outcomes.append(outcome)
+            if parsed is not None:
+                parse_results.append(parsed)
 
         await self._flush_capabilities()
 
@@ -604,7 +604,7 @@ def _endpoint_for_special_kind(special_kind: str) -> SofascoreEndpoint | None:
     return mapping.get(special_kind)
 
 
-def _special_endpoints_for_sport(sport_slug: str) -> tuple[SofascoreEndpoint, ...]:
+def _special_endpoints_for_sport(sport_slug: str, *, core_only: bool = False) -> tuple[SofascoreEndpoint, ...]:
     adapter = resolve_sport_adapter(sport_slug)
     family_map = {
         "tennis_point_by_point": EVENT_POINT_BY_POINT_ENDPOINT,
@@ -613,10 +613,11 @@ def _special_endpoints_for_sport(sport_slug: str) -> tuple[SofascoreEndpoint, ..
         "shotmap": EVENT_SHOTMAP_ENDPOINT,
         "esports_games": EVENT_ESPORTS_GAMES_ENDPOINT,
     }
+    core_enabled_families = {"baseball_innings", "esports_games"}
     return tuple(
         family_map[family]
         for family in adapter.special_families
-        if family in family_map
+        if family in family_map and (not core_only or family in core_enabled_families)
     )
 
 

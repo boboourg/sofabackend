@@ -64,6 +64,35 @@ class TennisSpecialParserTests(unittest.TestCase):
         self.assertEqual(len(result.metric_rows["tennis_power"]), 2)
         self.assertEqual({item["side"] for item in result.metric_rows["tennis_power"]}, {"home", "away"})
 
+    def test_tennis_power_parser_supports_array_payload_shape(self) -> None:
+        parser = TennisPowerParser()
+        snapshot = RawSnapshot(
+            snapshot_id=503,
+            endpoint_pattern="/api/v1/event/{event_id}/tennis-power",
+            sport_slug="tennis",
+            source_url="https://www.sofascore.com/api/v1/event/15921219/tennis-power",
+            resolved_url="https://www.sofascore.com/api/v1/event/15921219/tennis-power",
+            envelope_key="tennisPowerRankings",
+            http_status=200,
+            payload={
+                "tennisPowerRankings": [
+                    {"set": 1, "game": 1, "value": -24, "breakOccurred": False},
+                    {"set": 1, "game": 2, "value": 30, "breakOccurred": True},
+                ]
+            },
+            fetched_at="2026-04-16T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=15921219,
+            context_event_id=15921219,
+        )
+
+        result = parser.parse(snapshot)
+
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(len(result.metric_rows["tennis_power"]), 2)
+        self.assertEqual(result.metric_rows["tennis_power"][0]["set_number"], 1)
+        self.assertEqual(result.metric_rows["tennis_power"][1]["break_occurred"], True)
+
 
 if __name__ == "__main__":
     unittest.main()
