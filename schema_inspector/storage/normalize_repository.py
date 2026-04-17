@@ -74,6 +74,7 @@ class NormalizeRepository:
             result.metric_rows.get("baseball_inning", ()),
             ("event_id", "ordinal", "inning", "home_score", "away_score"),
         )
+        await self._persist_baseball_pitches(executor, result.metric_rows.get("baseball_pitch", ()))
         await self._replace_event_rows(
             executor,
             "shotmap_point",
@@ -769,6 +770,56 @@ class NormalizeRepository:
                     row.get("start_y"),
                     row.get("end_x"),
                     row.get("end_y"),
+                )
+                for row in rows
+            ],
+        )
+
+    async def _persist_baseball_pitches(
+        self,
+        executor: SqlExecutor,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        if not rows:
+            return
+        seen_pairs = sorted(
+            {
+                (_as_int(row.get("event_id")), _as_int(row.get("at_bat_id")))
+                for row in rows
+                if _as_int(row.get("event_id")) is not None and _as_int(row.get("at_bat_id")) is not None
+            }
+        )
+        for event_id, at_bat_id in seen_pairs:
+            await executor.execute(
+                "DELETE FROM baseball_pitch WHERE event_id = $1 AND at_bat_id = $2",
+                event_id,
+                at_bat_id,
+            )
+        await _executemany(
+            executor,
+            """
+            INSERT INTO baseball_pitch (
+                event_id, at_bat_id, ordinal, pitch_id, pitch_speed, pitch_type,
+                pitch_zone, pitch_x, pitch_y, mlb_x, mlb_y, outcome, pitcher_id, hitter_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("at_bat_id"),
+                    row.get("ordinal"),
+                    row.get("pitch_id"),
+                    _as_float(row.get("pitch_speed")),
+                    _as_scalar_text(row.get("pitch_type")),
+                    _as_scalar_text(row.get("pitch_zone")),
+                    _as_float(row.get("pitch_x")),
+                    _as_float(row.get("pitch_y")),
+                    _as_float(row.get("mlb_x")),
+                    _as_float(row.get("mlb_y")),
+                    _as_scalar_text(row.get("outcome")),
+                    row.get("pitcher_id"),
+                    row.get("hitter_id"),
                 )
                 for row in rows
             ],

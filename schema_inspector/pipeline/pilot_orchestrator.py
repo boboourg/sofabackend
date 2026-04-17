@@ -8,6 +8,7 @@ from typing import Any
 
 from ..endpoints import (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
+    EVENT_BASEBALL_PITCHES_ENDPOINT,
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
     EVENT_ESPORTS_GAMES_ENDPOINT,
@@ -156,6 +157,7 @@ class PilotOrchestrator:
         live_lane: str | None = None
         live_stream: str | None = None
         finalized = False
+        baseball_seen_at_bats: set[int] = set()
 
         root_outcome, root_parse = await self._fetch_and_parse(
             endpoint=EVENT_DETAIL_ENDPOINT,
@@ -225,6 +227,15 @@ class PilotOrchestrator:
                         fetch_outcomes.append(special_outcome)
                         if special_parse is not None:
                             parse_results.append(special_parse)
+            child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                parent_endpoint=endpoint,
+                parent_outcome=outcome,
+                seen_at_bats=baseball_seen_at_bats,
+            )
+            fetch_outcomes.extend(child_outcomes)
+            parse_results.extend(child_parses)
 
         minutes_to_start = _minutes_to_start(
             start_timestamp=start_timestamp,
@@ -367,6 +378,15 @@ class PilotOrchestrator:
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
+            child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                parent_endpoint=endpoint,
+                parent_outcome=outcome,
+                seen_at_bats=baseball_seen_at_bats,
+            )
+            fetch_outcomes.extend(child_outcomes)
+            parse_results.extend(child_parses)
 
         await self._flush_capabilities()
 
@@ -481,6 +501,49 @@ class PilotOrchestrator:
             context_event_id=event_id,
             fetch_reason=job.job_type,
         )
+
+    async def _run_baseball_pitch_fanout(
+        self,
+        *,
+        sport_slug: str,
+        event_id: int,
+        parent_endpoint: SofascoreEndpoint,
+        parent_outcome: FetchOutcomeEnvelope,
+        seen_at_bats: set[int],
+    ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
+        if (
+            sport_slug != "baseball"
+            or parent_outcome.snapshot_id is None
+            or parent_endpoint.pattern not in {EVENT_INCIDENTS_ENDPOINT.pattern, EVENT_BASEBALL_INNINGS_ENDPOINT.pattern}
+        ):
+            return [], []
+
+        snapshot = self.snapshot_store.load_snapshot(parent_outcome.snapshot_id)
+        discovered_at_bats = [
+            at_bat_id
+            for at_bat_id in _extract_baseball_at_bat_ids(snapshot.payload)
+            if at_bat_id not in seen_at_bats
+        ]
+        if not discovered_at_bats:
+            return [], []
+
+        outcomes: list[FetchOutcomeEnvelope] = []
+        parses: list[object] = []
+        for at_bat_id in discovered_at_bats:
+            seen_at_bats.add(at_bat_id)
+            outcome, parsed = await self._fetch_and_parse(
+                endpoint=EVENT_BASEBALL_PITCHES_ENDPOINT,
+                sport_slug=sport_slug,
+                path_params={"event_id": event_id, "at_bat_id": at_bat_id},
+                context_entity_type="event",
+                context_entity_id=event_id,
+                context_event_id=event_id,
+                fetch_reason="hydrate_special_route",
+            )
+            outcomes.append(outcome)
+            if parsed is not None:
+                parses.append(parsed)
+        return outcomes, parses
 
     async def _record_capability(
         self,
@@ -681,4 +744,43 @@ def _latest_fetched_at(outcomes: list[FetchOutcomeEnvelope]) -> str | None:
     for outcome in reversed(outcomes):
         if outcome.fetched_at:
             return outcome.fetched_at
+    return None
+
+
+def _extract_baseball_at_bat_ids(payload: object) -> tuple[int, ...]:
+    found: set[int] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized_key = str(key).strip().lower()
+                if normalized_key == "atbatid":
+                    at_bat_id = _as_int(child)
+                    if at_bat_id is not None:
+                        found.add(at_bat_id)
+                elif normalized_key == "atbat" and isinstance(child, dict):
+                    at_bat_id = _as_int(child.get("id"))
+                    if at_bat_id is not None:
+                        found.add(at_bat_id)
+                walk(child)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return tuple(sorted(found))
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
+            return int(stripped)
     return None

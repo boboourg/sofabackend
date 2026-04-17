@@ -19,6 +19,8 @@ ENTITY_KEY_TO_TYPE = {
     "parentTeam": "team",
     "team": "team",
     "player": "player",
+    "pitcher": "player",
+    "hitter": "player",
     "manager": "manager",
     "homeManager": "manager",
     "awayManager": "manager",

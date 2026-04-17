@@ -476,7 +476,7 @@ EVENT_BASEBALL_INNINGS_ENDPOINT = SofascoreEndpoint(
 EVENT_BASEBALL_PITCHES_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches",
     envelope_key="pitches",
-    target_table="api_payload_snapshot",
+    target_table="baseball_pitch",
     notes="Baseball-specific at-bat pitch breakdown payload.",
 )
 
@@ -550,6 +550,7 @@ EVENT_DETAIL_TENNIS_ENDPOINTS = (
 
 EVENT_DETAIL_BASEBALL_ENDPOINTS = (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
+    EVENT_BASEBALL_PITCHES_ENDPOINT,
 )
 
 EVENT_DETAIL_ICE_HOCKEY_ENDPOINTS = (

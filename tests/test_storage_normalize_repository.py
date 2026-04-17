@@ -221,6 +221,24 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                         "away_score": 1,
                     },
                 ),
+                "baseball_pitch": (
+                    {
+                        "event_id": 15308201,
+                        "at_bat_id": 981436,
+                        "ordinal": 0,
+                        "pitch_id": 1,
+                        "pitch_speed": 96.4,
+                        "pitch_type": "FF",
+                        "pitch_zone": "up-in",
+                        "pitch_x": 0.13,
+                        "pitch_y": 2.71,
+                        "mlb_x": 125.4,
+                        "mlb_y": 234.5,
+                        "outcome": "strike",
+                        "pitcher_id": 9001,
+                        "hitter_id": 9002,
+                    },
+                ),
                 "shotmap_point": (
                     {
                         "event_id": 15929810,
@@ -248,6 +266,7 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO tennis_point_by_point" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO tennis_power" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO baseball_inning" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO baseball_pitch" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO shotmap_point" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO esports_game" in sql for sql in statements))
 

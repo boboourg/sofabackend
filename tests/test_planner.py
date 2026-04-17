@@ -125,7 +125,7 @@ class PlannerTests(unittest.TestCase):
 
         self.assertIn("statistics", kinds)
         self.assertIn("lineups", kinds)
-        self.assertNotIn("incidents", kinds)
+        self.assertIn("incidents", kinds)
 
     def test_season_widgets_follow_sport_profile(self) -> None:
         planner = Planner()
