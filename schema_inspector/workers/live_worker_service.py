@@ -1,38 +1,40 @@
-"""Continuous hydrate worker backed by the shared worker runtime."""
+"""Continuous live refresh worker services for hot and warm lanes."""
 
 from __future__ import annotations
 
 import time
 
-from ..queue.streams import STREAM_HYDRATE, StreamEntry
+from ..queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job
 
 
-class HydrateWorker:
+class LiveWorkerService:
     def __init__(
         self,
         *,
         orchestrator,
         delayed_scheduler,
         queue,
+        lane: str,
         consumer: str,
-        group: str = "cg:hydrate",
-        stream: str = STREAM_HYDRATE,
         block_ms: int = 5_000,
         now_ms_factory=None,
         default_sport_slug: str = "football",
     ) -> None:
+        normalized_lane = str(lane).strip().lower()
+        if normalized_lane not in {"hot", "warm"}:
+            raise ValueError(f"Unsupported live lane: {lane!r}")
+
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
-        self.queue = queue
-        self.consumer = consumer
-        self.group = group
-        self.stream = stream
+        self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
+        stream = STREAM_LIVE_HOT if normalized_lane == "hot" else STREAM_LIVE_WARM
+        group = f"cg:live_{normalized_lane}"
         self.runtime = WorkerRuntime(
-            name="hydrate-worker",
+            name=f"live-{normalized_lane}-worker",
             queue=queue,
             stream=stream,
             group=group,
@@ -45,11 +47,11 @@ class HydrateWorker:
     async def handle(self, entry: StreamEntry) -> str:
         job = decode_stream_job(entry)
         if job.entity_id is None:
-            raise RuntimeError("Hydrate worker requires event entity_id in stream payload.")
+            raise RuntimeError("Live worker requires event entity_id in stream payload.")
         await self.orchestrator.run_event(
             event_id=int(job.entity_id),
             sport_slug=job.sport_slug or self.default_sport_slug,
-            hydration_mode=str(job.params.get("hydration_mode", "full")),
+            hydration_mode="full",
         )
         return "completed"
 
