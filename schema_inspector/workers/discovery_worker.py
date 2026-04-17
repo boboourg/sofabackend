@@ -22,6 +22,10 @@ class DiscoveryWorker:
         hydrate_stream: str = STREAM_HYDRATE,
         block_ms: int = 5_000,
         timeout_s: float = 20.0,
+        delayed_scheduler=None,
+        delayed_payload_store=None,
+        completion_store=None,
+        now_ms_factory=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.queue = queue
@@ -30,6 +34,9 @@ class DiscoveryWorker:
         self.stream = stream
         self.hydrate_stream = hydrate_stream
         self.timeout_s = float(timeout_s)
+        self.delayed_scheduler = delayed_scheduler
+        self.delayed_payload_store = delayed_payload_store
+        self.now_ms_factory = now_ms_factory or (lambda: int(datetime.now(timezone.utc).timestamp() * 1000))
         self.runtime = WorkerRuntime(
             name="discovery-worker",
             queue=queue,
@@ -37,7 +44,10 @@ class DiscoveryWorker:
             group=group,
             consumer=consumer,
             handler=self.handle,
+            retry_handler=self.retry_later if delayed_scheduler is not None else None,
+            completion_store=completion_store,
             block_ms=block_ms,
+            now_ms_factory=self.now_ms_factory,
         )
 
     async def handle(self, entry: StreamEntry) -> str:
@@ -76,6 +86,19 @@ class DiscoveryWorker:
             )
             self.queue.publish(self.hydrate_stream, encode_stream_job(hydrate_job))
         return f"published:{len(event_ids)}"
+
+    async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
+        del exc
+        if self.delayed_scheduler is None:
+            return "ignored"
+        job = decode_stream_job(entry)
+        if self.delayed_payload_store is not None:
+            self.delayed_payload_store.save_entry(entry)
+        self.delayed_scheduler.schedule(
+            job.job_id,
+            run_at_epoch_ms=int(self.now_ms_factory()) + int(delay_ms),
+        )
+        return "requeued"
 
     async def run_forever(self, *, install_signal_handlers: bool = True) -> None:
         await self.runtime.run_forever(install_signal_handlers=install_signal_handlers)

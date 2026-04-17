@@ -87,6 +87,41 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         payload = queue.published_payloads[0]
         self.assertEqual(json.loads(str(payload["params_json"])), {"hydration_mode": "full"})
 
+    async def test_discovery_worker_schedules_retry_for_deadlock_errors(self) -> None:
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        scheduler = _FakeDelayedScheduler()
+        payload_store = _FakePayloadStore()
+        worker = DiscoveryWorker(
+            orchestrator=_FakeDiscoveryOrchestrator(event_ids=()),
+            queue=_FakeQueue(),
+            consumer="worker-discovery-1",
+            delayed_scheduler=scheduler,
+            delayed_payload_store=payload_store,
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+        entry = StreamEntry(
+            stream=STREAM_DISCOVERY,
+            message_id="1-9",
+            values={
+                "job_id": "job-9",
+                "job_type": "discover_sport_surface",
+                "sport_slug": "football",
+                "entity_type": "sport",
+                "entity_id": "",
+                "scope": "scheduled",
+                "params_json": '{"date":"2026-04-17"}',
+                "attempt": "3",
+                "idempotency_key": "key-9",
+            },
+        )
+
+        result = await worker.retry_later(entry, RuntimeError("deadlock detected"), delay_ms=20_000)
+
+        self.assertEqual(result, "requeued")
+        self.assertEqual(payload_store.saved_message_ids, ["1-9"])
+        self.assertEqual(scheduler.calls, [("job-9", 1_800_000_020_000)])
+
 
 class _FakeDiscoveryOrchestrator:
     def __init__(self, *, event_ids: tuple[int, ...]) -> None:
@@ -120,6 +155,22 @@ class _FakeQueue:
     def ack(self, *args, **kwargs):
         del args, kwargs
         return 0
+
+
+class _FakeDelayedScheduler:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def schedule(self, job_id: str, *, run_at_epoch_ms: int) -> None:
+        self.calls.append((job_id, run_at_epoch_ms))
+
+
+class _FakePayloadStore:
+    def __init__(self) -> None:
+        self.saved_message_ids: list[str] = []
+
+    def save_entry(self, entry: StreamEntry) -> None:
+        self.saved_message_ids.append(entry.message_id)
 
 
 if __name__ == "__main__":

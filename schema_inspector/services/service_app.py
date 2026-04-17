@@ -156,6 +156,9 @@ class ServiceApp:
             consumer=consumer_name,
             block_ms=block_ms,
             timeout_s=timeout_s,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
         )
 
     def build_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> LiveWorkerService:

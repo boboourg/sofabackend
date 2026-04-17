@@ -7,7 +7,7 @@ import inspect
 import time
 from dataclasses import dataclass
 
-from ..queue.streams import STREAM_DLQ, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM, STREAM_MAINTENANCE, StreamEntry
+from ..queue.streams import STREAM_DISCOVERY, STREAM_DLQ, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM, STREAM_MAINTENANCE, StreamEntry
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job
 
@@ -40,6 +40,7 @@ class MaintenanceWorker:
         stream: str = STREAM_MAINTENANCE,
         block_ms: int = 5_000,
         reclaim_targets: tuple[ReclaimTarget, ...] = (
+            ReclaimTarget(stream=STREAM_DISCOVERY, group="cg:discovery"),
             ReclaimTarget(stream=STREAM_HYDRATE, group="cg:hydrate"),
             ReclaimTarget(stream=STREAM_LIVE_HOT, group="cg:live_hot"),
             ReclaimTarget(stream=STREAM_LIVE_WARM, group="cg:live_warm"),
