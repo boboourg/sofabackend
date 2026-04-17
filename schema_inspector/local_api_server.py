@@ -23,7 +23,17 @@ from .endpoints import SofascoreEndpoint, local_api_endpoints
 from .ops.health import collect_health_report
 from .queue.delayed import DELAYED_JOBS_KEY
 from .queue.live_state import LiveEventStateStore
-from .queue.streams import RedisStreamQueue, STREAM_DISCOVERY, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM, STREAM_MAINTENANCE
+from .queue.streams import (
+    RedisStreamQueue,
+    STREAM_DISCOVERY,
+    STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_HYDRATE,
+    STREAM_HISTORICAL_MAINTENANCE,
+    STREAM_HYDRATE,
+    STREAM_LIVE_HOT,
+    STREAM_LIVE_WARM,
+    STREAM_MAINTENANCE,
+)
 
 from .local_swagger_builder import (
     _build_viewer_html,
@@ -37,9 +47,12 @@ _ALL_ENDPOINTS = local_api_endpoints()
 _QUEUE_GROUPS = (
     (STREAM_DISCOVERY, "cg:discovery"),
     (STREAM_HYDRATE, "cg:hydrate"),
+    (STREAM_HISTORICAL_DISCOVERY, "cg:historical_discovery"),
+    (STREAM_HISTORICAL_HYDRATE, "cg:historical_hydrate"),
     (STREAM_LIVE_HOT, "cg:live_hot"),
     (STREAM_LIVE_WARM, "cg:live_warm"),
     (STREAM_MAINTENANCE, "cg:maintenance"),
+    (STREAM_HISTORICAL_MAINTENANCE, "cg:historical_maintenance"),
 )
 
 

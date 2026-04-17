@@ -93,19 +93,43 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         parser = _build_parser()
 
         planner = parser.parse_args(["planner-daemon", "--sport-slug", "football"])
+        historical_planner = parser.parse_args(
+            [
+                "historical-planner-daemon",
+                "--date-from",
+                "2025-01-01",
+                "--date-to",
+                "2025-01-31",
+            ]
+        )
         discovery = parser.parse_args(["worker-discovery", "--consumer-name", "discovery-1"])
+        historical_discovery = parser.parse_args(
+            ["worker-historical-discovery", "--consumer-name", "historical-discovery-1"]
+        )
         hydrate = parser.parse_args(["worker-hydrate", "--consumer-name", "hydrate-1"])
+        historical_hydrate = parser.parse_args(
+            ["worker-historical-hydrate", "--consumer-name", "historical-hydrate-1"]
+        )
         live_hot = parser.parse_args(["worker-live-hot", "--consumer-name", "hot-1"])
         live_warm = parser.parse_args(["worker-live-warm", "--consumer-name", "warm-1"])
         maintenance = parser.parse_args(["worker-maintenance", "--consumer-name", "maint-1"])
+        historical_maintenance = parser.parse_args(
+            ["worker-historical-maintenance", "--consumer-name", "historical-maint-1"]
+        )
 
         self.assertEqual(planner.command, "planner-daemon")
         self.assertEqual(planner.sport_slug, ["football"])
+        self.assertEqual(historical_planner.command, "historical-planner-daemon")
+        self.assertEqual(historical_planner.date_from, "2025-01-01")
+        self.assertEqual(historical_planner.date_to, "2025-01-31")
         self.assertEqual(discovery.command, "worker-discovery")
+        self.assertEqual(historical_discovery.command, "worker-historical-discovery")
         self.assertEqual(hydrate.command, "worker-hydrate")
+        self.assertEqual(historical_hydrate.command, "worker-historical-hydrate")
         self.assertEqual(live_hot.command, "worker-live-hot")
         self.assertEqual(live_warm.command, "worker-live-warm")
         self.assertEqual(maintenance.command, "worker-maintenance")
+        self.assertEqual(historical_maintenance.command, "worker-historical-maintenance")
 
     def test_service_app_ensures_consumer_groups(self) -> None:
         from schema_inspector.services.service_app import ServiceApp
@@ -129,6 +153,27 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("stream:etl:live_hot", "cg:live_hot", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:live_warm", "cg:live_warm", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:maintenance", "cg:maintenance", "0-0"), fake_stream_queue.groups)
+
+    def test_service_app_ensures_historical_consumer_groups(self) -> None:
+        from schema_inspector.services.service_app import ServiceApp
+
+        fake_stream_queue = _FakeStreamQueue()
+        app = type(
+            "App",
+            (),
+            {
+                "redis_backend": object(),
+                "stream_queue": fake_stream_queue,
+                "live_state_store": object(),
+            },
+        )()
+
+        service_app = ServiceApp(app)
+        service_app.ensure_historical_consumer_groups()
+
+        self.assertIn(("stream:etl:historical_discovery", "cg:historical_discovery", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:historical_hydrate", "cg:historical_hydrate", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:historical_maintenance", "cg:historical_maintenance", "0-0"), fake_stream_queue.groups)
 
     def test_load_redis_backend_fails_without_url_when_memory_fallback_disabled(self) -> None:
         import schema_inspector.cli as hybrid_cli
@@ -574,6 +619,123 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(fake_service_app.calls, [("discovery", "discovery-a", 2100, 17.5)])
 
+    async def test_dispatch_historical_service_commands_run_service_loops(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            planner_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="historical-planner-daemon",
+                    sport_slug=["football"],
+                    date_from="2025-01-01",
+                    date_to="2025-01-31",
+                    dates_per_tick=2,
+                    loop_interval_seconds=7.0,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+            discovery_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-historical-discovery",
+                    consumer_name="historical-discovery-a",
+                    block_ms=2200,
+                    timeout=18.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+            hydrate_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-historical-hydrate",
+                    consumer_name="historical-hydrate-a",
+                    block_ms=2300,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+            maintenance_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-historical-maintenance",
+                    consumer_name="historical-maint-a",
+                    block_ms=2400,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(planner_exit, 0)
+        self.assertEqual(discovery_exit, 0)
+        self.assertEqual(hydrate_exit, 0)
+        self.assertEqual(maintenance_exit, 0)
+        self.assertEqual(
+            fake_service_app.calls,
+            [
+                ("historical_planner", ("football",), "2025-01-01", "2025-01-31", 2, 7.0),
+                ("historical_discovery", "historical-discovery-a", 2200, 18.0),
+                ("historical_hydrate", "historical-hydrate-a", 2300),
+                ("historical_maintenance", "historical-maint-a", 2400),
+            ],
+        )
+
     async def test_dispatch_worker_live_and_maintenance_run_service_loops(self) -> None:
         import schema_inspector.cli as hybrid_cli
 
@@ -1001,6 +1163,28 @@ class _FakeServiceApp:
 
     async def run_maintenance_worker(self, *, consumer_name: str, block_ms: int) -> None:
         self.calls.append(("maintenance", consumer_name, block_ms))
+
+    async def run_historical_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...],
+        date_from: str,
+        date_to: str,
+        dates_per_tick: int,
+        loop_interval_seconds: float,
+    ) -> None:
+        self.calls.append(
+            ("historical_planner", sport_slugs, date_from, date_to, dates_per_tick, loop_interval_seconds)
+        )
+
+    async def run_historical_discovery_worker(self, *, consumer_name: str, block_ms: int, timeout_s: float) -> None:
+        self.calls.append(("historical_discovery", consumer_name, block_ms, timeout_s))
+
+    async def run_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int) -> None:
+        self.calls.append(("historical_hydrate", consumer_name, block_ms))
+
+    async def run_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int) -> None:
+        self.calls.append(("historical_maintenance", consumer_name, block_ms))
 
 
 class _FakeAsyncpgDatabaseContext:

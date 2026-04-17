@@ -6,6 +6,9 @@ from schema_inspector.queue import (
     DELAYED_JOBS_KEY,
     STREAM_DISCOVERY,
     STREAM_DLQ,
+    STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_HYDRATE,
+    STREAM_HISTORICAL_MAINTENANCE,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
@@ -211,6 +214,9 @@ class QueueStreamsTests(unittest.TestCase):
         self.assertEqual(STREAM_DISCOVERY, "stream:etl:discovery")
         self.assertEqual(STREAM_HYDRATE, "stream:etl:hydrate")
         self.assertEqual(STREAM_NORMALIZE, "stream:etl:normalize")
+        self.assertEqual(STREAM_HISTORICAL_DISCOVERY, "stream:etl:historical_discovery")
+        self.assertEqual(STREAM_HISTORICAL_HYDRATE, "stream:etl:historical_hydrate")
+        self.assertEqual(STREAM_HISTORICAL_MAINTENANCE, "stream:etl:historical_maintenance")
         self.assertEqual(STREAM_LIVE_HOT, "stream:etl:live_hot")
         self.assertEqual(STREAM_LIVE_WARM, "stream:etl:live_warm")
         self.assertEqual(STREAM_MAINTENANCE, "stream:etl:maintenance")

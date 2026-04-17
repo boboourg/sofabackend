@@ -5,6 +5,7 @@ import unittest
 from schema_inspector.local_api_server import (
     ApiResponse,
     LocalApiApplication,
+    _QUEUE_GROUPS,
     _compile_path_template,
     _decode_snapshot_payload,
     _normalized_query_map,
@@ -140,6 +141,20 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("Route is not registered", response.payload["error"])
 
+    async def test_queue_summary_tracks_historical_streams(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.live_state_store = None
+        application.redis_backend = None
+        application.stream_queue = _FakePendingQueue()
+
+        payload = await application._fetch_ops_queue_summary_payload()
+
+        stream_names = {item["stream"] for item in payload["streams"]}
+        self.assertIn("stream:etl:historical_discovery", stream_names)
+        self.assertIn("stream:etl:historical_hydrate", stream_names)
+        self.assertIn("stream:etl:historical_maintenance", stream_names)
+        self.assertGreaterEqual(len(_QUEUE_GROUPS), 8)
+
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_api_get_uses_normalized_category_fallback_when_snapshot_missing(self) -> None:
@@ -192,3 +207,11 @@ class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakePendingQueue:
+    def pending_summary(self, stream: str, group: str):
+        del stream, group
+        from schema_inspector.queue.streams import PendingSummary
+
+        return PendingSummary(total=0, smallest_id=None, largest_id=None, consumers={})

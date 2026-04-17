@@ -492,6 +492,16 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "historical-planner-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_planner_daemon(
+                    sport_slugs=tuple(args.sport_slug or ()),
+                    date_from=args.date_from,
+                    date_to=args.date_to,
+                    dates_per_tick=args.dates_per_tick,
+                    loop_interval_seconds=args.loop_interval_seconds,
+                )
+                return 0
             if args.command == "worker-discovery":
                 service_app = ServiceApp(app)
                 await service_app.run_discovery_worker(
@@ -500,9 +510,24 @@ async def _dispatch(args) -> int:
                     timeout_s=args.timeout,
                 )
                 return 0
+            if args.command == "worker-historical-discovery":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_discovery_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                    timeout_s=args.timeout,
+                )
+                return 0
             if args.command == "worker-hydrate":
                 service_app = ServiceApp(app)
                 await service_app.run_hydrate_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-historical-hydrate":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_hydrate_worker(
                     consumer_name=args.consumer_name,
                     block_ms=args.block_ms,
                 )
@@ -526,6 +551,13 @@ async def _dispatch(args) -> int:
             if args.command == "worker-maintenance":
                 service_app = ServiceApp(app)
                 await service_app.run_maintenance_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-historical-maintenance":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_maintenance_worker(
                     consumer_name=args.consumer_name,
                     block_ms=args.block_ms,
                 )
@@ -595,13 +627,28 @@ def _build_parser() -> argparse.ArgumentParser:
     planner_daemon.add_argument("--scheduled-interval-seconds", type=float, default=300.0, help="Scheduled planning interval per sport.")
     planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
 
+    historical_planner_daemon = subparsers.add_parser("historical-planner-daemon", help="Run the historical date-range planner loop.")
+    historical_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
+    historical_planner_daemon.add_argument("--date-from", required=True, help="Inclusive start date in YYYY-MM-DD format.")
+    historical_planner_daemon.add_argument("--date-to", required=True, help="Inclusive end date in YYYY-MM-DD format.")
+    historical_planner_daemon.add_argument("--dates-per-tick", type=int, default=1, help="Maximum archival dates to publish per sport on each planner tick.")
+    historical_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
     worker_discovery = subparsers.add_parser("worker-discovery", help="Run the discovery consumer group loop.")
     worker_discovery.add_argument("--consumer-name", default="worker-discovery-1", help="Redis consumer name for the discovery worker.")
     worker_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
+    worker_historical_discovery = subparsers.add_parser("worker-historical-discovery", help="Run the archival discovery consumer group loop.")
+    worker_historical_discovery.add_argument("--consumer-name", default="worker-historical-discovery-1", help="Redis consumer name for the archival discovery worker.")
+    worker_historical_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
     worker_hydrate = subparsers.add_parser("worker-hydrate", help="Run the hydrate consumer group loop.")
     worker_hydrate.add_argument("--consumer-name", default="worker-hydrate-1", help="Redis consumer name for the hydrate worker.")
     worker_hydrate.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_historical_hydrate = subparsers.add_parser("worker-historical-hydrate", help="Run the archival hydrate consumer group loop.")
+    worker_historical_hydrate.add_argument("--consumer-name", default="worker-historical-hydrate-1", help="Redis consumer name for the archival hydrate worker.")
+    worker_historical_hydrate.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_live_hot = subparsers.add_parser("worker-live-hot", help="Run the live-hot consumer group loop.")
     worker_live_hot.add_argument("--consumer-name", default="worker-live-hot-1", help="Redis consumer name for the live-hot worker.")
@@ -614,6 +661,10 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_maintenance = subparsers.add_parser("worker-maintenance", help="Run the maintenance/recovery consumer group loop.")
     worker_maintenance.add_argument("--consumer-name", default="worker-maintenance-1", help="Redis consumer name for the maintenance worker.")
     worker_maintenance.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_historical_maintenance = subparsers.add_parser("worker-historical-maintenance", help="Run the archival maintenance/recovery consumer group loop.")
+    worker_historical_maintenance.add_argument("--consumer-name", default="worker-historical-maintenance-1", help="Redis consumer name for the archival maintenance worker.")
+    worker_historical_maintenance.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
     return parser
 
 

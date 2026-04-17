@@ -12,6 +12,9 @@ from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
 from ..queue.streams import (
     STREAM_DISCOVERY,
+    STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_HYDRATE,
+    STREAM_HISTORICAL_MAINTENANCE,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
@@ -19,12 +22,14 @@ from ..queue.streams import (
     RedisStreamQueue,
     StreamEntry,
 )
-from ..services.planner_daemon import PlannerDaemon, ScheduledPlanningTarget
+from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
+from .planner_daemon import PlannerDaemon, ScheduledPlanningTarget
 from ..workers._stream_jobs import decode_stream_payload
 from ..workers.discovery_worker import DiscoveryWorker
 from ..workers.hydrate_worker import HydrateWorker
 from ..workers.live_worker_service import LiveWorkerService
 from ..workers.maintenance_worker import MaintenanceWorker
+from ..workers.maintenance_worker import ReclaimTarget
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,12 @@ DEFAULT_CONSUMER_GROUPS = (
     (STREAM_LIVE_HOT, "cg:live_hot"),
     (STREAM_LIVE_WARM, "cg:live_warm"),
     (STREAM_MAINTENANCE, "cg:maintenance"),
+)
+
+HISTORICAL_CONSUMER_GROUPS = (
+    (STREAM_HISTORICAL_DISCOVERY, "cg:historical_discovery"),
+    (STREAM_HISTORICAL_HYDRATE, "cg:historical_hydrate"),
+    (STREAM_HISTORICAL_MAINTENANCE, "cg:historical_maintenance"),
 )
 
 
@@ -100,9 +111,14 @@ class ServiceApp:
         self.delayed_scheduler = DelayedJobScheduler(self.app.redis_backend)
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
         self.completion_store = DedupeStore(self.app.redis_backend)
+        self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
 
     def ensure_consumer_groups(self) -> None:
         for stream, group in DEFAULT_CONSUMER_GROUPS:
+            self.stream_queue.ensure_group(stream, group)
+
+    def ensure_historical_consumer_groups(self) -> None:
+        for stream, group in HISTORICAL_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
 
     def build_planner_daemon(
@@ -130,6 +146,32 @@ class ServiceApp:
             loop_interval_s=loop_interval_seconds,
         )
 
+    def build_historical_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        date_from: str,
+        date_to: str,
+        dates_per_tick: int = 1,
+        loop_interval_seconds: float = 5.0,
+    ) -> HistoricalPlannerDaemon:
+        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        targets = tuple(
+            HistoricalPlanningTarget(
+                sport_slug=sport_slug,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            for sport_slug in normalized_sports
+        )
+        return HistoricalPlannerDaemon(
+            queue=self.stream_queue,
+            cursor_store=self.historical_cursor_store,
+            targets=targets,
+            dates_per_tick=dates_per_tick,
+            loop_interval_s=loop_interval_seconds,
+        )
+
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
         self.ensure_consumer_groups()
         return HydrateWorker(
@@ -139,6 +181,20 @@ class ServiceApp:
             completion_store=self.completion_store,
             queue=self.stream_queue,
             consumer=consumer_name,
+            block_ms=block_ms,
+        )
+
+    def build_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
+        self.ensure_historical_consumer_groups()
+        return HydrateWorker(
+            orchestrator=self.app,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            group="cg:historical_hydrate",
+            stream=STREAM_HISTORICAL_HYDRATE,
             block_ms=block_ms,
         )
 
@@ -154,6 +210,28 @@ class ServiceApp:
             orchestrator=self.app,
             queue=self.stream_queue,
             consumer=consumer_name,
+            block_ms=block_ms,
+            timeout_s=timeout_s,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+        )
+
+    def build_historical_discovery_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+        timeout_s: float = 20.0,
+    ) -> DiscoveryWorker:
+        self.ensure_historical_consumer_groups()
+        return DiscoveryWorker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            group="cg:historical_discovery",
+            stream=STREAM_HISTORICAL_DISCOVERY,
+            hydrate_stream=STREAM_HISTORICAL_HYDRATE,
             block_ms=block_ms,
             timeout_s=timeout_s,
             delayed_scheduler=self.delayed_scheduler,
@@ -186,6 +264,24 @@ class ServiceApp:
             block_ms=block_ms,
         )
 
+    def build_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:
+        self.ensure_historical_consumer_groups()
+        return MaintenanceWorker(
+            handler=self._handle_maintenance,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            group="cg:historical_maintenance",
+            stream=STREAM_HISTORICAL_MAINTENANCE,
+            block_ms=block_ms,
+            reclaim_targets=(
+                ReclaimTarget(stream=STREAM_HISTORICAL_DISCOVERY, group="cg:historical_discovery"),
+                ReclaimTarget(stream=STREAM_HISTORICAL_HYDRATE, group="cg:historical_hydrate"),
+            ),
+        )
+
     async def run_planner_daemon(
         self,
         *,
@@ -198,6 +294,25 @@ class ServiceApp:
         daemon = self.build_planner_daemon(
             sport_slugs=sport_slugs,
             scheduled_interval_seconds=scheduled_interval_seconds,
+            loop_interval_seconds=loop_interval_seconds,
+        )
+        await daemon.run_forever()
+
+    async def run_historical_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        date_from: str,
+        date_to: str,
+        dates_per_tick: int = 1,
+        loop_interval_seconds: float = 5.0,
+    ) -> None:
+        self.ensure_historical_consumer_groups()
+        daemon = self.build_historical_planner_daemon(
+            sport_slugs=sport_slugs,
+            date_from=date_from,
+            date_to=date_to,
+            dates_per_tick=dates_per_tick,
             loop_interval_seconds=loop_interval_seconds,
         )
         await daemon.run_forever()
@@ -216,8 +331,26 @@ class ServiceApp:
         )
         await worker.run_forever()
 
+    async def run_historical_discovery_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+        timeout_s: float = 20.0,
+    ) -> None:
+        worker = self.build_historical_discovery_worker(
+            consumer_name=consumer_name,
+            block_ms=block_ms,
+            timeout_s=timeout_s,
+        )
+        await worker.run_forever()
+
     async def run_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
+        await worker.run_forever()
+
+    async def run_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        worker = self.build_historical_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
     async def run_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> None:
@@ -227,6 +360,10 @@ class ServiceApp:
 
     async def run_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_maintenance_worker(consumer_name=consumer_name, block_ms=block_ms)
+        await worker.run_forever()
+
+    async def run_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        worker = self.build_historical_maintenance_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
     async def _handle_maintenance(self, entry: StreamEntry) -> str:
