@@ -19,6 +19,7 @@ from .event_list_repository import EventListRepository
 from .fetch_executor import FetchExecutor
 from .normalizers.sink import DurableNormalizeSink
 from .normalizers.worker import NormalizeWorker
+from .ops.db_audit import collect_db_audit
 from .ops.health import collect_health_report
 from .ops.recovery import rebuild_live_state_from_postgres
 from .parsers.base import RawSnapshot
@@ -187,6 +188,14 @@ class HybridApp:
                 result_sink=DurableNormalizeSink(self.normalize_repository, connection),
             )
             return await worker.handle_async(snapshot)
+
+    async def collect_db_audit(self, *, sport_slug: str, event_ids: tuple[int, ...]):
+        async with self.database.connection() as connection:
+            return await collect_db_audit(
+                sql_executor=connection,
+                sport_slug=sport_slug,
+                event_ids=tuple(int(item) for item in event_ids),
+            )
 
     async def discover_live_event_ids(self, *, sport_slug: str, timeout: float) -> tuple[int, ...]:
         result = await self.event_list_job.run_live(sport_slug=sport_slug, timeout=timeout)
@@ -443,6 +452,13 @@ async def _dispatch(args) -> int:
                     f"live_cold={report.live_cold_count}"
                 )
                 return 0
+            if args.command == "audit-db":
+                report = await app.collect_db_audit(
+                    sport_slug=args.sport_slug,
+                    event_ids=tuple(int(item) for item in args.event_id),
+                )
+                _print_db_audit_report(report)
+                return 0
             if args.command == "recover-live-state":
                 report = await app.recover_live_state()
                 print(
@@ -500,6 +516,10 @@ def _build_parser() -> argparse.ArgumentParser:
     replay = subparsers.add_parser("replay", help="Replay one or more payload snapshots through durable sinks.")
     replay.add_argument("--snapshot-id", type=int, action="append", required=True, help="Repeatable payload snapshot id.")
 
+    audit = subparsers.add_parser("audit-db", help="Print a compact durable/raw database audit for event ids.")
+    audit.add_argument("--sport-slug", required=True, help="Sport slug for special-table routing.")
+    audit.add_argument("--event-id", type=int, action="append", required=True, help="Repeatable hydrated event id.")
+
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
     subparsers.add_parser("recover-live-state", help="Rebuild Redis live-state indexes from PostgreSQL history.")
     return parser
@@ -507,6 +527,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _print_batch_report(label: str, report: HydrationBatchReport) -> None:
     print(f"{label} events={len(report.processed_event_ids)} event_ids={','.join(str(item) for item in report.processed_event_ids)}")
+
+
+def _print_db_audit_report(report) -> None:
+    special = " ".join(f"{name}={count}" for name, count in sorted(report.special_counts.items()))
+    suffix = f" {special}" if special else ""
+    print(
+        "db_audit "
+        f"sport={report.sport_slug} "
+        f"events={report.event_count} "
+        f"requests={report.raw_requests} "
+        f"snapshots={report.raw_snapshots} "
+        f"event_rows={report.events} "
+        f"statistics={report.statistics} "
+        f"incidents={report.incidents} "
+        f"lineup_sides={report.lineup_sides} "
+        f"lineup_players={report.lineup_players}"
+        f"{suffix}"
+    )
 
 
 def _configure_logging(level_name: str) -> None:

@@ -207,6 +207,56 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("redis_ok=1", output)
         self.assertIn("redis_backend=fakeredis", output)
 
+    async def test_dispatch_audit_db_prints_compact_report(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        stdout = io.StringIO()
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+
+            with redirect_stdout(stdout):
+                exit_code = await hybrid_cli._dispatch(
+                    argparse.Namespace(
+                        command="audit-db",
+                        sport_slug="tennis",
+                        event_id=[15991729],
+                        timeout=20.0,
+                        proxy=[],
+                        user_agent=None,
+                        max_attempts=None,
+                        database_url=None,
+                        db_min_size=None,
+                        db_max_size=None,
+                        db_timeout=None,
+                        redis_url=None,
+                        allow_memory_redis=True,
+                        event_concurrency=None,
+                        log_level="INFO",
+                    )
+                )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue().strip()
+        self.assertIn("db_audit sport=tennis", output)
+        self.assertIn("events=1", output)
+        self.assertIn("requests=5", output)
+        self.assertIn("snapshots=4", output)
+        self.assertIn("tennis_point_by_point=7", output)
+        self.assertIn("tennis_power=3", output)
+
     async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
         from schema_inspector.cli import HybridApp
         from schema_inspector.runtime import RuntimeConfig
@@ -457,6 +507,25 @@ class _FakeDispatchHybridApp:
 
     async def close(self) -> None:
         self.closed = True
+
+    async def collect_db_audit(self, *, sport_slug: str, event_ids: tuple[int, ...]):
+        del event_ids
+        return type(
+            "DatabaseAuditReport",
+            (),
+            {
+                "sport_slug": sport_slug,
+                "event_count": 1,
+                "raw_requests": 5,
+                "raw_snapshots": 4,
+                "events": 1,
+                "statistics": 9,
+                "incidents": 2,
+                "lineup_sides": 0,
+                "lineup_players": 0,
+                "special_counts": {"tennis_point_by_point": 7, "tennis_power": 3},
+            },
+        )()
 
 
 class _FakeAsyncpgDatabaseContext:
