@@ -2,10 +2,26 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import types
 import unittest
+from unittest import mock
 
 
 class HybridCliTests(unittest.IsolatedAsyncioTestCase):
+    def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
+        from schema_inspector.cli import _build_parser
+
+        parser = _build_parser()
+
+        args = parser.parse_args(
+            [
+                "--allow-memory-redis",
+                "health",
+            ]
+        )
+
+        self.assertTrue(args.allow_memory_redis)
+
     def test_parser_accepts_event_concurrency_after_scheduled_subcommand(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -29,6 +45,44 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.sport_slug, "football")
         self.assertEqual(args.date, "2026-04-17")
         self.assertEqual(args.event_concurrency, 15)
+
+    def test_load_redis_backend_fails_without_url_when_memory_fallback_disabled(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        with mock.patch.dict(hybrid_cli.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "Redis is required for production runs"):
+                hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
+
+    def test_load_redis_backend_fails_without_redis_package_when_memory_fallback_disabled(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        with mock.patch.dict(hybrid_cli.os.environ, {"REDIS_URL": "redis://127.0.0.1:6379/0"}, clear=True):
+            with mock.patch.dict("sys.modules", {"redis": None}):
+                with self.assertRaisesRegex(RuntimeError, "Install python package `redis`"):
+                    hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
+
+    def test_load_redis_backend_uses_memory_only_when_explicitly_allowed(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        with mock.patch.dict(hybrid_cli.os.environ, {}, clear=True):
+            backend = hybrid_cli._load_redis_backend(None, allow_memory_fallback=True)
+
+        self.assertIsInstance(backend, hybrid_cli._MemoryRedisBackend)
+
+    def test_load_redis_backend_pings_real_redis_backend(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_backend = _FakeRedisBackend()
+        fake_redis_module = types.SimpleNamespace(
+            Redis=types.SimpleNamespace(from_url=lambda *args, **kwargs: fake_backend),
+        )
+
+        with mock.patch.dict(hybrid_cli.os.environ, {"REDIS_URL": "redis://127.0.0.1:6379/0"}, clear=True):
+            with mock.patch.dict("sys.modules", {"redis": fake_redis_module}):
+                backend = hybrid_cli._load_redis_backend(None, allow_memory_fallback=False)
+
+        self.assertIs(backend, fake_backend)
+        self.assertEqual(fake_backend.ping_calls, 1)
 
     async def test_hybrid_app_close_closes_transport(self) -> None:
         from schema_inspector.cli import HybridApp
@@ -66,11 +120,12 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
                     database_url=None,
                     db_min_size=None,
                     db_max_size=None,
-                    db_timeout=None,
-                    redis_url=None,
-                    event_concurrency=None,
-                    log_level="INFO",
-                )
+                db_timeout=None,
+                redis_url=None,
+                allow_memory_redis=True,
+                event_concurrency=None,
+                log_level="INFO",
+            )
             )
         finally:
             hybrid_cli.load_runtime_config = original_load_runtime_config
@@ -266,9 +321,19 @@ class _FakeClosableTransport:
         self.closed = True
 
 
+class _FakeRedisBackend:
+    def __init__(self) -> None:
+        self.ping_calls = 0
+
+    def ping(self) -> bool:
+        self.ping_calls += 1
+        return True
+
+
 class _FakeDispatchHybridApp:
     def __init__(self) -> None:
         self.closed = False
+        self.redis_backend = _FakeRedisBackend()
 
     async def collect_health(self):
         return type(

@@ -370,8 +370,12 @@ async def _dispatch(args) -> int:
         app = HybridApp(
             database=database,
             runtime_config=runtime_config,
-            redis_backend=_load_redis_backend(args.redis_url),
+            redis_backend=_load_redis_backend(
+                args.redis_url,
+                allow_memory_fallback=bool(getattr(args, "allow_memory_redis", False)),
+            ),
         )
+        logger.info("Redis backend ready: backend=%s", type(app.redis_backend).__name__)
         try:
             if args.command == "event":
                 if args.event_concurrency is None:
@@ -456,6 +460,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db-max-size", type=int, default=None, help="Maximum asyncpg pool size.")
     parser.add_argument("--db-timeout", type=float, default=None, help="asyncpg command timeout in seconds.")
     parser.add_argument("--redis-url", default=None, help="Redis URL override.")
+    parser.add_argument(
+        "--allow-memory-redis",
+        action="store_true",
+        help="Development-only escape hatch that permits in-memory Redis emulation.",
+    )
     parser.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
     parser.add_argument("--log-level", default="INFO", help="Python log level.")
 
@@ -503,15 +512,23 @@ def _configure_logging(level_name: str) -> None:
     )
 
 
-def _load_redis_backend(redis_url: str | None):
+def _load_redis_backend(redis_url: str | None, *, allow_memory_fallback: bool):
     resolved_url = redis_url or os.environ.get("REDIS_URL") or os.environ.get("SOFASCORE_REDIS_URL")
     if not resolved_url:
-        return _MemoryRedisBackend()
+        if allow_memory_fallback:
+            logger.warning("Redis URL missing; falling back to in-memory backend because --allow-memory-redis is enabled.")
+            return _MemoryRedisBackend()
+        raise RuntimeError("Redis is required for production runs. Set REDIS_URL or SOFASCORE_REDIS_URL.")
     try:
         import redis  # type: ignore
-    except ImportError:
-        return _MemoryRedisBackend()
-    return redis.Redis.from_url(resolved_url, decode_responses=True)
+    except ImportError as exc:
+        if allow_memory_fallback:
+            logger.warning("Python package `redis` is not installed; falling back to in-memory backend because --allow-memory-redis is enabled.")
+            return _MemoryRedisBackend()
+        raise RuntimeError("Redis is required for production runs. Install python package `redis`.") from exc
+    backend = redis.Redis.from_url(resolved_url, decode_responses=True)
+    backend.ping()
+    return backend
 
 
 class _MemoryRedisBackend:
