@@ -7,6 +7,8 @@ from typing import Any, Mapping, Protocol
 
 from ..parsers.base import ParseResult
 
+_EXECUTEMANY_BATCH_SIZE = 100
+
 
 class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
@@ -860,7 +862,8 @@ def _event_id_from_rows(rows: tuple[Mapping[str, object], ...]) -> int | None:
 async def _executemany(executor: SqlExecutor, sql: str, rows: list[tuple[object, ...]]) -> None:
     if not rows:
         return
-    await executor.executemany(sql, rows)
+    for start in range(0, len(rows), _EXECUTEMANY_BATCH_SIZE):
+        await executor.executemany(sql, rows[start : start + _EXECUTEMANY_BATCH_SIZE])
 
 
 def _jsonb(value: Any) -> str | None:

@@ -166,6 +166,34 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted_row[10], "2")
         self.assertEqual(persisted_row[11], "99")
 
+    async def test_repository_chunks_large_player_upserts_into_smaller_executemany_batches(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=778,
+            parser_family="entity_profiles",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "player": tuple(
+                    {
+                        "id": player_id,
+                        "slug": f"player-{player_id}",
+                        "name": f"Player {player_id}",
+                        "short_name": f"P{player_id}",
+                    }
+                    for player_id in range(1, 206)
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        player_batches = [
+            rows for sql, rows in executor.executemany_calls if "INSERT INTO player" in sql
+        ]
+        self.assertEqual([len(rows) for rows in player_batches], [100, 100, 5])
+
     async def test_durable_sink_persists_special_metric_rows(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()
@@ -319,6 +347,135 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(executor.execute_calls, [])
         self.assertEqual(executor.executemany_calls, [])
+
+    async def test_durable_sink_prunes_event_statistics_entity_upserts_to_event_only(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=905,
+            parser_family="event_statistics",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+                "country": ({"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},),
+                "category": ({"id": 10, "slug": "england", "name": "England", "sport_id": 1, "country_alpha2": "EN"},),
+                "team": (
+                    {"id": 42, "slug": "arsenal", "name": "Arsenal", "short_name": "Arsenal"},
+                    {"id": 43, "slug": "chelsea", "name": "Chelsea", "short_name": "Chelsea"},
+                ),
+                "season": ({"id": 76986, "name": "Premier League 25/26", "year": "25/26", "editor": False},),
+                "event": (
+                    {
+                        "id": 14083191,
+                        "slug": "arsenal-chelsea",
+                        "season_id": 76986,
+                        "home_team_id": 42,
+                        "away_team_id": 43,
+                        "venue_id": None,
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "start_timestamp": 1_800_000_000,
+                    },
+                ),
+            },
+            metric_rows={
+                "event_statistic": (
+                    {
+                        "event_id": 14083191,
+                        "period": "ALL",
+                        "group_name": "Overview",
+                        "name": "Possession",
+                        "home_value": "55%",
+                        "away_value": "45%",
+                        "compare_code": None,
+                        "statistics_type": None,
+                    },
+                ),
+            },
+        )
+
+        await sink(result)
+
+        statements = [sql for sql, _ in executor.executemany_calls]
+        self.assertFalse(any("INSERT INTO sport" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO country" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO category" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO season" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO team" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_statistic" in sql for sql in statements))
+
+    async def test_durable_sink_prunes_event_player_statistics_to_event_team_player_only(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=906,
+            parser_family="event_player_statistics",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+                "category": ({"id": 10, "slug": "england", "name": "England", "sport_id": 1, "country_alpha2": None},),
+                "team": (
+                    {"id": 42, "slug": "arsenal", "name": "Arsenal", "short_name": "Arsenal"},
+                ),
+                "player": (
+                    {"id": 700, "slug": "saka", "name": "Bukayo Saka", "short_name": "B. Saka", "team_id": 42},
+                ),
+                "event": (
+                    {
+                        "id": 14083191,
+                        "slug": "arsenal-chelsea",
+                        "season_id": None,
+                        "home_team_id": 42,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "start_timestamp": 1_800_000_000,
+                    },
+                ),
+            },
+            metric_rows={
+                "event_player_statistics": (
+                    {
+                        "event_id": 14083191,
+                        "player_id": 700,
+                        "team_id": 42,
+                        "position": "F",
+                        "rating": 7.9,
+                        "rating_original": 7.9,
+                        "rating_alternative": None,
+                        "statistics_type": "player",
+                        "sport_slug": "football",
+                        "extra_json": None,
+                    },
+                ),
+                "event_player_stat_value": (
+                    {
+                        "event_id": 14083191,
+                        "player_id": 700,
+                        "stat_name": "goals",
+                        "stat_value_numeric": 1,
+                        "stat_value_text": "1",
+                        "stat_value_json": None,
+                    },
+                ),
+            },
+        )
+
+        await sink(result)
+
+        statements = [sql for sql, _ in executor.executemany_calls]
+        self.assertFalse(any("INSERT INTO sport" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO category" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO team" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO player" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_player_statistics" in sql for sql in statements))
 
     async def test_persists_event_root_entities_in_dependency_order(self) -> None:
         parser = EventRootParser()
