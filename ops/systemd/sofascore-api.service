@@ -1,0 +1,16 @@
+[Unit]
+Description=Sofascore Local API And Ops Surface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.local_api_server --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

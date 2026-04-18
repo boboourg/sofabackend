@@ -1,0 +1,16 @@
+[Unit]
+Description=Sofascore Live Discovery Planner Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.cli --log-level INFO live-discovery-planner-daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

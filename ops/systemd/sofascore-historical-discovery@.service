@@ -1,0 +1,16 @@
+[Unit]
+Description=Sofascore Historical Discovery Worker %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.cli --log-level INFO worker-historical-discovery --consumer-name historical-discovery-%i --block-ms 5000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
