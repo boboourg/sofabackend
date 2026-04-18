@@ -12,6 +12,7 @@ from schema_inspector.queue import (
     STREAM_HISTORICAL_MAINTENANCE,
     STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
+    STREAM_LIVE_DISCOVERY,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
     STREAM_MAINTENANCE,
@@ -242,11 +243,31 @@ class QueueStreamsTests(unittest.TestCase):
         self.assertEqual(STREAM_HISTORICAL_ENRICHMENT, "stream:etl:historical_enrichment")
         self.assertEqual(STREAM_HISTORICAL_HYDRATE, "stream:etl:historical_hydrate")
         self.assertEqual(STREAM_HISTORICAL_MAINTENANCE, "stream:etl:historical_maintenance")
+        self.assertEqual(STREAM_LIVE_DISCOVERY, "stream:etl:live_discovery")
         self.assertEqual(STREAM_LIVE_HOT, "stream:etl:live_hot")
         self.assertEqual(STREAM_LIVE_WARM, "stream:etl:live_warm")
         self.assertEqual(STREAM_MAINTENANCE, "stream:etl:maintenance")
         self.assertEqual(STREAM_DLQ, "stream:etl:dlq")
         self.assertEqual(DELAYED_JOBS_KEY, "zset:etl:delayed")
+
+    def test_stream_queue_tracks_distinct_groups_on_distinct_streams_independently(self) -> None:
+        backend = _FakeStreamBackend()
+        queue = RedisStreamQueue(backend)
+
+        queue.ensure_group(STREAM_DISCOVERY, "cg:discovery")
+        queue.ensure_group(STREAM_LIVE_DISCOVERY, "cg:live_discovery")
+        queue.publish(STREAM_DISCOVERY, {"job_id": "scheduled-1"})
+        queue.publish(STREAM_LIVE_DISCOVERY, {"job_id": "live-1"})
+
+        scheduled_messages = queue.read_group(STREAM_DISCOVERY, "cg:discovery", "scheduled-consumer", count=10)
+        live_messages = queue.read_group(STREAM_LIVE_DISCOVERY, "cg:live_discovery", "live-consumer", count=10)
+        scheduled_group = queue.group_info(STREAM_DISCOVERY, "cg:discovery")
+        live_group = queue.group_info(STREAM_LIVE_DISCOVERY, "cg:live_discovery")
+
+        self.assertEqual([item.values["job_id"] for item in scheduled_messages], ["scheduled-1"])
+        self.assertEqual([item.values["job_id"] for item in live_messages], ["live-1"])
+        self.assertEqual(scheduled_group.entries_read if scheduled_group is not None else None, 1)
+        self.assertEqual(live_group.entries_read if live_group is not None else None, 1)
 
     def test_stream_queue_can_publish_read_and_ack(self) -> None:
         queue = RedisStreamQueue(_FakeStreamBackend())

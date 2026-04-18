@@ -544,6 +544,13 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "live-discovery-planner-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_live_discovery_planner_daemon(
+                    sport_slugs=tuple(args.sport_slug or ()),
+                    loop_interval_seconds=args.loop_interval_seconds,
+                )
+                return 0
             if args.command == "historical-planner-daemon":
                 service_app = ServiceApp(app)
                 await service_app.run_historical_planner_daemon(
@@ -565,6 +572,14 @@ async def _dispatch(args) -> int:
             if args.command == "worker-discovery":
                 service_app = ServiceApp(app)
                 await service_app.run_discovery_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                    timeout_s=args.timeout,
+                )
+                return 0
+            if args.command == "worker-live-discovery":
+                service_app = ServiceApp(app)
+                await service_app.run_live_discovery_worker(
                     consumer_name=args.consumer_name,
                     block_ms=args.block_ms,
                     timeout_s=args.timeout,
@@ -701,6 +716,10 @@ def _build_parser() -> argparse.ArgumentParser:
     planner_daemon.add_argument("--scheduled-interval-seconds", type=float, default=300.0, help="Scheduled planning interval per sport.")
     planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
 
+    live_discovery_planner_daemon = subparsers.add_parser("live-discovery-planner-daemon", help="Run the continuous live sport-surface planner loop.")
+    live_discovery_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
+    live_discovery_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
     historical_planner_daemon = subparsers.add_parser("historical-planner-daemon", help="Run the historical date-range planner loop.")
     historical_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
     historical_planner_daemon.add_argument("--date-from", required=True, help="Inclusive start date in YYYY-MM-DD format.")
@@ -717,6 +736,10 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_discovery = subparsers.add_parser("worker-discovery", help="Run the discovery consumer group loop.")
     worker_discovery.add_argument("--consumer-name", default="worker-discovery-1", help="Redis consumer name for the discovery worker.")
     worker_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_live_discovery = subparsers.add_parser("worker-live-discovery", help="Run the live discovery consumer group loop.")
+    worker_live_discovery.add_argument("--consumer-name", default="worker-live-discovery-1", help="Redis consumer name for the live discovery worker.")
+    worker_live_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_historical_discovery = subparsers.add_parser("worker-historical-discovery", help="Run the archival discovery consumer group loop.")
     worker_historical_discovery.add_argument("--consumer-name", default="worker-historical-discovery-1", help="Redis consumer name for the archival discovery worker.")
@@ -790,6 +813,12 @@ def _configure_logging(level_name: str) -> None:
 
 def _load_redis_backend(redis_url: str | None, *, allow_memory_fallback: bool):
     env = _load_project_env()
+    # The explicit memory fallback flag is a development/testing escape hatch.
+    # When it is enabled and no URL was passed on the command line, prefer the
+    # in-memory backend instead of implicitly binding to a machine-local REDIS_URL.
+    if allow_memory_fallback and not redis_url:
+        logger.warning("Using in-memory Redis backend because --allow-memory-redis is enabled.")
+        return _MemoryRedisBackend()
     resolved_url = redis_url or env.get("REDIS_URL") or env.get("SOFASCORE_REDIS_URL")
     if not resolved_url:
         if allow_memory_fallback:

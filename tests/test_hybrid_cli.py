@@ -109,12 +109,14 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         historical_tournament_planner = parser.parse_args(
             ["historical-tournament-planner-daemon", "--consumer-name", "historical-tournament-planner-1"]
         )
+        live_discovery_planner = parser.parse_args(["live-discovery-planner-daemon", "--sport-slug", "football"])
         historical_tournament = parser.parse_args(
             ["worker-historical-tournament", "--consumer-name", "historical-tournament-1"]
         )
         historical_enrichment = parser.parse_args(
             ["worker-historical-enrichment", "--consumer-name", "historical-enrichment-1"]
         )
+        live_discovery = parser.parse_args(["worker-live-discovery", "--consumer-name", "live-discovery-1"])
         hydrate = parser.parse_args(["worker-hydrate", "--consumer-name", "hydrate-1"])
         historical_hydrate = parser.parse_args(
             ["worker-historical-hydrate", "--consumer-name", "historical-hydrate-1"]
@@ -134,8 +136,11 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(discovery.command, "worker-discovery")
         self.assertEqual(historical_discovery.command, "worker-historical-discovery")
         self.assertEqual(historical_tournament_planner.command, "historical-tournament-planner-daemon")
+        self.assertEqual(live_discovery_planner.command, "live-discovery-planner-daemon")
+        self.assertEqual(live_discovery_planner.sport_slug, ["football"])
         self.assertEqual(historical_tournament.command, "worker-historical-tournament")
         self.assertEqual(historical_enrichment.command, "worker-historical-enrichment")
+        self.assertEqual(live_discovery.command, "worker-live-discovery")
         self.assertEqual(hydrate.command, "worker-hydrate")
         self.assertEqual(historical_hydrate.command, "worker-historical-hydrate")
         self.assertEqual(live_hot.command, "worker-live-hot")
@@ -162,6 +167,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(("stream:etl:discovery", "cg:discovery", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:hydrate", "cg:hydrate", "0-0"), fake_stream_queue.groups)
+        self.assertIn(("stream:etl:live_discovery", "cg:live_discovery", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:live_hot", "cg:live_hot", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:live_warm", "cg:live_warm", "0-0"), fake_stream_queue.groups)
         self.assertIn(("stream:etl:maintenance", "cg:maintenance", "0-0"), fake_stream_queue.groups)

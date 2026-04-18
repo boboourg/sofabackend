@@ -11,6 +11,13 @@ from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
 from ..queue.streams import (
+    GROUP_HISTORICAL_DISCOVERY,
+    GROUP_HISTORICAL_ENRICHMENT,
+    GROUP_HISTORICAL_HYDRATE,
+    GROUP_HISTORICAL_MAINTENANCE,
+    GROUP_HISTORICAL_TOURNAMENT,
+    HISTORICAL_CONSUMER_GROUPS,
+    OPERATIONAL_CONSUMER_GROUPS,
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
     STREAM_HISTORICAL_ENRICHMENT,
@@ -18,12 +25,15 @@ from ..queue.streams import (
     STREAM_HISTORICAL_MAINTENANCE,
     STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
+    STREAM_LIVE_DISCOVERY,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
     STREAM_MAINTENANCE,
     RedisStreamQueue,
     StreamEntry,
 )
+from ..sport_profiles import resolve_sport_profile
+from .live_discovery_planner import LiveDiscoveryPlannerDaemon, LiveDiscoveryPlanningTarget
 from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
 from .historical_tournament_planner import (
     HistoricalTournamentCursorStore,
@@ -58,23 +68,6 @@ DEFAULT_SERVICE_SPORT_SLUGS = (
     "futsal",
     "esports",
 )
-
-DEFAULT_CONSUMER_GROUPS = (
-    (STREAM_DISCOVERY, "cg:discovery"),
-    (STREAM_HYDRATE, "cg:hydrate"),
-    (STREAM_LIVE_HOT, "cg:live_hot"),
-    (STREAM_LIVE_WARM, "cg:live_warm"),
-    (STREAM_MAINTENANCE, "cg:maintenance"),
-)
-
-HISTORICAL_CONSUMER_GROUPS = (
-    (STREAM_HISTORICAL_DISCOVERY, "cg:historical_discovery"),
-    (STREAM_HISTORICAL_TOURNAMENT, "cg:historical_tournament"),
-    (STREAM_HISTORICAL_ENRICHMENT, "cg:historical_enrichment"),
-    (STREAM_HISTORICAL_HYDRATE, "cg:historical_hydrate"),
-    (STREAM_HISTORICAL_MAINTENANCE, "cg:historical_maintenance"),
-)
-
 
 class DelayedEnvelopeStore:
     """Stores serialized job payloads so delayed jobs can be reconstructed later."""
@@ -128,7 +121,7 @@ class ServiceApp:
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
     def ensure_consumer_groups(self) -> None:
-        for stream, group in DEFAULT_CONSUMER_GROUPS:
+        for stream, group in OPERATIONAL_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
 
     def ensure_historical_consumer_groups(self) -> None:
@@ -157,6 +150,26 @@ class ServiceApp:
             delayed_job_loader=self.delayed_envelope_store.load,
             live_state_store=self.live_state_store,
             scheduled_targets=targets,
+            loop_interval_s=loop_interval_seconds,
+        )
+
+    def build_live_discovery_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        loop_interval_seconds: float = 5.0,
+    ) -> LiveDiscoveryPlannerDaemon:
+        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        targets = tuple(
+            LiveDiscoveryPlanningTarget(
+                sport_slug=sport_slug,
+                interval_ms=int(resolve_sport_profile(sport_slug).live_discovery_interval_seconds * 1000),
+            )
+            for sport_slug in normalized_sports
+        )
+        return LiveDiscoveryPlannerDaemon(
+            queue=self.stream_queue,
+            targets=targets,
             loop_interval_s=loop_interval_seconds,
         )
 
@@ -278,6 +291,29 @@ class ServiceApp:
             job_audit_logger=self.job_audit_logger,
         )
 
+    def build_live_discovery_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+        timeout_s: float = 20.0,
+    ) -> DiscoveryWorker:
+        self.ensure_consumer_groups()
+        return DiscoveryWorker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            group="cg:live_discovery",
+            stream=STREAM_LIVE_DISCOVERY,
+            hydrate_stream=STREAM_HYDRATE,
+            block_ms=block_ms,
+            timeout_s=timeout_s,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            job_audit_logger=self.job_audit_logger,
+        )
+
     def build_historical_tournament_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HistoricalTournamentWorker:
         self.ensure_historical_consumer_groups()
         return HistoricalTournamentWorker(
@@ -345,14 +381,14 @@ class ServiceApp:
             completion_store=self.completion_store,
             queue=self.stream_queue,
             consumer=consumer_name,
-            group="cg:historical_maintenance",
+            group=GROUP_HISTORICAL_MAINTENANCE,
             stream=STREAM_HISTORICAL_MAINTENANCE,
             block_ms=block_ms,
             reclaim_targets=(
-                ReclaimTarget(stream=STREAM_HISTORICAL_DISCOVERY, group="cg:historical_discovery"),
-                ReclaimTarget(stream=STREAM_HISTORICAL_TOURNAMENT, group="cg:historical_tournament"),
-                ReclaimTarget(stream=STREAM_HISTORICAL_ENRICHMENT, group="cg:historical_enrichment"),
-                ReclaimTarget(stream=STREAM_HISTORICAL_HYDRATE, group="cg:historical_hydrate"),
+                ReclaimTarget(stream=STREAM_HISTORICAL_DISCOVERY, group=GROUP_HISTORICAL_DISCOVERY),
+                ReclaimTarget(stream=STREAM_HISTORICAL_TOURNAMENT, group=GROUP_HISTORICAL_TOURNAMENT),
+                ReclaimTarget(stream=STREAM_HISTORICAL_ENRICHMENT, group=GROUP_HISTORICAL_ENRICHMENT),
+                ReclaimTarget(stream=STREAM_HISTORICAL_HYDRATE, group=GROUP_HISTORICAL_HYDRATE),
             ),
             job_audit_logger=self.job_audit_logger,
         )
@@ -369,6 +405,19 @@ class ServiceApp:
         daemon = self.build_planner_daemon(
             sport_slugs=sport_slugs,
             scheduled_interval_seconds=scheduled_interval_seconds,
+            loop_interval_seconds=loop_interval_seconds,
+        )
+        await daemon.run_forever()
+
+    async def run_live_discovery_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        loop_interval_seconds: float = 5.0,
+    ) -> None:
+        self.ensure_consumer_groups()
+        daemon = self.build_live_discovery_planner_daemon(
+            sport_slugs=sport_slugs,
             loop_interval_seconds=loop_interval_seconds,
         )
         await daemon.run_forever()
@@ -429,6 +478,20 @@ class ServiceApp:
         timeout_s: float = 20.0,
     ) -> None:
         worker = self.build_historical_discovery_worker(
+            consumer_name=consumer_name,
+            block_ms=block_ms,
+            timeout_s=timeout_s,
+        )
+        await worker.run_forever()
+
+    async def run_live_discovery_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+        timeout_s: float = 20.0,
+    ) -> None:
+        worker = self.build_live_discovery_worker(
             consumer_name=consumer_name,
             block_ms=block_ms,
             timeout_s=timeout_s,

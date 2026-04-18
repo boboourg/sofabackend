@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_HYDRATE_EVENT_ROOT
-from ..queue.streams import STREAM_DISCOVERY, STREAM_HYDRATE, StreamEntry
+from ..queue.streams import GROUP_DISCOVERY, STREAM_DISCOVERY, STREAM_HYDRATE, StreamEntry
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job, encode_stream_job
 
@@ -17,7 +17,7 @@ class DiscoveryWorker:
         orchestrator,
         queue,
         consumer: str,
-        group: str = "cg:discovery",
+        group: str = GROUP_DISCOVERY,
         stream: str = STREAM_DISCOVERY,
         hydrate_stream: str = STREAM_HYDRATE,
         block_ms: int = 5_000,

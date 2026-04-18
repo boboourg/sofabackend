@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from ..queue.streams import STREAM_HYDRATE, StreamEntry
+from ..queue.streams import GROUP_HYDRATE, STREAM_HYDRATE, StreamEntry
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job
 
@@ -19,7 +19,7 @@ class HydrateWorker:
         completion_store=None,
         queue,
         consumer: str,
-        group: str = "cg:hydrate",
+        group: str = GROUP_HYDRATE,
         stream: str = STREAM_HYDRATE,
         block_ms: int = 5_000,
         now_ms_factory=None,

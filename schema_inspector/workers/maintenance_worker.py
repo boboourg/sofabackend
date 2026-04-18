@@ -7,7 +7,22 @@ import inspect
 import time
 from dataclasses import dataclass
 
-from ..queue.streams import STREAM_DISCOVERY, STREAM_DLQ, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM, STREAM_MAINTENANCE, StreamEntry
+from ..queue.streams import (
+    GROUP_DISCOVERY,
+    GROUP_HYDRATE,
+    GROUP_LIVE_DISCOVERY,
+    GROUP_LIVE_HOT,
+    GROUP_LIVE_WARM,
+    GROUP_MAINTENANCE,
+    STREAM_DISCOVERY,
+    STREAM_DLQ,
+    STREAM_HYDRATE,
+    STREAM_LIVE_DISCOVERY,
+    STREAM_LIVE_HOT,
+    STREAM_LIVE_WARM,
+    STREAM_MAINTENANCE,
+    StreamEntry,
+)
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job
 
@@ -36,14 +51,15 @@ class MaintenanceWorker:
         delayed_scheduler=None,
         delayed_payload_store=None,
         completion_store=None,
-        group: str = "cg:maintenance",
+        group: str = GROUP_MAINTENANCE,
         stream: str = STREAM_MAINTENANCE,
         block_ms: int = 5_000,
         reclaim_targets: tuple[ReclaimTarget, ...] = (
-            ReclaimTarget(stream=STREAM_DISCOVERY, group="cg:discovery"),
-            ReclaimTarget(stream=STREAM_HYDRATE, group="cg:hydrate"),
-            ReclaimTarget(stream=STREAM_LIVE_HOT, group="cg:live_hot"),
-            ReclaimTarget(stream=STREAM_LIVE_WARM, group="cg:live_warm"),
+            ReclaimTarget(stream=STREAM_DISCOVERY, group=GROUP_DISCOVERY),
+            ReclaimTarget(stream=STREAM_LIVE_DISCOVERY, group=GROUP_LIVE_DISCOVERY),
+            ReclaimTarget(stream=STREAM_HYDRATE, group=GROUP_HYDRATE),
+            ReclaimTarget(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT),
+            ReclaimTarget(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM),
         ),
         reclaim_interval_s: float = 15.0,
         reclaim_min_idle_ms: int = 30_000,

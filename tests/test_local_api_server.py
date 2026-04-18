@@ -155,6 +155,7 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stream:etl:historical_tournament", stream_names)
         self.assertIn("stream:etl:historical_enrichment", stream_names)
         self.assertIn("stream:etl:historical_maintenance", stream_names)
+        self.assertIn("stream:etl:live_discovery", stream_names)
         self.assertGreaterEqual(len(_QUEUE_GROUPS), 8)
         first_stream = payload["streams"][0]
         self.assertIn("length", first_stream)

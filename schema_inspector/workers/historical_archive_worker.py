@@ -6,6 +6,8 @@ import time
 
 from ..jobs.types import JOB_ENRICH_TOURNAMENT_ARCHIVE, JOB_SYNC_TOURNAMENT_ARCHIVE
 from ..queue.streams import (
+    GROUP_HISTORICAL_ENRICHMENT,
+    GROUP_HISTORICAL_TOURNAMENT,
     STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_TOURNAMENT,
     StreamEntry,
@@ -21,7 +23,7 @@ class HistoricalTournamentWorker:
         orchestrator,
         queue,
         consumer: str,
-        group: str = "cg:historical_tournament",
+        group: str = GROUP_HISTORICAL_TOURNAMENT,
         stream: str = STREAM_HISTORICAL_TOURNAMENT,
         enrichment_stream: str = STREAM_HISTORICAL_ENRICHMENT,
         block_ms: int = 5_000,
@@ -96,7 +98,7 @@ class HistoricalEnrichmentWorker:
         orchestrator,
         queue,
         consumer: str,
-        group: str = "cg:historical_enrichment",
+        group: str = GROUP_HISTORICAL_ENRICHMENT,
         stream: str = STREAM_HISTORICAL_ENRICHMENT,
         block_ms: int = 5_000,
         delayed_scheduler=None,

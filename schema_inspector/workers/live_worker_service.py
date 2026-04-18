@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from ..queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
+from ..queue.streams import GROUP_LIVE_HOT, GROUP_LIVE_WARM, STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job
 
@@ -36,7 +36,7 @@ class LiveWorkerService:
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
         stream = STREAM_LIVE_HOT if normalized_lane == "hot" else STREAM_LIVE_WARM
-        group = f"cg:live_{normalized_lane}"
+        group = GROUP_LIVE_HOT if normalized_lane == "hot" else GROUP_LIVE_WARM
         self.runtime = WorkerRuntime(
             name=f"live-{normalized_lane}-worker",
             queue=queue,
