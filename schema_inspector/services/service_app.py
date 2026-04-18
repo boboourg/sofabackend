@@ -309,6 +309,12 @@ class ServiceApp:
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
             freshness_policy=self.freshness_policy,
+            hydrate_backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
+                ),
+            ),
             job_audit_logger=self.job_audit_logger,
         )
 
@@ -333,6 +339,18 @@ class ServiceApp:
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
             freshness_policy=self.freshness_policy,
+            hydrate_backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(
+                        stream=STREAM_HISTORICAL_HYDRATE,
+                        group=GROUP_HISTORICAL_HYDRATE,
+                        max_lag=50_000,
+                    ),
+                ),
+            ),
+            defer_on_backpressure=True,
+            admission_delay_ms=30_000,
             job_audit_logger=self.job_audit_logger,
         )
 
@@ -357,6 +375,12 @@ class ServiceApp:
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
             freshness_policy=self.freshness_policy,
+            hydrate_backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
+                ),
+            ),
             job_audit_logger=self.job_audit_logger,
         )
 

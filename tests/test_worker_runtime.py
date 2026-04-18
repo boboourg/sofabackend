@@ -175,6 +175,40 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retries, [("1-5", 5_000)])
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5",))])
 
+    async def test_worker_runtime_uses_custom_retry_delay_for_admission_deferrals(self) -> None:
+        from schema_inspector.services.retry_policy import AdmissionDeferredError
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(entries=(StreamEntry(stream=STREAM_HYDRATE, message_id="1-6", values={"attempt": "1"}),))
+        retries: list[tuple[str, int]] = []
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            del entry
+            raise AdmissionDeferredError("hydrate backlog", delay_ms=30_000)
+
+        async def on_retry(entry: StreamEntry, exc: Exception, *, delay_ms: int) -> None:
+            self.assertIsInstance(exc, AdmissionDeferredError)
+            retries.append((entry.message_id, delay_ms))
+            assert runtime is not None
+            runtime.request_shutdown()
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            retry_handler=on_retry,
+            block_ms=0,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(retries, [("1-6", 30_000)])
+        self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-6",))])
+
 
 class _FakeQueue:
     def __init__(self, *, entries: tuple[StreamEntry, ...]) -> None:

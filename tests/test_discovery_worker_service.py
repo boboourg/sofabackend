@@ -178,6 +178,141 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(freshness_policy.calls, [])
 
+    async def test_discovery_worker_skips_non_force_hydrate_fanout_when_backpressure_blocks_operational_lane(self) -> None:
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        orchestrator = _FakeDiscoveryOrchestrator(event_ids=(501, 777))
+        queue = _FakeQueue()
+        freshness_policy = _FakeFreshnessPolicy(allowed_event_ids={501, 777})
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-1",
+            timeout_s=12.5,
+            freshness_policy=freshness_policy,
+            hydrate_backpressure=_FakeBackpressure("stream:etl:hydrate:cg:hydrate:lag=250001>100000"),
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="1-5",
+                values={
+                    "job_id": "job-5",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "scheduled",
+                    "params_json": '{"date":"2026-04-17"}',
+                    "priority": "50",
+                    "attempt": "1",
+                    "scheduled_at": "2026-04-17T20:00:00+00:00",
+                    "idempotency_key": "key-5",
+                },
+            )
+        )
+
+        self.assertEqual(result, "published:0")
+        self.assertEqual(queue.published_streams, [])
+        self.assertEqual(freshness_policy.calls, [])
+
+    async def test_discovery_worker_still_publishes_force_rehydrate_jobs_under_backpressure(self) -> None:
+        from schema_inspector.services.surface_correction_detector import SurfaceCorrection
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        orchestrator = _FakeDiscoveryOrchestrator(
+            event_ids=(777, 888),
+            scheduled_result=_FakeSurfaceDiscoveryResult(
+                event_ids=(777, 888),
+                corrections=(SurfaceCorrection(event_id=777, reason="score_changed"),),
+            ),
+        )
+        queue = _FakeQueue()
+        freshness_policy = _FakeFreshnessPolicy(allowed_event_ids={888})
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-1",
+            timeout_s=12.5,
+            freshness_policy=freshness_policy,
+            hydrate_backpressure=_FakeBackpressure("stream:etl:hydrate:cg:hydrate:lag=250001>100000"),
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="1-6",
+                values={
+                    "job_id": "job-6",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "scheduled",
+                    "params_json": '{"date":"2026-04-17"}',
+                    "priority": "50",
+                    "attempt": "1",
+                    "scheduled_at": "2026-04-17T20:00:00+00:00",
+                    "idempotency_key": "key-6",
+                },
+            )
+        )
+
+        self.assertEqual(result, "published:1")
+        self.assertEqual(queue.published_streams, [STREAM_HYDRATE])
+        self.assertEqual(
+            json.loads(str(queue.published_payloads[0]["params_json"])),
+            {
+                "hydration_mode": "full",
+                "force_rehydrate": True,
+                "correction_reason": "score_changed",
+            },
+        )
+        self.assertEqual(freshness_policy.calls, [])
+
+    async def test_historical_discovery_worker_defers_non_force_hydrate_fanout_under_backpressure(self) -> None:
+        from schema_inspector.services.retry_policy import AdmissionDeferredError
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        orchestrator = _FakeDiscoveryOrchestrator(event_ids=(901, 902))
+        queue = _FakeQueue()
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-1",
+            timeout_s=12.5,
+            delayed_scheduler=_FakeDelayedScheduler(),
+            delayed_payload_store=_FakePayloadStore(),
+            hydrate_backpressure=_FakeBackpressure("stream:etl:historical_hydrate:cg:historical_hydrate:lag=90001>50000"),
+            defer_on_backpressure=True,
+            admission_delay_ms=30_000,
+        )
+
+        with self.assertRaises(AdmissionDeferredError) as ctx:
+            await worker.handle(
+                StreamEntry(
+                    stream=STREAM_DISCOVERY,
+                    message_id="1-7",
+                    values={
+                        "job_id": "job-7",
+                        "job_type": "discover_sport_surface",
+                        "sport_slug": "tennis",
+                        "entity_type": "sport",
+                        "entity_id": "",
+                        "scope": "historical",
+                        "params_json": '{"date":"2020-04-17"}',
+                        "priority": "50",
+                        "attempt": "1",
+                        "scheduled_at": "2026-04-17T20:00:00+00:00",
+                        "idempotency_key": "key-7",
+                    },
+                )
+            )
+
+        self.assertEqual(ctx.exception.delay_ms, 30_000)
+        self.assertEqual(queue.published_streams, [])
+
     async def test_discovery_worker_schedules_retry_for_deadlock_errors(self) -> None:
         from schema_inspector.workers.discovery_worker import DiscoveryWorker
 
@@ -292,6 +427,14 @@ class _FakeFreshnessPolicy:
         del now_ms
         self.calls.append((int(event_id), str(hydration_mode), bool(force_rehydrate)))
         return int(event_id) in self.allowed_event_ids
+
+
+class _FakeBackpressure:
+    def __init__(self, reason: str | None) -> None:
+        self.reason = reason
+
+    def blocking_reason(self) -> str | None:
+        return self.reason
 
 
 class _FakeParsedEvent:

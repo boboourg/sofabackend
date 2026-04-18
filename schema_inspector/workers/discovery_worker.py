@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_HYDRATE_EVENT_ROOT
 from ..queue.streams import GROUP_DISCOVERY, STREAM_DISCOVERY, STREAM_HYDRATE, StreamEntry
+from ..services.retry_policy import AdmissionDeferredError
 from ..services.surface_correction_detector import SurfaceCorrection
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job, encode_stream_job
+
+logger = logging.getLogger(__name__)
 
 
 class DiscoveryWorker:
@@ -28,6 +32,9 @@ class DiscoveryWorker:
         delayed_payload_store=None,
         completion_store=None,
         freshness_policy=None,
+        hydrate_backpressure=None,
+        defer_on_backpressure: bool = False,
+        admission_delay_ms: int = 30_000,
         now_ms_factory=None,
         job_audit_logger=None,
     ) -> None:
@@ -41,6 +48,9 @@ class DiscoveryWorker:
         self.delayed_scheduler = delayed_scheduler
         self.delayed_payload_store = delayed_payload_store
         self.freshness_policy = freshness_policy
+        self.hydrate_backpressure = hydrate_backpressure
+        self.defer_on_backpressure = bool(defer_on_backpressure)
+        self.admission_delay_ms = int(admission_delay_ms)
         self.now_ms_factory = now_ms_factory or (lambda: int(datetime.now(timezone.utc).timestamp() * 1000))
         self.runtime = WorkerRuntime(
             name="discovery-worker",
@@ -76,9 +86,32 @@ class DiscoveryWorker:
 
         published = 0
         corrections = {int(item.event_id): item for item in discovery.corrections}
+        blocking_reason = self._blocking_reason()
+        if blocking_reason is not None:
+            non_force_event_count = sum(
+                1
+                for event_id in discovery.event_ids
+                if corrections.get(int(event_id)) is None
+            )
+            if non_force_event_count and self.defer_on_backpressure:
+                logger.info(
+                    "Discovery worker deferred hydrate fanout by backpressure: scope=%s sport=%s events=%s reason=%s",
+                    scope,
+                    sport_slug,
+                    non_force_event_count,
+                    blocking_reason,
+                )
+                raise AdmissionDeferredError(
+                    f"hydrate admission deferred: {blocking_reason}",
+                    delay_ms=self.admission_delay_ms,
+                )
+        skipped_due_backpressure = 0
         for event_id in discovery.event_ids:
             correction = corrections.get(int(event_id))
             force_rehydrate = correction is not None
+            if blocking_reason is not None and not force_rehydrate:
+                skipped_due_backpressure += 1
+                continue
             resolved_mode = "full" if force_rehydrate else hydration_mode
             if self.freshness_policy is not None and not force_rehydrate:
                 if not self.freshness_policy.claim_event_hydration(
@@ -102,6 +135,14 @@ class DiscoveryWorker:
             )
             self.queue.publish(self.hydrate_stream, encode_stream_job(hydrate_job))
             published += 1
+        if skipped_due_backpressure:
+            logger.info(
+                "Discovery worker skipped hydrate fanout by backpressure: scope=%s sport=%s skipped=%s reason=%s",
+                scope,
+                sport_slug,
+                skipped_due_backpressure,
+                blocking_reason,
+            )
         return f"published:{published}"
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
@@ -149,6 +190,15 @@ class DiscoveryWorker:
                 timeout=self.timeout_s,
             )
         return _normalize_surface_result(result)
+
+    def _blocking_reason(self) -> str | None:
+        backpressure = self.hydrate_backpressure
+        if backpressure is None:
+            return None
+        blocking_reason = getattr(backpressure, "blocking_reason", None)
+        if not callable(blocking_reason):
+            return None
+        return blocking_reason()
 
 
 class _SurfaceDiscovery:

@@ -115,7 +115,7 @@ class WorkerRuntime:
             outcome = await _await_maybe(self.handler(entry))
         except Exception as exc:
             if self.retry_handler is not None and is_retryable_db_error(exc):
-                delay_ms = retry_delay_ms(attempt=_entry_attempt(entry))
+                delay_ms = retry_delay_ms(attempt=_entry_attempt(entry), exc=exc)
                 await _await_maybe(self.retry_handler(entry, exc, delay_ms=delay_ms))
                 await self._record_job_run(
                     entry,

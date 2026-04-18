@@ -20,6 +20,14 @@ class RetryPolicyTests(unittest.TestCase):
 
         self.assertTrue(is_retryable_db_error(TimeoutError()))
 
+    def test_retry_policy_marks_admission_deferred_error_as_retryable(self) -> None:
+        from schema_inspector.services.retry_policy import AdmissionDeferredError, is_retryable_db_error, retry_delay_ms
+
+        exc = AdmissionDeferredError("hydrate backlog", delay_ms=30_000)
+
+        self.assertTrue(is_retryable_db_error(exc))
+        self.assertEqual(retry_delay_ms(attempt=1, exc=exc), 30_000)
+
     def test_retry_policy_ignores_non_lock_errors(self) -> None:
         from schema_inspector.services.retry_policy import is_retryable_db_error
 
