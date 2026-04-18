@@ -8,6 +8,17 @@ from typing import Any, Mapping, Protocol
 from ..parsers.base import ParseResult
 
 _EXECUTEMANY_BATCH_SIZE = 100
+_CACHEABLE_MINIMAL_ENTITY_KINDS = (
+    "sport",
+    "country",
+    "category",
+    "unique_tournament",
+    "tournament",
+    "season",
+    "venue",
+    "manager",
+    "team",
+)
 
 
 class SqlExecutor(Protocol):
@@ -18,6 +29,11 @@ class SqlExecutor(Protocol):
 
 class NormalizeRepository:
     """Persists normalized parser output into PostgreSQL fact tables."""
+
+    def __init__(self) -> None:
+        self._known_minimal_entities: dict[str, set[object]] = {
+            entity_kind: set() for entity_kind in _CACHEABLE_MINIMAL_ENTITY_KINDS
+        }
 
     async def persist_parse_result(
         self,
@@ -108,11 +124,18 @@ class NormalizeRepository:
             "player": set(),
             "event": set(),
         }
+        for entity_kind, known_entities in self._known_minimal_entities.items():
+            inserted[entity_kind].update(known_entities)
 
         sport_rows = [
             (row.get("id"), row.get("slug"), row.get("name"))
             for row in entity_upserts.get("sport", ())
-            if row.get("id") is not None and row.get("slug") and row.get("name")
+            if (
+                row.get("id") is not None
+                and row.get("slug")
+                and row.get("name")
+                and row.get("id") not in self._known_minimal_entities["sport"]
+            )
         ]
         if sport_rows:
             await _executemany(
@@ -124,12 +147,18 @@ class NormalizeRepository:
                 """,
                 sport_rows,
             )
-            inserted["sport"].update(int(row[0]) for row in sport_rows if row[0] is not None)
+            sport_ids = {int(row[0]) for row in sport_rows if row[0] is not None}
+            inserted["sport"].update(sport_ids)
+            self._known_minimal_entities["sport"].update(sport_ids)
 
         country_rows = [
             (row.get("alpha2"), row.get("alpha3"), row.get("slug"), row.get("name"))
             for row in entity_upserts.get("country", ())
-            if row.get("alpha2") is not None and row.get("name")
+            if (
+                row.get("alpha2") is not None
+                and row.get("name")
+                and row.get("alpha2") not in self._known_minimal_entities["country"]
+            )
         ]
         if country_rows:
             await _executemany(
@@ -141,13 +170,17 @@ class NormalizeRepository:
                 """,
                 country_rows,
             )
-            inserted["country"].update(str(row[0]) for row in country_rows if row[0] is not None)
+            country_codes = {str(row[0]) for row in country_rows if row[0] is not None}
+            inserted["country"].update(country_codes)
+            self._known_minimal_entities["country"].update(country_codes)
 
         category_rows = []
         for row in entity_upserts.get("category", ()):
             category_id = row.get("id")
             sport_id = row.get("sport_id")
             if category_id is None or not row.get("slug") or not row.get("name") or sport_id not in inserted["sport"]:
+                continue
+            if category_id in self._known_minimal_entities["category"]:
                 continue
             country_alpha2 = row.get("country_alpha2")
             if country_alpha2 not in inserted["country"]:
@@ -171,7 +204,9 @@ class NormalizeRepository:
                 """,
                 category_rows,
             )
-            inserted["category"].update(int(row[0]) for row in category_rows if row[0] is not None)
+            category_ids = {int(row[0]) for row in category_rows if row[0] is not None}
+            inserted["category"].update(category_ids)
+            self._known_minimal_entities["category"].update(category_ids)
 
         unique_tournament_rows = []
         for row in entity_upserts.get("unique_tournament", ()):
@@ -183,6 +218,8 @@ class NormalizeRepository:
                 or not row.get("name")
                 or category_id not in inserted["category"]
             ):
+                continue
+            if unique_tournament_id in self._known_minimal_entities["unique_tournament"]:
                 continue
             country_alpha2 = row.get("country_alpha2")
             if country_alpha2 not in inserted["country"]:
@@ -206,12 +243,14 @@ class NormalizeRepository:
                 """,
                 unique_tournament_rows,
             )
-            inserted["unique_tournament"].update(int(row[0]) for row in unique_tournament_rows if row[0] is not None)
+            unique_tournament_ids = {int(row[0]) for row in unique_tournament_rows if row[0] is not None}
+            inserted["unique_tournament"].update(unique_tournament_ids)
+            self._known_minimal_entities["unique_tournament"].update(unique_tournament_ids)
 
         season_rows = [
             (row.get("id"), row.get("name"), row.get("year"), row.get("editor"))
             for row in entity_upserts.get("season", ())
-            if row.get("id") is not None
+            if row.get("id") is not None and row.get("id") not in self._known_minimal_entities["season"]
         ]
         if season_rows:
             await _executemany(
@@ -223,7 +262,9 @@ class NormalizeRepository:
                 """,
                 season_rows,
             )
-            inserted["season"].update(int(row[0]) for row in season_rows if row[0] is not None)
+            season_ids = {int(row[0]) for row in season_rows if row[0] is not None}
+            inserted["season"].update(season_ids)
+            self._known_minimal_entities["season"].update(season_ids)
 
         tournament_rows = []
         for row in entity_upserts.get("tournament", ()):
@@ -231,6 +272,8 @@ class NormalizeRepository:
             category_id = row.get("category_id")
             unique_tournament_id = row.get("unique_tournament_id")
             if tournament_id is None or not row.get("name"):
+                continue
+            if tournament_id in self._known_minimal_entities["tournament"]:
                 continue
             if category_id not in inserted["category"]:
                 continue
@@ -255,7 +298,9 @@ class NormalizeRepository:
                 """,
                 tournament_rows,
             )
-            inserted["tournament"].update(int(row[0]) for row in tournament_rows if row[0] is not None)
+            tournament_ids = {int(row[0]) for row in tournament_rows if row[0] is not None}
+            inserted["tournament"].update(tournament_ids)
+            self._known_minimal_entities["tournament"].update(tournament_ids)
 
         venue_rows = [
             (
@@ -265,7 +310,11 @@ class NormalizeRepository:
                 row.get("country_alpha2") if row.get("country_alpha2") in inserted["country"] else None,
             )
             for row in entity_upserts.get("venue", ())
-            if row.get("id") is not None and row.get("name")
+            if (
+                row.get("id") is not None
+                and row.get("name")
+                and row.get("id") not in self._known_minimal_entities["venue"]
+            )
         ]
         if venue_rows:
             await _executemany(
@@ -277,12 +326,18 @@ class NormalizeRepository:
                 """,
                 venue_rows,
             )
-            inserted["venue"].update(int(row[0]) for row in venue_rows if row[0] is not None)
+            venue_ids = {int(row[0]) for row in venue_rows if row[0] is not None}
+            inserted["venue"].update(venue_ids)
+            self._known_minimal_entities["venue"].update(venue_ids)
 
         manager_rows = [
             (row.get("id"), row.get("slug"), row.get("name"), row.get("short_name"), None)
             for row in entity_upserts.get("manager", ())
-            if row.get("id") is not None and row.get("name")
+            if (
+                row.get("id") is not None
+                and row.get("name")
+                and row.get("id") not in self._known_minimal_entities["manager"]
+            )
         ]
         if manager_rows:
             await _executemany(
@@ -298,12 +353,16 @@ class NormalizeRepository:
                 """,
                 manager_rows,
             )
-            inserted["manager"].update(int(row[0]) for row in manager_rows if row[0] is not None)
+            manager_ids = {int(row[0]) for row in manager_rows if row[0] is not None}
+            inserted["manager"].update(manager_ids)
+            self._known_minimal_entities["manager"].update(manager_ids)
 
         team_rows = []
         for row in entity_upserts.get("team", ()):
             team_id = row.get("id")
             if team_id is None or not row.get("slug") or not row.get("name"):
+                continue
+            if team_id in self._known_minimal_entities["team"]:
                 continue
             sport_id = row.get("sport_id")
             if sport_id not in inserted["sport"]:
@@ -368,7 +427,9 @@ class NormalizeRepository:
                 """,
                 team_rows,
             )
-            inserted["team"].update(int(row[0]) for row in team_rows if row[0] is not None)
+            team_ids = {int(row[0]) for row in team_rows if row[0] is not None}
+            inserted["team"].update(team_ids)
+            self._known_minimal_entities["team"].update(team_ids)
 
         player_rows = []
         for row in entity_upserts.get("player", ()):

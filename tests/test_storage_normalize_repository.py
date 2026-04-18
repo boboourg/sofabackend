@@ -194,6 +194,64 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual([len(rows) for rows in player_batches], [100, 100, 5])
 
+    async def test_repository_reuses_known_dimensions_across_calls(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+
+        await repository._upsert_minimal_entities(
+            executor,
+            {
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+                "country": ({"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},),
+                "category": (
+                    {
+                        "id": 10,
+                        "slug": "england",
+                        "name": "England",
+                        "sport_id": 1,
+                        "country_alpha2": "EN",
+                    },
+                ),
+            },
+        )
+
+        executor.executemany_calls.clear()
+
+        inserted = await repository._upsert_minimal_entities(
+            executor,
+            {
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+                "country": ({"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},),
+                "category": (
+                    {
+                        "id": 10,
+                        "slug": "england",
+                        "name": "England",
+                        "sport_id": 1,
+                        "country_alpha2": "EN",
+                    },
+                ),
+                "tournament": (
+                    {
+                        "id": 100,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category_id": 10,
+                        "unique_tournament_id": None,
+                    },
+                ),
+            },
+        )
+
+        statements = [sql for sql, _ in executor.executemany_calls]
+        self.assertFalse(any("INSERT INTO sport" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO country" in sql for sql in statements))
+        self.assertFalse(any("INSERT INTO category" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO tournament" in sql for sql in statements))
+        self.assertIn(1, inserted["sport"])
+        self.assertIn("EN", inserted["country"])
+        self.assertIn(10, inserted["category"])
+
     async def test_durable_sink_persists_special_metric_rows(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()
