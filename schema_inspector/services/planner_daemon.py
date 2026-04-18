@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from typing import Any
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_REFRESH_LIVE_EVENT
 from ..queue.streams import STREAM_DISCOVERY, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,8 @@ class PlannerDaemon:
         scheduled_targets: tuple[ScheduledPlanningTarget, ...] = (),
         now_ms_factory=None,
         loop_interval_s: float = 5.0,
+        scheduled_backpressure=None,
+        live_backpressure=None,
     ) -> None:
         self.queue = queue
         self.delayed_scheduler = delayed_scheduler
@@ -43,6 +48,8 @@ class PlannerDaemon:
         self.scheduled_targets = tuple(scheduled_targets)
         self.now_ms_factory = now_ms_factory or _default_now_ms
         self.loop_interval_s = float(loop_interval_s)
+        self.scheduled_backpressure = scheduled_backpressure
+        self.live_backpressure = live_backpressure
         self.shutdown_requested = False
         self._last_planned_at_ms: dict[str, int] = {}
 
@@ -58,9 +65,17 @@ class PlannerDaemon:
 
     async def tick(self, *, now_ms: int | None = None) -> None:
         observed_now = int(now_ms if now_ms is not None else self.now_ms_factory())
-        await self._publish_scheduled_targets(observed_now)
+        scheduled_reason = _blocking_reason(self.scheduled_backpressure)
+        if scheduled_reason is None:
+            await self._publish_scheduled_targets(observed_now)
+        else:
+            logger.info("Planner paused scheduled planning by backpressure: %s", scheduled_reason)
         await self._publish_due_delayed_jobs(observed_now)
-        await self._publish_live_refreshes(observed_now)
+        live_reason = _blocking_reason(self.live_backpressure)
+        if live_reason is None:
+            await self._publish_live_refreshes(observed_now)
+        else:
+            logger.info("Planner paused live refresh planning by backpressure: %s", live_reason)
 
     async def _publish_scheduled_targets(self, now_ms: int) -> None:
         for target in self.scheduled_targets:
@@ -161,3 +176,12 @@ def _default_now_ms() -> int:
 
 def _date_from_epoch_ms(now_ms: int) -> str:
     return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+def _blocking_reason(backpressure: object | None) -> str | None:
+    if backpressure is None:
+        return None
+    blocking_reason = getattr(backpressure, "blocking_reason", None)
+    if not callable(blocking_reason):
+        return None
+    return blocking_reason()

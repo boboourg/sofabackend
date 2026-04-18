@@ -11,11 +11,15 @@ from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
 from ..queue.streams import (
+    GROUP_DISCOVERY,
+    GROUP_HYDRATE,
     GROUP_HISTORICAL_DISCOVERY,
     GROUP_HISTORICAL_ENRICHMENT,
     GROUP_HISTORICAL_HYDRATE,
     GROUP_HISTORICAL_MAINTENANCE,
     GROUP_HISTORICAL_TOURNAMENT,
+    GROUP_LIVE_HOT,
+    GROUP_LIVE_WARM,
     HISTORICAL_CONSUMER_GROUPS,
     OPERATIONAL_CONSUMER_GROUPS,
     STREAM_DISCOVERY,
@@ -154,6 +158,20 @@ class ServiceApp:
             live_state_store=self.live_state_store,
             scheduled_targets=targets,
             loop_interval_s=loop_interval_seconds,
+            scheduled_backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_DISCOVERY, group=GROUP_DISCOVERY, max_lag=5_000),
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
+                ),
+            ),
+            live_backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=100_000),
+                    BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=250_000),
+                ),
+            ),
         )
 
     def build_live_discovery_planner_daemon(
@@ -174,6 +192,14 @@ class ServiceApp:
             queue=self.stream_queue,
             targets=targets,
             loop_interval_s=loop_interval_seconds,
+            backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
+                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=100_000),
+                    BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=250_000),
+                ),
+            ),
         )
 
     def build_historical_planner_daemon(

@@ -18,6 +18,9 @@ _RETRYABLE_MARKERS = (
 
 
 def is_retryable_db_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+
     sqlstate = str(getattr(exc, "sqlstate", "") or "").upper()
     if sqlstate in _RETRYABLE_SQLSTATES:
         return True

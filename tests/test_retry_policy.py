@@ -15,6 +15,11 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertTrue(is_retryable_db_error(deadlock))
         self.assertTrue(is_retryable_db_error(lock_not_available))
 
+    def test_retry_policy_marks_timeout_error_as_retryable(self) -> None:
+        from schema_inspector.services.retry_policy import is_retryable_db_error
+
+        self.assertTrue(is_retryable_db_error(TimeoutError()))
+
     def test_retry_policy_ignores_non_lock_errors(self) -> None:
         from schema_inspector.services.retry_policy import is_retryable_db_error
 

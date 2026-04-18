@@ -7,7 +7,13 @@ from schema_inspector.jobs.envelope import JobEnvelope
 from schema_inspector.jobs.types import JOB_HYDRATE_EVENT_ROOT, JOB_REFRESH_LIVE_EVENT
 from schema_inspector.queue.delayed import DelayedJob
 from schema_inspector.queue.live_state import LiveEventState
-from schema_inspector.queue.streams import STREAM_DISCOVERY, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM
+from schema_inspector.queue.streams import (
+    STREAM_DISCOVERY,
+    STREAM_HYDRATE,
+    STREAM_LIVE_HOT,
+    STREAM_LIVE_WARM,
+    ConsumerGroupInfo,
+)
 
 
 class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
@@ -135,14 +141,159 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([payload["sport_slug"] for _, payload in queue.published], ["football", "baseball", "football", "baseball"])
         self.assertEqual(json.loads(queue.published[0][1]["params_json"]), {"date": "2026-04-17"})
 
+    async def test_planner_daemon_skips_scheduled_targets_when_operational_backpressure_blocks(self) -> None:
+        from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
+        from schema_inspector.services.planner_daemon import PlannerDaemon, ScheduledPlanningTarget
+
+        queue = _FakeQueue(
+            group_infos={
+                (STREAM_HYDRATE, "cg:hydrate"): ConsumerGroupInfo(
+                    consumers=2,
+                    pending=0,
+                    last_delivered_id="1-0",
+                    entries_read=10,
+                    lag=250_000,
+                ),
+            }
+        )
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(()),
+            delayed_job_loader=lambda job_id: None,
+            live_state_store=_FakeLiveStateStore(),
+            scheduled_targets=(
+                ScheduledPlanningTarget(
+                    sport_slug="football",
+                    interval_ms=60_000,
+                    date_factory=lambda now_ms: "2026-04-18",
+                ),
+            ),
+            scheduled_backpressure=QueueBackpressure(
+                queue=queue,
+                limits=(BackpressureLimit(stream=STREAM_HYDRATE, group="cg:hydrate", max_lag=100_000),),
+            ),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(queue.published, [])
+
+    async def test_planner_daemon_still_publishes_delayed_jobs_while_scheduled_targets_are_blocked(self) -> None:
+        from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
+        from schema_inspector.services.planner_daemon import PlannerDaemon, ScheduledPlanningTarget
+
+        delayed_job = DelayedJob(job_id="job-124", run_at_epoch_ms=1_800_000_000_000)
+        delayed_envelope = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="football",
+            entity_type="event",
+            entity_id=502,
+            scope="scheduled",
+            params={"hydration_mode": "core"},
+            priority=20,
+            trace_id="trace-2",
+        )
+        queue = _FakeQueue(
+            group_infos={
+                (STREAM_HYDRATE, "cg:hydrate"): ConsumerGroupInfo(
+                    consumers=2,
+                    pending=0,
+                    last_delivered_id="1-0",
+                    entries_read=10,
+                    lag=250_000,
+                ),
+            }
+        )
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler((delayed_job,)),
+            delayed_job_loader=lambda job_id: delayed_envelope if job_id == "job-124" else None,
+            live_state_store=_FakeLiveStateStore(),
+            scheduled_targets=(
+                ScheduledPlanningTarget(
+                    sport_slug="football",
+                    interval_ms=60_000,
+                    date_factory=lambda now_ms: "2026-04-18",
+                ),
+            ),
+            scheduled_backpressure=QueueBackpressure(
+                queue=queue,
+                limits=(BackpressureLimit(stream=STREAM_HYDRATE, group="cg:hydrate", max_lag=100_000),),
+            ),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(len(queue.published), 1)
+        self.assertEqual(queue.published[0][0], STREAM_HYDRATE)
+        self.assertEqual(queue.published[0][1]["job_id"], delayed_envelope.job_id)
+
+    async def test_planner_daemon_skips_live_refreshes_when_live_backpressure_blocks(self) -> None:
+        from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        queue = _FakeQueue(
+            group_infos={
+                (STREAM_LIVE_WARM, "cg:live_warm"): ConsumerGroupInfo(
+                    consumers=2,
+                    pending=0,
+                    last_delivered_id="1-0",
+                    entries_read=10,
+                    lag=900_000,
+                ),
+            }
+        )
+        live_state_store = _FakeLiveStateStore(
+            due_by_lane={"warm": (7002,)},
+            states_by_event={
+                7002: LiveEventState(
+                    event_id=7002,
+                    sport_slug="basketball",
+                    status_type="inprogress",
+                    poll_profile="warm",
+                    last_seen_at=1,
+                    last_ingested_at=1,
+                    last_changed_at=1,
+                    next_poll_at=1_800_000_000_200,
+                    hot_until=None,
+                    home_score=88,
+                    away_score=80,
+                    version_hint=None,
+                    is_finalized=False,
+                )
+            },
+        )
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(()),
+            delayed_job_loader=lambda job_id: None,
+            live_state_store=live_state_store,
+            scheduled_targets=(),
+            live_backpressure=QueueBackpressure(
+                queue=queue,
+                limits=(BackpressureLimit(stream=STREAM_LIVE_WARM, group="cg:live_warm", max_lag=100_000),),
+            ),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(queue.published, [])
+
 
 class _FakeQueue:
-    def __init__(self) -> None:
+    def __init__(self, *, group_infos: dict[tuple[str, str], ConsumerGroupInfo] | None = None) -> None:
         self.published: list[tuple[str, dict[str, object]]] = []
+        self.group_infos = dict(group_infos or {})
 
     def publish(self, stream: str, values: dict[str, object]) -> str:
         self.published.append((stream, dict(values)))
         return f"{stream}:{len(self.published)}"
+
+    def group_info(self, stream: str, group: str) -> ConsumerGroupInfo | None:
+        return self.group_infos.get((stream, group))
 
 
 class _FakeDelayedScheduler:

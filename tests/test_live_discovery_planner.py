@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from schema_inspector.queue.streams import STREAM_LIVE_DISCOVERY
+from schema_inspector.queue.streams import STREAM_HYDRATE, STREAM_LIVE_DISCOVERY, ConsumerGroupInfo
 
 
 class LiveDiscoveryPlannerTests(unittest.IsolatedAsyncioTestCase):
@@ -34,14 +34,50 @@ class LiveDiscoveryPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([payload["scope"] for _, payload in queue.published], ["live", "live", "live"])
         self.assertEqual(json.loads(queue.published[0][1]["params_json"]), {})
 
+    async def test_live_discovery_planner_pauses_when_operational_backpressure_blocks(self) -> None:
+        from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
+        from schema_inspector.services.live_discovery_planner import (
+            LiveDiscoveryPlannerDaemon,
+            LiveDiscoveryPlanningTarget,
+        )
+
+        queue = _FakeQueue(
+            group_infos={
+                (STREAM_HYDRATE, "cg:hydrate"): ConsumerGroupInfo(
+                    consumers=3,
+                    pending=0,
+                    last_delivered_id="1-0",
+                    entries_read=100,
+                    lag=300_000,
+                ),
+            }
+        )
+        daemon = LiveDiscoveryPlannerDaemon(
+            queue=queue,
+            targets=(LiveDiscoveryPlanningTarget(sport_slug="football", interval_ms=60_000, priority=10),),
+            backpressure=QueueBackpressure(
+                queue=queue,
+                limits=(BackpressureLimit(stream=STREAM_HYDRATE, group="cg:hydrate", max_lag=100_000),),
+            ),
+        )
+
+        published = await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(published, 0)
+        self.assertEqual(queue.published, [])
+
 
 class _FakeQueue:
-    def __init__(self) -> None:
+    def __init__(self, *, group_infos: dict[tuple[str, str], ConsumerGroupInfo] | None = None) -> None:
         self.published: list[tuple[str, dict[str, object]]] = []
+        self.group_infos = dict(group_infos or {})
 
     def publish(self, stream: str, values: dict[str, object]) -> str:
         self.published.append((stream, dict(values)))
         return f"{stream}:{len(self.published)}"
+
+    def group_info(self, stream: str, group: str) -> ConsumerGroupInfo | None:
+        return self.group_infos.get((stream, group))
 
 
 if __name__ == "__main__":

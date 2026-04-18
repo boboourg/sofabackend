@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
@@ -10,6 +11,8 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE
 from ..queue.streams import STREAM_LIVE_DISCOVERY
 from ..workers._stream_jobs import encode_stream_job
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -30,12 +33,14 @@ class LiveDiscoveryPlannerDaemon:
         stream: str = STREAM_LIVE_DISCOVERY,
         now_ms_factory=None,
         loop_interval_s: float = 5.0,
+        backpressure=None,
     ) -> None:
         self.queue = queue
         self.targets = tuple(targets)
         self.stream = stream
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.loop_interval_s = float(loop_interval_s)
+        self.backpressure = backpressure
         self.shutdown_requested = False
         self._last_planned_at_ms: dict[str, int] = {}
 
@@ -51,6 +56,10 @@ class LiveDiscoveryPlannerDaemon:
 
     async def tick(self, *, now_ms: int | None = None) -> int:
         observed_now = int(now_ms if now_ms is not None else self.now_ms_factory())
+        blocking_reason = _blocking_reason(self.backpressure)
+        if blocking_reason is not None:
+            logger.info("Live discovery planner paused by backpressure: %s", blocking_reason)
+            return 0
         published = 0
         for target in self.targets:
             last_planned = self._last_planned_at_ms.get(target.sport_slug)
@@ -70,3 +79,12 @@ class LiveDiscoveryPlannerDaemon:
             self._last_planned_at_ms[target.sport_slug] = observed_now
             published += 1
         return published
+
+
+def _blocking_reason(backpressure: object | None) -> str | None:
+    if backpressure is None:
+        return None
+    blocking_reason = getattr(backpressure, "blocking_reason", None)
+    if not callable(blocking_reason):
+        return None
+    return blocking_reason()
