@@ -8,10 +8,12 @@ from datetime import datetime
 from typing import Any, Iterable, Protocol
 
 from .event_list_parser import EventListBundle
+from .services.surface_correction_detector import SurfaceEventState
 
 
 class SqlExecutor(Protocol):
     async def executemany(self, command: str, args: Iterable[tuple[Any, ...]]) -> Any: ...
+    async def fetch(self, command: str, *args) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,93 @@ class EventListWriteResult:
 
 class EventListRepository:
     """Writes normalized event-list data into PostgreSQL."""
+
+    async def load_surface_states(self, executor: SqlExecutor, event_ids: Iterable[int]) -> dict[int, SurfaceEventState]:
+        resolved_event_ids = tuple(sorted({int(item) for item in event_ids}))
+        if not resolved_event_ids:
+            return {}
+
+        rows = await executor.fetch(
+            """
+            SELECT id, status_code, winner_code, aggregated_winner_code
+            FROM event
+            WHERE id = ANY($1::bigint[])
+            """,
+            resolved_event_ids,
+        )
+        if not rows:
+            return {}
+
+        states: dict[int, dict[str, Any]] = {
+            int(row["id"]): {
+                "event_id": int(row["id"]),
+                "status_code": row["status_code"],
+                "winner_code": row["winner_code"],
+                "aggregated_winner_code": row["aggregated_winner_code"],
+                "home_score": None,
+                "away_score": None,
+                "var_home": None,
+                "var_away": None,
+                "change_timestamp": None,
+                "changes": (),
+            }
+            for row in rows
+        }
+
+        score_rows = await executor.fetch(
+            """
+            SELECT event_id, side, current
+            FROM event_score
+            WHERE event_id = ANY($1::bigint[])
+            """,
+            resolved_event_ids,
+        )
+        for row in score_rows:
+            state = states.get(int(row["event_id"]))
+            if state is None:
+                continue
+            if str(row["side"]) == "home":
+                state["home_score"] = row["current"]
+            elif str(row["side"]) == "away":
+                state["away_score"] = row["current"]
+
+        var_rows = await executor.fetch(
+            """
+            SELECT event_id, home_team, away_team
+            FROM event_var_in_progress
+            WHERE event_id = ANY($1::bigint[])
+            """,
+            resolved_event_ids,
+        )
+        for row in var_rows:
+            state = states.get(int(row["event_id"]))
+            if state is None:
+                continue
+            state["var_home"] = row["home_team"]
+            state["var_away"] = row["away_team"]
+
+        change_rows = await executor.fetch(
+            """
+            SELECT event_id, change_timestamp, ordinal, change_value
+            FROM event_change_item
+            WHERE event_id = ANY($1::bigint[])
+            ORDER BY event_id, ordinal
+            """,
+            resolved_event_ids,
+        )
+        grouped_changes: dict[int, list[tuple[int, str, int | None]]] = {}
+        for row in change_rows:
+            grouped_changes.setdefault(int(row["event_id"]), []).append(
+                (int(row["ordinal"]), str(row["change_value"]), row["change_timestamp"])
+            )
+        for event_id, values in grouped_changes.items():
+            state = states.get(int(event_id))
+            if state is None:
+                continue
+            state["change_timestamp"] = next((timestamp for _, _, timestamp in values if timestamp is not None), None)
+            state["changes"] = tuple(change_value for _, change_value, _ in values)
+
+        return {event_id: SurfaceEventState(**state) for event_id, state in states.items()}
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: EventListBundle) -> EventListWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)

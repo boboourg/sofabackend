@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_HYDRATE_EVENT_ROOT
 from ..queue.streams import GROUP_DISCOVERY, STREAM_DISCOVERY, STREAM_HYDRATE, StreamEntry
+from ..services.surface_correction_detector import SurfaceCorrection
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job, encode_stream_job
 
@@ -25,6 +27,7 @@ class DiscoveryWorker:
         delayed_scheduler=None,
         delayed_payload_store=None,
         completion_store=None,
+        freshness_policy=None,
         now_ms_factory=None,
         job_audit_logger=None,
     ) -> None:
@@ -37,6 +40,7 @@ class DiscoveryWorker:
         self.timeout_s = float(timeout_s)
         self.delayed_scheduler = delayed_scheduler
         self.delayed_payload_store = delayed_payload_store
+        self.freshness_policy = freshness_policy
         self.now_ms_factory = now_ms_factory or (lambda: int(datetime.now(timezone.utc).timestamp() * 1000))
         self.runtime = WorkerRuntime(
             name="discovery-worker",
@@ -63,31 +67,42 @@ class DiscoveryWorker:
 
         scope = str(job.scope or "").strip().lower() or "scheduled"
         if scope == "live":
-            event_ids = await self.orchestrator.discover_live_event_ids(
-                sport_slug=sport_slug,
-                timeout=self.timeout_s,
-            )
+            discovery = await self._discover_live_surface(sport_slug=sport_slug)
             hydration_mode = "full"
         else:
             observed_date = str(job.params.get("date") or _utc_today())
-            event_ids = await self.orchestrator.discover_scheduled_event_ids(
-                sport_slug=sport_slug,
-                date=observed_date,
-                timeout=self.timeout_s,
-            )
+            discovery = await self._discover_scheduled_surface(sport_slug=sport_slug, observed_date=observed_date)
             hydration_mode = "core"
 
-        for event_id in event_ids:
+        published = 0
+        corrections = {int(item.event_id): item for item in discovery.corrections}
+        for event_id in discovery.event_ids:
+            correction = corrections.get(int(event_id))
+            force_rehydrate = correction is not None
+            resolved_mode = "full" if force_rehydrate else hydration_mode
+            if self.freshness_policy is not None and not force_rehydrate:
+                if not self.freshness_policy.claim_event_hydration(
+                    event_id=int(event_id),
+                    hydration_mode=resolved_mode,
+                    force_rehydrate=False,
+                    now_ms=int(self.now_ms_factory()),
+                ):
+                    continue
+            params = {"hydration_mode": resolved_mode}
+            if correction is not None:
+                params["force_rehydrate"] = True
+                params["correction_reason"] = correction.reason
             hydrate_job = job.spawn_child(
                 job_type=JOB_HYDRATE_EVENT_ROOT,
                 entity_type="event",
                 entity_id=int(event_id),
                 scope=scope,
-                params={"hydration_mode": hydration_mode},
+                params=params,
                 priority=job.priority,
             )
             self.queue.publish(self.hydrate_stream, encode_stream_job(hydrate_job))
-        return f"published:{len(event_ids)}"
+            published += 1
+        return f"published:{published}"
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
         del exc
@@ -107,6 +122,54 @@ class DiscoveryWorker:
 
     def request_shutdown(self) -> None:
         self.runtime.request_shutdown()
+
+    async def _discover_live_surface(self, *, sport_slug: str) -> "_SurfaceDiscovery":
+        resolver = getattr(self.orchestrator, "discover_live_events", None)
+        if callable(resolver):
+            result = await resolver(sport_slug=sport_slug, timeout=self.timeout_s)
+        else:
+            result = await self.orchestrator.discover_live_event_ids(
+                sport_slug=sport_slug,
+                timeout=self.timeout_s,
+            )
+        return _normalize_surface_result(result)
+
+    async def _discover_scheduled_surface(self, *, sport_slug: str, observed_date: str) -> "_SurfaceDiscovery":
+        resolver = getattr(self.orchestrator, "discover_scheduled_events", None)
+        if callable(resolver):
+            result = await resolver(
+                sport_slug=sport_slug,
+                date=observed_date,
+                timeout=self.timeout_s,
+            )
+        else:
+            result = await self.orchestrator.discover_scheduled_event_ids(
+                sport_slug=sport_slug,
+                date=observed_date,
+                timeout=self.timeout_s,
+            )
+        return _normalize_surface_result(result)
+
+
+class _SurfaceDiscovery:
+    def __init__(self, *, event_ids: tuple[int, ...], corrections: tuple[SurfaceCorrection, ...]) -> None:
+        self.event_ids = tuple(int(item) for item in event_ids)
+        self.corrections = tuple(corrections)
+
+
+def _normalize_surface_result(value: Any) -> _SurfaceDiscovery:
+    if isinstance(value, (tuple, list)):
+        return _SurfaceDiscovery(event_ids=tuple(int(item) for item in value), corrections=())
+    parsed = getattr(value, "parsed", None)
+    if parsed is not None and hasattr(parsed, "events"):
+        event_ids = tuple(
+            int(getattr(item, "id"))
+            for item in getattr(parsed, "events", ())
+            if getattr(item, "id", None) is not None
+        )
+        corrections = tuple(getattr(value, "corrections", ()) or ())
+        return _SurfaceDiscovery(event_ids=event_ids, corrections=corrections)
+    raise TypeError(f"Unsupported discovery result: {value!r}")
 
 
 def _utc_today() -> str:

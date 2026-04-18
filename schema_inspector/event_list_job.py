@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from .db import AsyncpgDatabase
 from .event_list_parser import EventListBundle, EventListParser
 from .event_list_repository import EventListRepository, EventListWriteResult
+from .services.surface_correction_detector import SurfaceCorrection, SurfaceCorrectionDetector
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,7 @@ class EventListIngestResult:
     job_name: str
     parsed: EventListBundle
     written: EventListWriteResult
+    corrections: tuple[SurfaceCorrection, ...] = ()
 
 
 class EventListIngestJob:
@@ -27,11 +29,13 @@ class EventListIngestJob:
         database: AsyncpgDatabase,
         *,
         logger: logging.Logger | None = None,
+        correction_detector: SurfaceCorrectionDetector | None = None,
     ) -> None:
         self.parser = parser
         self.repository = repository
         self.database = database
         self.logger = logger or logging.getLogger(__name__)
+        self.correction_detector = correction_detector or SurfaceCorrectionDetector()
 
     async def run_scheduled(
         self,
@@ -100,7 +104,17 @@ class EventListIngestJob:
 
     async def _run(self, job_name: str, bundle_awaitable) -> EventListIngestResult:
         bundle = await bundle_awaitable
+        corrections: tuple[SurfaceCorrection, ...] = ()
+        load_surface_states = getattr(self.repository, "load_surface_states", None)
+        connection_factory = getattr(self.database, "connection", None)
+        if callable(load_surface_states) and callable(connection_factory):
+            async with connection_factory() as connection:
+                previous_states = await load_surface_states(
+                    connection,
+                    tuple(int(item.id) for item in bundle.events),
+                )
+            corrections = self.correction_detector.detect(bundle=bundle, previous_states=previous_states)
         async with self.database.transaction() as connection:
             write_result = await self.repository.upsert_bundle(connection, bundle)
         self.logger.info("Event-list ingest completed: job=%s events=%s", job_name, write_result.event_rows)
-        return EventListIngestResult(job_name=job_name, parsed=bundle, written=write_result)
+        return EventListIngestResult(job_name=job_name, parsed=bundle, written=write_result, corrections=corrections)

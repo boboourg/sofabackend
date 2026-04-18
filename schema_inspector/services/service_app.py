@@ -33,6 +33,8 @@ from ..queue.streams import (
     StreamEntry,
 )
 from ..sport_profiles import resolve_sport_profile
+from .backpressure import BackpressureLimit, QueueBackpressure
+from .freshness_policy import FreshnessPolicy
 from .live_discovery_planner import LiveDiscoveryPlannerDaemon, LiveDiscoveryPlanningTarget
 from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
 from .historical_tournament_planner import (
@@ -115,6 +117,7 @@ class ServiceApp:
         self.delayed_scheduler = DelayedJobScheduler(self.app.redis_backend)
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
         self.completion_store = DedupeStore(self.app.redis_backend)
+        self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
         database = getattr(self.app, "database", None)
@@ -197,6 +200,13 @@ class ServiceApp:
             targets=targets,
             dates_per_tick=dates_per_tick,
             loop_interval_s=loop_interval_seconds,
+            backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_HISTORICAL_DISCOVERY, group=GROUP_HISTORICAL_DISCOVERY, max_lag=10_000),
+                    BackpressureLimit(stream=STREAM_HISTORICAL_HYDRATE, group=GROUP_HISTORICAL_HYDRATE, max_lag=50_000),
+                ),
+            ),
         )
 
     def build_historical_tournament_planner_daemon(
@@ -218,6 +228,13 @@ class ServiceApp:
             targets=targets,
             tournaments_per_tick=tournaments_per_tick,
             loop_interval_s=loop_interval_seconds,
+            backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(stream=STREAM_HISTORICAL_TOURNAMENT, group=GROUP_HISTORICAL_TOURNAMENT, max_lag=2_500),
+                    BackpressureLimit(stream=STREAM_HISTORICAL_ENRICHMENT, group=GROUP_HISTORICAL_ENRICHMENT, max_lag=15_000),
+                ),
+            ),
         )
 
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
@@ -265,6 +282,7 @@ class ServiceApp:
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
+            freshness_policy=self.freshness_policy,
             job_audit_logger=self.job_audit_logger,
         )
 
@@ -288,6 +306,7 @@ class ServiceApp:
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
+            freshness_policy=self.freshness_policy,
             job_audit_logger=self.job_audit_logger,
         )
 
@@ -311,6 +330,7 @@ class ServiceApp:
             delayed_scheduler=self.delayed_scheduler,
             delayed_payload_store=self.delayed_envelope_store,
             completion_store=self.completion_store,
+            freshness_policy=self.freshness_policy,
             job_audit_logger=self.job_audit_logger,
         )
 

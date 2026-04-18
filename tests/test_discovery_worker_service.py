@@ -87,6 +87,97 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         payload = queue.published_payloads[0]
         self.assertEqual(json.loads(str(payload["params_json"])), {"hydration_mode": "full"})
 
+    async def test_discovery_worker_skips_duplicate_hydrate_jobs_when_freshness_blocks_publish(self) -> None:
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        orchestrator = _FakeDiscoveryOrchestrator(event_ids=(501, 777))
+        queue = _FakeQueue()
+        freshness_policy = _FakeFreshnessPolicy(allowed_event_ids={501})
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-1",
+            timeout_s=12.5,
+            freshness_policy=freshness_policy,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="1-3",
+                values={
+                    "job_id": "job-3",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "scheduled",
+                    "params_json": '{"date":"2026-04-17"}',
+                    "priority": "50",
+                    "attempt": "1",
+                    "scheduled_at": "2026-04-17T20:00:00+00:00",
+                    "idempotency_key": "key-3",
+                },
+            )
+        )
+
+        self.assertEqual(result, "published:1")
+        self.assertEqual(queue.published_streams, [STREAM_HYDRATE])
+        self.assertEqual(freshness_policy.calls, [(501, "core", False), (777, "core", False)])
+
+    async def test_discovery_worker_force_rehydrates_corrected_events_even_when_freshness_would_skip(self) -> None:
+        from schema_inspector.services.surface_correction_detector import SurfaceCorrection
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        orchestrator = _FakeDiscoveryOrchestrator(
+            event_ids=(777,),
+            scheduled_result=_FakeSurfaceDiscoveryResult(
+                event_ids=(777,),
+                corrections=(SurfaceCorrection(event_id=777, reason="score_changed"),),
+            ),
+        )
+        queue = _FakeQueue()
+        freshness_policy = _FakeFreshnessPolicy(allowed_event_ids=())
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-1",
+            timeout_s=12.5,
+            freshness_policy=freshness_policy,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="1-4",
+                values={
+                    "job_id": "job-4",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "scheduled",
+                    "params_json": '{"date":"2026-04-17"}',
+                    "priority": "50",
+                    "attempt": "1",
+                    "scheduled_at": "2026-04-17T20:00:00+00:00",
+                    "idempotency_key": "key-4",
+                },
+            )
+        )
+
+        self.assertEqual(result, "published:1")
+        payload = queue.published_payloads[0]
+        self.assertEqual(
+            json.loads(str(payload["params_json"])),
+            {
+                "hydration_mode": "full",
+                "force_rehydrate": True,
+                "correction_reason": "score_changed",
+            },
+        )
+        self.assertEqual(freshness_policy.calls, [])
+
     async def test_discovery_worker_schedules_retry_for_deadlock_errors(self) -> None:
         from schema_inspector.workers.discovery_worker import DiscoveryWorker
 
@@ -124,14 +215,26 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakeDiscoveryOrchestrator:
-    def __init__(self, *, event_ids: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        *,
+        event_ids: tuple[int, ...],
+        scheduled_result: _FakeSurfaceDiscoveryResult | None = None,
+    ) -> None:
         self.event_ids = tuple(event_ids)
+        self.scheduled_result = scheduled_result
         self.scheduled_calls: list[tuple[str, str, float]] = []
         self.live_calls: list[tuple[str, float]] = []
 
     async def discover_scheduled_event_ids(self, *, sport_slug: str, date: str, timeout: float):
         self.scheduled_calls.append((sport_slug, date, timeout))
         return self.event_ids
+
+    async def discover_scheduled_events(self, *, sport_slug: str, date: str, timeout: float):
+        self.scheduled_calls.append((sport_slug, date, timeout))
+        if self.scheduled_result is not None:
+            return self.scheduled_result
+        return _FakeSurfaceDiscoveryResult(event_ids=self.event_ids, corrections=())
 
     async def discover_live_event_ids(self, *, sport_slug: str, timeout: float):
         self.live_calls.append((sport_slug, timeout))
@@ -171,6 +274,40 @@ class _FakePayloadStore:
 
     def save_entry(self, entry: StreamEntry) -> None:
         self.saved_message_ids.append(entry.message_id)
+
+
+class _FakeFreshnessPolicy:
+    def __init__(self, *, allowed_event_ids: tuple[int, ...] | set[int]) -> None:
+        self.allowed_event_ids = {int(item) for item in allowed_event_ids}
+        self.calls: list[tuple[int, str, bool]] = []
+
+    def claim_event_hydration(
+        self,
+        *,
+        event_id: int,
+        hydration_mode: str,
+        force_rehydrate: bool,
+        now_ms: int | None = None,
+    ) -> bool:
+        del now_ms
+        self.calls.append((int(event_id), str(hydration_mode), bool(force_rehydrate)))
+        return int(event_id) in self.allowed_event_ids
+
+
+class _FakeParsedEvent:
+    def __init__(self, event_id: int) -> None:
+        self.id = int(event_id)
+
+
+class _FakeParsedBundle:
+    def __init__(self, event_ids: tuple[int, ...]) -> None:
+        self.events = tuple(_FakeParsedEvent(event_id) for event_id in event_ids)
+
+
+class _FakeSurfaceDiscoveryResult:
+    def __init__(self, *, event_ids: tuple[int, ...], corrections: tuple[object, ...]) -> None:
+        self.parsed = _FakeParsedBundle(event_ids)
+        self.corrections = tuple(corrections)
 
 
 if __name__ == "__main__":

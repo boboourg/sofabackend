@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -13,6 +14,7 @@ from ..workers._stream_jobs import encode_stream_job
 
 HISTORICAL_TOURNAMENT_CURSOR_HASH = "hash:etl:historical_tournament_cursor"
 TournamentSelector = Callable[..., Awaitable[tuple[int, ...]] | tuple[int, ...]]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class HistoricalTournamentPlannerDaemon:
         stream: str = STREAM_HISTORICAL_TOURNAMENT,
         tournaments_per_tick: int = 10,
         loop_interval_s: float = 10.0,
+        backpressure=None,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -63,6 +66,7 @@ class HistoricalTournamentPlannerDaemon:
         self.stream = stream
         self.tournaments_per_tick = max(1, int(tournaments_per_tick))
         self.loop_interval_s = float(loop_interval_s)
+        self.backpressure = backpressure
         self.shutdown_requested = False
 
     def request_shutdown(self) -> None:
@@ -76,6 +80,11 @@ class HistoricalTournamentPlannerDaemon:
             await asyncio.sleep(self.loop_interval_s)
 
     async def tick(self) -> int:
+        if self.backpressure is not None:
+            reason = self.backpressure.blocking_reason()
+            if reason:
+                logger.info("Historical tournament planner paused by backpressure: %s", reason)
+                return 0
         published = 0
         for target in self.targets:
             after_unique_tournament_id = self.cursor_store.load_last_unique_tournament_id(target.sport_slug)

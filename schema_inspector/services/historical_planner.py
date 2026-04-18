@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import date as Date
 
@@ -12,6 +13,7 @@ from ..queue.streams import STREAM_HISTORICAL_DISCOVERY
 from ..workers._stream_jobs import encode_stream_job
 
 HISTORICAL_CURSOR_HASH = "hash:etl:historical_cursor"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class HistoricalPlannerDaemon:
         stream: str = STREAM_HISTORICAL_DISCOVERY,
         dates_per_tick: int = 1,
         loop_interval_s: float = 5.0,
+        backpressure=None,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -60,6 +63,7 @@ class HistoricalPlannerDaemon:
         self.stream = stream
         self.dates_per_tick = max(1, int(dates_per_tick))
         self.loop_interval_s = float(loop_interval_s)
+        self.backpressure = backpressure
         self.shutdown_requested = False
 
     def request_shutdown(self) -> None:
@@ -73,6 +77,11 @@ class HistoricalPlannerDaemon:
             await asyncio.sleep(self.loop_interval_s)
 
     async def tick(self) -> int:
+        if self.backpressure is not None:
+            reason = self.backpressure.blocking_reason()
+            if reason:
+                logger.info("Historical planner paused by backpressure: %s", reason)
+                return 0
         published = 0
         for target in self.targets:
             current = self.cursor_store.load_next_date(target.sport_slug, target.date_from, target.date_to) or target.date_from

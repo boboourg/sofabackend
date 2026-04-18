@@ -206,12 +206,18 @@ class HybridApp:
             )
 
     async def discover_live_event_ids(self, *, sport_slug: str, timeout: float) -> tuple[int, ...]:
-        result = await self.event_list_job.run_live(sport_slug=sport_slug, timeout=timeout)
+        result = await self.discover_live_events(sport_slug=sport_slug, timeout=timeout)
         return tuple(int(item.id) for item in result.parsed.events)
 
     async def discover_scheduled_event_ids(self, *, sport_slug: str, date: str, timeout: float) -> tuple[int, ...]:
-        result = await self.event_list_job.run_scheduled(date, sport_slug=sport_slug, timeout=timeout)
+        result = await self.discover_scheduled_events(sport_slug=sport_slug, date=date, timeout=timeout)
         return tuple(int(item.id) for item in result.parsed.events)
+
+    async def discover_live_events(self, *, sport_slug: str, timeout: float):
+        return await self.event_list_job.run_live(sport_slug=sport_slug, timeout=timeout)
+
+    async def discover_scheduled_events(self, *, sport_slug: str, date: str, timeout: float):
+        return await self.event_list_job.run_scheduled(date, sport_slug=sport_slug, timeout=timeout)
 
     async def select_unique_tournament_ids_after_cursor(
         self,
