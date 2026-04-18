@@ -11,8 +11,22 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..jobs.envelope import JobEnvelope
-from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_REFRESH_LIVE_EVENT
-from ..queue.streams import STREAM_DISCOVERY, STREAM_HYDRATE, STREAM_LIVE_HOT, STREAM_LIVE_WARM
+from ..jobs.types import (
+    JOB_DISCOVER_SPORT_SURFACE,
+    JOB_ENRICH_TOURNAMENT_ARCHIVE,
+    JOB_REFRESH_LIVE_EVENT,
+    JOB_SYNC_TOURNAMENT_ARCHIVE,
+)
+from ..queue.streams import (
+    STREAM_DISCOVERY,
+    STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_ENRICHMENT,
+    STREAM_HISTORICAL_HYDRATE,
+    STREAM_HISTORICAL_TOURNAMENT,
+    STREAM_HYDRATE,
+    STREAM_LIVE_HOT,
+    STREAM_LIVE_WARM,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +154,14 @@ def _stream_for_job(job: JobEnvelope) -> str:
         if str(job.scope or "").strip().lower() == "warm":
             return STREAM_LIVE_WARM
         return STREAM_LIVE_HOT
+    if str(job.scope or "").strip().lower() == "historical":
+        if job.job_type == JOB_SYNC_TOURNAMENT_ARCHIVE:
+            return STREAM_HISTORICAL_TOURNAMENT
+        if job.job_type == JOB_ENRICH_TOURNAMENT_ARCHIVE:
+            return STREAM_HISTORICAL_ENRICHMENT
+        if job.job_type.startswith("discover_") or job.job_type.startswith("sync_"):
+            return STREAM_HISTORICAL_DISCOVERY
+        return STREAM_HISTORICAL_HYDRATE
     if job.job_type.startswith("discover_") or job.job_type.startswith("sync_"):
         return STREAM_DISCOVERY
     return STREAM_HYDRATE
