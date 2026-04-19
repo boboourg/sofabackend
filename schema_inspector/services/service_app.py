@@ -38,17 +38,6 @@ from ..queue.streams import (
 )
 from ..sport_profiles import resolve_sport_profile
 from .backpressure import BackpressureLimit, QueueBackpressure
-from .backpressure_config import (
-    HISTORICAL_DISCOVERY_MAX_LAG,
-    HISTORICAL_ENRICHMENT_MAX_LAG,
-    HISTORICAL_HYDRATE_MAX_LAG,
-    HISTORICAL_TOURNAMENT_MAX_LAG,
-    HYDRATE_MAX_LAG,
-    LIVE_DISCOVERY_HYDRATE_MAX_LAG,
-    LIVE_HOT_MAX_LAG,
-    LIVE_WARM_MAX_LAG,
-    SCHEDULED_DISCOVERY_MAX_LAG,
-)
 from .freshness_policy import FreshnessPolicy
 from .live_discovery_planner import LiveDiscoveryPlannerDaemon, LiveDiscoveryPlanningTarget
 from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
@@ -172,15 +161,15 @@ class ServiceApp:
             scheduled_backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_DISCOVERY, group=GROUP_DISCOVERY, max_lag=SCHEDULED_DISCOVERY_MAX_LAG),
-                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=HYDRATE_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_DISCOVERY, group=GROUP_DISCOVERY, max_lag=5_000),
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
                 ),
             ),
             live_backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=LIVE_HOT_MAX_LAG),
-                    BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=LIVE_WARM_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=100_000),
+                    BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=250_000),
                 ),
             ),
         )
@@ -206,9 +195,9 @@ class ServiceApp:
             backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=LIVE_DISCOVERY_HYDRATE_MAX_LAG),
-                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=LIVE_HOT_MAX_LAG),
-                    BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=LIVE_WARM_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
+                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=100_000),
+                    BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=250_000),
                 ),
             ),
         )
@@ -240,16 +229,8 @@ class ServiceApp:
             backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_DISCOVERY,
-                        group=GROUP_HISTORICAL_DISCOVERY,
-                        max_lag=HISTORICAL_DISCOVERY_MAX_LAG,
-                    ),
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_HYDRATE,
-                        group=GROUP_HISTORICAL_HYDRATE,
-                        max_lag=HISTORICAL_HYDRATE_MAX_LAG,
-                    ),
+                    BackpressureLimit(stream=STREAM_HISTORICAL_DISCOVERY, group=GROUP_HISTORICAL_DISCOVERY, max_lag=10_000),
+                    BackpressureLimit(stream=STREAM_HISTORICAL_HYDRATE, group=GROUP_HISTORICAL_HYDRATE, max_lag=50_000),
                 ),
             ),
         )
@@ -276,16 +257,8 @@ class ServiceApp:
             backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_TOURNAMENT,
-                        group=GROUP_HISTORICAL_TOURNAMENT,
-                        max_lag=HISTORICAL_TOURNAMENT_MAX_LAG,
-                    ),
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_ENRICHMENT,
-                        group=GROUP_HISTORICAL_ENRICHMENT,
-                        max_lag=HISTORICAL_ENRICHMENT_MAX_LAG,
-                    ),
+                    BackpressureLimit(stream=STREAM_HISTORICAL_TOURNAMENT, group=GROUP_HISTORICAL_TOURNAMENT, max_lag=2_500),
+                    BackpressureLimit(stream=STREAM_HISTORICAL_ENRICHMENT, group=GROUP_HISTORICAL_ENRICHMENT, max_lag=15_000),
                 ),
             ),
         )
@@ -339,7 +312,7 @@ class ServiceApp:
             hydrate_backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=HYDRATE_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
                 ),
             ),
             job_audit_logger=self.job_audit_logger,
@@ -372,7 +345,7 @@ class ServiceApp:
                     BackpressureLimit(
                         stream=STREAM_HISTORICAL_HYDRATE,
                         group=GROUP_HISTORICAL_HYDRATE,
-                        max_lag=HISTORICAL_HYDRATE_MAX_LAG,
+                        max_lag=50_000,
                     ),
                 ),
             ),
@@ -405,7 +378,7 @@ class ServiceApp:
             hydrate_backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=HYDRATE_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=100_000),
                 ),
             ),
             job_audit_logger=self.job_audit_logger,
