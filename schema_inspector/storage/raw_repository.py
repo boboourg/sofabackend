@@ -231,59 +231,54 @@ class RawRepository:
         executor: SqlExecutor,
         record: PayloadSnapshotRecord,
     ) -> int | None:
+        # Single-roundtrip, race-free upsert keyed by (scope_key, payload_hash).
+        #
+        # Relies on the partial unique index
+        #   uniq_api_payload_snapshot_scope_hash
+        #     ON api_payload_snapshot (scope_key, payload_hash)
+        #     WHERE scope_key IS NOT NULL AND payload_hash IS NOT NULL
+        # created by migration 2026-04-20_api_payload_snapshot_scope_hash_uniq.sql.
+        #
+        # The ON CONFLICT DO UPDATE sets scope_key to its own value; this is a
+        # deliberate no-op assignment used purely to force Postgres to return
+        # the surviving row's id via RETURNING on conflict (DO NOTHING would
+        # suppress RETURNING when the row already exists).
         scope_key = _snapshot_scope_key(record)
         query = """
-            WITH existing AS (
-                SELECT id
-                FROM api_payload_snapshot
-                WHERE (
-                    CASE
-                        WHEN context_entity_type IS NOT NULL AND context_entity_id IS NOT NULL
-                        THEN context_entity_type || ':' || context_entity_id::text || ':' || endpoint_pattern
-                        ELSE endpoint_pattern
-                    END
-                ) = $1
-                  AND payload_hash IS NOT DISTINCT FROM $2
-                ORDER BY id DESC
-                LIMIT 1
-            ),
-            inserted AS (
-                INSERT INTO api_payload_snapshot (
-                    endpoint_pattern,
-                    source_url,
-                    resolved_url,
-                    envelope_key,
-                    context_entity_type,
-                    context_entity_id,
-                    context_unique_tournament_id,
-                    context_season_id,
-                    context_event_id,
-                    payload,
-                    fetched_at,
-                    trace_id,
-                    job_id,
-                    sport_slug,
-                    http_status,
-                    payload_hash,
-                    payload_size_bytes,
-                    content_type,
-                    is_valid_json,
-                    is_soft_error_payload
-                )
-                SELECT
-                    $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                    $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
-                WHERE NOT EXISTS (SELECT 1 FROM existing)
-                RETURNING id
+            INSERT INTO api_payload_snapshot (
+                endpoint_pattern,
+                source_url,
+                resolved_url,
+                envelope_key,
+                context_entity_type,
+                context_entity_id,
+                context_unique_tournament_id,
+                context_season_id,
+                context_event_id,
+                payload,
+                fetched_at,
+                trace_id,
+                job_id,
+                sport_slug,
+                http_status,
+                payload_hash,
+                payload_size_bytes,
+                content_type,
+                is_valid_json,
+                is_soft_error_payload,
+                scope_key
             )
-            SELECT id FROM inserted
-            UNION ALL
-            SELECT id FROM existing
-            LIMIT 1
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                $21
+            )
+            ON CONFLICT (scope_key, payload_hash)
+                WHERE scope_key IS NOT NULL AND payload_hash IS NOT NULL
+                DO UPDATE SET scope_key = EXCLUDED.scope_key
+            RETURNING id
         """
         args = (
-            scope_key,
-            record.payload_hash,
             record.endpoint_pattern,
             record.source_url,
             record.resolved_url,
@@ -304,6 +299,7 @@ class RawRepository:
             record.content_type,
             record.is_valid_json,
             record.is_soft_error_payload,
+            scope_key,
         )
         fetchval = getattr(executor, "fetchval", None)
         if callable(fetchval):

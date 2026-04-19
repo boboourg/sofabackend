@@ -140,11 +140,14 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot_id, 42)
         self.assertEqual(len(executor.fetchval_calls), 1)
         query, args = executor.fetchval_calls[0]
-        self.assertIn("WITH existing AS", query)
-        self.assertIn("payload_hash IS NOT DISTINCT FROM", query)
-        self.assertIn("api_payload_snapshot", query)
-        self.assertEqual(args[0], "event:1:/api/v1/event/{event_id}")
-        self.assertEqual(args[1], "hash-1")
+        self.assertIn("INSERT INTO api_payload_snapshot", query)
+        self.assertIn("ON CONFLICT (scope_key, payload_hash)", query)
+        self.assertIn("WHERE scope_key IS NOT NULL AND payload_hash IS NOT NULL", query)
+        self.assertIn("RETURNING id", query)
+        self.assertNotIn("IS NOT DISTINCT FROM", query)
+        # scope_key is the last positional parameter ($21); payload_hash is $16.
+        self.assertEqual(args[15], "hash-1")
+        self.assertEqual(args[20], "event:1:/api/v1/event/{event_id}")
 
 
 if __name__ == "__main__":
