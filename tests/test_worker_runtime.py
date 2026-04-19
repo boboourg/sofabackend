@@ -209,12 +209,201 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retries, [("1-6", 30_000)])
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-6",))])
 
+    async def test_worker_runtime_max_concurrency_defaults_to_serial(self) -> None:
+        # Fix #2: default behaviour must stay strictly serial so that
+        # untouched deployments keep identical semantics to the old
+        # `await task` loop.
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        entries = tuple(
+            StreamEntry(stream=STREAM_HYDRATE, message_id=f"1-{index}", values={"attempt": "1"})
+            for index in range(4)
+        )
+        queue = _FakeQueue(entries=entries)
+
+        overlap = 0
+        max_overlap = 0
+        order: list[str] = []
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            nonlocal overlap, max_overlap
+            overlap += 1
+            max_overlap = max(max_overlap, overlap)
+            order.append(entry.message_id)
+            await asyncio.sleep(0.01)
+            overlap -= 1
+            assert runtime is not None
+            if entry.message_id == "1-3":
+                runtime.request_shutdown()
+            return "ok"
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            block_ms=0,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(max_overlap, 1)
+        self.assertEqual(order, ["1-0", "1-1", "1-2", "1-3"])
+        self.assertEqual(runtime.max_concurrency, 1)
+
+    async def test_worker_runtime_max_concurrency_dispatches_in_parallel(self) -> None:
+        # Fix #2: with max_concurrency=4 the runtime must execute up to four
+        # handlers concurrently rather than strictly one at a time.
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        entries = tuple(
+            StreamEntry(stream=STREAM_HYDRATE, message_id=f"p-{index}", values={"attempt": "1"})
+            for index in range(4)
+        )
+        queue = _FakeQueue(entries=entries)
+
+        overlap = 0
+        max_overlap = 0
+        completed: list[str] = []
+        all_started = asyncio.Event()
+        started = 0
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            nonlocal overlap, max_overlap, started
+            overlap += 1
+            max_overlap = max(max_overlap, overlap)
+            started += 1
+            if started >= 4:
+                all_started.set()
+            # Hold each task until all siblings have started so we can prove
+            # they were dispatched concurrently.
+            await all_started.wait()
+            overlap -= 1
+            completed.append(entry.message_id)
+            assert runtime is not None
+            if len(completed) >= 4:
+                runtime.request_shutdown()
+            return "ok"
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            block_ms=0,
+            max_concurrency=4,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(max_overlap, 4)
+        self.assertEqual(sorted(completed), ["p-0", "p-1", "p-2", "p-3"])
+        acked_ids = {msg_id for _, _, ids in queue.acked for msg_id in ids}
+        self.assertEqual(acked_ids, {"p-0", "p-1", "p-2", "p-3"})
+
+    async def test_worker_runtime_honours_max_concurrency_env_var(self) -> None:
+        # Fix #2: max_concurrency is configurable via environment so tmux
+        # sessions can ramp individual workers without touching code.
+        import os
+
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        previous = os.environ.get("SOFASCORE_WORKER_MAX_CONCURRENCY")
+        os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = "6"
+        try:
+            runtime = WorkerRuntime(
+                name="hydrate",
+                queue=_FakeQueue(entries=()),
+                stream=STREAM_HYDRATE,
+                group="cg:hydrate",
+                consumer="worker-a",
+                handler=lambda entry: "ok",
+            )
+            self.assertEqual(runtime.max_concurrency, 6)
+        finally:
+            if previous is None:
+                os.environ.pop("SOFASCORE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = previous
+
+    async def test_worker_runtime_completion_ttl_defaults_to_one_hour(self) -> None:
+        # Fix #3: shrink completion-key TTL from 24h to 1h so Redis memory
+        # stays bounded (71k keys observed in prod after 24h).
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=_FakeQueue(entries=()),
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=lambda entry: "ok",
+        )
+        self.assertEqual(runtime.completion_ttl_ms, 3_600_000)
+
+    async def test_worker_runtime_completion_ttl_env_override(self) -> None:
+        import os
+
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        previous = os.environ.get("SOFASCORE_WORKER_COMPLETION_TTL_MS")
+        os.environ["SOFASCORE_WORKER_COMPLETION_TTL_MS"] = "900000"
+        try:
+            runtime = WorkerRuntime(
+                name="hydrate",
+                queue=_FakeQueue(entries=()),
+                stream=STREAM_HYDRATE,
+                group="cg:hydrate",
+                consumer="worker-a",
+                handler=lambda entry: "ok",
+            )
+            self.assertEqual(runtime.completion_ttl_ms, 900_000)
+        finally:
+            if previous is None:
+                os.environ.pop("SOFASCORE_WORKER_COMPLETION_TTL_MS", None)
+            else:
+                os.environ["SOFASCORE_WORKER_COMPLETION_TTL_MS"] = previous
+
+    async def test_worker_runtime_reraises_non_retryable_handler_errors(self) -> None:
+        # Regression guard: the new fire-and-forget dispatch loop must still
+        # bubble up unknown handler errors so tmux crash-recovery works.
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(
+            entries=(StreamEntry(stream=STREAM_HYDRATE, message_id="boom-1", values={"attempt": "1"}),)
+        )
+
+        async def handler(entry: StreamEntry) -> str:
+            del entry
+            raise ValueError("unknown handler failure")
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            block_ms=0,
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            await runtime.run_forever(install_signal_handlers=False)
+        self.assertIn("unknown handler failure", str(caught.exception))
+
 
 class _FakeQueue:
     def __init__(self, *, entries: tuple[StreamEntry, ...]) -> None:
         self._entries = list(entries)
         self.acked: list[tuple[str, str, tuple[str, ...]]] = []
         self.read_calls = 0
+        self.read_counts: list[int] = []
 
     def read_group(
         self,
@@ -225,13 +414,15 @@ class _FakeQueue:
         count: int = 1,
         block_ms: int | None = None,
     ) -> tuple[StreamEntry, ...]:
-        del stream, group, consumer, count, block_ms
+        del stream, group, consumer, block_ms
         self.read_calls += 1
+        self.read_counts.append(count)
         if not self._entries:
             return ()
-        entries = tuple(self._entries)
-        self._entries.clear()
-        return entries
+        take = max(1, int(count))
+        taken = self._entries[:take]
+        self._entries = self._entries[take:]
+        return tuple(taken)
 
     def ack(self, stream: str, group: str, message_ids: tuple[str, ...]) -> int:
         self.acked.append((stream, group, message_ids))

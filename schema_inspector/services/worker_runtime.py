@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import signal
 import time
 from collections.abc import Awaitable, Callable
@@ -17,6 +18,25 @@ from .retry_policy import is_retryable_db_error, retry_delay_ms
 StreamHandler = Callable[[StreamEntry], object]
 RetryHandler = Callable[[StreamEntry, Exception], object]
 logger = logging.getLogger(__name__)
+
+_ENV_MAX_CONCURRENCY = "SOFASCORE_WORKER_MAX_CONCURRENCY"
+_ENV_COMPLETION_TTL_MS = "SOFASCORE_WORKER_COMPLETION_TTL_MS"
+_DEFAULT_COMPLETION_TTL_MS = 3_600_000  # 1 hour; was 24h — see Fix #3 (Apr 2026).
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to %d", name, raw, default)
+        return default
+    if value < 1:
+        logger.warning("%s must be >= 1 (got %d); falling back to %d", name, value, default)
+        return default
+    return value
 
 
 class WorkerRuntime:
@@ -33,11 +53,12 @@ class WorkerRuntime:
         handler: StreamHandler,
         retry_handler: Callable[..., object] | None = None,
         completion_store=None,
-        completion_ttl_ms: int = 86_400_000,
+        completion_ttl_ms: int | None = None,
         now_ms_factory=None,
         block_ms: int = 5_000,
         idle_sleep_s: float = 0.05,
         job_audit_logger=None,
+        max_concurrency: int | None = None,
     ) -> None:
         self.name = name
         self.queue = queue
@@ -47,15 +68,28 @@ class WorkerRuntime:
         self.handler = handler
         self.retry_handler = retry_handler
         self.completion_store = completion_store
+        # Fix #3: completion TTL defaults to 1 hour (was 24h) and can be
+        # overridden via SOFASCORE_WORKER_COMPLETION_TTL_MS. 1h is more than
+        # enough to dedupe a reclaimed PENDING entry — autoclaim kicks in
+        # within minutes, not hours — and keeps Redis memory tidy.
+        if completion_ttl_ms is None:
+            completion_ttl_ms = _env_positive_int(_ENV_COMPLETION_TTL_MS, _DEFAULT_COMPLETION_TTL_MS)
         self.completion_ttl_ms = int(completion_ttl_ms)
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.block_ms = block_ms
         self.idle_sleep_s = idle_sleep_s
         self.job_audit_logger = job_audit_logger
+        # Fix #2: parallel dispatch. Default=1 preserves the old strictly-serial
+        # behaviour; tmux sessions can opt into more concurrency by exporting
+        # SOFASCORE_WORKER_MAX_CONCURRENCY=N before launching the worker.
+        if max_concurrency is None:
+            max_concurrency = _env_positive_int(_ENV_MAX_CONCURRENCY, 1)
+        self.max_concurrency = int(max_concurrency)
         self.shutdown_requested = False
         self.accepting_new_work = True
         self._signal_handlers_installed = False
         self._inflight: set[asyncio.Task[Any]] = set()
+        self._fatal_exc: BaseException | None = None
 
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
@@ -77,24 +111,57 @@ class WorkerRuntime:
             self.install_signal_handlers()
         try:
             while self.accepting_new_work:
+                # 1) Back-pressure: block until at least one slot is free.
+                #    With max_concurrency=1 this degrades into "wait for the
+                #    single inflight task", matching the previous await-task
+                #    behaviour but without blocking the whole loop body.
+                await self._await_free_slot()
+                if not self.accepting_new_work:
+                    break
+
+                slots = self.max_concurrency - len(self._inflight)
+                if slots <= 0:
+                    continue
+
+                # 2) Read as many entries as we can dispatch in parallel.
                 entries = self.queue.read_group(
                     self.stream,
                     self.group,
                     self.consumer,
-                    count=1,
+                    count=slots,
                     block_ms=self.block_ms,
                 )
                 if not entries:
                     await asyncio.sleep(self.idle_sleep_s)
                     continue
+
+                # 3) Fire-and-track: never `await task` here — that would
+                #    serialise dispatch. Fatal task errors are captured via
+                #    _on_task_done and re-raised after drain().
                 for entry in entries:
                     if not self.accepting_new_work:
                         break
                     task = asyncio.create_task(self._handle_entry(entry))
                     self._track_task(task)
-                    await task
         finally:
             await self.drain()
+            if self._fatal_exc is not None:
+                raise self._fatal_exc
+
+    async def _await_free_slot(self) -> None:
+        while self.accepting_new_work and len(self._inflight) >= self.max_concurrency:
+            pending = tuple(self._inflight)
+            if not pending:
+                return
+            done, _ = await asyncio.wait(
+                pending,
+                timeout=self.idle_sleep_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # `done` callbacks run asynchronously; trim eagerly so the outer
+            # loop doesn't spin waiting for discard-callbacks to fire.
+            if done:
+                self._inflight.difference_update(done)
 
     async def drain(self, *, timeout_s: float | None = None) -> None:
         if not self._inflight:
@@ -107,6 +174,27 @@ class WorkerRuntime:
     def _track_task(self, task: asyncio.Task[Any]) -> None:
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task[Any]) -> None:
+        # Preserve crash-on-unknown-error semantics from the original
+        # `await task` loop: if a task surfaces a non-retryable exception
+        # (retryable ones are consumed inside _handle_entry), capture the
+        # first one, stop accepting new work, and let run_forever re-raise
+        # after draining the other inflight tasks.
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except asyncio.InvalidStateError:
+            return
+        if exc is None:
+            return
+        if self._fatal_exc is None:
+            self._fatal_exc = exc
+        self.accepting_new_work = False
 
     async def _handle_entry(self, entry: StreamEntry) -> object:
         started_at = _utc_now_iso()
