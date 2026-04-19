@@ -6,7 +6,6 @@ import json
 from typing import Any, Mapping, Protocol
 
 from ..parsers.base import ParseResult
-from .bulk_write_helpers import RowsBatch, sorted_delete_insert, sorted_upsert
 
 _EXECUTEMANY_BATCH_SIZE = 100
 _CACHEABLE_MINIMAL_ENTITY_KINDS = (
@@ -71,7 +70,6 @@ class NormalizeRepository:
                 "home_score",
                 "away_score",
             ),
-            sort_keys=("event_id", "ordinal"),
         )
         await self._replace_event_rows(
             executor,
@@ -87,14 +85,12 @@ class NormalizeRepository:
                 _as_scalar_text(row.get("value", row.get("current"))),
                 row.get("break_occurred"),
             ),
-            sort_keys=("event_id", "ordinal"),
         )
         await self._replace_event_rows(
             executor,
             "baseball_inning",
             result.metric_rows.get("baseball_inning", ()),
             ("event_id", "ordinal", "inning", "home_score", "away_score"),
-            sort_keys=("event_id", "ordinal"),
         )
         await self._persist_baseball_pitches(executor, result.metric_rows.get("baseball_pitch", ()))
         await self._replace_event_rows(
@@ -102,14 +98,12 @@ class NormalizeRepository:
             "shotmap_point",
             result.metric_rows.get("shotmap_point", ()),
             ("event_id", "ordinal", "x", "y", "shot_type"),
-            sort_keys=("event_id", "ordinal"),
         )
         await self._replace_event_rows(
             executor,
             "esports_game",
             result.metric_rows.get("esports_game", ()),
             ("event_id", "ordinal", "game_id", "status", "map_name"),
-            sort_keys=("event_id", "ordinal"),
         )
 
     async def _upsert_minimal_entities(
@@ -144,16 +138,14 @@ class NormalizeRepository:
             )
         ]
         if sport_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "sport",
-                RowsBatch(
-                    columns=("id", "slug", "name"),
-                    values=tuple(sport_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=(),
+                """
+                INSERT INTO sport (id, slug, name)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                sport_rows,
             )
             sport_ids = {int(row[0]) for row in sport_rows if row[0] is not None}
             inserted["sport"].update(sport_ids)
@@ -169,16 +161,14 @@ class NormalizeRepository:
             )
         ]
         if country_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "country",
-                RowsBatch(
-                    columns=("alpha2", "alpha3", "slug", "name"),
-                    values=tuple(country_rows),
-                ),
-                sort_keys=("alpha2",),
-                conflict_target="alpha2",
-                update_cols=(),
+                """
+                INSERT INTO country (alpha2, alpha3, slug, name)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (alpha2) DO NOTHING
+                """,
+                country_rows,
             )
             country_codes = {str(row[0]) for row in country_rows if row[0] is not None}
             inserted["country"].update(country_codes)
@@ -205,16 +195,14 @@ class NormalizeRepository:
                 )
             )
         if category_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "category",
-                RowsBatch(
-                    columns=("id", "slug", "name", "sport_id", "country_alpha2"),
-                    values=tuple(category_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=(),
+                """
+                INSERT INTO category (id, slug, name, sport_id, country_alpha2)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                category_rows,
             )
             category_ids = {int(row[0]) for row in category_rows if row[0] is not None}
             inserted["category"].update(category_ids)
@@ -246,16 +234,14 @@ class NormalizeRepository:
                 )
             )
         if unique_tournament_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "unique_tournament",
-                RowsBatch(
-                    columns=("id", "slug", "name", "category_id", "country_alpha2"),
-                    values=tuple(unique_tournament_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=(),
+                """
+                INSERT INTO unique_tournament (id, slug, name, category_id, country_alpha2)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                unique_tournament_rows,
             )
             unique_tournament_ids = {int(row[0]) for row in unique_tournament_rows if row[0] is not None}
             inserted["unique_tournament"].update(unique_tournament_ids)
@@ -267,16 +253,14 @@ class NormalizeRepository:
             if row.get("id") is not None and row.get("id") not in self._known_minimal_entities["season"]
         ]
         if season_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "season",
-                RowsBatch(
-                    columns=("id", "name", "year", "editor"),
-                    values=tuple(season_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=(),
+                """
+                INSERT INTO season (id, name, year, editor)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                season_rows,
             )
             season_ids = {int(row[0]) for row in season_rows if row[0] is not None}
             inserted["season"].update(season_ids)
@@ -305,16 +289,14 @@ class NormalizeRepository:
                 )
             )
         if tournament_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "tournament",
-                RowsBatch(
-                    columns=("id", "slug", "name", "category_id", "unique_tournament_id"),
-                    values=tuple(tournament_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=(),
+                """
+                INSERT INTO tournament (id, slug, name, category_id, unique_tournament_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                tournament_rows,
             )
             tournament_ids = {int(row[0]) for row in tournament_rows if row[0] is not None}
             inserted["tournament"].update(tournament_ids)
@@ -335,16 +317,14 @@ class NormalizeRepository:
             )
         ]
         if venue_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "venue",
-                RowsBatch(
-                    columns=("id", "slug", "name", "country_alpha2"),
-                    values=tuple(venue_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=(),
+                """
+                INSERT INTO venue (id, slug, name, country_alpha2)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                venue_rows,
             )
             venue_ids = {int(row[0]) for row in venue_rows if row[0] is not None}
             inserted["venue"].update(venue_ids)
@@ -360,16 +340,18 @@ class NormalizeRepository:
             )
         ]
         if manager_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "manager",
-                RowsBatch(
-                    columns=("id", "slug", "name", "short_name", "team_id"),
-                    values=tuple(manager_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=("slug", "name", "short_name", "team_id"),
+                """
+                INSERT INTO manager (id, slug, name, short_name, team_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    short_name = EXCLUDED.short_name,
+                    team_id = EXCLUDED.team_id
+                """,
+                manager_rows,
             )
             manager_ids = {int(row[0]) for row in manager_rows if row[0] is not None}
             inserted["manager"].update(manager_ids)
@@ -459,16 +441,18 @@ class NormalizeRepository:
                 team_id = None
             player_rows.append((player_id, row.get("slug"), row.get("name"), row.get("short_name"), team_id))
         if player_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "player",
-                RowsBatch(
-                    columns=("id", "slug", "name", "short_name", "team_id"),
-                    values=tuple(player_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols=("slug", "name", "short_name", "team_id"),
+                """
+                INSERT INTO player (id, slug, name, short_name, team_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    short_name = EXCLUDED.short_name,
+                    team_id = EXCLUDED.team_id
+                """,
+                player_rows,
             )
             inserted["player"].update(int(row[0]) for row in player_rows if row[0] is not None)
 
@@ -509,35 +493,25 @@ class NormalizeRepository:
                 )
             )
         if event_rows:
-            await sorted_upsert(
+            await _executemany(
                 executor,
-                "event",
-                RowsBatch(
-                    columns=(
-                        "id",
-                        "slug",
-                        "tournament_id",
-                        "unique_tournament_id",
-                        "season_id",
-                        "home_team_id",
-                        "away_team_id",
-                        "venue_id",
-                        "start_timestamp",
-                    ),
-                    values=tuple(event_rows),
-                ),
-                sort_keys=("id",),
-                conflict_target="id",
-                update_cols={
-                    "slug": 'COALESCE(EXCLUDED."slug", event."slug")',
-                    "tournament_id": 'COALESCE(EXCLUDED."tournament_id", event."tournament_id")',
-                    "unique_tournament_id": 'COALESCE(EXCLUDED."unique_tournament_id", event."unique_tournament_id")',
-                    "season_id": 'COALESCE(EXCLUDED."season_id", event."season_id")',
-                    "home_team_id": 'COALESCE(EXCLUDED."home_team_id", event."home_team_id")',
-                    "away_team_id": 'COALESCE(EXCLUDED."away_team_id", event."away_team_id")',
-                    "venue_id": 'COALESCE(EXCLUDED."venue_id", event."venue_id")',
-                    "start_timestamp": 'EXCLUDED."start_timestamp"',
-                },
+                """
+                INSERT INTO event (
+                    id, slug, tournament_id, unique_tournament_id, season_id,
+                    home_team_id, away_team_id, venue_id, start_timestamp
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (id) DO UPDATE SET
+                    slug = COALESCE(EXCLUDED.slug, event.slug),
+                    tournament_id = COALESCE(EXCLUDED.tournament_id, event.tournament_id),
+                    unique_tournament_id = COALESCE(EXCLUDED.unique_tournament_id, event.unique_tournament_id),
+                    season_id = COALESCE(EXCLUDED.season_id, event.season_id),
+                    home_team_id = COALESCE(EXCLUDED.home_team_id, event.home_team_id),
+                    away_team_id = COALESCE(EXCLUDED.away_team_id, event.away_team_id),
+                    venue_id = COALESCE(EXCLUDED.venue_id, event.venue_id),
+                    start_timestamp = EXCLUDED.start_timestamp
+                """,
+                event_rows,
             )
             inserted["event"].update(int(row[0]) for row in event_rows if row[0] is not None)
 
@@ -556,22 +530,15 @@ class NormalizeRepository:
         event_id = _event_id_from_rows(side_rows) or _event_id_from_rows(player_rows)
         if event_id is None:
             return
-        if side_rows:
-            await sorted_delete_insert(
-                executor,
-                "event_lineup",
-                RowsBatch(
-                    columns=("event_id", "side", "formation"),
-                    values=tuple(
-                        (row.get("event_id"), row.get("side"), row.get("formation"))
-                        for row in side_rows
-                    ),
-                ),
-                delete_key="event_id",
-                sort_keys=("event_id", "side"),
-            )
-        else:
-            await executor.execute("DELETE FROM event_lineup WHERE event_id = $1", event_id)
+        await executor.execute("DELETE FROM event_lineup WHERE event_id = $1", event_id)
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_lineup (event_id, side, formation)
+            VALUES ($1, $2, $3)
+            """,
+            [(row.get("event_id"), row.get("side"), row.get("formation")) for row in side_rows],
+        )
         normalized_players = []
         for row in player_rows:
             team_id = row.get("team_id")
@@ -608,6 +575,7 @@ class NormalizeRepository:
         event_id = _event_id_from_rows(rows)
         if event_id is None:
             return
+        await executor.execute("DELETE FROM event_statistic WHERE event_id = $1", event_id)
         normalized_rows = []
         for row in rows:
             normalized_rows.append(
@@ -626,28 +594,18 @@ class NormalizeRepository:
                     _as_scalar_text(row.get("statistics_type")),
                 )
             )
-        await sorted_delete_insert(
+        await _executemany(
             executor,
-            "event_statistic",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "period",
-                    "group_name",
-                    "stat_name",
-                    "home_value_numeric",
-                    "home_value_text",
-                    "home_value_json",
-                    "away_value_numeric",
-                    "away_value_text",
-                    "away_value_json",
-                    "compare_code",
-                    "statistics_type",
-                ),
-                values=tuple(normalized_rows),
-            ),
-            delete_key="event_id",
-            sort_keys=("event_id", "period", "group_name", "stat_name"),
+            """
+            INSERT INTO event_statistic (
+                event_id, period, group_name, stat_name,
+                home_value_numeric, home_value_text, home_value_json,
+                away_value_numeric, away_value_text, away_value_json,
+                compare_code, statistics_type
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11, $12)
+            """,
+            normalized_rows,
         )
 
     async def _persist_event_incidents(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
@@ -656,36 +614,29 @@ class NormalizeRepository:
         event_id = _event_id_from_rows(rows)
         if event_id is None:
             return
-        await sorted_delete_insert(
+        await executor.execute("DELETE FROM event_incident WHERE event_id = $1", event_id)
+        await _executemany(
             executor,
-            "event_incident",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "ordinal",
-                    "incident_id",
-                    "incident_type",
-                    "minute",
-                    "home_score_text",
-                    "away_score_text",
-                    "text_value",
-                ),
-                values=tuple(
-                    (
-                        row.get("event_id"),
-                        row.get("ordinal"),
-                        row.get("incident_id"),
-                        row.get("incident_type"),
-                        row.get("time"),
-                        _as_scalar_text(row.get("home_score")),
-                        _as_scalar_text(row.get("away_score")),
-                        row.get("text"),
-                    )
-                    for row in rows
-                ),
-            ),
-            delete_key="event_id",
-            sort_keys=("event_id", "ordinal"),
+            """
+            INSERT INTO event_incident (
+                event_id, ordinal, incident_id, incident_type,
+                minute, home_score_text, away_score_text, text_value
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("ordinal"),
+                    row.get("incident_id"),
+                    row.get("incident_type"),
+                    row.get("time"),
+                    _as_scalar_text(row.get("home_score")),
+                    _as_scalar_text(row.get("away_score")),
+                    row.get("text"),
+                )
+                for row in rows
+            ],
         )
 
     async def _persist_event_graph(
@@ -702,40 +653,29 @@ class NormalizeRepository:
             return
         if graph_rows:
             row = graph_rows[0]
-            await sorted_upsert(
-                executor,
-                "event_graph",
-                RowsBatch(
-                    columns=("event_id", "period_time", "period_count", "overtime_length"),
-                    values=(
-                        (
-                            row.get("event_id"),
-                            row.get("period_time"),
-                            row.get("period_count"),
-                            row.get("overtime_length"),
-                        ),
-                    ),
-                ),
-                sort_keys=("event_id",),
-                conflict_target="event_id",
-                update_cols=("period_time", "period_count", "overtime_length"),
+            await executor.execute(
+                """
+                INSERT INTO event_graph (event_id, period_time, period_count, overtime_length)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (event_id) DO UPDATE SET
+                    period_time = EXCLUDED.period_time,
+                    period_count = EXCLUDED.period_count,
+                    overtime_length = EXCLUDED.overtime_length
+                """,
+                row.get("event_id"),
+                row.get("period_time"),
+                row.get("period_count"),
+                row.get("overtime_length"),
             )
-        if point_rows:
-            await sorted_delete_insert(
-                executor,
-                "event_graph_point",
-                RowsBatch(
-                    columns=("event_id", "ordinal", "minute", "value"),
-                    values=tuple(
-                        (row.get("event_id"), row.get("ordinal"), row.get("minute"), row.get("value"))
-                        for row in point_rows
-                    ),
-                ),
-                delete_key="event_id",
-                sort_keys=("event_id", "ordinal"),
-            )
-        else:
-            await executor.execute("DELETE FROM event_graph_point WHERE event_id = $1", event_id)
+        await executor.execute("DELETE FROM event_graph_point WHERE event_id = $1", event_id)
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_graph_point (event_id, ordinal, minute, value)
+            VALUES ($1, $2, $3, $4)
+            """,
+            [(row.get("event_id"), row.get("ordinal"), row.get("minute"), row.get("value")) for row in point_rows],
+        )
 
     async def _persist_best_players(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
         if not rows:
@@ -743,36 +683,28 @@ class NormalizeRepository:
         event_id = _event_id_from_rows(rows)
         if event_id is None:
             return
-        await sorted_delete_insert(
+        await executor.execute("DELETE FROM event_best_player_entry WHERE event_id = $1", event_id)
+        await _executemany(
             executor,
-            "event_best_player_entry",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "bucket",
-                    "ordinal",
-                    "player_id",
-                    "label",
-                    "value_text",
-                    "value_numeric",
-                    "is_player_of_the_match",
-                ),
-                values=tuple(
-                    (
-                        row.get("event_id"),
-                        row.get("bucket"),
-                        row.get("ordinal"),
-                        row.get("player_id"),
-                        row.get("label"),
-                        row.get("value_text"),
-                        row.get("value_numeric"),
-                        row.get("is_player_of_the_match"),
-                    )
-                    for row in rows
-                ),
-            ),
-            delete_key="event_id",
-            sort_keys=("event_id", "bucket", "ordinal"),
+            """
+            INSERT INTO event_best_player_entry (
+                event_id, bucket, ordinal, player_id, label, value_text, value_numeric, is_player_of_the_match
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("bucket"),
+                    row.get("ordinal"),
+                    row.get("player_id"),
+                    row.get("label"),
+                    row.get("value_text"),
+                    row.get("value_numeric"),
+                    row.get("is_player_of_the_match"),
+                )
+                for row in rows
+            ],
         )
 
     async def _persist_event_player_statistics(
@@ -782,50 +714,39 @@ class NormalizeRepository:
     ) -> None:
         if not rows:
             return
-        await sorted_upsert(
+        await _executemany(
             executor,
-            "event_player_statistics",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "player_id",
-                    "team_id",
-                    "position",
-                    "rating",
-                    "rating_original",
-                    "rating_alternative",
-                    "statistics_type",
-                    "sport_slug",
-                    "extra_json",
-                ),
-                values=tuple(
-                    (
-                        row.get("event_id"),
-                        row.get("player_id"),
-                        row.get("team_id"),
-                        row.get("position"),
-                        row.get("rating"),
-                        row.get("rating_original"),
-                        row.get("rating_alternative"),
-                        row.get("statistics_type"),
-                        row.get("sport_slug"),
-                        _jsonb(row.get("extra_json")),
-                    )
-                    for row in rows
-                ),
-            ),
-            sort_keys=("event_id", "player_id"),
-            conflict_target=("event_id", "player_id"),
-            update_cols=(
-                "team_id",
-                "position",
-                "rating",
-                "rating_original",
-                "rating_alternative",
-                "statistics_type",
-                "sport_slug",
-                "extra_json",
-            ),
+            """
+            INSERT INTO event_player_statistics (
+                event_id, player_id, team_id, position, rating,
+                rating_original, rating_alternative, statistics_type, sport_slug, extra_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+            ON CONFLICT (event_id, player_id) DO UPDATE SET
+                team_id = EXCLUDED.team_id,
+                position = EXCLUDED.position,
+                rating = EXCLUDED.rating,
+                rating_original = EXCLUDED.rating_original,
+                rating_alternative = EXCLUDED.rating_alternative,
+                statistics_type = EXCLUDED.statistics_type,
+                sport_slug = EXCLUDED.sport_slug,
+                extra_json = EXCLUDED.extra_json
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("player_id"),
+                    row.get("team_id"),
+                    row.get("position"),
+                    row.get("rating"),
+                    row.get("rating_original"),
+                    row.get("rating_alternative"),
+                    row.get("statistics_type"),
+                    row.get("sport_slug"),
+                    _jsonb(row.get("extra_json")),
+                )
+                for row in rows
+            ],
         )
 
     async def _persist_event_player_stat_values(
@@ -835,32 +756,38 @@ class NormalizeRepository:
     ) -> None:
         if not rows:
             return
-        await sorted_delete_insert(
+        seen_pairs = sorted(
+            {
+                (row.get("event_id"), row.get("player_id"))
+                for row in rows
+                if row.get("event_id") is not None and row.get("player_id") is not None
+            }
+        )
+        for event_id, player_id in seen_pairs:
+            await executor.execute(
+                "DELETE FROM event_player_stat_value WHERE event_id = $1 AND player_id = $2",
+                event_id,
+                player_id,
+            )
+        await _executemany(
             executor,
-            "event_player_stat_value",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "player_id",
-                    "stat_name",
-                    "stat_value_numeric",
-                    "stat_value_text",
-                    "stat_value_json",
-                ),
-                values=tuple(
-                    (
-                        row.get("event_id"),
-                        row.get("player_id"),
-                        row.get("stat_name"),
-                        row.get("stat_value_numeric"),
-                        row.get("stat_value_text"),
-                        _jsonb(row.get("stat_value_json")),
-                    )
-                    for row in rows
-                ),
-            ),
-            delete_key=("event_id", "player_id"),
-            sort_keys=("event_id", "player_id", "stat_name"),
+            """
+            INSERT INTO event_player_stat_value (
+                event_id, player_id, stat_name, stat_value_numeric, stat_value_text, stat_value_json
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("player_id"),
+                    row.get("stat_name"),
+                    row.get("stat_value_numeric"),
+                    row.get("stat_value_text"),
+                    _jsonb(row.get("stat_value_json")),
+                )
+                for row in rows
+            ],
         )
 
     async def _persist_event_player_rating_breakdown(
@@ -870,44 +797,45 @@ class NormalizeRepository:
     ) -> None:
         if not rows:
             return
-        await sorted_delete_insert(
+        seen_pairs = sorted(
+            {
+                (row.get("event_id"), row.get("player_id"))
+                for row in rows
+                if row.get("event_id") is not None and row.get("player_id") is not None
+            }
+        )
+        for event_id, player_id in seen_pairs:
+            await executor.execute(
+                "DELETE FROM event_player_rating_breakdown_action WHERE event_id = $1 AND player_id = $2",
+                event_id,
+                player_id,
+            )
+        await _executemany(
             executor,
-            "event_player_rating_breakdown_action",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "player_id",
-                    "action_group",
-                    "ordinal",
-                    "event_action_type",
-                    "is_home",
-                    "keypass",
-                    "outcome",
-                    "start_x",
-                    "start_y",
-                    "end_x",
-                    "end_y",
-                ),
-                values=tuple(
-                    (
-                        row.get("event_id"),
-                        row.get("player_id"),
-                        row.get("action_group"),
-                        row.get("ordinal"),
-                        row.get("event_action_type"),
-                        row.get("is_home"),
-                        row.get("keypass"),
-                        row.get("outcome"),
-                        row.get("start_x"),
-                        row.get("start_y"),
-                        row.get("end_x"),
-                        row.get("end_y"),
-                    )
-                    for row in rows
-                ),
-            ),
-            delete_key=("event_id", "player_id"),
-            sort_keys=("event_id", "player_id", "action_group", "ordinal"),
+            """
+            INSERT INTO event_player_rating_breakdown_action (
+                event_id, player_id, action_group, ordinal, event_action_type,
+                is_home, keypass, outcome, start_x, start_y, end_x, end_y
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("player_id"),
+                    row.get("action_group"),
+                    row.get("ordinal"),
+                    row.get("event_action_type"),
+                    row.get("is_home"),
+                    row.get("keypass"),
+                    row.get("outcome"),
+                    row.get("start_x"),
+                    row.get("start_y"),
+                    row.get("end_x"),
+                    row.get("end_y"),
+                )
+                for row in rows
+            ],
         )
 
     async def _persist_baseball_pitches(
@@ -917,48 +845,47 @@ class NormalizeRepository:
     ) -> None:
         if not rows:
             return
-        await sorted_delete_insert(
+        seen_pairs = sorted(
+            {
+                (_as_int(row.get("event_id")), _as_int(row.get("at_bat_id")))
+                for row in rows
+                if _as_int(row.get("event_id")) is not None and _as_int(row.get("at_bat_id")) is not None
+            }
+        )
+        for event_id, at_bat_id in seen_pairs:
+            await executor.execute(
+                "DELETE FROM baseball_pitch WHERE event_id = $1 AND at_bat_id = $2",
+                event_id,
+                at_bat_id,
+            )
+        await _executemany(
             executor,
-            "baseball_pitch",
-            RowsBatch(
-                columns=(
-                    "event_id",
-                    "at_bat_id",
-                    "ordinal",
-                    "pitch_id",
-                    "pitch_speed",
-                    "pitch_type",
-                    "pitch_zone",
-                    "pitch_x",
-                    "pitch_y",
-                    "mlb_x",
-                    "mlb_y",
-                    "outcome",
-                    "pitcher_id",
-                    "hitter_id",
-                ),
-                values=tuple(
-                    (
-                        row.get("event_id"),
-                        row.get("at_bat_id"),
-                        row.get("ordinal"),
-                        row.get("pitch_id"),
-                        _as_float(row.get("pitch_speed")),
-                        _as_scalar_text(row.get("pitch_type")),
-                        _as_scalar_text(row.get("pitch_zone")),
-                        _as_float(row.get("pitch_x")),
-                        _as_float(row.get("pitch_y")),
-                        _as_float(row.get("mlb_x")),
-                        _as_float(row.get("mlb_y")),
-                        _as_scalar_text(row.get("outcome")),
-                        row.get("pitcher_id"),
-                        row.get("hitter_id"),
-                    )
-                    for row in rows
-                ),
-            ),
-            delete_key=("event_id", "at_bat_id"),
-            sort_keys=("event_id", "at_bat_id", "ordinal"),
+            """
+            INSERT INTO baseball_pitch (
+                event_id, at_bat_id, ordinal, pitch_id, pitch_speed, pitch_type,
+                pitch_zone, pitch_x, pitch_y, mlb_x, mlb_y, outcome, pitcher_id, hitter_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            """,
+            [
+                (
+                    row.get("event_id"),
+                    row.get("at_bat_id"),
+                    row.get("ordinal"),
+                    row.get("pitch_id"),
+                    _as_float(row.get("pitch_speed")),
+                    _as_scalar_text(row.get("pitch_type")),
+                    _as_scalar_text(row.get("pitch_zone")),
+                    _as_float(row.get("pitch_x")),
+                    _as_float(row.get("pitch_y")),
+                    _as_float(row.get("mlb_x")),
+                    _as_float(row.get("mlb_y")),
+                    _as_scalar_text(row.get("outcome")),
+                    row.get("pitcher_id"),
+                    row.get("hitter_id"),
+                )
+                for row in rows
+            ],
         )
 
     async def _replace_event_rows(
@@ -969,23 +896,19 @@ class NormalizeRepository:
         columns: tuple[str, ...],
         *,
         row_mapper=None,
-        sort_keys: tuple[str, ...],
     ) -> None:
         if not rows:
             return
         event_id = _event_id_from_rows(rows)
         if event_id is None:
             return
+        await executor.execute(f"DELETE FROM {table_name} WHERE event_id = $1", event_id)
         mapper = row_mapper or (lambda row: tuple(row.get(column) for column in columns))
-        await sorted_delete_insert(
+        placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
+        await _executemany(
             executor,
-            table_name,
-            RowsBatch(
-                columns=columns,
-                values=tuple(tuple(mapper(row)) for row in rows),
-            ),
-            delete_key="event_id",
-            sort_keys=sort_keys,
+            f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})",
+            [tuple(mapper(row)) for row in rows],
         )
 
 
