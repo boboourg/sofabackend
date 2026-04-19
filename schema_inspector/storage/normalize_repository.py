@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Mapping, Protocol
 
 from ..parsers.base import ParseResult
+from ..services.retry_policy import RetryableJobError
 
 _EXECUTEMANY_BATCH_SIZE = 100
 _CACHEABLE_MINIMAL_ENTITY_KINDS = (
@@ -20,11 +22,43 @@ _CACHEABLE_MINIMAL_ENTITY_KINDS = (
     "team",
 )
 
+logger = logging.getLogger(__name__)
+
+_PARENT_KEY_SPECS: dict[str, tuple[str, str]] = {
+    "sport": ("id", "bigint"),
+    "country": ("alpha2", "text"),
+    "category": ("id", "bigint"),
+    "unique_tournament": ("id", "bigint"),
+    "tournament": ("id", "bigint"),
+    "season": ("id", "bigint"),
+    "venue": ("id", "bigint"),
+    "manager": ("id", "bigint"),
+    "team": ("id", "bigint"),
+}
+
 
 class SqlExecutor(Protocol):
     async def execute(self, query: str, *args: object) -> Any: ...
 
     async def executemany(self, query: str, args: list[tuple[object, ...]]) -> Any: ...
+
+    async def fetch(self, query: str, *args: object) -> Any: ...
+
+
+class RetriableRepositoryError(RetryableJobError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing_parent_table: str,
+        missing_parent_ids: tuple[object, ...],
+        child_event_id: int | None,
+        delay_ms: int | None = None,
+    ) -> None:
+        super().__init__(message, delay_ms=delay_ms)
+        self.missing_parent_table = str(missing_parent_table)
+        self.missing_parent_ids = tuple(missing_parent_ids)
+        self.child_event_id = child_event_id
 
 
 class NormalizeRepository:
@@ -45,6 +79,7 @@ class NormalizeRepository:
         inserted = _empty_inserted_tracker()
         if not skip_entity_upserts:
             inserted = await self._upsert_minimal_entities(executor, result.entity_upserts)
+        await self._confirm_lineup_team_refs(executor, result, inserted)
         await self._persist_lineups(executor, result, inserted)
         await self._persist_event_statistics(executor, result.metric_rows.get("event_statistic", ()))
         await self._persist_event_incidents(executor, result.metric_rows.get("event_incident", ()))
@@ -111,22 +146,39 @@ class NormalizeRepository:
         executor: SqlExecutor,
         entity_upserts: dict[str, tuple[Mapping[str, object], ...]],
     ) -> dict[str, set[int]]:
-        inserted: dict[str, set[int]] = {
-            "sport": set(),
-            "country": set(),
-            "category": set(),
-            "unique_tournament": set(),
-            "tournament": set(),
-            "season": set(),
-            "venue": set(),
-            "manager": set(),
-            "team": set(),
-            "player": set(),
-            "event": set(),
-        }
-        for entity_kind, known_entities in self._known_minimal_entities.items():
-            inserted[entity_kind].update(known_entities)
+        current_inserted = _empty_inserted_tracker()
+        # This cache is advisory only: it can help us remember rows we've seen before,
+        # but FK validation must always rely on rows inserted in the current transaction
+        # or ids confirmed directly from PostgreSQL.
+        await self._upsert_parent_pass(executor, entity_upserts, current_inserted)
+        await self._upsert_dependent_pass(executor, entity_upserts, current_inserted)
+        parent_exists = await self._build_child_parent_exists(executor, entity_upserts, current_inserted)
+        await self._upsert_child_pass(executor, entity_upserts, current_inserted, parent_exists)
 
+        resolved = _empty_inserted_tracker()
+        for entity_kind in (
+            "sport",
+            "country",
+            "category",
+            "unique_tournament",
+            "tournament",
+            "season",
+            "venue",
+            "manager",
+        ):
+            resolved[entity_kind].update(self._known_minimal_entities[entity_kind])
+        for entity_kind, entity_ids in current_inserted.items():
+            resolved[entity_kind].update(entity_ids)
+        for entity_kind, entity_ids in parent_exists.items():
+            resolved[entity_kind].update(entity_ids)
+        return resolved
+
+    async def _upsert_parent_pass(
+        self,
+        executor: SqlExecutor,
+        entity_upserts: dict[str, tuple[Mapping[str, object], ...]],
+        inserted: dict[str, set[int]],
+    ) -> None:
         sport_rows = [
             (row.get("id"), row.get("slug"), row.get("name"))
             for row in entity_upserts.get("sport", ())
@@ -174,16 +226,28 @@ class NormalizeRepository:
             inserted["country"].update(country_codes)
             self._known_minimal_entities["country"].update(country_codes)
 
+        category_sport_exists = await _authoritative_existing_ids(
+            executor,
+            "sport",
+            {_as_int(row.get("sport_id")) for row in entity_upserts.get("category", ())},
+            inserted["sport"],
+        )
+        category_country_exists = await _authoritative_existing_ids(
+            executor,
+            "country",
+            {row.get("country_alpha2") for row in entity_upserts.get("category", ()) if row.get("country_alpha2") is not None},
+            inserted["country"],
+        )
         category_rows = []
         for row in entity_upserts.get("category", ()):
-            category_id = row.get("id")
-            sport_id = row.get("sport_id")
-            if category_id is None or not row.get("slug") or not row.get("name") or sport_id not in inserted["sport"]:
+            category_id = _as_int(row.get("id"))
+            sport_id = _as_int(row.get("sport_id"))
+            if category_id is None or not row.get("slug") or not row.get("name") or sport_id not in category_sport_exists:
                 continue
             if category_id in self._known_minimal_entities["category"]:
                 continue
             country_alpha2 = row.get("country_alpha2")
-            if country_alpha2 not in inserted["country"]:
+            if country_alpha2 not in category_country_exists:
                 country_alpha2 = None
             category_rows.append(
                 (
@@ -208,21 +272,37 @@ class NormalizeRepository:
             inserted["category"].update(category_ids)
             self._known_minimal_entities["category"].update(category_ids)
 
+        unique_tournament_category_exists = await _authoritative_existing_ids(
+            executor,
+            "category",
+            {_as_int(row.get("category_id")) for row in entity_upserts.get("unique_tournament", ())},
+            inserted["category"],
+        )
+        unique_tournament_country_exists = await _authoritative_existing_ids(
+            executor,
+            "country",
+            {
+                row.get("country_alpha2")
+                for row in entity_upserts.get("unique_tournament", ())
+                if row.get("country_alpha2") is not None
+            },
+            inserted["country"],
+        )
         unique_tournament_rows = []
         for row in entity_upserts.get("unique_tournament", ()):
-            unique_tournament_id = row.get("id")
-            category_id = row.get("category_id")
+            unique_tournament_id = _as_int(row.get("id"))
+            category_id = _as_int(row.get("category_id"))
             if (
                 unique_tournament_id is None
                 or not row.get("slug")
                 or not row.get("name")
-                or category_id not in inserted["category"]
+                or category_id not in unique_tournament_category_exists
             ):
                 continue
             if unique_tournament_id in self._known_minimal_entities["unique_tournament"]:
                 continue
             country_alpha2 = row.get("country_alpha2")
-            if country_alpha2 not in inserted["country"]:
+            if country_alpha2 not in unique_tournament_country_exists:
                 country_alpha2 = None
             unique_tournament_rows.append(
                 (
@@ -266,18 +346,28 @@ class NormalizeRepository:
             inserted["season"].update(season_ids)
             self._known_minimal_entities["season"].update(season_ids)
 
+        tournament_category_exists = await _authoritative_existing_ids(
+            executor,
+            "category",
+            {_as_int(row.get("category_id")) for row in entity_upserts.get("tournament", ())},
+            inserted["category"],
+        )
+        tournament_unique_exists = await _authoritative_existing_ids(
+            executor,
+            "unique_tournament",
+            {_as_int(row.get("unique_tournament_id")) for row in entity_upserts.get("tournament", ())},
+            inserted["unique_tournament"],
+        )
         tournament_rows = []
         for row in entity_upserts.get("tournament", ()):
-            tournament_id = row.get("id")
-            category_id = row.get("category_id")
-            unique_tournament_id = row.get("unique_tournament_id")
-            if tournament_id is None or not row.get("name"):
+            tournament_id = _as_int(row.get("id"))
+            category_id = _as_int(row.get("category_id"))
+            unique_tournament_id = _as_int(row.get("unique_tournament_id"))
+            if tournament_id is None or not row.get("name") or category_id not in tournament_category_exists:
                 continue
             if tournament_id in self._known_minimal_entities["tournament"]:
                 continue
-            if category_id not in inserted["category"]:
-                continue
-            if unique_tournament_id is not None and unique_tournament_id not in inserted["unique_tournament"]:
+            if unique_tournament_id not in tournament_unique_exists:
                 unique_tournament_id = None
             tournament_rows.append(
                 (
@@ -302,12 +392,18 @@ class NormalizeRepository:
             inserted["tournament"].update(tournament_ids)
             self._known_minimal_entities["tournament"].update(tournament_ids)
 
+        venue_country_exists = await _authoritative_existing_ids(
+            executor,
+            "country",
+            {row.get("country_alpha2") for row in entity_upserts.get("venue", ()) if row.get("country_alpha2") is not None},
+            inserted["country"],
+        )
         venue_rows = [
             (
                 row.get("id"),
                 row.get("slug"),
                 row.get("name"),
-                row.get("country_alpha2") if row.get("country_alpha2") in inserted["country"] else None,
+                row.get("country_alpha2") if row.get("country_alpha2") in venue_country_exists else None,
             )
             for row in entity_upserts.get("venue", ())
             if (
@@ -357,32 +453,112 @@ class NormalizeRepository:
             inserted["manager"].update(manager_ids)
             self._known_minimal_entities["manager"].update(manager_ids)
 
+    async def _upsert_dependent_pass(
+        self,
+        executor: SqlExecutor,
+        entity_upserts: dict[str, tuple[Mapping[str, object], ...]],
+        inserted: dict[str, set[int]],
+    ) -> None:
+        team_rows_source = tuple(entity_upserts.get("team", ()))
+        if not team_rows_source:
+            return
+
+        sport_exists = await _authoritative_existing_ids(
+            executor,
+            "sport",
+            {_as_int(row.get("sport_id")) for row in team_rows_source},
+            inserted["sport"],
+        )
+        category_exists = await _authoritative_existing_ids(
+            executor,
+            "category",
+            {_as_int(row.get("category_id")) for row in team_rows_source},
+            inserted["category"],
+        )
+        country_exists = await _authoritative_existing_ids(
+            executor,
+            "country",
+            {row.get("country_alpha2") for row in team_rows_source if row.get("country_alpha2") is not None},
+            inserted["country"],
+        )
+        manager_exists = await _authoritative_existing_ids(
+            executor,
+            "manager",
+            {_as_int(row.get("manager_id")) for row in team_rows_source},
+            inserted["manager"],
+        )
+        venue_exists = await _authoritative_existing_ids(
+            executor,
+            "venue",
+            {_as_int(row.get("venue_id")) for row in team_rows_source},
+            inserted["venue"],
+        )
+        tournament_exists = await _authoritative_existing_ids(
+            executor,
+            "tournament",
+            {_as_int(row.get("tournament_id")) for row in team_rows_source},
+            inserted["tournament"],
+        )
+        unique_tournament_exists = await _authoritative_existing_ids(
+            executor,
+            "unique_tournament",
+            {_as_int(row.get("primary_unique_tournament_id")) for row in team_rows_source},
+            inserted["unique_tournament"],
+        )
+
+        declared_team_ids = {_as_int(row.get("id")) for row in team_rows_source}
+        declared_team_ids.discard(None)
+        parent_team_ref_ids = {_as_int(row.get("parent_team_id")) for row in team_rows_source}
+        parent_team_ref_ids.discard(None)
+        parent_team_exists = declared_team_ids | await _fetch_existing_ids(
+            executor,
+            "team",
+            parent_team_ref_ids - declared_team_ids,
+        )
+
         team_rows = []
-        for row in entity_upserts.get("team", ()):
-            team_id = row.get("id")
+        for row in team_rows_source:
+            team_id = _as_int(row.get("id"))
             if team_id is None or not row.get("slug") or not row.get("name"):
                 continue
             if team_id in self._known_minimal_entities["team"]:
                 continue
-            sport_id = row.get("sport_id")
-            if sport_id not in inserted["sport"]:
+            sport_id = _as_int(row.get("sport_id"))
+            if sport_id not in sport_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.sport_id", missing_parent_id=sport_id)
                 sport_id = None
-            category_id = row.get("category_id")
-            if category_id not in inserted["category"]:
+            category_id = _as_int(row.get("category_id"))
+            if category_id not in category_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.category_id", missing_parent_id=category_id)
                 category_id = None
-            manager_id = row.get("manager_id")
-            if manager_id not in inserted["manager"]:
+            country_alpha2 = row.get("country_alpha2")
+            if country_alpha2 not in country_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.country_alpha2", missing_parent_id=country_alpha2)
+                country_alpha2 = None
+            manager_id = _as_int(row.get("manager_id"))
+            if manager_id not in manager_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.manager_id", missing_parent_id=manager_id)
                 manager_id = None
-            venue_id = row.get("venue_id")
-            if venue_id not in inserted["venue"]:
+            venue_id = _as_int(row.get("venue_id"))
+            if venue_id not in venue_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.venue_id", missing_parent_id=venue_id)
                 venue_id = None
-            tournament_id = row.get("tournament_id")
-            if tournament_id not in inserted["tournament"]:
+            tournament_id = _as_int(row.get("tournament_id"))
+            if tournament_id not in tournament_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.tournament_id", missing_parent_id=tournament_id)
                 tournament_id = None
-            primary_unique_tournament_id = row.get("primary_unique_tournament_id")
-            if primary_unique_tournament_id not in inserted["unique_tournament"]:
+            primary_unique_tournament_id = _as_int(row.get("primary_unique_tournament_id"))
+            if primary_unique_tournament_id not in unique_tournament_exists:
+                self._log_nullified_fk(
+                    event_id=None,
+                    fk_name="team.primary_unique_tournament_id",
+                    missing_parent_id=primary_unique_tournament_id,
+                )
                 primary_unique_tournament_id = None
-            parent_team_id = row.get("parent_team_id")
+            parent_team_id = _as_int(row.get("parent_team_id"))
+            if parent_team_id not in parent_team_exists:
+                self._log_nullified_fk(event_id=None, fk_name="team.parent_team_id", missing_parent_id=parent_team_id)
+                parent_team_id = None
             team_rows.append(
                 (
                     team_id,
@@ -391,7 +567,7 @@ class NormalizeRepository:
                     row.get("short_name"),
                     sport_id,
                     category_id,
-                    row.get("country_alpha2"),
+                    country_alpha2,
                     manager_id,
                     venue_id,
                     tournament_id,
@@ -431,13 +607,74 @@ class NormalizeRepository:
             inserted["team"].update(team_ids)
             self._known_minimal_entities["team"].update(team_ids)
 
+    async def _build_child_parent_exists(
+        self,
+        executor: SqlExecutor,
+        entity_upserts: dict[str, tuple[Mapping[str, object], ...]],
+        inserted: dict[str, set[int]],
+    ) -> dict[str, set[int]]:
+        parent_exists = _empty_inserted_tracker()
+        for entity_kind, entity_ids in inserted.items():
+            parent_exists[entity_kind].update(entity_ids)
+
+        player_rows = tuple(entity_upserts.get("player", ()))
+        event_rows = tuple(entity_upserts.get("event", ()))
+
+        team_ids = {_as_int(row.get("team_id")) for row in player_rows}
+        team_ids.update({_as_int(row.get("home_team_id")) for row in event_rows})
+        team_ids.update({_as_int(row.get("away_team_id")) for row in event_rows})
+        parent_exists["team"].update(
+            await _authoritative_existing_ids(executor, "team", team_ids, inserted["team"])
+        )
+        parent_exists["tournament"].update(
+            await _authoritative_existing_ids(
+                executor,
+                "tournament",
+                {_as_int(row.get("tournament_id")) for row in event_rows},
+                inserted["tournament"],
+            )
+        )
+        parent_exists["unique_tournament"].update(
+            await _authoritative_existing_ids(
+                executor,
+                "unique_tournament",
+                {_as_int(row.get("unique_tournament_id")) for row in event_rows},
+                inserted["unique_tournament"],
+            )
+        )
+        parent_exists["season"].update(
+            await _authoritative_existing_ids(
+                executor,
+                "season",
+                {_as_int(row.get("season_id")) for row in event_rows},
+                inserted["season"],
+            )
+        )
+        parent_exists["venue"].update(
+            await _authoritative_existing_ids(
+                executor,
+                "venue",
+                {_as_int(row.get("venue_id")) for row in event_rows},
+                inserted["venue"],
+            )
+        )
+        return parent_exists
+
+    async def _upsert_child_pass(
+        self,
+        executor: SqlExecutor,
+        entity_upserts: dict[str, tuple[Mapping[str, object], ...]],
+        inserted: dict[str, set[int]],
+        parent_exists: dict[str, set[int]],
+    ) -> None:
         player_rows = []
         for row in entity_upserts.get("player", ()):
-            player_id = row.get("id")
+            player_id = _as_int(row.get("id"))
             if player_id is None or not row.get("name"):
                 continue
-            team_id = row.get("team_id")
-            if team_id not in inserted["team"]:
+            team_id = _as_int(row.get("team_id"))
+            if team_id not in parent_exists["team"]:
+                self._log_nullified_fk(event_id=None, fk_name="player.team_id", missing_parent_id=team_id)
                 team_id = None
             player_rows.append((player_id, row.get("slug"), row.get("name"), row.get("short_name"), team_id))
         if player_rows:
@@ -458,27 +695,72 @@ class NormalizeRepository:
 
         event_rows = []
         for row in entity_upserts.get("event", ()):
-            event_id = row.get("id")
+            event_id = _as_int(row.get("id"))
             if event_id is None:
                 continue
-            tournament_id = row.get("tournament_id")
-            if tournament_id not in inserted["tournament"]:
+
+            original_tournament_id = _as_int(row.get("tournament_id"))
+            tournament_id = original_tournament_id
+            if tournament_id is not None and tournament_id not in parent_exists["tournament"]:
+                self._log_nullified_fk(event_id=event_id, fk_name="event.tournament_id", missing_parent_id=tournament_id)
                 tournament_id = None
-            unique_tournament_id = row.get("unique_tournament_id")
-            if unique_tournament_id not in inserted["unique_tournament"]:
-                unique_tournament_id = None
-            season_id = row.get("season_id")
-            if season_id not in inserted["season"]:
+
+            original_unique_tournament_id = _as_int(row.get("unique_tournament_id"))
+            unique_tournament_id = original_unique_tournament_id
+            if unique_tournament_id is not None and unique_tournament_id not in parent_exists["unique_tournament"]:
+                raise RetriableRepositoryError(
+                    "Missing retry-critical parent for event.unique_tournament_id",
+                    missing_parent_table="unique_tournament",
+                    missing_parent_ids=tuple(id_ for id_ in (unique_tournament_id,) if id_ is not None),
+                    child_event_id=event_id,
+                )
+
+            season_id = _as_int(row.get("season_id"))
+            if season_id is not None and season_id not in parent_exists["season"]:
+                self._log_nullified_fk(event_id=event_id, fk_name="event.season_id", missing_parent_id=season_id)
                 season_id = None
-            home_team_id = row.get("home_team_id")
-            if home_team_id not in inserted["team"]:
-                home_team_id = None
-            away_team_id = row.get("away_team_id")
-            if away_team_id not in inserted["team"]:
-                away_team_id = None
-            venue_id = row.get("venue_id")
-            if venue_id not in inserted["venue"]:
+
+            original_home_team_id = _as_int(row.get("home_team_id"))
+            home_team_id = original_home_team_id
+            if home_team_id is not None and home_team_id not in parent_exists["team"]:
+                raise RetriableRepositoryError(
+                    "Missing retry-critical parent for event.home_team_id",
+                    missing_parent_table="team",
+                    missing_parent_ids=tuple(id_ for id_ in (home_team_id,) if id_ is not None),
+                    child_event_id=event_id,
+                )
+
+            original_away_team_id = _as_int(row.get("away_team_id"))
+            away_team_id = original_away_team_id
+            if away_team_id is not None and away_team_id not in parent_exists["team"]:
+                raise RetriableRepositoryError(
+                    "Missing retry-critical parent for event.away_team_id",
+                    missing_parent_table="team",
+                    missing_parent_ids=tuple(id_ for id_ in (away_team_id,) if id_ is not None),
+                    child_event_id=event_id,
+                )
+
+            venue_id = _as_int(row.get("venue_id"))
+            if venue_id is not None and venue_id not in parent_exists["venue"]:
+                self._log_nullified_fk(event_id=event_id, fk_name="event.venue_id", missing_parent_id=venue_id)
                 venue_id = None
+
+            if (
+                tournament_id is None
+                and unique_tournament_id is None
+                and (original_tournament_id is not None or original_unique_tournament_id is not None)
+            ):
+                raise RetriableRepositoryError(
+                    "Event is missing both tournament and unique_tournament after FK validation",
+                    missing_parent_table="event_competition",
+                    missing_parent_ids=tuple(
+                        id_
+                        for id_ in (original_tournament_id, original_unique_tournament_id)
+                        if id_ is not None
+                    ),
+                    child_event_id=event_id,
+                )
+
             event_rows.append(
                 (
                     event_id,
@@ -515,7 +797,33 @@ class NormalizeRepository:
             )
             inserted["event"].update(int(row[0]) for row in event_rows if row[0] is not None)
 
-        return inserted
+    async def _confirm_lineup_team_refs(
+        self,
+        executor: SqlExecutor,
+        result: ParseResult,
+        inserted: dict[str, set[int]],
+    ) -> None:
+        lineup_rows = tuple(result.relation_upserts.get("event_lineup_player", ()))
+        if not lineup_rows:
+            return
+        inserted["team"].update(
+            await _authoritative_existing_ids(
+                executor,
+                "team",
+                {_as_int(row.get("team_id")) for row in lineup_rows},
+                inserted["team"],
+            )
+        )
+
+    def _log_nullified_fk(self, *, event_id: int | None, fk_name: str, missing_parent_id: object) -> None:
+        if missing_parent_id is None:
+            return
+        logger.warning(
+            "Nullified missing FK during normalized persist: event_id=%s fk_name=%s missing_parent_id=%s",
+            event_id,
+            fk_name,
+            missing_parent_id,
+        )
 
     async def _persist_lineups(
         self,
@@ -910,6 +1218,35 @@ class NormalizeRepository:
             f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})",
             [tuple(mapper(row)) for row in rows],
         )
+
+
+async def _authoritative_existing_ids(
+    executor: SqlExecutor,
+    table: str,
+    referenced_ids: set[object],
+    inserted_ids: set[object],
+) -> set[object]:
+    normalized_ids = {item for item in referenced_ids if item is not None}
+    if not normalized_ids:
+        return set(inserted_ids)
+    confirmed_ids = await _fetch_existing_ids(executor, table, normalized_ids - set(inserted_ids))
+    return set(inserted_ids) | confirmed_ids
+
+
+async def _fetch_existing_ids(
+    executor: SqlExecutor,
+    table: str,
+    ids: set[object],
+) -> set[object]:
+    normalized_ids = {item for item in ids if item is not None}
+    if not normalized_ids:
+        return set()
+    column_name, array_type = _PARENT_KEY_SPECS[table]
+    rows = await executor.fetch(
+        f"SELECT {column_name} FROM {table} WHERE {column_name} = ANY($1::{array_type}[])",
+        sorted(normalized_ids),
+    )
+    return {row[column_name] for row in rows}
 
 
 def _event_id_from_rows(rows: tuple[Mapping[str, object], ...]) -> int | None:

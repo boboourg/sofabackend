@@ -6,13 +6,15 @@ from pathlib import Path
 from schema_inspector.normalizers.sink import DurableNormalizeSink
 from schema_inspector.parsers.base import ParseResult, RawSnapshot
 from schema_inspector.parsers.families.event_root import EventRootParser
-from schema_inspector.storage.normalize_repository import NormalizeRepository
+from schema_inspector.storage.normalize_repository import NormalizeRepository, RetriableRepositoryError
 
 
 class _FakeExecutor:
     def __init__(self) -> None:
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
         self.executemany_calls: list[tuple[str, list[tuple[object, ...]]]] = []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_results: list[list[dict[str, object]]] = []
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
@@ -22,8 +24,20 @@ class _FakeExecutor:
         self.executemany_calls.append((query, rows))
         return "OK"
 
+    async def fetch(self, query: str, *args: object):
+        self.fetch_calls.append((query, args))
+        if self.fetch_results:
+            return self.fetch_results.pop(0)
+        return []
+
 
 class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    """Statement-shape and repository-branch coverage only.
+
+    FK correctness and ordering guarantees live in the real-Postgres
+    integration tests in test_storage_normalize_repository_integration.py.
+    """
+
     def test_base_schema_does_not_require_unique_manager_slug(self) -> None:
         schema_path = Path(__file__).resolve().parent.parent / "postgres_schema.sql"
         sql = schema_path.read_text(encoding="utf-8")
@@ -47,6 +61,7 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_repository_persists_core_metric_rows(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()
+        executor.fetch_results = [[{"id": 100}], [{"id": 17}]]
         result = ParseResult(
             snapshot_id=301,
             parser_family="event_statistics",
@@ -216,6 +231,11 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         executor.executemany_calls.clear()
+        executor.fetch_results = [
+            [{"id": 1}],
+            [{"alpha2": "EN"}],
+            [{"id": 10}],
+        ]
 
         inserted = await repository._upsert_minimal_entities(
             executor,
@@ -409,6 +429,10 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_durable_sink_prunes_event_statistics_entity_upserts_to_event_only(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()
+        executor.fetch_results = [
+            [{"id": 42}, {"id": 43}],
+            [{"id": 76986}],
+        ]
         sink = DurableNormalizeSink(repository, executor)
         result = ParseResult(
             snapshot_id=905,
@@ -709,6 +733,97 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO season"])
         self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO tournament"])
         self.assertIn("ON CONFLICT (id) DO NOTHING", statements["INSERT INTO venue"])
+
+    async def test_repository_nullifies_event_venue_when_cache_is_stale(self) -> None:
+        repository = NormalizeRepository()
+        repository._known_minimal_entities["sport"].add(1)
+        repository._known_minimal_entities["category"].add(10)
+        repository._known_minimal_entities["unique_tournament"].add(17)
+        repository._known_minimal_entities["venue"].add(11505)
+        executor = _FakeExecutor()
+        executor.fetch_results = [[{"id": 17}], []]
+        result = ParseResult(
+            snapshot_id=999,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 14083191,
+                        "slug": "arsenal-chelsea",
+                        "tournament_id": None,
+                        "unique_tournament_id": 17,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": 11505,
+                        "start_timestamp": 1_800_000_000,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event" in sql)
+        self.assertIsNone(event_rows[0][7])
+
+    async def test_repository_preserves_player_team_id_when_db_confirms_parent_exists(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        executor.fetch_results = [[{"id": 42}]]
+        result = ParseResult(
+            snapshot_id=1000,
+            parser_family="entity_profiles",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "player": (
+                    {
+                        "id": 700,
+                        "slug": "saka",
+                        "name": "Bukayo Saka",
+                        "short_name": "B. Saka",
+                        "team_id": 42,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        player_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO player" in sql)
+        self.assertEqual(player_rows[0][4], 42)
+
+    async def test_repository_raises_retryable_error_for_missing_event_unique_tournament(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        executor.fetch_results = [[]]
+        result = ParseResult(
+            snapshot_id=1001,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 14083192,
+                        "slug": "arsenal-chelsea-2",
+                        "tournament_id": None,
+                        "unique_tournament_id": 17,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "start_timestamp": 1_800_000_100,
+                    },
+                ),
+            },
+        )
+
+        with self.assertRaises(RetriableRepositoryError):
+            await repository.persist_parse_result(executor, result)
 
 
 if __name__ == "__main__":
