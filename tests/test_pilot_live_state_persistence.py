@@ -27,7 +27,8 @@ class _FakeRawSnapshotStore:
         self._next_id = 1
 
     async def insert_request_log(self, executor, record) -> None:
-        del executor, record
+        if hasattr(executor, "record_request_log"):
+            executor.record_request_log(record)
 
     async def insert_payload_snapshot_returning_id(self, executor, record) -> int:
         del executor
@@ -70,6 +71,30 @@ class _FakeCapabilityRepository:
 
     async def upsert_rollup(self, executor, record) -> None:
         del executor, record
+
+
+class _FakeSqlExecutor:
+    def __init__(self) -> None:
+        self.request_logs = []
+
+    def record_request_log(self, record) -> None:
+        self.request_logs.append(record)
+
+    async def fetch(self, query: str, *args):
+        if "FROM api_request_log" not in query:
+            return []
+        source_url = str(args[0])
+        endpoint_pattern = str(args[1])
+        job_type = str(args[2])
+        limit = int(args[3])
+        rows = [
+            {"http_status": record.http_status}
+            for record in reversed(self.request_logs)
+            if record.source_url == source_url
+            and record.endpoint_pattern == endpoint_pattern
+            and record.job_type == job_type
+        ]
+        return rows[:limit]
 
 
 class _FakeLiveStateRepository:
@@ -227,6 +252,85 @@ class PilotLiveStatePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_state_repository.live_history[0].poll_profile, "hot")
         self.assertEqual(live_state_repository.live_history[0].observed_status_type, "halftime")
         self.assertEqual(live_state_repository.terminal_states, [])
+
+    async def test_repeated_root_not_found_persists_terminal_retire_state(self) -> None:
+        event_id = 15921223
+        event_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        statistics_url = f"https://www.sofascore.com/api/v1/event/{event_id}/statistics"
+        lineups_url = f"https://www.sofascore.com/api/v1/event/{event_id}/lineups"
+        incidents_url = f"https://www.sofascore.com/api/v1/event/{event_id}/incidents"
+        point_by_point_url = f"https://www.sofascore.com/api/v1/event/{event_id}/point-by-point"
+        tennis_power_url = f"https://www.sofascore.com/api/v1/event/{event_id}/tennis-power"
+
+        live_state_repository = _FakeLiveStateRepository()
+        raw_store = _FakeRawSnapshotStore()
+        sql_executor = _FakeSqlExecutor()
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": event_id,
+                            "slug": "sinner-alcaraz",
+                            "tournament": {
+                                "id": 300,
+                                "slug": "wimbledon",
+                                "name": "Wimbledon",
+                                "uniqueTournament": {"id": 2361, "slug": "wimbledon", "name": "Wimbledon"},
+                            },
+                            "season": {"id": 90001, "name": "Wimbledon 2026", "year": "2026"},
+                            "status": {"type": "inprogress"},
+                            "startTimestamp": 1_799_999_000,
+                            "homeTeam": {"id": 101, "slug": "sinner", "name": "Jannik Sinner"},
+                            "awayTeam": {"id": 102, "slug": "alcaraz", "name": "Carlos Alcaraz"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(statistics_url, {"statistics": []}),
+                lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+                incidents_url: _json_result(incidents_url, {"incidents": []}),
+                point_by_point_url: _json_result(point_by_point_url, {"pointByPoint": []}),
+                tennis_power_url: _json_result(
+                    tennis_power_url,
+                    {"tennisPowerRankings": {"home": {"current": 0.51}, "away": {"current": 0.49}}},
+                ),
+            }
+        )
+        orchestrator = PilotOrchestrator(
+            fetch_executor=FetchExecutor(
+                transport=transport,
+                raw_repository=raw_store,
+                sql_executor=sql_executor,
+            ),
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(
+                capability_rollup={
+                    "/api/v1/event/{event_id}/graph": "unsupported",
+                    "/api/v1/event/{event_id}/incidents": "supported",
+                }
+            ),
+            capability_repository=_FakeCapabilityRepository(),
+            live_state_repository=live_state_repository,
+            sql_executor=sql_executor,
+            live_worker=LiveWorker(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        transport.responses[event_url] = _json_result(event_url, {"error": "Not found"}, status_code=404)
+
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+        report = await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        self.assertTrue(report.finalized)
+        self.assertEqual(live_state_repository.live_history[-1].poll_profile, "terminal")
+        self.assertEqual(live_state_repository.live_history[-1].observed_status_type, "not_found")
+        self.assertEqual(live_state_repository.terminal_states[-1].terminal_status, "not_found")
+        self.assertIsNotNone(live_state_repository.terminal_states[-1].final_snapshot_id)
 
 
 def _json_result(url: str, payload: object, *, status_code: int = 200) -> TransportResult:

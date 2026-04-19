@@ -39,6 +39,10 @@ from ..storage.capability_repository import CapabilityObservationRecord, Capabil
 from ..storage.live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord
 from ..workers.live_worker import LiveWorker
 
+MISSING_ROOT_TERMINAL_STATUS = "not_found"
+MISSING_ROOT_RETIRE_THRESHOLD = 3
+MISSING_ROOT_RETIRE_LOOKBACK = 20
+
 
 @dataclass(frozen=True)
 class PilotRunReport:
@@ -170,6 +174,39 @@ class PilotOrchestrator:
             fetch_reason=JOB_HYDRATE_EVENT_ROOT,
         )
         fetch_outcomes.append(root_outcome)
+        should_retire_missing_root = root_outcome.classification == "not_found" and await self._should_retire_missing_root_event(
+            root_outcome=root_outcome
+        )
+        if should_retire_missing_root:
+            finalized = True
+            self.live_worker.finalize_event(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                status_type=MISSING_ROOT_TERMINAL_STATUS,
+                live_state_store=self.live_state_store,
+            )
+            await self._record_live_state_history(
+                event_id=event_id,
+                status_type=MISSING_ROOT_TERMINAL_STATUS,
+                poll_profile="terminal",
+                observed_at=root_outcome.fetched_at,
+            )
+            await self._record_terminal_state(
+                event_id=event_id,
+                status_type=MISSING_ROOT_TERMINAL_STATUS,
+                finalized_at=root_outcome.fetched_at,
+                final_snapshot_id=root_outcome.snapshot_id,
+            )
+            await self._flush_capabilities()
+            return PilotRunReport(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                fetch_outcomes=tuple(fetch_outcomes),
+                parse_results=tuple(parse_results),
+                live_lane=live_lane,
+                live_stream=live_stream,
+                finalized=finalized,
+            )
         if root_parse is not None:
             parse_results.append(root_parse)
 
@@ -655,6 +692,43 @@ class PilotOrchestrator:
                 final_snapshot_id=final_snapshot_id,
             ),
         )
+
+    async def _should_retire_missing_root_event(
+        self,
+        *,
+        root_outcome: FetchOutcomeEnvelope,
+    ) -> bool:
+        if root_outcome.classification != "not_found":
+            return False
+        fetch = getattr(self.sql_executor, "fetch", None)
+        if not callable(fetch):
+            return False
+        rows = await fetch(
+            """
+            SELECT http_status
+            FROM api_request_log
+            WHERE source_url = $1
+              AND endpoint_pattern = $2
+              AND job_type = $3
+            ORDER BY finished_at DESC
+            LIMIT $4
+            """,
+            root_outcome.source_url,
+            root_outcome.endpoint_pattern,
+            JOB_HYDRATE_EVENT_ROOT,
+            MISSING_ROOT_RETIRE_LOOKBACK,
+        )
+        statuses: list[int] = []
+        for row in rows:
+            http_status = row["http_status"]
+            if http_status is None:
+                continue
+            statuses.append(int(http_status))
+        if len(statuses) < MISSING_ROOT_RETIRE_THRESHOLD:
+            return False
+        if any(status != 404 for status in statuses[:MISSING_ROOT_RETIRE_THRESHOLD]):
+            return False
+        return any(200 <= status < 300 for status in statuses[MISSING_ROOT_RETIRE_THRESHOLD :])
 
 
 def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:

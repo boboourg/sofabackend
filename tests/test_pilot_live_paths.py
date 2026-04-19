@@ -31,7 +31,8 @@ class _FakeRawSnapshotStore:
         self._next_id = 1
 
     async def insert_request_log(self, executor, record) -> None:
-        del executor, record
+        if hasattr(executor, "record_request_log"):
+            executor.record_request_log(record)
 
     async def insert_payload_snapshot_returning_id(self, executor, record) -> int:
         del executor
@@ -74,6 +75,30 @@ class _FakeCapabilityRepository:
 
     async def upsert_rollup(self, executor, record) -> None:
         del executor, record
+
+
+class _FakeSqlExecutor:
+    def __init__(self) -> None:
+        self.request_logs = []
+
+    def record_request_log(self, record) -> None:
+        self.request_logs.append(record)
+
+    async def fetch(self, query: str, *args):
+        if "FROM api_request_log" not in query:
+            return []
+        source_url = str(args[0])
+        endpoint_pattern = str(args[1])
+        job_type = str(args[2])
+        limit = int(args[3])
+        rows = [
+            {"http_status": record.http_status}
+            for record in reversed(self.request_logs)
+            if record.source_url == source_url
+            and record.endpoint_pattern == endpoint_pattern
+            and record.job_type == job_type
+        ]
+        return rows[:limit]
 
 
 class _FakeLiveBackend:
@@ -217,11 +242,51 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("15921221", live_backend.zsets.get(LIVE_COLD_ZSET, {}))
         self.assertEqual(stream_backend.streams, {})
 
+    async def test_repeated_root_not_found_retires_previously_seen_live_event(self) -> None:
+        now_ms = 1_800_000_000_000
+        event_id = 15921223
+        live_backend = _FakeLiveBackend()
+        stream_backend = _FakeStreamBackend()
+        transport = _FakeTransport(
+            _tennis_responses(
+                event_id=event_id,
+                status_type="inprogress",
+                start_timestamp=(now_ms // 1000) - 300,
+            )
+        )
+        sql_executor = _FakeSqlExecutor()
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(live_backend),
+            stream_queue=RedisStreamQueue(stream_backend),
+            now_ms_factory=lambda: now_ms,
+            sql_executor=sql_executor,
+        )
 
-def _build_orchestrator(*, transport, live_state_store, stream_queue, now_ms_factory):
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        event_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        transport.responses[event_url] = _json_result(event_url, {"error": "Not found"}, status_code=404)
+
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+        report = await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        self.assertTrue(report.finalized)
+        state = live_backend.hashes["live:event:15921223"]
+        self.assertEqual(state["status_type"], "not_found")
+        self.assertEqual(state["poll_profile"], "terminal")
+        self.assertEqual(state["is_finalized"], 1)
+        self.assertNotIn("15921223", live_backend.zsets.get(LIVE_HOT_ZSET, {}))
+        self.assertNotIn("15921223", live_backend.zsets.get(LIVE_WARM_ZSET, {}))
+        self.assertNotIn("15921223", live_backend.zsets.get(LIVE_COLD_ZSET, {}))
+
+
+def _build_orchestrator(*, transport, live_state_store, stream_queue, now_ms_factory, sql_executor=None):
     raw_store = _FakeRawSnapshotStore()
+    sql_executor = sql_executor or object()
     return PilotOrchestrator(
-        fetch_executor=FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object()),
+        fetch_executor=FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=sql_executor),
         snapshot_store=raw_store,
         normalize_worker=NormalizeWorker(ParserRegistry.default()),
         planner=Planner(
@@ -231,7 +296,7 @@ def _build_orchestrator(*, transport, live_state_store, stream_queue, now_ms_fac
             }
         ),
         capability_repository=_FakeCapabilityRepository(),
-        sql_executor=object(),
+        sql_executor=sql_executor,
         live_worker=LiveWorker(),
         live_state_store=live_state_store,
         stream_queue=stream_queue,
