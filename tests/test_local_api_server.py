@@ -212,6 +212,82 @@ class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.payload["endpointPattern"], "/api/v1/sport/baseball/categories")
 
 
+class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_events_snapshot_filters_terminal_events(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        result = match_route("/api/v1/sport/football/events/live", routes)
+        assert result is not None
+        route, _ = result
+
+        payload = {
+            "events": [
+                {
+                    "id": 14109883,
+                    "status": {"code": 7, "type": "inprogress", "description": "2nd half"},
+                },
+                {
+                    "id": 14100000,
+                    "status": {"code": 7, "type": "inprogress", "description": "2nd half"},
+                },
+            ]
+        }
+        executor = _FakeFetchExecutor(
+            [
+                {
+                    "event_id": 14109883,
+                    "terminal_status": "finished",
+                    "final_payload": {
+                        "event": {
+                            "id": 14109883,
+                            "status": {"code": 100, "type": "finished", "description": "Ended"},
+                        }
+                    },
+                }
+            ]
+        )
+
+        reconciled = await application._reconcile_snapshot_payload(executor, route, payload)
+
+        self.assertEqual([item["id"] for item in reconciled["events"]], [14100000])
+
+    async def test_scheduled_events_snapshot_overrides_terminal_status_from_final_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        result = match_route("/api/v1/sport/football/scheduled-events/2026-04-19", routes)
+        assert result is not None
+        route, _ = result
+
+        payload = {
+            "events": [
+                {
+                    "id": 14109883,
+                    "status": {"code": 7, "type": "inprogress", "description": "2nd half"},
+                }
+            ]
+        }
+        executor = _FakeFetchExecutor(
+            [
+                {
+                    "event_id": 14109883,
+                    "terminal_status": "finished",
+                    "final_payload": {
+                        "event": {
+                            "id": 14109883,
+                            "status": {"code": 100, "type": "finished", "description": "Ended"},
+                        }
+                    },
+                }
+            ]
+        )
+
+        reconciled = await application._reconcile_snapshot_payload(executor, route, payload)
+
+        self.assertEqual(reconciled["events"][0]["status"]["code"], 100)
+        self.assertEqual(reconciled["events"][0]["status"]["type"], "finished")
+        self.assertEqual(reconciled["events"][0]["status"]["description"], "Ended")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -238,3 +314,12 @@ class _FakePendingQueue:
             entries_read=42,
             lag=7,
         )
+
+
+class _FakeFetchExecutor:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def fetch(self, query: str, *args):
+        del query, args
+        return self.rows

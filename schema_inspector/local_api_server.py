@@ -199,11 +199,6 @@ class LocalApiApplication:
         raw_query: str,
         path_params: dict[str, str],
     ) -> Any | None:
-        try:
-            import asyncpg
-        except ImportError as exc:
-            raise RuntimeError("asyncpg is required to serve the local multi-sport API.") from exc
-
         context_value = _parse_context_value(route, path_params)
         query = "SELECT source_url, payload FROM api_payload_snapshot WHERE endpoint_pattern = $1"
         arguments: list[Any] = [route.endpoint.pattern]
@@ -212,29 +207,101 @@ class LocalApiApplication:
             arguments.extend([route.context_entity_type, context_value])
         query += " ORDER BY id DESC LIMIT 500"
 
-        connection = await asyncpg.connect(
-            self.database_config.dsn,
-            command_timeout=self.database_config.command_timeout,
-        )
+        connection = await self._connect()
         try:
             rows = await connection.fetch(query, *arguments)
+            latest_path_match: Any | None = None
+            for row in rows:
+                split = urlsplit(str(row["source_url"]))
+                if split.path != path:
+                    continue
+                decoded_payload = _decode_snapshot_payload(row["payload"])
+                if _query_maps_equal(split.query, raw_query):
+                    return await self._reconcile_snapshot_payload(connection, route, decoded_payload)
+                if not raw_query and latest_path_match is None:
+                    latest_path_match = decoded_payload
+
+            if route.endpoint.query_template and not raw_query and latest_path_match is not None:
+                return await self._reconcile_snapshot_payload(connection, route, latest_path_match)
         finally:
             await connection.close()
-
-        latest_path_match: Any | None = None
-        for row in rows:
-            split = urlsplit(str(row["source_url"]))
-            if split.path != path:
-                continue
-            decoded_payload = _decode_snapshot_payload(row["payload"])
-            if _query_maps_equal(split.query, raw_query):
-                return decoded_payload
-            if not raw_query and latest_path_match is None:
-                latest_path_match = decoded_payload
-
-        if route.endpoint.query_template and not raw_query:
-            return latest_path_match
         return None
+
+    async def _reconcile_snapshot_payload(
+        self,
+        executor: Any,
+        route: RouteSpec,
+        payload: Any,
+    ) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+
+        envelope_key = getattr(route.endpoint, "envelope_key", None)
+        if envelope_key not in {"events", "featuredEvents"}:
+            return payload
+
+        raw_items = payload.get(envelope_key)
+        if not isinstance(raw_items, list):
+            return payload
+
+        event_ids = [int(item["id"]) for item in raw_items if isinstance(item, dict) and item.get("id") is not None]
+        if not event_ids:
+            return payload
+
+        rows = await executor.fetch(
+            """
+            SELECT
+                ets.event_id,
+                ets.terminal_status,
+                aps.payload AS final_payload
+            FROM event_terminal_state AS ets
+            LEFT JOIN api_payload_snapshot AS aps
+                ON aps.id = ets.final_snapshot_id
+            WHERE ets.event_id = ANY($1::bigint[])
+            """,
+            event_ids,
+        )
+        if not rows:
+            return payload
+
+        terminal_by_event: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            event_id = int(row["event_id"])
+            status_payload = _extract_terminal_status_payload(row.get("final_payload"))
+            if status_payload is None:
+                status_payload = _fallback_terminal_status_payload(
+                    row.get("terminal_status"),
+                    _extract_existing_event_status(raw_items, event_id),
+                )
+            if status_payload is not None:
+                terminal_by_event[event_id] = status_payload
+
+        if not terminal_by_event:
+            return payload
+
+        live_route = route.endpoint.path_template.endswith("/events/live")
+        reconciled_items: list[Any] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                reconciled_items.append(item)
+                continue
+            event_id = item.get("id")
+            if event_id is None:
+                reconciled_items.append(item)
+                continue
+            event_id = int(event_id)
+            if event_id not in terminal_by_event:
+                reconciled_items.append(item)
+                continue
+            if live_route:
+                continue
+            updated = dict(item)
+            updated["status"] = terminal_by_event[event_id]
+            reconciled_items.append(updated)
+
+        reconciled_payload = dict(payload)
+        reconciled_payload[envelope_key] = reconciled_items
+        return reconciled_payload
 
     async def _fetch_normalized_payload(
         self,
@@ -796,6 +863,55 @@ def _extract_category_seed_request(
         str(path_params.get("date", match.group("date"))),
         timezone_offset_seconds,
     )
+
+
+def _extract_terminal_status_payload(final_payload: Any) -> dict[str, Any] | None:
+    decoded_payload = _decode_snapshot_payload(final_payload)
+    if not isinstance(decoded_payload, dict):
+        return None
+    event_payload = decoded_payload.get("event")
+    if not isinstance(event_payload, dict):
+        return None
+    status_payload = event_payload.get("status")
+    if not isinstance(status_payload, dict):
+        return None
+    return dict(status_payload)
+
+
+def _extract_existing_event_status(items: list[Any], event_id: int) -> dict[str, Any] | None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("id") or 0) != event_id:
+            continue
+        status_payload = item.get("status")
+        if isinstance(status_payload, dict):
+            return dict(status_payload)
+        return None
+    return None
+
+
+def _fallback_terminal_status_payload(
+    terminal_status: Any,
+    existing_status: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    normalized = str(terminal_status or "").strip().lower()
+    if not normalized:
+        return existing_status
+
+    base = dict(existing_status or {})
+    fallback_by_type: dict[str, dict[str, Any]] = {
+        "finished": {"code": 100, "type": "finished", "description": "Ended"},
+        "afterextra": {"type": "afterextra", "description": "After extra time"},
+        "afterpen": {"type": "afterpen", "description": "After penalties"},
+        "cancelled": {"type": "cancelled", "description": "Cancelled"},
+        "postponed": {"type": "postponed", "description": "Postponed"},
+    }
+    fallback = fallback_by_type.get(normalized)
+    if fallback is None:
+        return base or None
+    base.update(fallback)
+    return base
 
 
 def _load_optional_redis_backend(redis_url: str | None) -> Any | None:
