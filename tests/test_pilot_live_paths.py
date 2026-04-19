@@ -158,6 +158,30 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_backend.zsets[LIVE_WARM_ZSET]["15921220"], float(now_ms + 60_000))
         self.assertEqual(stream_backend.streams[STREAM_LIVE_WARM][0][1]["job_type"], "refresh_live_event")
 
+    async def test_halftime_event_stays_on_hot_lane(self) -> None:
+        now_ms = 1_800_000_000_000
+        live_backend = _FakeLiveBackend()
+        stream_backend = _FakeStreamBackend()
+        orchestrator = _build_orchestrator(
+            transport=_FakeTransport(
+                _tennis_responses(
+                    event_id=15921222,
+                    status_type="halftime",
+                    start_timestamp=(now_ms // 1000) - 300,
+                )
+            ),
+            live_state_store=LiveEventStateStore(live_backend),
+            stream_queue=RedisStreamQueue(stream_backend),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        await orchestrator.run_event(event_id=15921222, sport_slug="tennis")
+
+        state = live_backend.hashes["live:event:15921222"]
+        self.assertEqual(state["poll_profile"], "hot")
+        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921222"], float(now_ms + 10_000))
+        self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["job_type"], "refresh_live_event")
+
     async def test_finished_event_runs_final_sweep_and_marks_terminal_state(self) -> None:
         now_ms = 1_800_000_000_000
         live_backend = _FakeLiveBackend()

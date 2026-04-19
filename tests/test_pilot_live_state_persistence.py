@@ -158,6 +158,76 @@ class PilotLiveStatePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_state_repository.terminal_states[0].terminal_status, "finished")
         self.assertIsNotNone(live_state_repository.terminal_states[0].final_snapshot_id)
 
+    async def test_halftime_event_persists_hot_live_history_without_terminal_state(self) -> None:
+        event_id = 15921222
+        event_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        statistics_url = f"https://www.sofascore.com/api/v1/event/{event_id}/statistics"
+        lineups_url = f"https://www.sofascore.com/api/v1/event/{event_id}/lineups"
+        incidents_url = f"https://www.sofascore.com/api/v1/event/{event_id}/incidents"
+        point_by_point_url = f"https://www.sofascore.com/api/v1/event/{event_id}/point-by-point"
+        tennis_power_url = f"https://www.sofascore.com/api/v1/event/{event_id}/tennis-power"
+
+        live_state_repository = _FakeLiveStateRepository()
+        raw_store = _FakeRawSnapshotStore()
+        orchestrator = PilotOrchestrator(
+            fetch_executor=FetchExecutor(
+                transport=_FakeTransport(
+                    {
+                        event_url: _json_result(
+                            event_url,
+                            {
+                                "event": {
+                                    "id": event_id,
+                                    "slug": "sinner-alcaraz",
+                                    "tournament": {
+                                        "id": 300,
+                                        "slug": "wimbledon",
+                                        "name": "Wimbledon",
+                                        "uniqueTournament": {"id": 2361, "slug": "wimbledon", "name": "Wimbledon"},
+                                    },
+                                    "season": {"id": 90001, "name": "Wimbledon 2026", "year": "2026"},
+                                    "status": {"type": "halftime"},
+                                    "startTimestamp": 1_799_999_000,
+                                    "homeTeam": {"id": 101, "slug": "sinner", "name": "Jannik Sinner"},
+                                    "awayTeam": {"id": 102, "slug": "alcaraz", "name": "Carlos Alcaraz"},
+                                }
+                            },
+                        ),
+                        statistics_url: _json_result(statistics_url, {"statistics": []}),
+                        lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+                        incidents_url: _json_result(incidents_url, {"incidents": []}),
+                        point_by_point_url: _json_result(point_by_point_url, {"pointByPoint": []}),
+                        tennis_power_url: _json_result(
+                            tennis_power_url,
+                            {"tennisPowerRankings": {"home": {"current": 0.51}, "away": {"current": 0.49}}},
+                        ),
+                    }
+                ),
+                raw_repository=raw_store,
+                sql_executor=object(),
+            ),
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(
+                capability_rollup={
+                    "/api/v1/event/{event_id}/graph": "unsupported",
+                    "/api/v1/event/{event_id}/incidents": "supported",
+                }
+            ),
+            capability_repository=_FakeCapabilityRepository(),
+            live_state_repository=live_state_repository,
+            sql_executor=object(),
+            live_worker=LiveWorker(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        self.assertEqual(len(live_state_repository.live_history), 1)
+        self.assertEqual(live_state_repository.live_history[0].poll_profile, "hot")
+        self.assertEqual(live_state_repository.live_history[0].observed_status_type, "halftime")
+        self.assertEqual(live_state_repository.terminal_states, [])
+
 
 def _json_result(url: str, payload: object, *, status_code: int = 200) -> TransportResult:
     return TransportResult(
