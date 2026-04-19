@@ -9,6 +9,7 @@ from typing import Any, Iterable, Protocol
 
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
+from .storage.bulk_write_helpers import RowsBatch, sorted_upsert
 
 
 class SqlExecutor(Protocol):
@@ -181,46 +182,38 @@ class EventListRepository:
             )
             for item in bundle.registry_entries
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO endpoint_registry (pattern, path_template, query_template, envelope_key, target_table, notes)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (pattern) DO UPDATE SET
-                path_template = EXCLUDED.path_template,
-                query_template = EXCLUDED.query_template,
-                envelope_key = EXCLUDED.envelope_key,
-                target_table = EXCLUDED.target_table,
-                notes = EXCLUDED.notes
-            """,
-            rows,
+            "endpoint_registry",
+            RowsBatch(
+                columns=("pattern", "path_template", "query_template", "envelope_key", "target_table", "notes"),
+                values=tuple(rows),
+            ),
+            sort_keys=("pattern",),
+            conflict_target="pattern",
+            update_cols=("path_template", "query_template", "envelope_key", "target_table", "notes"),
         )
 
     async def _upsert_sports(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.id, item.slug, item.name) for item in bundle.sports]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO sport (id, slug, name)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (id) DO UPDATE SET slug = EXCLUDED.slug, name = EXCLUDED.name
-            """,
-            rows,
+            "sport",
+            RowsBatch(columns=("id", "slug", "name"), values=tuple(rows)),
+            sort_keys=("id",),
+            conflict_target="id",
+            update_cols=("slug", "name"),
         )
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO country (alpha2, alpha3, slug, name)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (alpha2) DO UPDATE SET
-                alpha3 = EXCLUDED.alpha3,
-                slug = EXCLUDED.slug,
-                name = EXCLUDED.name
-            """,
-            rows,
+            "country",
+            RowsBatch(columns=("alpha2", "alpha3", "slug", "name"), values=tuple(rows)),
+            sort_keys=("alpha2",),
+            conflict_target="alpha2",
+            update_cols=("alpha3", "slug", "name"),
         )
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -238,24 +231,16 @@ class EventListRepository:
             )
             for item in bundle.categories
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO category (
-                id, slug, name, flag, alpha2, priority, sport_id, country_alpha2, field_translations
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-                slug = EXCLUDED.slug,
-                name = EXCLUDED.name,
-                flag = EXCLUDED.flag,
-                alpha2 = EXCLUDED.alpha2,
-                priority = EXCLUDED.priority,
-                sport_id = EXCLUDED.sport_id,
-                country_alpha2 = EXCLUDED.country_alpha2,
-                field_translations = EXCLUDED.field_translations
-            """,
-            rows,
+            "category",
+            RowsBatch(
+                columns=("id", "slug", "name", "flag", "alpha2", "priority", "sport_id", "country_alpha2", "field_translations"),
+                values=tuple(rows),
+            ),
+            sort_keys=("id",),
+            conflict_target="id",
+            update_cols=("slug", "name", "flag", "alpha2", "priority", "sport_id", "country_alpha2", "field_translations"),
         )
 
     async def _upsert_unique_tournaments(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -277,30 +262,43 @@ class EventListRepository:
             )
             for item in bundle.unique_tournaments
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO unique_tournament (
-                id, slug, name, category_id, country_alpha2, gender,
-                primary_color_hex, secondary_color_hex, user_count, has_event_player_statistics,
-                display_inverse_home_away_teams, field_translations, period_length
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-                slug = EXCLUDED.slug,
-                name = EXCLUDED.name,
-                category_id = EXCLUDED.category_id,
-                country_alpha2 = EXCLUDED.country_alpha2,
-                gender = EXCLUDED.gender,
-                primary_color_hex = EXCLUDED.primary_color_hex,
-                secondary_color_hex = EXCLUDED.secondary_color_hex,
-                user_count = EXCLUDED.user_count,
-                has_event_player_statistics = EXCLUDED.has_event_player_statistics,
-                display_inverse_home_away_teams = EXCLUDED.display_inverse_home_away_teams,
-                field_translations = EXCLUDED.field_translations,
-                period_length = EXCLUDED.period_length
-            """,
-            rows,
+            "unique_tournament",
+            RowsBatch(
+                columns=(
+                    "id",
+                    "slug",
+                    "name",
+                    "category_id",
+                    "country_alpha2",
+                    "gender",
+                    "primary_color_hex",
+                    "secondary_color_hex",
+                    "user_count",
+                    "has_event_player_statistics",
+                    "display_inverse_home_away_teams",
+                    "field_translations",
+                    "period_length",
+                ),
+                values=tuple(rows),
+            ),
+            sort_keys=("id",),
+            conflict_target="id",
+            update_cols=(
+                "slug",
+                "name",
+                "category_id",
+                "country_alpha2",
+                "gender",
+                "primary_color_hex",
+                "secondary_color_hex",
+                "user_count",
+                "has_event_player_statistics",
+                "display_inverse_home_away_teams",
+                "field_translations",
+                "period_length",
+            ),
         )
 
     async def _upsert_seasons(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -308,18 +306,16 @@ class EventListRepository:
             (item.id, item.name, item.year, item.editor, _jsonb(item.season_coverage_info))
             for item in bundle.seasons
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO season (id, name, year, editor, season_coverage_info)
-            VALUES ($1, $2, $3, $4, $5::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                year = EXCLUDED.year,
-                editor = EXCLUDED.editor,
-                season_coverage_info = EXCLUDED.season_coverage_info
-            """,
-            rows,
+            "season",
+            RowsBatch(
+                columns=("id", "name", "year", "editor", "season_coverage_info"),
+                values=tuple(rows),
+            ),
+            sort_keys=("id",),
+            conflict_target="id",
+            update_cols=("name", "year", "editor", "season_coverage_info"),
         )
 
     async def _upsert_tournaments(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -339,27 +335,39 @@ class EventListRepository:
             )
             for item in bundle.tournaments
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO tournament (
-                id, slug, name, category_id, unique_tournament_id,
-                group_name, group_sign, is_group, is_live, priority, field_translations
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-                slug = EXCLUDED.slug,
-                name = EXCLUDED.name,
-                category_id = EXCLUDED.category_id,
-                unique_tournament_id = EXCLUDED.unique_tournament_id,
-                group_name = EXCLUDED.group_name,
-                group_sign = EXCLUDED.group_sign,
-                is_group = EXCLUDED.is_group,
-                is_live = EXCLUDED.is_live,
-                priority = EXCLUDED.priority,
-                field_translations = EXCLUDED.field_translations
-            """,
-            rows,
+            "tournament",
+            RowsBatch(
+                columns=(
+                    "id",
+                    "slug",
+                    "name",
+                    "category_id",
+                    "unique_tournament_id",
+                    "group_name",
+                    "group_sign",
+                    "is_group",
+                    "is_live",
+                    "priority",
+                    "field_translations",
+                ),
+                values=tuple(rows),
+            ),
+            sort_keys=("id",),
+            conflict_target="id",
+            update_cols=(
+                "slug",
+                "name",
+                "category_id",
+                "unique_tournament_id",
+                "group_name",
+                "group_sign",
+                "is_group",
+                "is_live",
+                "priority",
+                "field_translations",
+            ),
         )
 
     async def _upsert_teams(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -414,16 +422,13 @@ class EventListRepository:
 
     async def _upsert_event_statuses(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.code, item.description, item.type) for item in bundle.event_statuses]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_status (code, description, type)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (code) DO UPDATE SET
-                description = EXCLUDED.description,
-                type = EXCLUDED.type
-            """,
-            rows,
+            "event_status",
+            RowsBatch(columns=("code", "description", "type"), values=tuple(rows)),
+            sort_keys=("code",),
+            conflict_target="code",
+            update_cols=("description", "type"),
         )
 
     async def _upsert_events(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -467,96 +472,115 @@ class EventListRepository:
             )
             for item in bundle.events
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event (
-                id, slug, custom_id, detail_id, tournament_id, unique_tournament_id, season_id,
-                home_team_id, away_team_id, status_code, season_statistics_type, start_timestamp,
-                coverage, winner_code, aggregated_winner_code, home_red_cards, away_red_cards,
-                previous_leg_event_id, cup_matches_in_round, default_period_count,
-                default_period_length, default_overtime_length, last_period,
-                correct_ai_insight, correct_halftime_ai_insight, feed_locked, is_editor,
-                show_toto_promo, crowdsourcing_enabled, crowdsourcing_data_display_enabled,
-                final_result_only, has_event_player_statistics, has_event_player_heat_map,
-                has_global_highlights, has_xg
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-                $31, $32, $33, $34, $35
-            )
-            ON CONFLICT (id) DO UPDATE SET
-                slug = EXCLUDED.slug,
-                custom_id = EXCLUDED.custom_id,
-                detail_id = EXCLUDED.detail_id,
-                tournament_id = EXCLUDED.tournament_id,
-                unique_tournament_id = EXCLUDED.unique_tournament_id,
-                season_id = EXCLUDED.season_id,
-                home_team_id = EXCLUDED.home_team_id,
-                away_team_id = EXCLUDED.away_team_id,
-                status_code = EXCLUDED.status_code,
-                season_statistics_type = EXCLUDED.season_statistics_type,
-                start_timestamp = EXCLUDED.start_timestamp,
-                coverage = EXCLUDED.coverage,
-                winner_code = EXCLUDED.winner_code,
-                aggregated_winner_code = EXCLUDED.aggregated_winner_code,
-                home_red_cards = EXCLUDED.home_red_cards,
-                away_red_cards = EXCLUDED.away_red_cards,
-                previous_leg_event_id = EXCLUDED.previous_leg_event_id,
-                cup_matches_in_round = EXCLUDED.cup_matches_in_round,
-                default_period_count = EXCLUDED.default_period_count,
-                default_period_length = EXCLUDED.default_period_length,
-                default_overtime_length = EXCLUDED.default_overtime_length,
-                last_period = EXCLUDED.last_period,
-                correct_ai_insight = EXCLUDED.correct_ai_insight,
-                correct_halftime_ai_insight = EXCLUDED.correct_halftime_ai_insight,
-                feed_locked = EXCLUDED.feed_locked,
-                is_editor = EXCLUDED.is_editor,
-                show_toto_promo = EXCLUDED.show_toto_promo,
-                crowdsourcing_enabled = EXCLUDED.crowdsourcing_enabled,
-                crowdsourcing_data_display_enabled = EXCLUDED.crowdsourcing_data_display_enabled,
-                final_result_only = EXCLUDED.final_result_only,
-                has_event_player_statistics = EXCLUDED.has_event_player_statistics,
-                has_event_player_heat_map = EXCLUDED.has_event_player_heat_map,
-                has_global_highlights = EXCLUDED.has_global_highlights,
-                has_xg = EXCLUDED.has_xg
-            """,
-            rows,
+            "event",
+            RowsBatch(
+                columns=(
+                    "id",
+                    "slug",
+                    "custom_id",
+                    "detail_id",
+                    "tournament_id",
+                    "unique_tournament_id",
+                    "season_id",
+                    "home_team_id",
+                    "away_team_id",
+                    "status_code",
+                    "season_statistics_type",
+                    "start_timestamp",
+                    "coverage",
+                    "winner_code",
+                    "aggregated_winner_code",
+                    "home_red_cards",
+                    "away_red_cards",
+                    "previous_leg_event_id",
+                    "cup_matches_in_round",
+                    "default_period_count",
+                    "default_period_length",
+                    "default_overtime_length",
+                    "last_period",
+                    "correct_ai_insight",
+                    "correct_halftime_ai_insight",
+                    "feed_locked",
+                    "is_editor",
+                    "show_toto_promo",
+                    "crowdsourcing_enabled",
+                    "crowdsourcing_data_display_enabled",
+                    "final_result_only",
+                    "has_event_player_statistics",
+                    "has_event_player_heat_map",
+                    "has_global_highlights",
+                    "has_xg",
+                ),
+                values=tuple(rows),
+            ),
+            sort_keys=("id",),
+            conflict_target="id",
+            update_cols=(
+                "slug",
+                "custom_id",
+                "detail_id",
+                "tournament_id",
+                "unique_tournament_id",
+                "season_id",
+                "home_team_id",
+                "away_team_id",
+                "status_code",
+                "season_statistics_type",
+                "start_timestamp",
+                "coverage",
+                "winner_code",
+                "aggregated_winner_code",
+                "home_red_cards",
+                "away_red_cards",
+                "previous_leg_event_id",
+                "cup_matches_in_round",
+                "default_period_count",
+                "default_period_length",
+                "default_overtime_length",
+                "last_period",
+                "correct_ai_insight",
+                "correct_halftime_ai_insight",
+                "feed_locked",
+                "is_editor",
+                "show_toto_promo",
+                "crowdsourcing_enabled",
+                "crowdsourcing_data_display_enabled",
+                "final_result_only",
+                "has_event_player_statistics",
+                "has_event_player_heat_map",
+                "has_global_highlights",
+                "has_xg",
+            ),
         )
 
     async def _upsert_event_round_infos(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.event_id, item.round_number, item.slug, item.name, item.cup_round_type) for item in bundle.event_round_infos]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_round_info (event_id, round_number, slug, name, cup_round_type)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (event_id) DO UPDATE SET
-                round_number = EXCLUDED.round_number,
-                slug = EXCLUDED.slug,
-                name = EXCLUDED.name,
-                cup_round_type = EXCLUDED.cup_round_type
-            """,
-            rows,
+            "event_round_info",
+            RowsBatch(
+                columns=("event_id", "round_number", "slug", "name", "cup_round_type"),
+                values=tuple(rows),
+            ),
+            sort_keys=("event_id",),
+            conflict_target="event_id",
+            update_cols=("round_number", "slug", "name", "cup_round_type"),
         )
 
     async def _upsert_event_status_times(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.event_id, item.prefix, item.timestamp, item.initial, item.max, item.extra) for item in bundle.event_status_times]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_status_time (event_id, prefix, timestamp, initial, max, extra)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (event_id) DO UPDATE SET
-                prefix = EXCLUDED.prefix,
-                timestamp = EXCLUDED.timestamp,
-                initial = EXCLUDED.initial,
-                max = EXCLUDED.max,
-                extra = EXCLUDED.extra
-            """,
-            rows,
+            "event_status_time",
+            RowsBatch(
+                columns=("event_id", "prefix", "timestamp", "initial", "max", "extra"),
+                values=tuple(rows),
+            ),
+            sort_keys=("event_id",),
+            conflict_target="event_id",
+            update_cols=("prefix", "timestamp", "initial", "max", "extra"),
         )
 
     async def _upsert_event_times(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -577,43 +601,52 @@ class EventListRepository:
             )
             for item in bundle.event_times
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_time (
-                event_id, current_period_start_timestamp, initial, max, extra,
-                injury_time1, injury_time2, injury_time3, injury_time4,
-                overtime_length, period_length, total_period_count
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (event_id) DO UPDATE SET
-                current_period_start_timestamp = EXCLUDED.current_period_start_timestamp,
-                initial = EXCLUDED.initial,
-                max = EXCLUDED.max,
-                extra = EXCLUDED.extra,
-                injury_time1 = EXCLUDED.injury_time1,
-                injury_time2 = EXCLUDED.injury_time2,
-                injury_time3 = EXCLUDED.injury_time3,
-                injury_time4 = EXCLUDED.injury_time4,
-                overtime_length = EXCLUDED.overtime_length,
-                period_length = EXCLUDED.period_length,
-                total_period_count = EXCLUDED.total_period_count
-            """,
-            rows,
+            "event_time",
+            RowsBatch(
+                columns=(
+                    "event_id",
+                    "current_period_start_timestamp",
+                    "initial",
+                    "max",
+                    "extra",
+                    "injury_time1",
+                    "injury_time2",
+                    "injury_time3",
+                    "injury_time4",
+                    "overtime_length",
+                    "period_length",
+                    "total_period_count",
+                ),
+                values=tuple(rows),
+            ),
+            sort_keys=("event_id",),
+            conflict_target="event_id",
+            update_cols=(
+                "current_period_start_timestamp",
+                "initial",
+                "max",
+                "extra",
+                "injury_time1",
+                "injury_time2",
+                "injury_time3",
+                "injury_time4",
+                "overtime_length",
+                "period_length",
+                "total_period_count",
+            ),
         )
 
     async def _upsert_event_var_in_progress(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.event_id, item.home_team, item.away_team) for item in bundle.event_var_in_progress_items]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_var_in_progress (event_id, home_team, away_team)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (event_id) DO UPDATE SET
-                home_team = EXCLUDED.home_team,
-                away_team = EXCLUDED.away_team
-            """,
-            rows,
+            "event_var_in_progress",
+            RowsBatch(columns=("event_id", "home_team", "away_team"), values=tuple(rows)),
+            sort_keys=("event_id",),
+            conflict_target="event_id",
+            update_cols=("home_team", "away_team"),
         )
 
     async def _upsert_event_scores(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
@@ -625,57 +658,74 @@ class EventListRepository:
             )
             for item in bundle.event_scores
         ]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_score (
-                event_id, side, current, display, aggregated, normaltime, overtime,
-                penalties, period1, period2, period3, period4, extra1, extra2, series
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            ON CONFLICT (event_id, side) DO UPDATE SET
-                current = EXCLUDED.current,
-                display = EXCLUDED.display,
-                aggregated = EXCLUDED.aggregated,
-                normaltime = EXCLUDED.normaltime,
-                overtime = EXCLUDED.overtime,
-                penalties = EXCLUDED.penalties,
-                period1 = EXCLUDED.period1,
-                period2 = EXCLUDED.period2,
-                period3 = EXCLUDED.period3,
-                period4 = EXCLUDED.period4,
-                extra1 = EXCLUDED.extra1,
-                extra2 = EXCLUDED.extra2,
-                series = EXCLUDED.series
-            """,
-            rows,
+            "event_score",
+            RowsBatch(
+                columns=(
+                    "event_id",
+                    "side",
+                    "current",
+                    "display",
+                    "aggregated",
+                    "normaltime",
+                    "overtime",
+                    "penalties",
+                    "period1",
+                    "period2",
+                    "period3",
+                    "period4",
+                    "extra1",
+                    "extra2",
+                    "series",
+                ),
+                values=tuple(rows),
+            ),
+            sort_keys=("event_id", "side"),
+            conflict_target=("event_id", "side"),
+            update_cols=(
+                "current",
+                "display",
+                "aggregated",
+                "normaltime",
+                "overtime",
+                "penalties",
+                "period1",
+                "period2",
+                "period3",
+                "period4",
+                "extra1",
+                "extra2",
+                "series",
+            ),
         )
 
     async def _upsert_event_filter_values(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.event_id, item.filter_name, item.ordinal, item.filter_value) for item in bundle.event_filter_values]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_filter_value (event_id, filter_name, ordinal, filter_value)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (event_id, filter_name, ordinal) DO UPDATE SET
-                filter_value = EXCLUDED.filter_value
-            """,
-            rows,
+            "event_filter_value",
+            RowsBatch(
+                columns=("event_id", "filter_name", "ordinal", "filter_value"),
+                values=tuple(rows),
+            ),
+            sort_keys=("event_id", "filter_name", "ordinal"),
+            conflict_target=("event_id", "filter_name", "ordinal"),
+            update_cols=("filter_value",),
         )
 
     async def _upsert_event_change_items(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.event_id, item.change_timestamp, item.ordinal, item.change_value) for item in bundle.event_change_items]
-        await _executemany(
+        await sorted_upsert(
             executor,
-            """
-            INSERT INTO event_change_item (event_id, change_timestamp, ordinal, change_value)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (event_id, ordinal) DO UPDATE SET
-                change_timestamp = EXCLUDED.change_timestamp,
-                change_value = EXCLUDED.change_value
-            """,
-            rows,
+            "event_change_item",
+            RowsBatch(
+                columns=("event_id", "change_timestamp", "ordinal", "change_value"),
+                values=tuple(rows),
+            ),
+            sort_keys=("event_id", "ordinal"),
+            conflict_target=("event_id", "ordinal"),
+            update_cols=("change_timestamp", "change_value"),
         )
 
     async def _insert_payload_snapshots(self, executor: SqlExecutor, bundle: EventListBundle) -> None:

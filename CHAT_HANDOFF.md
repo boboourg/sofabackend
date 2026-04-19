@@ -6,12 +6,16 @@ Path:
 
 - `C:\Users\bobur\Desktop\sofascore\NEXT_CHAT_CONTEXT.md`
 
-It contains:
+Current version:
 
-1. the current architecture truth
-2. implemented endpoint families
-3. migration state
-4. normal vs problematic 404 behavior
-5. local API / Swagger notes
-6. mass-load commands
-7. the new top-tournaments worker pipeline context
+- `2026-04-19`
+
+It now contains:
+
+1. the current continuous-runtime state
+2. the real deployment flow (`main -> origin/main -> server pull main`)
+3. Slice 2 / `hydrate3` / `hydrate4` operational context
+4. the distinction between baseline readiness and true throughput checks
+5. current frontend/API capability and new frontend handoff docs
+6. the exact commands the next AI should run first
+7. the decision tree for keeping or killing `hydrate4`

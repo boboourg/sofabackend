@@ -563,9 +563,6 @@ class PilotOrchestrator:
         outcome: FetchOutcomeEnvelope,
         context_type: str | None,
     ) -> None:
-        if self.capability_repository is None:
-            return
-
         payload_validity = "json" if outcome.is_valid_json else "non_json"
         if outcome.is_soft_error_payload:
             payload_validity = "soft_error_json"
@@ -590,13 +587,15 @@ class PilotOrchestrator:
             CapabilityRollupAccumulator(sport_slug=sport_slug, endpoint_pattern=outcome.endpoint_pattern),
         )
         rollup = accumulator.observe(outcome)
+        self.planner.capability_rollup[outcome.endpoint_pattern] = rollup.support_level
+        if self.capability_repository is None:
+            return
         self._pending_capability_records.append(
             DeferredCapabilityRecord(
                 observation=observation,
                 rollup=rollup,
             )
         )
-        self.planner.capability_rollup[outcome.endpoint_pattern] = rollup.support_level
 
     async def _flush_capabilities(self) -> None:
         if self.capability_repository is None or not self._pending_capability_records:
