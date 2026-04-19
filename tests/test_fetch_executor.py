@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.fetch_executor import FetchExecutor
-from schema_inspector.fetch_models import FetchOutcomeEnvelope, FetchTask
+from schema_inspector.fetch_models import FetchTask
 from schema_inspector.runtime import TransportAttempt, TransportResult
 
 
@@ -22,7 +22,6 @@ class _FakeRawRepository:
         self.request_logs = []
         self.snapshots = []
         self.snapshot_heads = []
-        self.idempotent_snapshot_ids: list[int] = []
 
     async def insert_request_log(self, executor, record) -> None:
         del executor
@@ -33,27 +32,9 @@ class _FakeRawRepository:
         self.snapshots.append(record)
         return 101
 
-    async def insert_payload_snapshot_if_missing_returning_id(self, executor, record) -> int:
-        del executor
-        self.snapshots.append(record)
-        snapshot_id = self.idempotent_snapshot_ids.pop(0) if self.idempotent_snapshot_ids else 101
-        return snapshot_id
-
     async def upsert_snapshot_head(self, executor, record) -> None:
         del executor
         self.snapshot_heads.append(record)
-
-
-class _FakeSnapshotStore:
-    def __init__(self) -> None:
-        self.records = []
-        self.next_snapshot_id = -1
-
-    def stage_snapshot(self, record) -> int:
-        self.records.append(record)
-        snapshot_id = self.next_snapshot_id
-        self.next_snapshot_id -= 1
-        return snapshot_id
 
 
 class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
@@ -98,99 +79,6 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(raw_repository.snapshots), 1)
         self.assertEqual(len(raw_repository.snapshot_heads), 1)
         self.assertEqual(transport.calls[0][2], 12.5)
-
-    async def test_executor_can_defer_raw_writes_and_collect_prefetched_record(self) -> None:
-        transport = _FakeTransport(
-            TransportResult(
-                resolved_url="https://www.sofascore.com/api/v1/event/5",
-                status_code=200,
-                headers={"Content-Type": "application/json"},
-                body_bytes=b'{"event":{"id":5,"slug":"prefetched"}}',
-                attempts=(TransportAttempt(1, "proxy_5", 200, None, None),),
-                final_proxy_name="proxy_5",
-                challenge_reason=None,
-            )
-        )
-        raw_repository = _FakeRawRepository()
-        snapshot_store = _FakeSnapshotStore()
-        executor = FetchExecutor(
-            transport=transport,
-            raw_repository=raw_repository,
-            sql_executor=None,
-            snapshot_store=snapshot_store,
-            write_mode="deferred",
-        )
-
-        outcome = await executor.execute(
-            FetchTask(
-                trace_id="trace-prefetch",
-                job_id="job-prefetch",
-                sport_slug="football",
-                endpoint_pattern="/api/v1/event/{event_id}",
-                source_url="https://www.sofascore.com/api/v1/event/5",
-                timeout_profile="pilot",
-                context_entity_type="event",
-                context_entity_id=5,
-                context_event_id=5,
-                fetch_reason="hydrate_event_root",
-            )
-        )
-
-        self.assertEqual(outcome.snapshot_id, -1)
-        self.assertEqual(len(raw_repository.request_logs), 0)
-        self.assertEqual(len(raw_repository.snapshots), 0)
-        self.assertEqual(len(snapshot_store.records), 1)
-        self.assertEqual(len(executor.prefetched_records), 1)
-
-    async def test_commit_prefetched_record_persists_append_only_log_and_idempotent_snapshot(self) -> None:
-        transport = _FakeTransport(
-            TransportResult(
-                resolved_url="https://www.sofascore.com/api/v1/event/9/statistics",
-                status_code=200,
-                headers={"Content-Type": "application/json"},
-                body_bytes=b'{"statistics":[]}',
-                attempts=(TransportAttempt(1, "proxy_9", 200, None, None),),
-                final_proxy_name="proxy_9",
-                challenge_reason=None,
-            )
-        )
-        raw_repository = _FakeRawRepository()
-        raw_repository.idempotent_snapshot_ids.append(404)
-        deferred_executor = FetchExecutor(
-            transport=transport,
-            raw_repository=raw_repository,
-            sql_executor=None,
-            snapshot_store=_FakeSnapshotStore(),
-            write_mode="deferred",
-        )
-        await deferred_executor.execute(
-            FetchTask(
-                trace_id="trace-commit",
-                job_id="job-commit",
-                sport_slug="football",
-                endpoint_pattern="/api/v1/event/{event_id}/statistics",
-                source_url="https://www.sofascore.com/api/v1/event/9/statistics",
-                timeout_profile="pilot",
-                context_entity_type="event",
-                context_entity_id=9,
-                context_event_id=9,
-                fetch_reason="hydrate_event_edge",
-            )
-        )
-
-        committing_executor = FetchExecutor(
-            transport=transport,
-            raw_repository=raw_repository,
-            sql_executor=object(),
-        )
-
-        committed = await committing_executor.commit_prefetched_record(deferred_executor.prefetched_records[0])
-
-        self.assertIsInstance(committed, FetchOutcomeEnvelope)
-        self.assertEqual(committed.snapshot_id, 404)
-        self.assertEqual(len(raw_repository.request_logs), 1)
-        self.assertEqual(len(raw_repository.snapshots), 1)
-        self.assertEqual(len(raw_repository.snapshot_heads), 1)
 
     async def test_executor_writes_request_log_for_guarded_non_json_response(self) -> None:
         transport = _FakeTransport(

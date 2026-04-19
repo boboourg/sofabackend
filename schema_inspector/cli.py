@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections import deque
 import inspect
 import logging
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from .db import AsyncpgDatabase, load_database_config
@@ -18,7 +17,7 @@ from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .event_list_job import EventListIngestJob
 from .event_list_parser import EventListParser
 from .event_list_repository import EventListRepository
-from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
+from .fetch_executor import FetchExecutor
 from .normalizers.sink import DurableNormalizeSink
 from .normalizers.worker import NormalizeWorker
 from .ops.db_audit import collect_db_audit
@@ -60,33 +59,11 @@ class ReplayBatchReport:
     parser_families: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class PrefetchedRun:
-    event_id: int
-    sport_slug: str
-    fetch_records: tuple[PrefetchedFetchRecord, ...]
-    snapshot_store: "HybridSnapshotStore"
-    initial_capability_rollup: dict[str, str]
-
-    @property
-    def total_payload_size_bytes(self) -> int:
-        return sum(
-            int(record.payload_snapshot.payload_size_bytes or 0)
-            for record in self.fetch_records
-            if record.payload_snapshot is not None
-        )
-
-    @property
-    def endpoint_count(self) -> int:
-        return len(self.fetch_records)
-
-
 class HybridSnapshotStore:
     def __init__(self, repository: RawRepository, sql_executor) -> None:
         self.repository = repository
         self.sql_executor = sql_executor
         self._cache: dict[int, RawSnapshot] = {}
-        self._next_prefetched_snapshot_id = -1
 
     async def insert_request_log(self, executor, record) -> None:
         await self.repository.insert_request_log(executor, record)
@@ -115,34 +92,6 @@ class HybridSnapshotStore:
     async def upsert_snapshot_head(self, executor, record) -> None:
         await self.repository.upsert_snapshot_head(executor, record)
 
-    def stage_snapshot(self, record) -> int:
-        snapshot_id = int(self._next_prefetched_snapshot_id)
-        self._next_prefetched_snapshot_id -= 1
-        self._cache[snapshot_id] = RawSnapshot(
-            snapshot_id=snapshot_id,
-            endpoint_pattern=record.endpoint_pattern,
-            sport_slug=str(record.sport_slug or ""),
-            source_url=record.source_url,
-            resolved_url=record.resolved_url or record.source_url,
-            envelope_key=record.envelope_key,
-            http_status=record.http_status,
-            payload=record.payload,
-            fetched_at=str(record.fetched_at or ""),
-            context_entity_type=record.context_entity_type,
-            context_entity_id=record.context_entity_id,
-            context_unique_tournament_id=record.context_unique_tournament_id,
-            context_season_id=record.context_season_id,
-            context_event_id=record.context_event_id,
-        )
-        return snapshot_id
-
-    def remap_snapshot_id(self, old_snapshot_id: int, new_snapshot_id: int) -> None:
-        snapshot = self._cache.pop(int(old_snapshot_id), None)
-        if snapshot is None:
-            return
-        if int(new_snapshot_id) not in self._cache:
-            self._cache[int(new_snapshot_id)] = replace(snapshot, snapshot_id=int(new_snapshot_id))
-
     def load_snapshot(self, snapshot_id: int) -> RawSnapshot:
         snapshot = self._cache.get(int(snapshot_id))
         if snapshot is None:
@@ -154,25 +103,9 @@ class HybridSnapshotStore:
         snapshot = self._cache.get(snapshot_id)
         if snapshot is not None:
             return snapshot
-        if self.sql_executor is None:
-            raise KeyError(snapshot_id)
         snapshot = await self.repository.fetch_payload_snapshot(self.sql_executor, snapshot_id)
         self._cache[snapshot_id] = snapshot
         return snapshot
-
-
-class ReplayFetchExecutor:
-    def __init__(self, prefetched_run: PrefetchedRun) -> None:
-        self._records_by_key: dict[tuple[object, ...], deque[PrefetchedFetchRecord]] = {}
-        for record in prefetched_run.fetch_records:
-            self._records_by_key.setdefault(build_fetch_task_key(record.task), deque()).append(record)
-
-    async def execute(self, task) -> object:
-        key = build_fetch_task_key(task)
-        queued = self._records_by_key.get(key)
-        if not queued:
-            raise RuntimeError(f"No prefetched fetch outcome available for task={key!r}")
-        return queued.popleft().outcome
 
 
 class HybridApp:
@@ -223,100 +156,16 @@ class HybridApp:
     ):
         resolved_sport_slug = sport_slug or await self.resolve_event_sport_slug(event_id)
         await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
-        prefetched_run = await self._prefetch_event_run(
-            event_id=event_id,
-            sport_slug=str(resolved_sport_slug or "football"),
-            hydration_mode=hydration_mode,
-        )
-        self._warn_if_prefetched_run_large(prefetched_run)
-        committed_run = await self._commit_prefetched_run(prefetched_run)
-        return await self._persist_prefetched_run(
-            committed_run,
-            hydration_mode=hydration_mode,
-        )
-
-    async def _prefetch_event_run(
-        self,
-        *,
-        event_id: int,
-        sport_slug: str,
-        hydration_mode: str,
-    ) -> PrefetchedRun:
-        initial_capability_rollup = dict(self.capability_rollup)
-        snapshot_store = HybridSnapshotStore(self.raw_repository, None)
-        prefetch_executor = FetchExecutor(
-            transport=self.transport,
-            raw_repository=self.raw_repository,
-            sql_executor=None,
-            snapshot_store=snapshot_store,
-            write_mode="deferred",
-        )
-        orchestrator = PilotOrchestrator(
-            fetch_executor=prefetch_executor,
-            snapshot_store=snapshot_store,
-            normalize_worker=NormalizeWorker(ParserRegistry.default(), result_sink=None),
-            planner=Planner(capability_rollup=dict(initial_capability_rollup)),
-            capability_repository=None,
-            sql_executor=None,
-            live_state_store=None,
-            live_state_repository=None,
-            stream_queue=None,
-        )
-        await orchestrator.run_event(
-            event_id=event_id,
-            sport_slug=sport_slug,
-            hydration_mode=hydration_mode,
-        )
-        return PrefetchedRun(
-            event_id=event_id,
-            sport_slug=sport_slug,
-            fetch_records=prefetch_executor.prefetched_records,
-            snapshot_store=snapshot_store,
-            initial_capability_rollup=initial_capability_rollup,
-        )
-
-    async def _commit_prefetched_run(self, prefetched_run: PrefetchedRun) -> PrefetchedRun:
         async with self.database.transaction() as connection:
-            raw_write_executor = FetchExecutor(
-                transport=self.transport,
-                raw_repository=self.raw_repository,
-                sql_executor=connection,
-            )
-            committed_records: list[PrefetchedFetchRecord] = []
-            for record in prefetched_run.fetch_records:
-                committed_outcome = await raw_write_executor.commit_prefetched_record(record)
-                if record.outcome.snapshot_id is not None and committed_outcome.snapshot_id is not None:
-                    prefetched_run.snapshot_store.remap_snapshot_id(
-                        int(record.outcome.snapshot_id),
-                        int(committed_outcome.snapshot_id),
-                    )
-                committed_snapshot_head = record.snapshot_head
-                if committed_outcome.snapshot_id is not None and record.snapshot_head is not None:
-                    committed_snapshot_head = replace(
-                        record.snapshot_head,
-                        latest_snapshot_id=int(committed_outcome.snapshot_id),
-                    )
-                committed_records.append(
-                    replace(
-                        record,
-                        outcome=committed_outcome,
-                        snapshot_head=committed_snapshot_head,
-                    )
-                )
-        return replace(prefetched_run, fetch_records=tuple(committed_records))
-
-    async def _persist_prefetched_run(
-        self,
-        prefetched_run: PrefetchedRun,
-        *,
-        hydration_mode: str,
-    ):
-        async with self.database.transaction() as connection:
+            snapshot_store = HybridSnapshotStore(self.raw_repository, connection)
             skip_entity_parser_families = {"event_root"} if hydration_mode == "core" else set()
-            planner = Planner(capability_rollup=dict(prefetched_run.initial_capability_rollup))
             orchestrator = PilotOrchestrator(
-                fetch_executor=ReplayFetchExecutor(prefetched_run),
-                snapshot_store=prefetched_run.snapshot_store,
+                fetch_executor=FetchExecutor(
+                    transport=self.transport,
+                    raw_repository=snapshot_store,
+                    sql_executor=connection,
+                ),
+                snapshot_store=snapshot_store,
                 normalize_worker=NormalizeWorker(
                     ParserRegistry.default(),
                     result_sink=DurableNormalizeSink(
@@ -325,33 +174,18 @@ class HybridApp:
                         skip_entity_parser_families=skip_entity_parser_families,
                     ),
                 ),
-                planner=planner,
+                planner=Planner(capability_rollup=self.capability_rollup),
                 capability_repository=self.capability_repository,
                 sql_executor=connection,
                 live_state_store=self.live_state_store,
                 live_state_repository=self.live_state_repository,
                 stream_queue=self.stream_queue,
             )
-            result = await orchestrator.run_event(
-                event_id=prefetched_run.event_id,
-                sport_slug=prefetched_run.sport_slug,
+            return await orchestrator.run_event(
+                event_id=event_id,
+                sport_slug=str(resolved_sport_slug or "football"),
                 hydration_mode=hydration_mode,
             )
-        self.capability_rollup.update(planner.capability_rollup)
-        return result
-
-    def _warn_if_prefetched_run_large(self, prefetched_run: PrefetchedRun) -> None:
-        limit_bytes = _prefetched_run_size_limit_bytes()
-        total_bytes = prefetched_run.total_payload_size_bytes
-        if total_bytes <= limit_bytes:
-            return
-        logger.warning(
-            "Prefetched run exceeded in-memory payload budget: event_id=%s endpoint_count=%s total_payload_size_bytes=%s limit_bytes=%s",
-            prefetched_run.event_id,
-            prefetched_run.endpoint_count,
-            total_bytes,
-            limit_bytes,
-        )
 
     async def replay_snapshot(self, snapshot_id: int):
         async with self.database.transaction() as connection:
@@ -1021,17 +855,6 @@ def _load_project_env() -> dict[str, str]:
         key, value = line.split("=", 1)
         merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
     return merged
-
-
-def _prefetched_run_size_limit_bytes() -> int:
-    raw = str(os.getenv("PREFETCHED_RUN_SIZE_LIMIT_BYTES", "") or "").strip()
-    if not raw:
-        return 50 * 1024 * 1024
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        logger.warning("Invalid PREFETCHED_RUN_SIZE_LIMIT_BYTES=%r; falling back to 50MB default.", raw)
-        return 50 * 1024 * 1024
 
 
 class _MemoryRedisBackend:

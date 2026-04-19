@@ -121,9 +121,6 @@ class RawRepository:
             await executor.execute(query, *row)
 
     async def insert_request_log(self, executor: SqlExecutor, record: ApiRequestLogRecord) -> None:
-        # Intentionally append-only: retries must remain visible as separate transport
-        # attempts for observability and proxy/upstream debugging. Only payload snapshots
-        # and snapshot heads are retry-deduplicated.
         await executor.execute(
             """
             INSERT INTO api_request_log (
@@ -224,66 +221,36 @@ class RawRepository:
         executor: SqlExecutor,
         record: PayloadSnapshotRecord,
     ) -> int | None:
-        return await self.insert_payload_snapshot_if_missing_returning_id(executor, record)
-
-    async def insert_payload_snapshot_if_missing_returning_id(
-        self,
-        executor: SqlExecutor,
-        record: PayloadSnapshotRecord,
-    ) -> int | None:
-        scope_key = _snapshot_scope_key(record)
         query = """
-            WITH existing AS (
-                SELECT id
-                FROM api_payload_snapshot
-                WHERE (
-                    CASE
-                        WHEN context_entity_type IS NOT NULL AND context_entity_id IS NOT NULL
-                        THEN context_entity_type || ':' || context_entity_id::text || ':' || endpoint_pattern
-                        ELSE endpoint_pattern
-                    END
-                ) = $1
-                  AND payload_hash IS NOT DISTINCT FROM $2
-                ORDER BY id DESC
-                LIMIT 1
-            ),
-            inserted AS (
-                INSERT INTO api_payload_snapshot (
-                    endpoint_pattern,
-                    source_url,
-                    resolved_url,
-                    envelope_key,
-                    context_entity_type,
-                    context_entity_id,
-                    context_unique_tournament_id,
-                    context_season_id,
-                    context_event_id,
-                    payload,
-                    fetched_at,
-                    trace_id,
-                    job_id,
-                    sport_slug,
-                    http_status,
-                    payload_hash,
-                    payload_size_bytes,
-                    content_type,
-                    is_valid_json,
-                    is_soft_error_payload
-                )
-                SELECT
-                    $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                    $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
-                WHERE NOT EXISTS (SELECT 1 FROM existing)
-                RETURNING id
+            INSERT INTO api_payload_snapshot (
+                endpoint_pattern,
+                source_url,
+                resolved_url,
+                envelope_key,
+                context_entity_type,
+                context_entity_id,
+                context_unique_tournament_id,
+                context_season_id,
+                context_event_id,
+                payload,
+                fetched_at,
+                trace_id,
+                job_id,
+                sport_slug,
+                http_status,
+                payload_hash,
+                payload_size_bytes,
+                content_type,
+                is_valid_json,
+                is_soft_error_payload
             )
-            SELECT id FROM inserted
-            UNION ALL
-            SELECT id FROM existing
-            LIMIT 1
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+            )
+            RETURNING id
         """
         args = (
-            scope_key,
-            record.payload_hash,
             record.endpoint_pattern,
             record.source_url,
             record.resolved_url,
@@ -309,7 +276,7 @@ class RawRepository:
         if callable(fetchval):
             result = await fetchval(query, *args)
             return int(result) if result is not None else None
-        await executor.execute(query, *args)
+        await executor.execute(query.replace("RETURNING id", ""), *args)
         return None
 
     async def upsert_snapshot_head(self, executor: SqlExecutor, record: ApiSnapshotHeadRecord) -> None:
@@ -395,9 +362,3 @@ def _maybe_int(value: object) -> int | None:
     if value is None:
         return None
     return int(value)
-
-
-def _snapshot_scope_key(record: PayloadSnapshotRecord) -> str:
-    if record.context_entity_type and record.context_entity_id is not None:
-        return f"{record.context_entity_type}:{record.context_entity_id}:{record.endpoint_pattern}"
-    return record.endpoint_pattern
