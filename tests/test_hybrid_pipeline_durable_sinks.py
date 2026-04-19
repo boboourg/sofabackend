@@ -39,6 +39,9 @@ class _FakeRawSnapshotStore:
         self.snapshots_by_id[snapshot_id] = record
         return snapshot_id
 
+    async def insert_payload_snapshot_if_missing_returning_id(self, executor, record) -> int:
+        return await self.insert_payload_snapshot_returning_id(executor, record)
+
     async def upsert_snapshot_head(self, executor, record) -> None:
         del executor, record
 
@@ -84,6 +87,11 @@ class _FakeSqlExecutor:
     async def executemany(self, query: str, rows: list[tuple[object, ...]]) -> str:
         self.executemany_calls.append((query, rows))
         return "OK"
+
+    async def fetch(self, query: str, *args: object):
+        column = str(query).split("SELECT", 1)[1].split("FROM", 1)[0].strip()
+        ids = list(args[0]) if args else []
+        return [{column: item} for item in ids]
 
 
 class HybridPipelineDurableSinkTests(unittest.IsolatedAsyncioTestCase):

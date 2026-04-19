@@ -23,6 +23,9 @@ class _FakeRawRepository:
         self.snapshots.append(record)
         return 501
 
+    async def insert_payload_snapshot_if_missing_returning_id(self, executor, record) -> int:
+        return await self.insert_payload_snapshot_returning_id(executor, record)
+
     async def upsert_snapshot_head(self, executor, record) -> None:
         del executor
         self.snapshot_heads.append(record)

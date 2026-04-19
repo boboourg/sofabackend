@@ -20,6 +20,17 @@ class _FakeExecutor:
         return "OK"
 
 
+class _FakeReturningExecutor(_FakeExecutor):
+    def __init__(self, return_value: int | None) -> None:
+        super().__init__()
+        self.return_value = return_value
+        self.fetchval_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchval(self, query: str, *args: object) -> int | None:
+        self.fetchval_calls.append((query, args))
+        return self.return_value
+
+
 class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_repository_writes_request_snapshot_and_head(self) -> None:
         repository = RawRepository()
@@ -95,6 +106,45 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(request_args[14], datetime)
         self.assertIsInstance(snapshot_args[10], datetime)
         self.assertIsInstance(head_args[6], datetime)
+
+    async def test_repository_inserts_payload_snapshot_idempotently_by_scope_and_hash(self) -> None:
+        repository = RawRepository()
+        executor = _FakeReturningExecutor(return_value=42)
+
+        snapshot_id = await repository.insert_payload_snapshot_if_missing_returning_id(
+            executor,
+            PayloadSnapshotRecord(
+                trace_id="trace-1",
+                job_id="job-1",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}",
+                source_url="https://www.sofascore.com/api/v1/event/1",
+                resolved_url="https://www.sofascore.com/api/v1/event/1",
+                envelope_key="event",
+                context_entity_type="event",
+                context_entity_id=1,
+                context_unique_tournament_id=17,
+                context_season_id=76986,
+                context_event_id=1,
+                http_status=200,
+                payload={"event": {"id": 1}},
+                payload_hash="hash-1",
+                payload_size_bytes=18,
+                content_type="application/json",
+                is_valid_json=True,
+                is_soft_error_payload=False,
+                fetched_at="2026-04-16T09:00:01+00:00",
+            ),
+        )
+
+        self.assertEqual(snapshot_id, 42)
+        self.assertEqual(len(executor.fetchval_calls), 1)
+        query, args = executor.fetchval_calls[0]
+        self.assertIn("WITH existing AS", query)
+        self.assertIn("payload_hash IS NOT DISTINCT FROM", query)
+        self.assertIn("api_payload_snapshot", query)
+        self.assertEqual(args[0], "event:1:/api/v1/event/{event_id}")
+        self.assertEqual(args[1], "hash-1")
 
 
 if __name__ == "__main__":
