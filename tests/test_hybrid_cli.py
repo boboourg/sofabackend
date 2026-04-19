@@ -849,31 +849,140 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_hybrid_app_run_event_passes_hydration_mode_to_pilot_orchestrator(self) -> None:
+    async def test_hybrid_app_run_event_uses_prefetch_commit_and_persist_phases(self) -> None:
         from schema_inspector.cli import HybridApp
         from schema_inspector.runtime import RuntimeConfig
 
         database = _FakeDatabase()
         app = HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
-        repository = _FakeRawRepository()
-        app.raw_repository = repository
-        app.transport = object()
-        app.capability_repository = object()
-        app.live_state_repository = object()
-        app.normalize_repository = object()
+        app._seeded_endpoint_registry_sports.add("football")
+        phase_calls = []
+        prefetched_run = object()
+        committed_run = object()
 
-        original_orchestrator = getattr(__import__("schema_inspector.cli", fromlist=["PilotOrchestrator"]), "PilotOrchestrator")
-        fake_orchestrator = _FakePilotOrchestrator()
-        try:
-            import schema_inspector.cli as hybrid_cli
+        async def _fake_prefetch(*, event_id: int, sport_slug: str, hydration_mode: str):
+            phase_calls.append(("prefetch", event_id, sport_slug, hydration_mode))
+            return prefetched_run
 
-            hybrid_cli.PilotOrchestrator = lambda **kwargs: fake_orchestrator
-            result = await app.run_event(event_id=11, sport_slug="football", hydration_mode="core")
-        finally:
-            hybrid_cli.PilotOrchestrator = original_orchestrator
+        async def _fake_commit(run):
+            phase_calls.append(("commit", run))
+            return committed_run
+
+        async def _fake_persist(run, *, hydration_mode: str):
+            phase_calls.append(("persist", run, hydration_mode))
+            return {"event_id": 11, "sport_slug": "football", "hydration_mode": hydration_mode}
+
+        with mock.patch.object(app, "_prefetch_event_run", side_effect=_fake_prefetch):
+            with mock.patch.object(app, "_commit_prefetched_run", side_effect=_fake_commit):
+                with mock.patch.object(app, "_persist_prefetched_run", side_effect=_fake_persist):
+                    with mock.patch.object(app, "_warn_if_prefetched_run_large") as warn_mock:
+                        result = await app.run_event(event_id=11, sport_slug="football", hydration_mode="core")
 
         self.assertEqual(result["hydration_mode"], "core")
-        self.assertEqual(fake_orchestrator.calls, [(11, "football", "core")])
+        self.assertEqual(
+            phase_calls,
+            [
+                ("prefetch", 11, "football", "core"),
+                ("commit", prefetched_run),
+                ("persist", committed_run, "core"),
+            ],
+        )
+        warn_mock.assert_called_once_with(prefetched_run)
+
+    async def test_hybrid_app_warns_when_prefetched_run_exceeds_limit(self) -> None:
+        from schema_inspector.cli import HybridApp, HybridSnapshotStore, PrefetchedRun
+        from schema_inspector.fetch_executor import PrefetchedFetchRecord
+        from schema_inspector.fetch_models import FetchOutcomeEnvelope, FetchTask
+        from schema_inspector.runtime import RuntimeConfig
+        from schema_inspector.storage.raw_repository import ApiRequestLogRecord, PayloadSnapshotRecord
+
+        database = _FakeDatabase()
+        app = HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+        snapshot_store = HybridSnapshotStore(app.raw_repository, None)
+        prefetched = PrefetchedRun(
+            event_id=99,
+            sport_slug="football",
+            fetch_records=(
+                PrefetchedFetchRecord(
+                    task=FetchTask(
+                        trace_id="trace-99",
+                        job_id="job-99",
+                        sport_slug="football",
+                        endpoint_pattern="/api/v1/event/{event_id}",
+                        source_url="https://www.sofascore.com/api/v1/event/99",
+                        timeout_profile="pilot",
+                        context_entity_type="event",
+                        context_entity_id=99,
+                        context_event_id=99,
+                        fetch_reason="hydrate_event_root",
+                    ),
+                    outcome=FetchOutcomeEnvelope(
+                        trace_id="trace-99",
+                        job_id="job-99",
+                        endpoint_pattern="/api/v1/event/{event_id}",
+                        source_url="https://www.sofascore.com/api/v1/event/99",
+                        resolved_url="https://www.sofascore.com/api/v1/event/99",
+                        http_status=200,
+                        classification="success_json",
+                        proxy_id="proxy",
+                        challenge_reason=None,
+                        snapshot_id=-1,
+                        payload_hash="hash-99",
+                        fetched_at="2026-04-19T12:00:00+00:00",
+                    ),
+                    request_log=ApiRequestLogRecord(
+                        trace_id="trace-99",
+                        job_id="job-99",
+                        job_type="hydrate_event_root",
+                        sport_slug="football",
+                        method="GET",
+                        source_url="https://www.sofascore.com/api/v1/event/99",
+                        endpoint_pattern="/api/v1/event/{event_id}",
+                        request_headers_redacted=None,
+                        query_params=None,
+                        proxy_id="proxy",
+                        transport_attempt=1,
+                        http_status=200,
+                        challenge_reason=None,
+                        started_at="2026-04-19T12:00:00+00:00",
+                        finished_at="2026-04-19T12:00:01+00:00",
+                        latency_ms=100,
+                    ),
+                    payload_snapshot=PayloadSnapshotRecord(
+                        trace_id="trace-99",
+                        job_id="job-99",
+                        sport_slug="football",
+                        endpoint_pattern="/api/v1/event/{event_id}",
+                        source_url="https://www.sofascore.com/api/v1/event/99",
+                        resolved_url="https://www.sofascore.com/api/v1/event/99",
+                        envelope_key="event",
+                        context_entity_type="event",
+                        context_entity_id=99,
+                        context_unique_tournament_id=None,
+                        context_season_id=None,
+                        context_event_id=99,
+                        http_status=200,
+                        payload={"event": {"id": 99}},
+                        payload_hash="hash-99",
+                        payload_size_bytes=2048,
+                        content_type="application/json",
+                        is_valid_json=True,
+                        is_soft_error_payload=False,
+                        fetched_at="2026-04-19T12:00:01+00:00",
+                    ),
+                    snapshot_head=None,
+                ),
+            ),
+            snapshot_store=snapshot_store,
+            initial_capability_rollup={},
+        )
+
+        with mock.patch.dict("os.environ", {"PREFETCHED_RUN_SIZE_LIMIT_BYTES": "1024"}, clear=False):
+            with self.assertLogs("schema_inspector.cli", level="WARNING") as captured:
+                app._warn_if_prefetched_run_large(prefetched)
+
+        self.assertIn("event_id=99", captured.output[0])
+        self.assertIn("endpoint_count=1", captured.output[0])
 
     async def test_run_event_command_limits_batch_concurrency(self) -> None:
         from schema_inspector.cli import run_event_command
