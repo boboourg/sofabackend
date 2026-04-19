@@ -1,681 +1,458 @@
 # Next Chat Context
 
 This file is the current handoff source of truth for the next chat.
-It supersedes the older `NEXT_CHAT_CONTEXT.md` content from `2026-04-12`.
+It supersedes the older `NEXT_CHAT_CONTEXT.md` from `2026-04-16`.
 
-## Environment
+## Date And Environment
 
 - Repo: `D:\sofascore`
-- OS: Windows
-- Shell: PowerShell
-- Python: `.\.venv311\Scripts\python.exe`
-- PostgreSQL: local, reachable at `localhost:5433`
-- DB / proxy credentials: already configured in local `.env`
-- Date of this handoff: `2026-04-16`
-- Remote: `origin -> https://github.com/boboourg/sofabackend.git`
+- Local OS: Windows
+- Local shell: PowerShell
+- Local Python: `D:\sofascore\.venv311\Scripts\python.exe`
+- Remote server repo: `/opt/sofascore`
+- Remote server shell: bash
+- Remote server Python: use `python3`, not `python`
+- Git remote: `origin -> https://github.com/boboourg/sofabackend.git`
+- Deployment flow in reality:
+  - local changes in `D:\sofascore`
+  - `git push origin main`
+  - server: `cd /opt/sofascore && git pull --ff-only origin main`
+
+Important operator truth:
+
+- this is **not** a fresh deploy
+- this is **not** a new branch workflow
+- do **not** suggest "first deployment" or "new branch then track on server" unless the user explicitly asks for it
+
+The user called this out already and was right.
 
 ## Why This Chat Happened
 
-The project has moved from "football ETL + local mirror" into two parallel tracks:
+This chat moved through three connected tracks:
 
-1. make the local API / Swagger multi-sport instead of football-only
-2. map Sofascore endpoint families sport-by-sport, especially for handball
+1. continuous-runtime stabilization under large queue backlog
+2. live-first recovery and controlled hydrate worker scaling
+3. frontend/API documentation for a mobile-first Sofascore-style MVP
 
-The immediate trigger was a user-supplied `__NEXT_DATA__` dump from `/handball` and the question:
+The key operational question became:
 
-- does `__NEXT_DATA__` actually reveal handball endpoint families?
-- do we need to inspect every page's `__NEXT_DATA__`?
+- can the backend survive and drain without new DB timeout meltdowns?
+- can it already serve something useful to a frontend?
 
-Current answer:
+## Current Big Picture
 
-- `__NEXT_DATA__` is useful for feature-family hints and route seeds
-- it is not a direct `api/v1` registry
-- we should inspect page classes, not random pages one by one
+The backend is no longer a small inspection tool.
+It is now a continuous multi-sport ETL runtime with:
 
-## Current Goal
+- Redis Streams
+- planners
+- discovery workers
+- hydrate workers
+- historical lanes
+- PostgreSQL normalize sink
+- a local multi-sport read API
+- ops monitoring endpoints
 
-Keep building an honest, proxy-first, async Sofascore ingestion and local mirror stack, but now with a clearer multi-sport endpoint model.
+The architecture source of truth is:
 
-Near-term objective:
+- `D:\sofascore\docs\current-runtime-architecture.md`
 
-1. keep the local API / Swagger aligned with real ingested payload families
-2. use probe scripts plus `__NEXT_DATA__` hints to classify sports into endpoint archetypes
-3. determine the correct handball family without inventing fake sport-specific routes
+Core topology:
 
-## Architecture Truth
+`planner/live-discovery/historical planners -> Redis Streams -> discovery/live/historical workers -> hydrate/live/historical workers -> parsers -> durable normalize sink -> PostgreSQL -> local API + ops endpoints`
 
-These points must stay true in the next chat:
+## What Changed In This Chat
 
-1. All outbound HTTP goes through the existing transport/client layer.
-2. Proxy-first mode is required.
-3. The ETL architecture is async and should stay async.
-4. Endpoint path templates should remain exact Sofascore-style paths.
-5. Transport uses `curl_cffi` impersonation, retry/backoff, and challenge detection.
-6. We should not claim custom TLS spoofing, CAPTCHA bypass, or anti-detect magic.
-7. Correct wording: proxy-only transport plus `curl_cffi` impersonation and challenge-aware retries.
+### 1. Operational readiness / runtime hardening docs
 
-## Current Code State
+These files were added or rewritten:
 
-Tracked modifications already present before this handoff commit:
+- `D:\sofascore\README.md`
+- `D:\sofascore\PROJECT_OVERVIEW.md`
+- `D:\sofascore\docs\current-runtime-architecture.md`
+- `D:\sofascore\docs\live-ready-runbook.md`
+- `D:\sofascore\docs\live-first-rollout.md`
+- `D:\sofascore\docs\24x7-exit-criteria.md`
+- `D:\sofascore\docs\2026-04-17-production-deployment-guide.md`
+- `D:\sofascore\docs\superpowers\plans\2026-04-18-live-24x7-readiness-plan.md`
 
-- `local_swagger/index.html`
-- `schema_inspector/current_year_pipeline_cli.py`
-- `schema_inspector/endpoints.py`
-- `schema_inspector/entities_backfill_job.py`
-- `schema_inspector/event_detail_backfill_job.py`
-- `schema_inspector/local_api_server.py`
-- `schema_inspector/local_swagger_builder.py`
+### 2. systemd service files for server runtime
 
-Untracked files already present before this handoff commit:
+Added under:
 
-- `local_swagger/multisport.openapi.json`
-- `probe_multisport_reports.py`
-- `probe_next_data_feature_families.py`
+- `D:\sofascore\ops\systemd\*.service`
 
-## What Changed In Code
+These cover API, planners, hydrate, historical hydrate, discovery, live hot/warm, maintenance, and historical archival lanes.
 
-### 1. Multi-sport endpoint registry
+### 3. Baseline readiness tooling
 
-`schema_inspector/endpoints.py` now has an explicit local multi-sport registry instead of assuming football everywhere.
+Added:
 
-Important additions:
+- `D:\sofascore\scripts\prod_readiness_check.py`
+- `D:\sofascore\tests\test_prod_readiness_check.py`
+- `D:\sofascore\tests\test_capacity_backpressure_policy.py`
 
-- `LOCAL_API_SUPPORTED_SPORTS = ("football", "basketball", "tennis")`
-- sport-aware local leaderboard assembly
-- `local_api_endpoints(...)` is now the main source for the local API / OpenAPI route inventory
+### 4. Frontend handoff docs
 
-### 2. Local API server is now multi-sport oriented
+Added:
 
-`schema_inspector/local_api_server.py` now describes itself as a multi-sport local mirror and builds routes from `local_api_endpoints()`.
+- `D:\sofascore\backend_to_front_mvp.md`
+- `D:\sofascore\ai_mobile_mvp_prompt.md`
 
-Meaning:
+These describe:
 
-- local server route registration is no longer football-branded
-- Swagger and API server share the same registry source
+- what the backend can already serve to a frontend
+- how to think about `sport -> category -> uniqueTournament -> season -> event`
+- how to design a mobile-first MVP around real backend capabilities
+- how to build image URLs from Sofascore image endpoints instead of expecting logos in the DB
 
-### 3. Local Swagger builder is now multi-sport
+## Full Test Status On Local Machine
 
-`schema_inspector/local_swagger_builder.py` now generates:
+At the time the runtime-hardening batch was completed locally:
 
-- title: `Sofascore Local Multi-Sport API`
-- output file: `local_swagger/multisport.openapi.json`
-- tag groups across categories / competition / event list / event detail / standings / statistics / entities / leaderboards
+- targeted suites passed
+- full `pytest -q` passed with:
+  - `340 passed, 17 subtests passed`
 
-### 4. Current-year pipeline now propagates tournament scope into deeper stages
+No fresh local full test rerun was performed after the final docs-only frontend handoff files.
 
-`schema_inspector/current_year_pipeline_cli.py` now passes the discovered / selected tournament ids into:
+## Important Truths The Next AI Must Not Get Wrong
 
-- `event_detail_backfill_job.run(... unique_tournament_ids=...)`
-- `entities_backfill_job.run(... unique_tournament_ids=...)`
+### 1. `prod_readiness_check.py` is **not** a full Slice 2 gate
 
-This matters because current-year runs are now bounded to the selected tournaments instead of accidentally widening again during event-detail and entities backfill.
+This is critical.
 
-### 5. Event-detail backfill now accepts tournament-id batches
+The script is only a **baseline live-ready check**.
+It verifies:
 
-`schema_inspector/event_detail_backfill_job.py` now supports:
+- required streams exist
+- `stream:etl:discovery` lag is `0`
+- `stream:etl:live_discovery` lag is `0`
+- no `TimeoutError` in hydrate/historical-hydrate logs
+- no recent `failed` jobs in latest runs
 
-- `unique_tournament_ids: Iterable[int] | None`
+It does **not** verify:
 
-and filters candidates with:
+- that `stream:etl:hydrate` is decreasing over time
+- that `stream:etl:live_hot` is decreasing over time
+- that adding another hydrate worker improved net throughput
 
-- `e.unique_tournament_id = ANY($3)`
+This misunderstanding already happened once in chat and irritated the user.
+Do not repeat it.
 
-### 6. Entities backfill now accepts tournament-id batches
+### 2. `READY` from the script does **not** mean "24/7-ready"
 
-`schema_inspector/entities_backfill_job.py` now supports:
+It only means:
 
-- `unique_tournament_ids: tuple[int, ...] | None`
+- the system is not in an obvious live-path failure state
 
-and threads that filter through:
+It does **not** mean:
 
-- player seed loading
-- team seed loading
-- player overall request loading
-- team overall request loading
+- backlog is small
+- freshness is guaranteed
+- unattended production is proven
 
-This keeps entity hydration aligned with the tournament slice chosen by discovery.
+### 3. The system is currently in `Slice 2`, not `Slice 3`
 
-## Current Code Excerpts
+Current operational interpretation:
 
-These are the live code touchpoints that matter most in the next chat.
+- `Slice 1` runaway growth was stopped
+- `Slice 2` is controlled drain / throughput tuning
+- `Slice 3` historical bulk re-enablement is still too early
 
-### `probe_multisport_reports.py`
+### 4. Historical bulk stays off
 
-The broad sport probe starts from a fixed discovery family:
+At this stage:
 
-```python
-initial_urls = [
-    f"https://www.sofascore.com/api/v1/sport/{sport}/categories/all",
-    f"https://www.sofascore.com/api/v1/sport/{sport}/{date}/{tz_offset}/categories",
-    f"https://www.sofascore.com/api/v1/sport/{sport}/scheduled-tournaments/{date}/page/1",
-    f"https://www.sofascore.com/api/v1/sport/{sport}/scheduled-events/{date}",
-    f"https://www.sofascore.com/api/v1/sport/{sport}/events/live",
-    f"https://www.sofascore.com/api/v1/sport/{sport}/trending-top-players",
-    f"https://www.sofascore.com/api/v1/config/default-unique-tournaments/{country_code}/{sport}",
-]
+- `historical-tournament`
+- `historical-enrichment@1`
+- `historical-enrichment@2`
+
+should remain off unless the user explicitly chooses a new experiment.
+
+### 5. The backend can already serve frontend data
+
+This is no longer theoretical.
+
+The local API already exposes:
+
+- Swagger at `/`
+- OpenAPI at `/openapi.json`
+- ops endpoints
+- `/api/...` Sofascore-style read routes for sport lists, leagues, standings, events, lineups, comments, odds, players, teams, etc.
+
+But:
+
+- data coverage depends on what was ingested
+- valid contract routes can still return "known route but no ingested payload yet"
+
+## Current Backend Capability For Frontend
+
+The backend is already capable of powering a mobile-first MVP.
+
+Safe product areas:
+
+- home feed with live and upcoming matches
+- sport hub
+- category/country screens
+- league/competition screens
+- standings/table screens
+- match center
+- basic team pages
+- basic player pages
+
+Key conceptual hierarchy:
+
+`sport -> category(country/region) -> uniqueTournament(league) -> season -> event(match)`
+
+Image/media rule:
+
+- logos and photos should be built from Sofascore image URLs, not expected from our DB
+
+Examples:
+
+- country flag:
+  - `https://img.sofascore.com/api/v1/country/ES/flag`
+- team:
+  - `https://img.sofascore.com/api/v1/team/2836/image`
+- unique tournament / league:
+  - `https://img.sofascore.com/api/v1/unique-tournament/218/image`
+- manager:
+  - `https://img.sofascore.com/api/v1/manager/53376/image`
+- player:
+  - `https://img.sofascore.com/api/v1/player/944656/image`
+
+Public frontend docs created in this chat:
+
+- `D:\sofascore\backend_to_front_mvp.md`
+- `D:\sofascore\ai_mobile_mvp_prompt.md`
+
+## Current Production / Server State
+
+### Summary
+
+The server was in heavy backlog recovery.
+The recovery plan shifted to **live-first** instead of "wait for every historical queue to clear".
+
+Sequence:
+
+1. `hydrate3` was started as a controlled throughput increase
+2. multiple 20-minute queue deltas showed real negative lag without new timeouts
+3. after repeated stable intervals, `hydrate4` was started as an attended experiment
+4. latest observed state before this handoff: `hydrate4` was left running for ~12 hours to observe overnight behavior
+
+### What was already proven before `hydrate4`
+
+With `hydrate3`, real interval deltas included:
+
+- `stream:etl:hydrate: delta=-3040` over 20 minutes
+- `stream:etl:live_hot: delta=-247`
+- `stream:etl:historical_hydrate: delta=-1246`
+
+Later interval:
+
+- `stream:etl:hydrate: delta=-1019`
+- `stream:etl:live_hot: delta=-134`
+- `stream:etl:historical_hydrate: delta=-684`
+
+Interpretation:
+
+- controlled drain was real
+- system was stable
+- no new `TimeoutError`
+- but throughput was slow and still under strong backpressure
+
+### What was already proven after `hydrate4` start
+
+Observed samples after starting `hydrate4`:
+
+- `Sun Apr 19 02:12:37 EEST 2026`
+  - `stream:etl:hydrate: lag=770955`
+  - `stream:etl:live_hot: lag=901441`
+  - `stream:etl:historical_hydrate: lag=349617`
+- `Sun Apr 19 02:20:13 EEST 2026`
+  - `stream:etl:hydrate: lag=770247`
+  - `stream:etl:live_hot: lag=901325`
+  - `stream:etl:historical_hydrate: lag=349379`
+- `Sun Apr 19 02:22:33 EEST 2026`
+  - `stream:etl:hydrate: lag=770030`
+  - `stream:etl:live_hot: lag=901318`
+  - `stream:etl:historical_hydrate: lag=349310`
+  - `failed=11`
+  - `retry_scheduled=13583`
+  - fresh `jobRuns` included `worker_id=hydrate-4` with `status=succeeded`
+  - no new `TimeoutError`
+
+Interpretation at that point:
+
+- `hydrate4` did **not** immediately break the system
+- queue movement stayed downward
+- planner remained in backpressure pause mode
+- historical discovery still deferred
+- the system was not "stuck"; it was in a slow controlled drain / throughput ceiling state
+
+### Most recent operator action
+
+The user explicitly said:
+
+- they left `hydrate4` running for 12 hours
+
+That means the very next AI should begin by checking:
+
+- whether `hydrate4` stayed healthy overnight
+- whether lag continued to decrease
+- whether `TimeoutError` returned
+- whether `failed` remained flat
+
+## Current Operational Interpretation
+
+The system is currently best described as:
+
+- stable enough for continued live-first drain
+- not yet safe to call unattended 24/7-ready
+- not yet ready for `Slice 3`
+- capable of feeding a frontend, but with partial-data awareness
+
+## Server Commands That Matter
+
+### 1. Baseline live check
+
+```bash
+cd /opt/sofascore
+python3 scripts/prod_readiness_check.py --base-url http://127.0.0.1:8000 || true
 ```
 
-It then expands into category / tournament / season / event / entity families and writes markdown + JSON summaries.
+Remember:
 
-### `probe_next_data_feature_families.py`
+- this is baseline-only
+- do not treat it as proof of throughput health
 
-The targeted probe uses `__NEXT_DATA__` only as a hint source, then verifies URLs empirically:
+### 2. Queue summary
 
-```python
-target_sports = args.sport or ["ice-hockey", "baseball", "cricket", "mma"]
+```bash
+python3 - <<'PY'
+import json, urllib.request
+data = json.load(urllib.request.urlopen("http://127.0.0.1:8000/ops/queues/summary"))
+for item in data["streams"]:
+    if item["stream"] in {
+        "stream:etl:hydrate",
+        "stream:etl:live_hot",
+        "stream:etl:historical_discovery",
+        "stream:etl:historical_hydrate",
+    }:
+        print(f'{item["stream"]}: lag={item["lag"]} entries_read={item["entries_read"]} length={item["length"]}')
+print("delayed_total=", data["delayed_total"], "delayed_due=", data["delayed_due"])
+print("live_lanes=", data["live_lanes"])
+PY
 ```
 
-and probes the generic event family first:
+### 3. Planner log
 
-```python
-generic = [
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/meta",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/statistics",
-    f"https://api.sofascore.com/api/v1/event/{context.event_id}/statistics",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/lineups",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/incidents",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/best-players",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/h2h",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/pregame-form",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/graph",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/graph/win-probability",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/votes",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/comments",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/official-tweets",
-    f"https://www.sofascore.com/api/v1/event/{context.event_id}/highlights",
-]
+```bash
+tail -n 20 /opt/sofascore/logs/planner.log
 ```
 
-### `schema_inspector/current_year_pipeline_cli.py`
+### 4. Timeout checks
 
-The important current fix is that tournament scope is now preserved:
-
-```python
-event_detail_result = await event_detail_backfill_job.run(
-    limit=args.event_detail_limit,
-    only_missing=not args.all_event_detail,
-    unique_tournament_ids=selected_unique_tournament_ids or None,
-    start_timestamp_from=start_timestamp_from,
-    start_timestamp_to=start_timestamp_to,
-    provider_ids=provider_ids,
-    concurrency=max(args.event_detail_concurrency, 1),
-    timeout=args.timeout,
-)
-
-entities_result = await entities_backfill_job.run(
-    player_limit=args.entity_player_limit,
-    team_limit=args.entity_team_limit,
-    player_request_limit=args.entity_player_request_limit,
-    team_request_limit=args.entity_team_request_limit,
-    only_missing=not args.all_entities,
-    unique_tournament_ids=selected_unique_tournament_ids or None,
-    event_timestamp_from=start_timestamp_from,
-    event_timestamp_to=start_timestamp_to,
-    timeout=args.timeout,
-)
+```bash
+grep -E "TimeoutError" /opt/sofascore/logs/hydrate-1.log | tail -n 5
+grep -E "TimeoutError" /opt/sofascore/logs/hydrate-2.log | tail -n 5
+grep -E "TimeoutError" /opt/sofascore/logs/hydrate-3.log | tail -n 5
+grep -E "TimeoutError" /opt/sofascore/logs/hydrate-4.log | tail -n 5
+grep -E "TimeoutError" /opt/sofascore/logs/historical-hydrate-1.log | tail -n 5
+grep -E "TimeoutError" /opt/sofascore/logs/historical-hydrate-2.log | tail -n 5
 ```
 
-### `schema_inspector/event_detail_backfill_job.py`
+### 5. Job run status
 
-Key candidate filter:
-
-```sql
-AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
+```bash
+curl -s "http://127.0.0.1:8000/ops/jobs/runs?limit=20"
 ```
 
-### `schema_inspector/entities_backfill_job.py`
+## Decision Rules For The Next AI
 
-Key seed filter pattern:
+### If overnight `hydrate4` looks healthy
 
-```sql
-AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
+Healthy means all of these are true:
+
+- no new `TimeoutError`
+- `failed` remains flat
+- `hydrate` lag is down vs previous known values
+- `live_hot` lag is down or at least not meaningfully worse
+- `hydrate-4` appears in fresh `jobRuns` as `succeeded`
+
+Then:
+
+- keep `hydrate4`
+- keep historical bulk off
+- keep calling this `Slice 2`
+- do **not** promote to `Slice 3` yet
+
+### If overnight `hydrate4` looks unhealthy
+
+Unhealthy means any of:
+
+- new `TimeoutError`
+- `failed` starts increasing
+- `hydrate` or `live_hot` clearly trend upward
+- `hydrate-4` disappears or only fails/retries
+
+Then:
+
+- kill `hydrate4`
+- return to the known safer `hydrate3` profile
+- continue live-first drain
+
+Rollback command:
+
+```bash
+tmux kill-session -t hydrate4
 ```
 
-This now appears in the event-based entity seed loaders and is the main reason the current-year slice behaves correctly.
-
-## Current Theory: Sofascore Is An ID Graph
-
-Working model:
-
-1. sport discovery
-   - `sport/{sport}/categories/all`
-   - `sport/{sport}/{date}/{tz}/categories`
-   - `sport/{sport}/scheduled-tournaments/{date}/page/{page}`
-   - `sport/{sport}/scheduled-events/{date}`
-   - `sport/{sport}/events/live`
-
-2. category -> unique tournament -> season
-   - `category/{categoryId}/unique-tournaments`
-   - `unique-tournament/{id}`
-   - `unique-tournament/{id}/seasons`
-   - `unique-tournament/{id}/season/{seasonId}/info`
-
-3. event list
-   - `unique-tournament/{id}/scheduled-events/{date}`
-   - `unique-tournament/{id}/season/{seasonId}/events/round/{round}`
-   - `sport/{sport}/scheduled-events/{date}`
-
-4. event detail
-   - `event/{id}`
-   - `meta`
-   - `statistics`
-   - `lineups`
-   - `incidents`
-   - `h2h`
-   - `pregame-form`
-   - `votes`
-   - optional families like `graph`, `comments`, `official-tweets`, `highlights`
-
-5. entities / profiles
-   - `team/{teamId}`
-   - `player/{playerId}`
-   - `manager/{managerId}`
-   - player/team season statistics and history
-
-## Core Theory About `__NEXT_DATA__`
-
-`__NEXT_DATA__` is useful, but only in a bounded way.
-
-### What it is good for
-
-- route seeds like `/handball`, `/handball/tournament/...`, `/handball/match/...#id:{eventId}`
-- tab and feature labels
-- sport-specific stat names
-- hints that some UI block probably maps to `statistics`, `lineups`, `incidents`, `shotmap`, or another family
-
-### What it is not good for
-
-- it is not a direct endpoint registry
-- it does not guarantee a dedicated `api/v1/...` route exists for every UI label
-
-### Important rule
-
-UI feature names do not always map to dedicated endpoints.
-
-Already proven examples:
-
-- hockey `play-by-play` is really `event/{id}/incidents`
-- hockey `event map` / shot heatmap is really `shotmap`
-- baseball `batting order` and `starting pitchers` live inside `lineups`
-
-### Correct inspection order
-
-Do not inspect every random page.
-
-Inspect page classes:
-
-1. sport landing page
-2. tournament page
-3. event page
-4. player page
-5. team page
-
-## Probe Scripts And Outputs
-
-### Broad probe
-
-- Script: `probe_multisport_reports.py`
-- Output folder: `reports/multisport_probe_2026_04_15`
-
-Purpose:
-
-- discover sport slugs from `sport/10800/event-count`
-- probe discovery / competition / event / entity families
-- write schema reports via `inspect_api.py`
-
-### Targeted `__NEXT_DATA__` probe
-
-- Script: `probe_next_data_feature_families.py`
-- Output folder: `reports/next_data_feature_probe_2026_04_15`
-
-Purpose:
-
-- start from UI feature hints
-- probe generic event family first
-- only then probe sport-specific guesses
-- use 200/404 outcomes to kill fake theories early
-
-## Empirical Findings Already Proved
-
-Primary source summary:
-
-- `reports/next_data_feature_probe_2026_04_15/probe_summary.md`
-
-### ice-hockey
-
-Confirmed `200`:
-
-- `meta`
-- `statistics`
-- `lineups`
-- `incidents`
-- `best-players`
-- `h2h`
-- `pregame-form`
-- `votes`
-- `comments`
-- `official-tweets`
-- `highlights`
-- `api.sofascore.com/.../shotmap`
-- `shotmap/{teamId}`
-
-Failed `404`:
-
-- `play-by-play`
-- `event-map`
-- `penalties`
-- `player/{playerId}/shotmap`
-
-Conclusion:
-
-- hockey play-by-play / penalties are represented by `incidents`
-- hockey event-map / shot heatmap is represented by `shotmap`
-
-Supporting evidence:
-
-- `reports/next_data_feature_probe_2026_04_15/www_sofascore_com_api_v1_event_14201603_incidents.md`
-- `reports/next_data_feature_probe_2026_04_15/api_sofascore_com_api_v1_event_14201603_shotmap.md`
-
-### baseball
-
-Confirmed `200`:
-
-- `meta`
-- `statistics`
-- `lineups`
-- `h2h`
-- `pregame-form`
-- `votes`
-- `comments`
-- `official-tweets`
-- `highlights`
-
-Failed `404`:
-
-- `incidents`
-- `best-players`
-- `graph`
-- `plays`
-- `all-plays`
-- `batting-order`
-- `starting-pitchers`
-- `shotmap/{teamId}`
-
-Conclusion:
-
-- baseball lineup payload already carries batting-order / pitcher context
-- do not invent dedicated `batting-order` / `starting-pitchers` endpoints just because the UI has those words
-
-Supporting evidence:
-
-- `reports/next_data_feature_probe_2026_04_15/www_sofascore_com_api_v1_event_15507996_lineups.md`
-
-### cricket
-
-Confirmed `200`:
-
-- `meta`
-- `lineups`
-- `incidents`
-- `h2h`
-- `pregame-form`
-- `votes`
-- `highlights`
-
-Failed `404` in current probe:
-
-- `statistics`
-- `best-players`
-- `graph`
-- `comments`
-- `official-tweets`
-- `runs-per-over`
-- `runs-per-over/graph`
-- `overs`
-
-Conclusion:
-
-- cricket looks thinner than football-style event families
-- innings / scorecard progression probably exists elsewhere or is embedded differently
-
-### mma
-
-Confirmed `200`:
-
-- `meta`
-- `statistics`
-- `h2h`
-- `votes`
-
-Failed `404` in current probe:
-
-- `lineups`
-- `incidents`
-- `best-players`
-- `pregame-form`
-- `comments`
-- `official-tweets`
-- `highlights`
-
-Conclusion:
-
-- MMA is a thin event surface compared with team sports
-
-## Sport Archetype Theory
-
-Current matrix:
-
-- rich team-sport generic:
-  - football
-  - basketball
-
-- rich map / incident team sport:
-  - ice-hockey
-  - baseball
-
-- mixed team sport:
-  - handball
-  - volleyball
-  - futsal
-  - minifootball
-  - floorball
-  - waterpolo
-
-- racket / bracket sport:
-  - tennis
-  - badminton
-  - table-tennis
-  - snooker
-  - darts
-
-- thin / unusual:
-  - cricket
-  - esports
-  - mma
-
-This archetype model is documented in:
-
-- `reports/SPORT_ENDPOINT_PATTERN_MATRIX_2026_04_15.md`
-
-## Handball: Current Best Theory
-
-The current working assumption is:
-
-- handball is closer to a football-like generic team-sport family
-- the valuable specialization is likely inside `statistics`
-- there is no evidence yet that handball needs a tennis-like special endpoint family
-
-### Handball hints extracted from `/handball` `__NEXT_DATA__`
-
-Roster / roles:
-
-- `goalkeeper`
-- `back`
-- `winger`
-- `pivot`
-- `centre_back`
-
-Stat-family hints:
-
-- `sevenMetersScored`
-- `7mSaves`
-- `6mSaves`
-- `9mSaves`
-- `goalkeeperEfficiency`
-- `breakthroughGoals`
-- `breakthroughSaves`
-- `fastbreakGoals`
-- `fastbreakSaves`
-- `twoMinutePenalties`
-- `2minPenalty`
-- `technicalFaults`
-
-### Handball discovery family to test first
-
-```text
-/api/v1/sport/handball/categories/all
-/api/v1/sport/handball/{date}/{tz}/categories
-/api/v1/sport/handball/scheduled-tournaments/{date}/page/1
-/api/v1/sport/handball/scheduled-events/{date}
-/api/v1/sport/handball/events/live
-/api/v1/config/default-unique-tournaments/UA/handball
-```
-
-### Handball competition / season family to test next
-
-```text
-/api/v1/category/{categoryId}/unique-tournaments
-/api/v1/unique-tournament/{id}
-/api/v1/unique-tournament/{id}/seasons
-/api/v1/unique-tournament/{id}/season/{seasonId}/info
-/api/v1/unique-tournament/{id}/featured-events
-/api/v1/unique-tournament/{id}/scheduled-events/{date}
-/api/v1/unique-tournament/{id}/season/{seasonId}/standings/total
-/api/v1/unique-tournament/{id}/season/{seasonId}/statistics/info
-/api/v1/unique-tournament/{id}/season/{seasonId}/statistics?... 
-```
-
-### Handball event family to test next
-
-Core:
-
-```text
-/api/v1/event/{eventId}
-/api/v1/event/{eventId}/meta
-/api/v1/event/{eventId}/statistics
-/api/v1/event/{eventId}/lineups
-/api/v1/event/{eventId}/incidents
-/api/v1/event/{eventId}/best-players
-/api/v1/event/{eventId}/h2h
-/api/v1/event/{eventId}/pregame-form
-/api/v1/event/{eventId}/votes
-```
-
-Optional:
-
-```text
-/api/v1/event/{eventId}/graph
-/api/v1/event/{eventId}/graph/win-probability
-/api/v1/event/{eventId}/comments
-/api/v1/event/{eventId}/official-tweets
-/api/v1/event/{eventId}/highlights
-/api/v1/event/{eventId}/sport-video-highlights/country/UA/extended
-/api/v1/event/{eventId}/live-action-widget
-```
-
-### Handball entity family to test after that
-
-```text
-/api/v1/team/{teamId}
-/api/v1/team/{teamId}/team-statistics/seasons
-/api/v1/team/{teamId}/player-statistics/seasons
-/api/v1/team/{teamId}/events/last/0
-/api/v1/player/{playerId}
-/api/v1/player/{playerId}/statistics
-/api/v1/player/{playerId}/statistics/seasons
-/api/v1/player/{playerId}/events/last/0
-/api/v1/manager/{managerId}
-/api/v1/manager/{managerId}/career-history
-```
-
-## What To Ask For In The Next Chat
-
-If someone pastes handball responses, ask for:
-
-1. a list of URLs with `200`
-2. a list of URLs with `404`
-3. raw or summarized JSON from:
-   - `event/{eventId}/statistics`
-   - `unique-tournament/{id}/season/{seasonId}/statistics/info`
-   - `player/{playerId}/statistics`
-
-That is enough to decide whether handball is:
-
-- pure generic team-sport
-- generic team-sport with custom stat vocabulary
-- or hiding an extra dedicated family
+## What The Next AI Should Do First
+
+When the next chat starts, the first useful sequence is:
+
+1. read this file
+2. confirm current server state with the commands above
+3. compare new lag values against the latest known `hydrate4` values from this file
+4. decide:
+   - keep `hydrate4`
+   - or kill `hydrate4`
+5. do **not** jump to `Slice 3`
+6. do **not** confuse baseline `READY` with full readiness
+
+## What The Next AI Should Avoid
+
+Do not:
+
+- treat `prod_readiness_check.py` as a throughput oracle
+- suggest a fresh deploy flow
+- suggest branch-based server deployment unless the user asks
+- claim the backend is already "24/7 without problems"
+- enable historical tournament/enrichment lanes just because the system is alive
+- forget that the user is specifically sensitive to loss of context and repeated explanations
 
 ## Files To Open First In The Next Chat
 
-1. `NEXT_CHAT_CONTEXT.md`
-2. `reports/SPORT_ENDPOINT_PATTERN_MATRIX_2026_04_15.md`
-3. `reports/next_data_feature_probe_2026_04_15/probe_summary.md`
-4. `probe_multisport_reports.py`
-5. `probe_next_data_feature_families.py`
-6. `schema_inspector/endpoints.py`
-7. `schema_inspector/local_api_server.py`
-8. `schema_inspector/local_swagger_builder.py`
-9. `schema_inspector/current_year_pipeline_cli.py`
-10. `schema_inspector/event_detail_backfill_job.py`
-11. `schema_inspector/entities_backfill_job.py`
-
-## Useful Commands From Laptop
-
-Pull latest code:
-
-```powershell
-git -C D:\sofascore pull --ff-only origin main
-```
-
-Generate local multi-sport Swagger:
-
-```powershell
-.\.venv311\Scripts\python.exe -m schema_inspector.local_swagger_builder
-```
-
-Serve local multi-sport API:
-
-```powershell
-.\.venv311\Scripts\python.exe serve_local_api.py --host 127.0.0.1 --port 8000
-```
-
-Run broad multisport probe:
-
-```powershell
-.\.venv311\Scripts\python.exe probe_multisport_reports.py --limit-sports 6
-```
-
-Run targeted handball feature probe after adapting the script or adding `--sport handball`:
-
-```powershell
-.\.venv311\Scripts\python.exe probe_next_data_feature_families.py --sport handball
-```
-
-Run current-year bounded ingestion:
-
-```powershell
-.\.venv311\Scripts\python.exe -m schema_inspector.current_year_pipeline_cli --sport-slug football --timezone-name Europe/Kiev --log-level INFO
-```
+1. `D:\sofascore\NEXT_CHAT_CONTEXT.md`
+2. `D:\sofascore\docs\current-runtime-architecture.md`
+3. `D:\sofascore\docs\live-ready-runbook.md`
+4. `D:\sofascore\docs\2026-04-17-production-deployment-guide.md`
+5. `D:\sofascore\scripts\prod_readiness_check.py`
+6. `D:\sofascore\tests\test_capacity_backpressure_policy.py`
+7. `D:\sofascore\schema_inspector\local_api_server.py`
+8. `D:\sofascore\schema_inspector\endpoints.py`
+9. `D:\sofascore\backend_to_front_mvp.md`
+10. `D:\sofascore\ai_mobile_mvp_prompt.md`
 
 ## Final Reminder
 
-Do not treat UI wording as proof of a dedicated endpoint.
+The current product truth is:
 
-The fastest correct workflow is:
+- backend is already capable of serving useful frontend data
+- the runtime is alive and draining under backpressure
+- `hydrate4` was promising but still needs overnight validation
+- the system is in controlled recovery, not final production readiness
 
-1. probe discovery family
-2. probe generic event family
-3. inspect `statistics`, `lineups`, `incidents`
-4. only then guess sport-specific routes
-
-That rule already prevented false theories for hockey and baseball, and it should be applied to handball next.
+The next AI should act like an operator with context, not like a fresh consultant walking in cold.
