@@ -643,4 +643,26 @@ class ServiceApp:
 
     async def _handle_maintenance(self, entry: StreamEntry) -> str:
         job = decode_stream_payload(entry.values, fallback_job_id=entry.message_id)
-        if job.job_type ==
+        if job.job_type == JOB_REPLAY_FAILED_JOB:
+            self.delayed_envelope_store.save_payload(
+                dict(entry.values),
+                fallback_job_id=entry.message_id,
+            )
+            self.delayed_scheduler.schedule(
+                job.job_id,
+                run_at_epoch_ms=int(job.params.get("run_at_epoch_ms") or 0),
+            )
+            return "scheduled"
+        logger.warning("_handle_maintenance: unrecognised job_type=%r, skipping", job.job_type)
+        return "skipped"
+
+    @staticmethod
+    def _date_factory(now_ms: int) -> str:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date().isoformat()
+
+    async def _recover_live_state(self) -> None:
+        recover = getattr(self.app, "recover_live_state", None)
+        if callable(recover):
+            await recover()
