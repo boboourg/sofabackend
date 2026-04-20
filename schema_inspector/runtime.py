@@ -97,7 +97,7 @@ def load_runtime_config(
     Used to route historical workers to Proxyline without touching live proxies.
     """
 
-    env = env or _load_project_env()
+    env = _load_project_env() if env is None else env
     configured_proxy_urls = list(proxy_urls or _read_proxy_urls(env, proxy_env_key=proxy_env_key))
     endpoints = tuple(
         ProxyEndpoint(name=f"proxy_{index + 1}", url=url.strip())
@@ -183,7 +183,7 @@ def load_structure_runtime_config(
     rather than silently fall back to direct egress or to the residential pool.
     """
 
-    resolved_env = env or _load_project_env()
+    resolved_env = _load_project_env() if env is None else env
     config = load_runtime_config(
         env=resolved_env,
         proxy_env_key=STRUCTURE_PROXY_ENV_KEY,
