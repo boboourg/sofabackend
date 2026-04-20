@@ -82,6 +82,33 @@ class LiveStateRepository:
             record.final_snapshot_id,
         )
 
+    async def insert_terminal_state_if_missing(
+        self,
+        executor: SqlExecutor,
+        record: EventTerminalStateRecord,
+    ) -> None:
+        """Record a terminal state only if the event has no prior terminal row.
+
+        Used by the live-zombie sweeper to tag stuck matches without
+        overwriting a genuine finalization that may have raced with the sweep.
+        """
+        await executor.execute(
+            """
+            INSERT INTO event_terminal_state (
+                event_id,
+                terminal_status,
+                finalized_at,
+                final_snapshot_id
+            )
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (event_id) DO NOTHING
+            """,
+            record.event_id,
+            record.terminal_status,
+            coerce_timestamptz(record.finalized_at),
+            record.final_snapshot_id,
+        )
+
     async def fetch_latest_live_state_history(
         self,
         executor: SqlFetchExecutor,

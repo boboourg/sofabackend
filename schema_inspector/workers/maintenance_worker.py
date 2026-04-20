@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from ..queue.streams import (
     GROUP_DISCOVERY,
@@ -67,6 +68,7 @@ class MaintenanceWorker:
         reclaim_consumer: str | None = None,
         now_ms_factory=None,
         job_audit_logger=None,
+        housekeeping_loop: Any | None = None,
     ) -> None:
         self.handler = handler
         self.queue = queue
@@ -79,6 +81,7 @@ class MaintenanceWorker:
         self.max_delivery_count = int(max_delivery_count)
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.reclaim_consumer = reclaim_consumer or consumer
+        self.housekeeping_loop = housekeeping_loop
         self.runtime = WorkerRuntime(
             name="maintenance-worker",
             queue=queue,
@@ -113,14 +116,17 @@ class MaintenanceWorker:
         return "requeued"
 
     async def run_forever(self, *, install_signal_handlers: bool = True) -> None:
-        background = None
+        background_tasks: list[asyncio.Task[object]] = []
         try:
-            background = asyncio.create_task(self.run_reclaim_loop())
+            background_tasks.append(asyncio.create_task(self.run_reclaim_loop()))
+            if self.housekeeping_loop is not None:
+                background_tasks.append(asyncio.create_task(self.housekeeping_loop.run_forever()))
             await self.runtime.run_forever(install_signal_handlers=install_signal_handlers)
         finally:
             self.request_shutdown()
-            if background is not None:
+            for background in background_tasks:
                 background.cancel()
+            for background in background_tasks:
                 try:
                     await background
                 except asyncio.CancelledError:
@@ -128,6 +134,9 @@ class MaintenanceWorker:
 
     def request_shutdown(self) -> None:
         self.runtime.request_shutdown()
+        request_shutdown = getattr(self.housekeeping_loop, "request_shutdown", None)
+        if callable(request_shutdown):
+            request_shutdown()
 
     async def run_reclaim_loop(self) -> None:
         while not self.runtime.shutdown_requested:

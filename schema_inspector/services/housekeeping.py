@@ -1,0 +1,449 @@
+"""Housekeeping loop: retention sweeps + live-match zombie cleanup.
+
+This module adds a second background loop alongside the existing reclaim
+loop in MaintenanceWorker. Every ``interval_s`` seconds it runs a small,
+well-defined set of janitor tasks in sequence:
+
+  1. Retention on ``api_request_log`` (batched DELETE older than N hours).
+  2. Retention on ``api_payload_snapshot`` (batched DELETE of legacy rows
+     with NULL scope_key, older than N days, not referenced by
+     ``api_snapshot_head``).
+  3. Retention on ``event_live_state_history`` (batched DELETE older than
+     N days).
+  4. Live-zombie sweep: matches still in ``zset:live:hot`` / ``zset:live:warm``
+     whose ``last_ingested_at`` is older than N minutes are removed from
+     all lanes, their ``live:event:{id}`` hash is deleted, and
+     ``event_terminal_state`` is stamped with ``terminal_status='zombie_stale'``
+     via a DO-NOTHING insert (so a real finalization, if any, wins).
+
+Every numeric knob is driven by environment variables so deployments can
+tune retention windows without code changes.
+
+Dry-run mode (``SOFASCORE_HOUSEKEEPING_DRY_RUN=true``) runs the count-only
+queries for the retention tasks and logs the counts without touching data.
+The sweeper, in dry-run, logs candidate event ids without performing any
+Redis or DB writes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable
+
+from ..queue.live_state import (
+    LIVE_COLD_ZSET,
+    LIVE_HOT_ZSET,
+    LIVE_WARM_ZSET,
+    LiveEventStateStore,
+)
+from ..storage.live_state_repository import (
+    EventTerminalStateRecord,
+    LiveStateRepository,
+)
+from ..storage.retention_repository import RetentionRepository
+
+logger = logging.getLogger(__name__)
+
+ZOMBIE_TERMINAL_STATUS = "zombie_stale"
+
+_ENV_PREFIX = "SOFASCORE_"
+
+_ENV_ENABLED = _ENV_PREFIX + "HOUSEKEEPING_ENABLED"
+_ENV_DRY_RUN = _ENV_PREFIX + "HOUSEKEEPING_DRY_RUN"
+_ENV_INTERVAL_S = _ENV_PREFIX + "HOUSEKEEPING_INTERVAL_S"
+_ENV_BATCH_SIZE = _ENV_PREFIX + "RETENTION_DELETE_BATCH_SIZE"
+_ENV_MAX_BATCHES = _ENV_PREFIX + "RETENTION_MAX_BATCHES_PER_TICK"
+_ENV_BATCH_SLEEP_MS = _ENV_PREFIX + "RETENTION_BATCH_SLEEP_MS"
+_ENV_REQUEST_LOG_HOURS = _ENV_PREFIX + "RETENTION_REQUEST_LOG_HOURS"
+_ENV_SNAPSHOT_DAYS = _ENV_PREFIX + "RETENTION_PAYLOAD_SNAPSHOT_DAYS"
+_ENV_LIVE_HISTORY_DAYS = _ENV_PREFIX + "RETENTION_LIVE_HISTORY_DAYS"
+_ENV_ZOMBIE_MAX_AGE_MIN = _ENV_PREFIX + "SWEEPER_ZOMBIE_MAX_AGE_MINUTES"
+
+
+@dataclass(frozen=True)
+class HousekeepingConfig:
+    """All tunables for the housekeeping loop.
+
+    Defaults are safe for production: retention windows follow the plan
+    agreed in Fix #3, batches are small (5k), sleeps between batches give
+    Postgres room to breathe, and the loop ticks every 5 minutes.
+    """
+
+    enabled: bool = False
+    dry_run: bool = False
+    interval_s: float = 300.0
+    batch_size: int = 5_000
+    max_batches_per_tick: int = 20
+    batch_sleep_ms: int = 100
+    request_log_retention_hours: int = 48
+    payload_snapshot_retention_days: int = 7
+    live_state_history_retention_days: int = 30
+    zombie_max_age_minutes: int = 120
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> "HousekeepingConfig":
+        env = env if env is not None else dict(os.environ)
+        return cls(
+            enabled=_env_bool(env, _ENV_ENABLED, False),
+            dry_run=_env_bool(env, _ENV_DRY_RUN, False),
+            interval_s=_env_float(env, _ENV_INTERVAL_S, 300.0),
+            batch_size=_env_int(env, _ENV_BATCH_SIZE, 5_000, minimum=1),
+            max_batches_per_tick=_env_int(env, _ENV_MAX_BATCHES, 20, minimum=1),
+            batch_sleep_ms=_env_int(env, _ENV_BATCH_SLEEP_MS, 100, minimum=0),
+            request_log_retention_hours=_env_int(env, _ENV_REQUEST_LOG_HOURS, 48, minimum=1),
+            payload_snapshot_retention_days=_env_int(env, _ENV_SNAPSHOT_DAYS, 7, minimum=1),
+            live_state_history_retention_days=_env_int(env, _ENV_LIVE_HISTORY_DAYS, 30, minimum=1),
+            zombie_max_age_minutes=_env_int(env, _ENV_ZOMBIE_MAX_AGE_MIN, 120, minimum=1),
+        )
+
+
+@dataclass
+class HousekeepingTickReport:
+    """Per-tick summary; logged after every loop iteration."""
+
+    request_log_deleted: int = 0
+    payload_snapshot_deleted: int = 0
+    live_state_history_deleted: int = 0
+    zombies_found: int = 0
+    zombies_cleared: int = 0
+    dry_run: bool = False
+    # Populated only in dry-run mode — counts of rows that would be deleted.
+    would_delete: dict[str, int] = field(default_factory=dict)
+    duration_ms: int = 0
+
+
+@dataclass(frozen=True)
+class ZombieCandidate:
+    event_id: int
+    lane: str
+    last_ingested_at: int | None
+
+
+ExecutorFactory = Callable[[], "AsyncExecutorContext"]
+
+
+class AsyncExecutorContext:
+    """Thin shim matching the `async with database.connection()` pattern.
+
+    The housekeeping loop accepts any callable that yields an object with
+    asyncpg-compatible ``execute`` / ``fetchval`` methods. The production
+    wiring passes ``AsyncpgDatabase.connection`` directly.
+    """
+
+    async def __aenter__(self) -> Any:  # pragma: no cover - interface only
+        raise NotImplementedError
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+
+class HousekeepingLoop:
+    """Runs retention + sweeper tasks on a fixed interval until shutdown."""
+
+    def __init__(
+        self,
+        *,
+        config: HousekeepingConfig,
+        connection_factory: Callable[[], Any],
+        retention_repository: RetentionRepository | None = None,
+        live_state_store: LiveEventStateStore | None = None,
+        live_state_repository: LiveStateRepository | None = None,
+        redis_backend: Any | None = None,
+        now_ms_factory: Callable[[], int] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.config = config
+        self._connection_factory = connection_factory
+        self.retention_repository = retention_repository or RetentionRepository()
+        self.live_state_store = live_state_store
+        self.live_state_repository = live_state_repository or LiveStateRepository()
+        self.redis_backend = redis_backend
+        self._now_ms = now_ms_factory or (lambda: int(time.time() * 1000))
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._shutdown = False
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def request_shutdown(self) -> None:
+        self._shutdown = True
+
+    async def run_forever(self) -> None:
+        if not self.config.enabled:
+            logger.info("housekeeping loop disabled; set %s=true to enable", _ENV_ENABLED)
+            return
+        logger.info(
+            "housekeeping loop starting: dry_run=%s interval_s=%.0f batch=%d max_batches=%d",
+            self.config.dry_run,
+            self.config.interval_s,
+            self.config.batch_size,
+            self.config.max_batches_per_tick,
+        )
+        while not self._shutdown:
+            try:
+                report = await self.run_once()
+                logger.info("housekeeping tick: %s", report_to_log(report))
+            except Exception as exc:  # pragma: no cover - guard against one bad tick
+                logger.exception("housekeeping tick failed: %s", exc)
+            if self._shutdown:
+                break
+            await self._sleep_interruptible(self.config.interval_s)
+
+    async def run_once(self) -> HousekeepingTickReport:
+        started_perf = time.perf_counter()
+        report = HousekeepingTickReport(dry_run=self.config.dry_run)
+        if self.config.dry_run:
+            await self._fill_dry_run_counts(report)
+        else:
+            report.request_log_deleted = await self._run_retention(
+                name="api_request_log",
+                cutoff=self._cutoff(hours=self.config.request_log_retention_hours),
+                delete_batch=self.retention_repository.delete_request_log_batch,
+            )
+            report.payload_snapshot_deleted = await self._run_retention(
+                name="api_payload_snapshot_legacy",
+                cutoff=self._cutoff(days=self.config.payload_snapshot_retention_days),
+                delete_batch=self.retention_repository.delete_legacy_snapshot_batch,
+            )
+            report.live_state_history_deleted = await self._run_retention(
+                name="event_live_state_history",
+                cutoff=self._cutoff(days=self.config.live_state_history_retention_days),
+                delete_batch=self.retention_repository.delete_live_state_history_batch,
+            )
+        await self._run_zombie_sweep(report)
+        report.duration_ms = int((time.perf_counter() - started_perf) * 1000)
+        return report
+
+    # ------------------------------------------------------------------
+    # Retention helpers
+    # ------------------------------------------------------------------
+
+    def _cutoff(self, *, hours: int = 0, days: int = 0) -> datetime:
+        return self._clock() - timedelta(hours=hours, days=days)
+
+    async def _run_retention(
+        self,
+        *,
+        name: str,
+        cutoff: datetime,
+        delete_batch: Callable[..., Awaitable[int]],
+    ) -> int:
+        total_deleted = 0
+        for batch_index in range(self.config.max_batches_per_tick):
+            if self._shutdown:
+                break
+            async with self._connection_factory() as connection:
+                deleted = await delete_batch(
+                    connection,
+                    cutoff=cutoff,
+                    batch_size=self.config.batch_size,
+                )
+            total_deleted += int(deleted)
+            if deleted < self.config.batch_size:
+                # Exhausted — nothing more to clean this tick.
+                logger.debug(
+                    "retention %s exhausted after batch=%d deleted=%d total=%d",
+                    name,
+                    batch_index,
+                    deleted,
+                    total_deleted,
+                )
+                break
+            await asyncio.sleep(self.config.batch_sleep_ms / 1000.0)
+        if total_deleted:
+            logger.info("retention %s deleted=%d cutoff=%s", name, total_deleted, cutoff.isoformat())
+        return total_deleted
+
+    async def _fill_dry_run_counts(self, report: HousekeepingTickReport) -> None:
+        request_log_cutoff = self._cutoff(hours=self.config.request_log_retention_hours)
+        snapshot_cutoff = self._cutoff(days=self.config.payload_snapshot_retention_days)
+        history_cutoff = self._cutoff(days=self.config.live_state_history_retention_days)
+        async with self._connection_factory() as connection:
+            report.would_delete = {
+                "api_request_log": await self.retention_repository.count_expired_request_logs(
+                    connection, cutoff=request_log_cutoff
+                ),
+                "api_payload_snapshot_legacy": await self.retention_repository.count_expired_legacy_snapshots(
+                    connection, cutoff=snapshot_cutoff
+                ),
+                "event_live_state_history": await self.retention_repository.count_expired_live_state_history(
+                    connection, cutoff=history_cutoff
+                ),
+            }
+
+    # ------------------------------------------------------------------
+    # Zombie sweep
+    # ------------------------------------------------------------------
+
+    async def _run_zombie_sweep(self, report: HousekeepingTickReport) -> None:
+        if self.live_state_store is None or self.redis_backend is None:
+            return
+        candidates = self._collect_zombie_candidates()
+        report.zombies_found = len(candidates)
+        if not candidates:
+            return
+        if self.config.dry_run:
+            logger.info(
+                "zombie sweep dry-run candidates=%d (first 10: %s)",
+                len(candidates),
+                [c.event_id for c in candidates[:10]],
+            )
+            return
+        now_iso = self._clock().isoformat()
+        cleared = 0
+        for candidate in candidates:
+            try:
+                await self._retire_zombie(candidate, finalized_at_iso=now_iso)
+                cleared += 1
+            except Exception:  # pragma: no cover - best effort, continue sweep
+                logger.exception("zombie sweep failed for event_id=%s", candidate.event_id)
+        report.zombies_cleared = cleared
+        logger.info("zombie sweep cleared=%d found=%d", cleared, len(candidates))
+
+    def _collect_zombie_candidates(self) -> list[ZombieCandidate]:
+        assert self.live_state_store is not None
+        cutoff_ms = self._now_ms() - self.config.zombie_max_age_minutes * 60 * 1000
+        candidates: list[ZombieCandidate] = []
+        seen: set[int] = set()
+        for lane_name, lane_key in (("hot", LIVE_HOT_ZSET), ("warm", LIVE_WARM_ZSET)):
+            members = self._zrange_all(lane_key)
+            for raw in members:
+                try:
+                    event_id = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                state = self.live_state_store.fetch(event_id)
+                if state is None:
+                    # Orphan zset entry: lane has id but no hash. That's
+                    # itself a zombie — clear it.
+                    candidates.append(ZombieCandidate(event_id=event_id, lane=lane_name, last_ingested_at=None))
+                    continue
+                if state.is_finalized:
+                    # Should never be in a live lane, but the finalize worker
+                    # is the one who removes it — if it's here, let sweeper help.
+                    candidates.append(
+                        ZombieCandidate(event_id=event_id, lane=lane_name, last_ingested_at=state.last_ingested_at)
+                    )
+                    continue
+                last = state.last_ingested_at
+                if last is None or last < cutoff_ms:
+                    candidates.append(
+                        ZombieCandidate(event_id=event_id, lane=lane_name, last_ingested_at=last)
+                    )
+        return candidates
+
+    def _zrange_all(self, lane_key: str) -> tuple[Any, ...]:
+        """Read every member of a lane's zset. These zsets hold ~thousands of
+        ids at most (hot/warm polling cohorts), so a single ZRANGE is fine.
+        """
+
+        assert self.redis_backend is not None
+        try:
+            raw = self.redis_backend.zrange(lane_key, 0, -1)
+        except TypeError:
+            # Some fakes use keyword-style; tolerate that.
+            raw = self.redis_backend.zrange(lane_key, start=0, end=-1)
+        return tuple(raw or ())
+
+    async def _retire_zombie(self, candidate: ZombieCandidate, *, finalized_at_iso: str) -> None:
+        assert self.redis_backend is not None
+        event_key = f"live:event:{candidate.event_id}"
+        member = str(candidate.event_id)
+        # Remove from all three lanes — belt and braces.
+        for lane_key in (LIVE_HOT_ZSET, LIVE_WARM_ZSET, LIVE_COLD_ZSET):
+            self.redis_backend.zrem(lane_key, member)
+        # Drop the live:event:{id} hash so no stale state lingers.
+        self.redis_backend.delete(event_key)
+        # Record a terminal state but only if one does not already exist.
+        async with self._connection_factory() as connection:
+            await self.live_state_repository.insert_terminal_state_if_missing(
+                connection,
+                EventTerminalStateRecord(
+                    event_id=candidate.event_id,
+                    terminal_status=ZOMBIE_TERMINAL_STATUS,
+                    finalized_at=finalized_at_iso,
+                    final_snapshot_id=None,
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # Misc
+    # ------------------------------------------------------------------
+
+    async def _sleep_interruptible(self, seconds: float) -> None:
+        # Slice the sleep so request_shutdown takes effect within ~250 ms
+        # instead of waiting the full interval.
+        end_at = time.monotonic() + max(0.0, seconds)
+        while not self._shutdown:
+            remaining = end_at - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.25, remaining))
+
+
+def report_to_log(report: HousekeepingTickReport) -> str:
+    """Format a tick report for human-readable logging."""
+
+    if report.dry_run:
+        would = report.would_delete or {}
+        return (
+            f"dry_run would_delete "
+            f"request_log={would.get('api_request_log', 0)} "
+            f"snapshot={would.get('api_payload_snapshot_legacy', 0)} "
+            f"live_history={would.get('event_live_state_history', 0)} "
+            f"zombies_found={report.zombies_found} duration_ms={report.duration_ms}"
+        )
+    return (
+        f"deleted request_log={report.request_log_deleted} "
+        f"snapshot={report.payload_snapshot_deleted} "
+        f"live_history={report.live_state_history_deleted} "
+        f"zombies={report.zombies_cleared}/{report.zombies_found} "
+        f"duration_ms={report.duration_ms}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Env parsing helpers
+# ---------------------------------------------------------------------------
+
+
+def _env_bool(env: dict[str, str], name: str, default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(env: dict[str, str], name: str, default: int, *, minimum: int = 0) -> int:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s must be >= %d; using default %d", name, minimum, default)
+        return default
+    return value
+
+
+def _env_float(env: dict[str, str], name: str, default: float) -> float:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.3f", name, raw, default)
+        return default

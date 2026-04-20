@@ -50,6 +50,7 @@ from .backpressure_config import (
     SCHEDULED_DISCOVERY_MAX_LAG,
 )
 from .freshness_policy import FreshnessPolicy
+from .housekeeping import HousekeepingConfig, HousekeepingLoop
 from .live_discovery_planner import LiveDiscoveryPlannerDaemon, LiveDiscoveryPlanningTarget
 from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
 from .historical_tournament_planner import (
@@ -456,6 +457,21 @@ class ServiceApp:
             job_audit_logger=self.job_audit_logger,
         )
 
+    def build_housekeeping_loop(self) -> HousekeepingLoop | None:
+        database = getattr(self.app, "database", None)
+        if database is None:
+            return None
+        connection_factory = getattr(database, "connection", None)
+        if not callable(connection_factory):
+            logger.warning("housekeeping loop disabled: app.database.connection is unavailable")
+            return None
+        return HousekeepingLoop(
+            config=HousekeepingConfig.from_env(),
+            connection_factory=connection_factory,
+            live_state_store=self.live_state_store,
+            redis_backend=self.app.redis_backend,
+        )
+
     def build_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:
         self.ensure_consumer_groups()
         return MaintenanceWorker(
@@ -467,6 +483,7 @@ class ServiceApp:
             consumer=consumer_name,
             block_ms=block_ms,
             job_audit_logger=self.job_audit_logger,
+            housekeeping_loop=self.build_housekeeping_loop(),
         )
 
     def build_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:
