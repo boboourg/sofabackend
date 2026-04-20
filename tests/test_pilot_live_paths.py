@@ -161,7 +161,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         state = live_backend.hashes["live:event:15921219"]
         self.assertEqual(state["poll_profile"], "hot")
         self.assertEqual(state["is_finalized"], 0)
-        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921219"], float(now_ms + 10_000))
+        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921219"], float(now_ms + 15_000))
         self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["job_type"], "refresh_live_event")
         self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["event_id"], "15921219")
 
@@ -180,7 +180,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
 
         state = live_backend.hashes["live:event:15921220"]
         self.assertEqual(state["poll_profile"], "warm")
-        self.assertEqual(live_backend.zsets[LIVE_WARM_ZSET]["15921220"], float(now_ms + 60_000))
+        self.assertEqual(live_backend.zsets[LIVE_WARM_ZSET]["15921220"], float(now_ms + 600_000))
         self.assertEqual(stream_backend.streams[STREAM_LIVE_WARM][0][1]["job_type"], "refresh_live_event")
 
     async def test_halftime_event_stays_on_hot_lane(self) -> None:
@@ -204,7 +204,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
 
         state = live_backend.hashes["live:event:15921222"]
         self.assertEqual(state["poll_profile"], "hot")
-        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921222"], float(now_ms + 10_000))
+        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921222"], float(now_ms + 120_000))
         self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["job_type"], "refresh_live_event")
 
     async def test_finished_event_runs_final_sweep_and_marks_terminal_state(self) -> None:

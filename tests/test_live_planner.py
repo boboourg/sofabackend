@@ -19,15 +19,35 @@ class LivePlannerTests(unittest.TestCase):
 
         self.assertEqual(
             decision,
-            LivePollingDecision(lane="warm", next_poll_seconds=60, terminal=False),
+            LivePollingDecision(lane="warm", next_poll_seconds=600, terminal=False),
         )
 
-    def test_distant_scheduled_events_are_cold(self) -> None:
+    def test_distant_scheduled_events_are_warm(self) -> None:
         decision = classify_live_polling(status_type="scheduled", minutes_to_start=240)
 
         self.assertEqual(
             decision,
-            LivePollingDecision(lane="cold", next_poll_seconds=300, terminal=False),
+            LivePollingDecision(lane="warm", next_poll_seconds=300, terminal=False),
+        )
+
+    def test_break_status_stays_hot_with_120s(self) -> None:
+        decision = classify_live_polling(status_type="halftime", minutes_to_start=None)
+
+        self.assertEqual(
+            decision,
+            LivePollingDecision(lane="hot", next_poll_seconds=120, terminal=False),
+        )
+
+    def test_tennis_inprogress_uses_sport_specific_hot_poll_seconds(self) -> None:
+        decision = classify_live_polling(
+            status_type="inprogress",
+            minutes_to_start=None,
+            sport_slug="tennis",
+        )
+
+        self.assertEqual(
+            decision,
+            LivePollingDecision(lane="hot", next_poll_seconds=15, terminal=False),
         )
 
     def test_finished_events_are_terminal(self) -> None:
