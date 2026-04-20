@@ -24,8 +24,18 @@ class LiveWorker:
     def __init__(self, *, now_ms_factory=None) -> None:
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
 
-    def handle(self, *, status_type: str | None, minutes_to_start: int | None):
-        return classify_live_polling(status_type=status_type, minutes_to_start=minutes_to_start)
+    def handle(
+        self,
+        *,
+        status_type: str | None,
+        minutes_to_start: int | None,
+        sport_slug: str | None = None,
+    ):
+        return classify_live_polling(
+            status_type=status_type,
+            minutes_to_start=minutes_to_start,
+            sport_slug=sport_slug,
+        )
 
     def track_event(
         self,
@@ -38,7 +48,11 @@ class LiveWorker:
         live_state_store=None,
         stream_queue=None,
     ) -> LiveTrackResult:
-        decision = self.handle(status_type=status_type, minutes_to_start=minutes_to_start)
+        decision = self.handle(
+            status_type=status_type,
+            minutes_to_start=minutes_to_start,
+            sport_slug=sport_slug,
+        )
         now_ms = int(self.now_ms_factory())
         next_poll_at = now_ms + (decision.next_poll_seconds * 1000) if decision.next_poll_seconds is not None else None
 

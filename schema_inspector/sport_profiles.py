@@ -8,7 +8,15 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SportProfile:
     sport_slug: str
-    live_discovery_interval_seconds: float = 60.0
+    live_discovery_interval_seconds: float = 120.0
+    # HOT lane: seconds between polls while the match is actively in progress.
+    hot_poll_seconds: int = 10
+    # BREAK lane: seconds between polls during halftime / pause / break.
+    break_poll_seconds: int = 120
+    # WARMUP lane: how many minutes before kick-off to start tracking (warm lane).
+    warmup_window_minutes: int = 30
+    # WARMUP lane: poll interval in seconds while in the pre-match warmup window.
+    warmup_poll_seconds: int = 600
     standings_scopes: tuple[str, ...] = ("total",)
     team_event_scopes: tuple[str, ...] = ("total",)
     top_players_suffix: str | None = None
@@ -49,7 +57,8 @@ SUPPORTED_SPORT_SLUGS = (
 
 FOOTBALL_PROFILE = SportProfile(
     sport_slug="football",
-    live_discovery_interval_seconds=20.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("home", "away", "total"),
     top_players_suffix="overall",
@@ -72,7 +81,8 @@ FOOTBALL_PROFILE = SportProfile(
 
 BASKETBALL_PROFILE = SportProfile(
     sport_slug="basketball",
-    live_discovery_interval_seconds=20.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("total",),
     top_players_suffix="regularSeason",
@@ -93,7 +103,8 @@ BASKETBALL_PROFILE = SportProfile(
 
 TENNIS_PROFILE = SportProfile(
     sport_slug="tennis",
-    live_discovery_interval_seconds=30.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=15,
     standings_scopes=(),
     team_event_scopes=(),
     top_players_suffix=None,
@@ -117,7 +128,8 @@ TENNIS_PROFILE = SportProfile(
 
 VOLLEYBALL_PROFILE = SportProfile(
     sport_slug="volleyball",
-    live_discovery_interval_seconds=45.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=15,
     standings_scopes=("total",),
     team_event_scopes=("total",),
     top_players_suffix="overall",
@@ -137,7 +149,8 @@ VOLLEYBALL_PROFILE = SportProfile(
 
 BASEBALL_PROFILE = SportProfile(
     sport_slug="baseball",
-    live_discovery_interval_seconds=60.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=20,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("total",),
     top_players_suffix="regularSeason",
@@ -155,7 +168,8 @@ BASEBALL_PROFILE = SportProfile(
 
 AMERICAN_FOOTBALL_PROFILE = SportProfile(
     sport_slug="american-football",
-    live_discovery_interval_seconds=60.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=15,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("total",),
     top_players_suffix="regularSeason",
@@ -174,7 +188,8 @@ AMERICAN_FOOTBALL_PROFILE = SportProfile(
 
 HANDBALL_PROFILE = SportProfile(
     sport_slug="handball",
-    live_discovery_interval_seconds=45.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=15,
     standings_scopes=("total",),
     team_event_scopes=("total",),
     top_players_suffix="overall",
@@ -195,6 +210,7 @@ HANDBALL_PROFILE = SportProfile(
 TABLE_TENNIS_PROFILE = SportProfile(
     sport_slug="table-tennis",
     live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=20,
     standings_scopes=(),
     team_event_scopes=(),
     top_players_suffix=None,
@@ -217,7 +233,8 @@ TABLE_TENNIS_PROFILE = SportProfile(
 
 ICE_HOCKEY_PROFILE = SportProfile(
     sport_slug="ice-hockey",
-    live_discovery_interval_seconds=30.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("home", "away", "total"),
     top_players_suffix="regularSeason",
@@ -236,7 +253,8 @@ ICE_HOCKEY_PROFILE = SportProfile(
 
 RUGBY_PROFILE = SportProfile(
     sport_slug="rugby",
-    live_discovery_interval_seconds=60.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=15,
     standings_scopes=("total",),
     team_event_scopes=("total",),
     top_players_suffix="overall",
@@ -256,7 +274,8 @@ RUGBY_PROFILE = SportProfile(
 
 CRICKET_PROFILE = SportProfile(
     sport_slug="cricket",
-    live_discovery_interval_seconds=90.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=30,
     standings_scopes=("total",),
     team_event_scopes=("total",),
     top_players_suffix=None,
@@ -278,7 +297,8 @@ CRICKET_PROFILE = SportProfile(
 
 FUTSAL_PROFILE = SportProfile(
     sport_slug="futsal",
-    live_discovery_interval_seconds=45.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("home", "away", "total"),
     top_players_suffix="overall",
@@ -300,7 +320,8 @@ FUTSAL_PROFILE = SportProfile(
 
 ESPORTS_PROFILE = SportProfile(
     sport_slug="esports",
-    live_discovery_interval_seconds=30.0,
+    live_discovery_interval_seconds=120.0,
+    hot_poll_seconds=30,
     standings_scopes=(),
     team_event_scopes=(),
     top_players_suffix=None,

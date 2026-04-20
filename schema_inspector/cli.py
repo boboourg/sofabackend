@@ -606,9 +606,27 @@ def main(argv: list[str] | None = None) -> int:
     return asyncio.run(_dispatch(args))
 
 
+_HISTORICAL_COMMANDS = frozenset({
+    "worker-historical-hydrate",
+    "worker-historical-discovery",
+    "worker-historical-tournament",
+    "worker-historical-enrichment",
+    "worker-historical-maintenance",
+    "historical-planner-daemon",
+    "historical-tournament-planner-daemon",
+})
+
+
 async def _dispatch(args) -> int:
+    # Route historical workers to the Proxyline static pool automatically.
+    # Only kicks in when no explicit --proxy flags are passed — explicit always wins.
+    proxy_env_key: str | None = None
+    if getattr(args, "command", None) in _HISTORICAL_COMMANDS and not args.proxy:
+        proxy_env_key = "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS"
+
     runtime_config = load_runtime_config(
-        proxy_urls=args.proxy,
+        proxy_urls=args.proxy or None,
+        proxy_env_key=proxy_env_key,
         user_agent=args.user_agent,
         max_attempts=args.max_attempts,
     )
@@ -885,7 +903,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     planner_daemon = subparsers.add_parser("planner-daemon", help="Run the continuous planner loop.")
     planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
-    planner_daemon.add_argument("--scheduled-interval-seconds", type=float, default=300.0, help="Scheduled planning interval per sport.")
+    planner_daemon.add_argument("--scheduled-interval-seconds", type=float, default=3600.0, help="Scheduled planning interval per sport (default: 3600 = once per hour).")
     planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
 
     live_discovery_planner_daemon = subparsers.add_parser("live-discovery-planner-daemon", help="Run the continuous live sport-surface planner loop.")

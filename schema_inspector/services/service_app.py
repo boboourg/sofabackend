@@ -151,7 +151,7 @@ class ServiceApp:
         self,
         *,
         sport_slugs: tuple[str, ...] | None = None,
-        scheduled_interval_seconds: float = 300.0,
+        scheduled_interval_seconds: float = 3600.0,  # changed from 300 → 3600 (once per hour)
         loop_interval_seconds: float = 5.0,
     ) -> PlannerDaemon:
         normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
@@ -643,22 +643,4 @@ class ServiceApp:
 
     async def _handle_maintenance(self, entry: StreamEntry) -> str:
         job = decode_stream_payload(entry.values, fallback_job_id=entry.message_id)
-        if job.job_type == JOB_REPLAY_FAILED_JOB:
-            snapshot_id = job.params.get("snapshot_id")
-            if snapshot_id is None:
-                return "ignored"
-            await self.app.replay_snapshot(int(snapshot_id))
-            return "replayed"
-        logger.info("Maintenance worker ignored job_type=%s job_id=%s", job.job_type, job.job_id)
-        return "ignored"
-
-    @staticmethod
-    def _date_factory(now_ms: int) -> str:
-        from datetime import datetime, timezone
-
-        return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date().isoformat()
-
-    async def _recover_live_state(self) -> None:
-        recover = getattr(self.app, "recover_live_state", None)
-        if callable(recover):
-            await recover()
+        if job.job_type ==

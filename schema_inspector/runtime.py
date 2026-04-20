@@ -85,21 +85,32 @@ def load_runtime_config(
     *,
     env: Mapping[str, str] | None = None,
     proxy_urls: list[str] | None = None,
+    proxy_env_key: str | None = None,
     user_agent: str | None = None,
     extra_headers: Mapping[str, str] | None = None,
     max_attempts: int | None = None,
 ) -> RuntimeConfig:
-    """Build a runtime config from explicit arguments and environment."""
+    """Build a runtime config from explicit arguments and environment.
+
+    proxy_env_key: if set and proxy_urls is empty, reads proxy list from this
+    env variable instead of the default SCHEMA_INSPECTOR_PROXY_URLS.
+    Used to route historical workers to Proxyline without touching live proxies.
+    """
 
     env = env or _load_project_env()
-    configured_proxy_urls = list(proxy_urls or _read_proxy_urls(env))
+    configured_proxy_urls = list(proxy_urls or _read_proxy_urls(env, proxy_env_key=proxy_env_key))
     endpoints = tuple(
         ProxyEndpoint(name=f"proxy_{index + 1}", url=url.strip())
         for index, url in enumerate(configured_proxy_urls)
         if url.strip()
     )
 
-    headers = {"Accept": "application/json, text/plain, */*"}
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        # Explicit compression request — ensures gzip/br regardless of curl_cffi
+        # impersonation profile or library version.
+        "Accept-Encoding": "gzip, deflate, br",
+    }
     if extra_headers:
         headers.update(extra_headers)
 
@@ -121,7 +132,14 @@ def load_runtime_config(
     )
 
 
-def _read_proxy_urls(env: Mapping[str, str]) -> list[str]:
+def _read_proxy_urls(env: Mapping[str, str], *, proxy_env_key: str | None = None) -> list[str]:
+    # If a specific env key is requested (e.g. for historical workers), use it
+    # exclusively so we never accidentally mix proxy pools.
+    if proxy_env_key:
+        joined = (env.get(proxy_env_key) or "").strip()
+        return [item.strip() for item in joined.split(",") if item.strip()]
+
+    # Default: read from the standard live/scheduled proxy variables.
     values = []
     single = (env.get("SCHEMA_INSPECTOR_PROXY_URL") or "").strip()
     if single:

@@ -48,6 +48,11 @@ class InspectorTransport:
         self.proxy_pool = ProxyPool(runtime_config.proxy_endpoints, clock=self.clock)
         self._session_cache: dict[str, AsyncSession] = {}
         self._session_lock = asyncio.Lock()
+        # ETag cache: url -> (etag_value, last_body_bytes).
+        # Populated on 200 responses that carry an ETag header.
+        # Used to send If-None-Match on subsequent requests; on 304 we return
+        # the cached body transparently — zero proxy bytes consumed.
+        self._etag_cache: dict[str, tuple[str, bytes]] = {}
 
     async def fetch(
         self,
@@ -64,6 +69,11 @@ class InspectorTransport:
 
         if headers:
             request_headers.update(headers)
+
+        # Inject If-None-Match if we have a cached ETag for this URL.
+        cached_etag_entry = self._etag_cache.get(url)
+        if cached_etag_entry is not None:
+            request_headers["If-None-Match"] = cached_etag_entry[0]
 
         attempts = []
         for attempt_number in range(1, self.runtime_config.retry_policy.max_attempts + 1):
@@ -93,6 +103,31 @@ class InspectorTransport:
 
             try:
                 raw = await self._execute_once(url, request_headers, timeout, proxy_url)
+
+                # 304 Not Modified — data hasn't changed, return cached body.
+                # Proxy transferred only request headers, no response body.
+                if raw.status_code == 304 and cached_etag_entry is not None:
+                    if proxy_name is not None:
+                        self.proxy_pool.record_success(proxy_name)
+                    attempts.append(
+                        TransportAttempt(
+                            attempt_number=attempt_number,
+                            proxy_name=proxy_name,
+                            status_code=304,
+                            error=None,
+                            challenge_reason=None,
+                        )
+                    )
+                    return TransportResult(
+                        resolved_url=raw.resolved_url,
+                        status_code=200,  # surface as 200 so upstream pipeline is unaffected
+                        headers=raw.headers,
+                        body_bytes=cached_etag_entry[1],
+                        attempts=tuple(attempts),
+                        final_proxy_name=proxy_name,
+                        challenge_reason=None,
+                    )
+
                 challenge_reason = detect_challenge(
                     raw.status_code,
                     raw.headers,
@@ -127,6 +162,12 @@ class InspectorTransport:
                         self.proxy_pool.record_failure(proxy_name)
                     else:
                         self.proxy_pool.record_success(proxy_name)
+
+                # Store ETag from a successful 200 response for future requests.
+                if raw.status_code == 200 and raw.body_bytes:
+                    etag = _extract_etag(raw.headers)
+                    if etag:
+                        self._etag_cache[url] = (etag, raw.body_bytes)
 
                 return TransportResult(
                     resolved_url=raw.resolved_url,
@@ -277,3 +318,11 @@ class InspectorTransport:
                 headers=dict(exc.headers.items()),
                 body_bytes=exc.read(),
             )
+
+
+def _extract_etag(headers: Mapping[str, str]) -> str | None:
+    """Return the ETag value from response headers, case-insensitively."""
+    for key, value in headers.items():
+        if key.lower() == "etag":
+            return value.strip()
+    return None
