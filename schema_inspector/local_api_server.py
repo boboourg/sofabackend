@@ -39,6 +39,17 @@ from .local_swagger_builder import (
 _ALL_ENDPOINTS = local_api_endpoints()
 _QUEUE_GROUPS = ALL_CONSUMER_GROUPS
 
+# Mirrors schema_inspector/services/housekeeping.ZOMBIE_TERMINAL_STATUS.
+# Housekeeping stamps this sentinel into event_terminal_state for events whose
+# live polling went quiet past the zombie cutoff. It is NOT an authoritative
+# natural end-state, so the read-layer must not use it to override status or
+# drop events that the upstream snapshot still returns.
+_ZOMBIE_TERMINAL_STATUS = "zombie_stale"
+
+_NATURAL_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"finished", "afterextra", "afterpen", "cancelled", "postponed"}
+)
+
 
 @dataclass(frozen=True)
 class RouteSpec:
@@ -267,10 +278,18 @@ class LocalApiApplication:
         terminal_by_event: dict[int, dict[str, Any]] = {}
         for row in rows:
             event_id = int(row["event_id"])
+            terminal_status_raw = row.get("terminal_status")
+            # Housekeeping's zombie-sweeper stamps ``zombie_stale`` for events
+            # whose live-state polling went silent past the configured cutoff.
+            # That is NOT an authoritative natural end — if upstream later
+            # returns the event in a list snapshot, trust the snapshot rather
+            # than overriding its status from a synthetic sentinel.
+            if str(terminal_status_raw or "").strip().lower() == _ZOMBIE_TERMINAL_STATUS:
+                continue
             status_payload = _extract_terminal_status_payload(row.get("final_payload"))
             if status_payload is None:
                 status_payload = _fallback_terminal_status_payload(
-                    row.get("terminal_status"),
+                    terminal_status_raw,
                     _extract_existing_event_status(raw_items, event_id),
                 )
             if status_payload is not None:
@@ -279,7 +298,16 @@ class LocalApiApplication:
         if not terminal_by_event:
             return payload
 
-        live_route = route.endpoint.path_template.endswith("/events/live")
+        # Previously this branch unconditionally dropped every event that had
+        # *any* ``event_terminal_state`` row from the live list. That caused
+        # near-100% under-counting whenever the upstream feed's grace window
+        # briefly kept finished games in ``/events/live``, or when the
+        # zombie-sweeper had stamped many events as terminal. The live list's
+        # source of truth is the upstream snapshot, not ``event_terminal_state``:
+        # events disappear naturally when the next snapshot stops returning
+        # them. We now mirror the scheduled-list behaviour here — keep the
+        # event, override its status with the freshest authoritative terminal
+        # status so stale "inprogress" labels get corrected in-place.
         reconciled_items: list[Any] = []
         for item in raw_items:
             if not isinstance(item, dict):
@@ -292,8 +320,6 @@ class LocalApiApplication:
             event_id = int(event_id)
             if event_id not in terminal_by_event:
                 reconciled_items.append(item)
-                continue
-            if live_route:
                 continue
             updated = dict(item)
             updated["status"] = terminal_by_event[event_id]
@@ -325,6 +351,37 @@ class LocalApiApplication:
                 observed_date=observed_date,
                 timezone_offset_seconds=timezone_offset_seconds,
             )
+
+        # Entity-root routes used to return a false 404 whenever the specific
+        # raw snapshot for ``/api/v1/event/{id}``, ``/api/v1/team/{id}``,
+        # ``/api/v1/player/{id}``, etc. was absent — even when child snapshots
+        # (statistics / lineups / incidents / ...), a finalized end-state
+        # snapshot, or the corresponding normalized row WAS ingested. For
+        # zombie-resolved events this was the default. The fallback below
+        # returns the authoritative final snapshot first, then a minimal
+        # envelope synthesised from the normalized table so the route answers
+        # 200 instead of 404 whenever ingested data exists.
+        event_root_id = _extract_event_id_from_entity_root_path(path, "event")
+        if event_root_id is not None:
+            return await self._fetch_event_root_payload(event_root_id)
+
+        team_root_id = _extract_event_id_from_entity_root_path(path, "team")
+        if team_root_id is not None:
+            return await self._fetch_team_root_payload(team_root_id)
+
+        player_root_id = _extract_event_id_from_entity_root_path(path, "player")
+        if player_root_id is not None:
+            return await self._fetch_player_root_payload(player_root_id)
+
+        manager_root_id = _extract_event_id_from_entity_root_path(path, "manager")
+        if manager_root_id is not None:
+            return await self._fetch_manager_root_payload(manager_root_id)
+
+        unique_tournament_root_id = _extract_event_id_from_entity_root_path(
+            path, "unique-tournament"
+        )
+        if unique_tournament_root_id is not None:
+            return await self._fetch_unique_tournament_root_payload(unique_tournament_root_id)
 
         return None
 
@@ -434,6 +491,218 @@ class LocalApiApplication:
                 for row in rows
             ]
         }
+
+    async def _fetch_event_root_payload(self, event_id: int) -> dict[str, Any] | None:
+        """Return a payload for ``/api/v1/event/{event_id}`` via fallback layers.
+
+        Order of preference:
+          1. The finalized snapshot referenced by ``event_terminal_state.final_snapshot_id``
+             -- this is the exact upstream response we captured at end-of-match.
+          2. The most recent ``endpoint_pattern = /api/v1/event/{event_id}`` raw
+             snapshot pinned to this event id.
+          3. A minimal envelope synthesised from the normalized ``event`` row.
+
+        Returning ``None`` is reserved for the genuinely-unknown case: no
+        finalized state, no raw root snapshot, and no normalized row.
+        """
+
+        connection = await self._connect()
+        try:
+            final_payload_row = await connection.fetchrow(
+                """
+                SELECT aps.payload AS final_payload
+                FROM event_terminal_state AS ets
+                JOIN api_payload_snapshot AS aps
+                    ON aps.id = ets.final_snapshot_id
+                WHERE ets.event_id = $1
+                """,
+                event_id,
+            )
+            if final_payload_row is not None:
+                decoded = _decode_snapshot_payload(final_payload_row["final_payload"])
+                if isinstance(decoded, dict):
+                    return decoded
+
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/event/{event_id}'
+                  AND context_entity_type = 'event'
+                  AND context_entity_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                event_id,
+            )
+            if snapshot_row is not None:
+                decoded = _decode_snapshot_payload(snapshot_row["payload"])
+                if isinstance(decoded, dict):
+                    return decoded
+
+            normalized_row = await connection.fetchrow(
+                """
+                SELECT id, slug, tournament_id, unique_tournament_id, season_id,
+                       home_team_id, away_team_id, venue_id, start_timestamp
+                FROM event
+                WHERE id = $1
+                """,
+                event_id,
+            )
+            if normalized_row is None:
+                return None
+            return _synthesize_event_root_payload(normalized_row)
+        finally:
+            await connection.close()
+
+    async def _fetch_team_root_payload(self, team_id: int) -> dict[str, Any] | None:
+        """Return a payload for ``/api/v1/team/{team_id}`` via fallback layers."""
+
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/team/{team_id}'
+                  AND context_entity_type = 'team'
+                  AND context_entity_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                team_id,
+            )
+            if snapshot_row is not None:
+                decoded = _decode_snapshot_payload(snapshot_row["payload"])
+                if isinstance(decoded, dict):
+                    return decoded
+
+            normalized_row = await connection.fetchrow(
+                """
+                SELECT id, slug, name, short_name, sport_id, category_id,
+                       country_alpha2, manager_id, venue_id, tournament_id,
+                       primary_unique_tournament_id, parent_team_id
+                FROM team
+                WHERE id = $1
+                """,
+                team_id,
+            )
+            if normalized_row is None:
+                return None
+            return _synthesize_team_root_payload(normalized_row)
+        finally:
+            await connection.close()
+
+    async def _fetch_player_root_payload(self, player_id: int) -> dict[str, Any] | None:
+        """Return a payload for ``/api/v1/player/{player_id}`` via fallback layers."""
+
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/player/{player_id}'
+                  AND context_entity_type = 'player'
+                  AND context_entity_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                player_id,
+            )
+            if snapshot_row is not None:
+                decoded = _decode_snapshot_payload(snapshot_row["payload"])
+                if isinstance(decoded, dict):
+                    return decoded
+
+            normalized_row = await connection.fetchrow(
+                """
+                SELECT id, slug, name, short_name, team_id
+                FROM player
+                WHERE id = $1
+                """,
+                player_id,
+            )
+            if normalized_row is None:
+                return None
+            return _synthesize_player_root_payload(normalized_row)
+        finally:
+            await connection.close()
+
+    async def _fetch_manager_root_payload(self, manager_id: int) -> dict[str, Any] | None:
+        """Return a payload for ``/api/v1/manager/{manager_id}`` via fallback layers."""
+
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/manager/{manager_id}'
+                  AND context_entity_type = 'manager'
+                  AND context_entity_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                manager_id,
+            )
+            if snapshot_row is not None:
+                decoded = _decode_snapshot_payload(snapshot_row["payload"])
+                if isinstance(decoded, dict):
+                    return decoded
+
+            normalized_row = await connection.fetchrow(
+                """
+                SELECT id, slug, name, short_name, team_id
+                FROM manager
+                WHERE id = $1
+                """,
+                manager_id,
+            )
+            if normalized_row is None:
+                return None
+            return _synthesize_manager_root_payload(normalized_row)
+        finally:
+            await connection.close()
+
+    async def _fetch_unique_tournament_root_payload(
+        self, unique_tournament_id: int
+    ) -> dict[str, Any] | None:
+        """Return a payload for ``/api/v1/unique-tournament/{unique_tournament_id}``
+        via fallback layers."""
+
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/unique-tournament/{unique_tournament_id}'
+                  AND context_entity_type = 'unique_tournament'
+                  AND context_entity_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                unique_tournament_id,
+            )
+            if snapshot_row is not None:
+                decoded = _decode_snapshot_payload(snapshot_row["payload"])
+                if isinstance(decoded, dict):
+                    return decoded
+
+            normalized_row = await connection.fetchrow(
+                """
+                SELECT id, slug, name, category_id, country_alpha2
+                FROM unique_tournament
+                WHERE id = $1
+                """,
+                unique_tournament_id,
+            )
+            if normalized_row is None:
+                return None
+            return _synthesize_unique_tournament_root_payload(normalized_row)
+        finally:
+            await connection.close()
 
     async def _fetch_ops_health_payload(self) -> dict[str, Any]:
         connection = await self._connect()
@@ -863,6 +1132,145 @@ def _extract_category_seed_request(
         str(path_params.get("date", match.group("date"))),
         timezone_offset_seconds,
     )
+
+
+_ENTITY_ROOT_PATH_PATTERNS: dict[str, re.Pattern[str]] = {
+    "event": re.compile(r"^/api/v1/event/(?P<id>\d+)$"),
+    "team": re.compile(r"^/api/v1/team/(?P<id>\d+)$"),
+    "player": re.compile(r"^/api/v1/player/(?P<id>\d+)$"),
+    "manager": re.compile(r"^/api/v1/manager/(?P<id>\d+)$"),
+    "unique-tournament": re.compile(r"^/api/v1/unique-tournament/(?P<id>\d+)$"),
+}
+
+
+def _extract_event_id_from_entity_root_path(path: str, entity_kind: str) -> int | None:
+    """Return the numeric id embedded in an ``/api/v1/{kind}/{id}`` path.
+
+    The helper is shared by the normalized-fallback entry points so that
+    every ``<entity>`` root route -- event / team / player / manager /
+    unique-tournament -- is extracted uniformly. Unknown kinds return
+    ``None``; non-numeric ids return ``None`` instead of raising.
+    """
+
+    pattern = _ENTITY_ROOT_PATH_PATTERNS.get(entity_kind)
+    if pattern is None:
+        return None
+    match = pattern.fullmatch(path)
+    if match is None:
+        return None
+    try:
+        return int(match.group("id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _synthesize_event_root_payload(row: Any) -> dict[str, Any]:
+    event_payload: dict[str, Any] = {
+        "id": int(row["id"]),
+    }
+    slug = row["slug"]
+    if slug is not None:
+        event_payload["slug"] = str(slug)
+    start_timestamp = row["start_timestamp"]
+    if start_timestamp is not None:
+        try:
+            event_payload["startTimestamp"] = int(start_timestamp)
+        except (TypeError, ValueError):
+            event_payload["startTimestamp"] = _serialize_scalar(start_timestamp)
+    home_team_id = row["home_team_id"]
+    if home_team_id is not None:
+        event_payload["homeTeam"] = {"id": int(home_team_id)}
+    away_team_id = row["away_team_id"]
+    if away_team_id is not None:
+        event_payload["awayTeam"] = {"id": int(away_team_id)}
+    tournament_id = row["tournament_id"]
+    unique_tournament_id = row["unique_tournament_id"]
+    season_id = row["season_id"]
+    if tournament_id is not None or unique_tournament_id is not None:
+        tournament_payload: dict[str, Any] = {}
+        if tournament_id is not None:
+            tournament_payload["id"] = int(tournament_id)
+        if unique_tournament_id is not None:
+            tournament_payload["uniqueTournament"] = {"id": int(unique_tournament_id)}
+        event_payload["tournament"] = tournament_payload
+    if season_id is not None:
+        event_payload["season"] = {"id": int(season_id)}
+    return {"event": event_payload}
+
+
+def _synthesize_team_root_payload(row: Any) -> dict[str, Any]:
+    team_payload: dict[str, Any] = {"id": int(row["id"])}
+    for source_key, dest_key in (
+        ("slug", "slug"),
+        ("name", "name"),
+        ("short_name", "shortName"),
+    ):
+        value = row[source_key]
+        if value is not None:
+            team_payload[dest_key] = str(value)
+    if row["country_alpha2"] is not None:
+        team_payload["country"] = {"alpha2": str(row["country_alpha2"])}
+    if row["sport_id"] is not None:
+        team_payload["sport"] = {"id": int(row["sport_id"])}
+    if row["category_id"] is not None:
+        team_payload["category"] = {"id": int(row["category_id"])}
+    if row["venue_id"] is not None:
+        team_payload["venue"] = {"id": int(row["venue_id"])}
+    if row["manager_id"] is not None:
+        team_payload["manager"] = {"id": int(row["manager_id"])}
+    if row["tournament_id"] is not None:
+        team_payload["tournament"] = {"id": int(row["tournament_id"])}
+    if row["primary_unique_tournament_id"] is not None:
+        team_payload["primaryUniqueTournament"] = {"id": int(row["primary_unique_tournament_id"])}
+    if row["parent_team_id"] is not None:
+        team_payload["parentTeam"] = {"id": int(row["parent_team_id"])}
+    return {"team": team_payload}
+
+
+def _synthesize_player_root_payload(row: Any) -> dict[str, Any]:
+    player_payload: dict[str, Any] = {"id": int(row["id"])}
+    for source_key, dest_key in (
+        ("slug", "slug"),
+        ("name", "name"),
+        ("short_name", "shortName"),
+    ):
+        value = row[source_key]
+        if value is not None:
+            player_payload[dest_key] = str(value)
+    if row["team_id"] is not None:
+        player_payload["team"] = {"id": int(row["team_id"])}
+    return {"player": player_payload}
+
+
+def _synthesize_manager_root_payload(row: Any) -> dict[str, Any]:
+    manager_payload: dict[str, Any] = {"id": int(row["id"])}
+    for source_key, dest_key in (
+        ("slug", "slug"),
+        ("name", "name"),
+        ("short_name", "shortName"),
+    ):
+        value = row[source_key]
+        if value is not None:
+            manager_payload[dest_key] = str(value)
+    if row["team_id"] is not None:
+        manager_payload["team"] = {"id": int(row["team_id"])}
+    return {"manager": manager_payload}
+
+
+def _synthesize_unique_tournament_root_payload(row: Any) -> dict[str, Any]:
+    ut_payload: dict[str, Any] = {"id": int(row["id"])}
+    for source_key, dest_key in (
+        ("slug", "slug"),
+        ("name", "name"),
+    ):
+        value = row[source_key]
+        if value is not None:
+            ut_payload[dest_key] = str(value)
+    if row["category_id"] is not None:
+        ut_payload["category"] = {"id": int(row["category_id"])}
+    if row["country_alpha2"] is not None:
+        ut_payload["country"] = {"alpha2": str(row["country_alpha2"])}
+    return {"uniqueTournament": ut_payload}
 
 
 def _extract_terminal_status_payload(final_payload: Any) -> dict[str, Any] | None:

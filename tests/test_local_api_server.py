@@ -8,8 +8,14 @@ from schema_inspector.local_api_server import (
     _QUEUE_GROUPS,
     _compile_path_template,
     _decode_snapshot_payload,
+    _extract_event_id_from_entity_root_path,
     _normalized_query_map,
     _parse_context_value,
+    _synthesize_event_root_payload,
+    _synthesize_manager_root_payload,
+    _synthesize_player_root_payload,
+    _synthesize_team_root_payload,
+    _synthesize_unique_tournament_root_payload,
     build_route_specs,
     match_route,
 )
@@ -213,7 +219,17 @@ class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_live_events_snapshot_filters_terminal_events(self) -> None:
+    async def test_live_events_snapshot_keeps_terminal_events_with_status_override(self) -> None:
+        """Regression guard for the under-counting live-list bug.
+
+        Previously ``_reconcile_snapshot_payload`` unconditionally dropped
+        every event with any ``event_terminal_state`` row from the live
+        list. That caused near-total data loss whenever the upstream feed's
+        grace window or the zombie sweeper marked a live-list event as
+        terminal. The fix keeps the event in the list and overrides its
+        status with the authoritative final status.
+        """
+
         application = LocalApiApplication.__new__(LocalApiApplication)
         routes = build_route_specs()
         result = match_route("/api/v1/sport/football/events/live", routes)
@@ -249,7 +265,103 @@ class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
         reconciled = await application._reconcile_snapshot_payload(executor, route, payload)
 
-        self.assertEqual([item["id"] for item in reconciled["events"]], [14100000])
+        # Both events must survive; only the status of the finished one is rewritten.
+        self.assertEqual([item["id"] for item in reconciled["events"]], [14109883, 14100000])
+        finished_event = reconciled["events"][0]
+        self.assertEqual(finished_event["status"]["code"], 100)
+        self.assertEqual(finished_event["status"]["type"], "finished")
+        live_event = reconciled["events"][1]
+        self.assertEqual(live_event["status"]["type"], "inprogress")
+
+    async def test_live_events_snapshot_does_not_undercount_when_every_event_is_terminal(self) -> None:
+        """Reproduces the observed 56-events-in-snapshot / 1-event-in-response prod bug.
+
+        Even when every event in the raw snapshot has a terminal-state row
+        (which is the default after the zombie sweeper has caught up), the
+        response must still contain every event — only with their statuses
+        rewritten.
+        """
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        result = match_route("/api/v1/sport/football/events/live", routes)
+        assert result is not None
+        route, _ = result
+
+        payload = {
+            "events": [
+                {
+                    "id": event_id,
+                    "status": {"code": 7, "type": "inprogress", "description": "2nd half"},
+                }
+                for event_id in (15994150, 14109883, 14109884, 14109885, 14109886)
+            ]
+        }
+        executor = _FakeFetchExecutor(
+            [
+                {
+                    "event_id": event_id,
+                    "terminal_status": "finished",
+                    "final_payload": {
+                        "event": {
+                            "id": event_id,
+                            "status": {"code": 100, "type": "finished", "description": "Ended"},
+                        }
+                    },
+                }
+                for event_id in (14109883, 14109884, 14109885, 14109886)
+            ]
+        )
+
+        reconciled = await application._reconcile_snapshot_payload(executor, route, payload)
+
+        self.assertEqual(
+            [item["id"] for item in reconciled["events"]],
+            [15994150, 14109883, 14109884, 14109885, 14109886],
+        )
+        still_live = reconciled["events"][0]
+        self.assertEqual(still_live["status"]["type"], "inprogress")
+        for finished in reconciled["events"][1:]:
+            self.assertEqual(finished["status"]["type"], "finished")
+
+    async def test_live_events_snapshot_ignores_zombie_terminal_status(self) -> None:
+        """The zombie-sweeper stamp must not be treated as authoritative.
+
+        Housekeeping stamps ``zombie_stale`` for events whose live polling
+        went quiet past the cutoff, with ``final_snapshot_id = NULL``. If
+        upstream later resurrects the event in a list snapshot, the read
+        layer must trust the snapshot — not override its status from a
+        synthetic sentinel that has no real ``event.status`` attached.
+        """
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        result = match_route("/api/v1/sport/football/events/live", routes)
+        assert result is not None
+        route, _ = result
+
+        payload = {
+            "events": [
+                {
+                    "id": 14109883,
+                    "status": {"code": 7, "type": "inprogress", "description": "2nd half"},
+                }
+            ]
+        }
+        executor = _FakeFetchExecutor(
+            [
+                {
+                    "event_id": 14109883,
+                    "terminal_status": "zombie_stale",
+                    "final_payload": None,
+                }
+            ]
+        )
+
+        reconciled = await application._reconcile_snapshot_payload(executor, route, payload)
+
+        self.assertEqual([item["id"] for item in reconciled["events"]], [14109883])
+        self.assertEqual(reconciled["events"][0]["status"]["type"], "inprogress")
 
     async def test_scheduled_events_snapshot_overrides_terminal_status_from_final_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -288,8 +400,396 @@ class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reconciled["events"][0]["status"]["description"], "Ended")
 
 
+class LocalApiEntityRootFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """Guarantees that ``/api/v1/{entity}/{id}`` root routes do not 404 when
+    ingested data exists in any downstream layer (final snapshot, root
+    snapshot, or normalized row)."""
+
+    def test_extract_event_id_from_entity_root_path_matches_all_known_kinds(self) -> None:
+        self.assertEqual(_extract_event_id_from_entity_root_path("/api/v1/event/123", "event"), 123)
+        self.assertEqual(_extract_event_id_from_entity_root_path("/api/v1/team/42", "team"), 42)
+        self.assertEqual(_extract_event_id_from_entity_root_path("/api/v1/player/7", "player"), 7)
+        self.assertEqual(_extract_event_id_from_entity_root_path("/api/v1/manager/9", "manager"), 9)
+        self.assertEqual(
+            _extract_event_id_from_entity_root_path("/api/v1/unique-tournament/17", "unique-tournament"),
+            17,
+        )
+        # Child routes must not match a root pattern.
+        self.assertIsNone(
+            _extract_event_id_from_entity_root_path("/api/v1/event/123/statistics", "event")
+        )
+        # Cross-kind paths must not match.
+        self.assertIsNone(_extract_event_id_from_entity_root_path("/api/v1/team/42", "event"))
+
+    async def test_event_root_returns_final_snapshot_when_available(self) -> None:
+        """When ``event_terminal_state.final_snapshot_id`` points to a row,
+        the read layer must return that exact upstream response rather than
+        synthesizing from the normalized row."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("final_payload", 15994150): {
+                    "final_payload": {
+                        "event": {
+                            "id": 15994150,
+                            "status": {"code": 100, "type": "finished"},
+                            "homeTeam": {"id": 10},
+                            "awayTeam": {"id": 11},
+                        }
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_event_root_payload(15994150)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["event"]["id"], 15994150)
+        self.assertEqual(result["event"]["status"]["type"], "finished")
+
+    async def test_event_root_falls_back_to_normalized_row_when_no_snapshots(self) -> None:
+        """When no raw or final-snapshot payload exists but a normalized
+        ``event`` row does, the route must answer 200 instead of 404."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("normalized_event", 15994150): {
+                    "id": 15994150,
+                    "slug": "home-away",
+                    "tournament_id": 100,
+                    "unique_tournament_id": 17,
+                    "season_id": 76986,
+                    "home_team_id": 10,
+                    "away_team_id": 11,
+                    "venue_id": 5,
+                    "start_timestamp": 1713638400,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_event_root_payload(15994150)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["event"]["id"], 15994150)
+        self.assertEqual(result["event"]["slug"], "home-away")
+        self.assertEqual(result["event"]["homeTeam"]["id"], 10)
+        self.assertEqual(result["event"]["awayTeam"]["id"], 11)
+        self.assertEqual(result["event"]["season"]["id"], 76986)
+        self.assertEqual(result["event"]["tournament"]["id"], 100)
+        self.assertEqual(result["event"]["tournament"]["uniqueTournament"]["id"], 17)
+
+    async def test_event_root_returns_none_when_nothing_is_ingested(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(rows={})
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_event_root_payload(99999999)
+
+        self.assertIsNone(result)
+
+    async def test_team_root_falls_back_to_normalized_row(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("normalized_team", 42): {
+                    "id": 42,
+                    "slug": "real-madrid",
+                    "name": "Real Madrid",
+                    "short_name": "Real",
+                    "sport_id": 1,
+                    "category_id": 5,
+                    "country_alpha2": "ES",
+                    "manager_id": 101,
+                    "venue_id": 501,
+                    "tournament_id": 200,
+                    "primary_unique_tournament_id": 8,
+                    "parent_team_id": None,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_team_root_payload(42)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["team"]["id"], 42)
+        self.assertEqual(result["team"]["slug"], "real-madrid")
+        self.assertEqual(result["team"]["name"], "Real Madrid")
+        self.assertEqual(result["team"]["country"]["alpha2"], "ES")
+
+    async def test_player_root_falls_back_to_normalized_row(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("normalized_player", 288205): {
+                    "id": 288205,
+                    "slug": "k-m",
+                    "name": "K. Mbappé",
+                    "short_name": "K.M.",
+                    "team_id": 42,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_root_payload(288205)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["player"]["id"], 288205)
+        self.assertEqual(result["player"]["team"]["id"], 42)
+
+    async def test_manager_root_falls_back_to_normalized_row(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("normalized_manager", 9001): {
+                    "id": 9001,
+                    "slug": "c-a",
+                    "name": "C. Ancelotti",
+                    "short_name": "C.A.",
+                    "team_id": 42,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_manager_root_payload(9001)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["manager"]["id"], 9001)
+        self.assertEqual(result["manager"]["team"]["id"], 42)
+
+    async def test_unique_tournament_root_falls_back_to_normalized_row(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("normalized_unique_tournament", 17): {
+                    "id": 17,
+                    "slug": "laliga",
+                    "name": "LaLiga",
+                    "category_id": 5,
+                    "country_alpha2": "ES",
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_unique_tournament_root_payload(17)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["uniqueTournament"]["id"], 17)
+        self.assertEqual(result["uniqueTournament"]["slug"], "laliga")
+        self.assertEqual(result["uniqueTournament"]["category"]["id"], 5)
+
+    def test_synthesize_event_root_payload_handles_missing_optional_fields(self) -> None:
+        row = {
+            "id": 1,
+            "slug": None,
+            "tournament_id": None,
+            "unique_tournament_id": None,
+            "season_id": None,
+            "home_team_id": None,
+            "away_team_id": None,
+            "venue_id": None,
+            "start_timestamp": None,
+        }
+        payload = _synthesize_event_root_payload(row)
+        self.assertEqual(payload, {"event": {"id": 1}})
+
+    def test_synthesize_team_root_payload_handles_missing_optional_fields(self) -> None:
+        row = {
+            "id": 1,
+            "slug": None,
+            "name": "Solo",
+            "short_name": None,
+            "sport_id": None,
+            "category_id": None,
+            "country_alpha2": None,
+            "manager_id": None,
+            "venue_id": None,
+            "tournament_id": None,
+            "primary_unique_tournament_id": None,
+            "parent_team_id": None,
+        }
+        payload = _synthesize_team_root_payload(row)
+        self.assertEqual(payload, {"team": {"id": 1, "name": "Solo"}})
+
+    def test_synthesize_player_root_payload_without_team(self) -> None:
+        row = {"id": 1, "slug": None, "name": "X", "short_name": None, "team_id": None}
+        payload = _synthesize_player_root_payload(row)
+        self.assertEqual(payload, {"player": {"id": 1, "name": "X"}})
+
+    def test_synthesize_manager_root_payload_without_team(self) -> None:
+        row = {"id": 1, "slug": None, "name": "Y", "short_name": None, "team_id": None}
+        payload = _synthesize_manager_root_payload(row)
+        self.assertEqual(payload, {"manager": {"id": 1, "name": "Y"}})
+
+    def test_synthesize_unique_tournament_root_payload_minimal(self) -> None:
+        row = {"id": 1, "slug": None, "name": "Z", "category_id": None, "country_alpha2": None}
+        payload = _synthesize_unique_tournament_root_payload(row)
+        self.assertEqual(payload, {"uniqueTournament": {"id": 1, "name": "Z"}})
+
+
+class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):
+    """End-to-end dispatch: ensure ``_fetch_normalized_payload`` wires each
+    entity-root route to the correct fallback method without touching the
+    database."""
+
+    async def test_event_root_path_dispatches_to_event_root_fetcher(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        calls: list[tuple[str, int]] = []
+
+        async def fake_fetch(event_id: int) -> dict[str, int]:
+            calls.append(("event", event_id))
+            return {"event": {"id": event_id}}
+
+        application._fetch_event_root_payload = fake_fetch
+
+        result = match_route("/api/v1/event/15994150", application.routes)
+        assert result is not None
+        route, path_params = result
+        payload = await application._fetch_normalized_payload(
+            route,
+            "/api/v1/event/15994150",
+            "",
+            path_params,
+        )
+
+        self.assertEqual(payload, {"event": {"id": 15994150}})
+        self.assertEqual(calls, [("event", 15994150)])
+
+    async def test_team_root_path_dispatches_to_team_root_fetcher(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fake_fetch(team_id: int) -> dict[str, int]:
+            return {"team": {"id": team_id}}
+
+        application._fetch_team_root_payload = fake_fetch
+
+        result = match_route("/api/v1/team/42", application.routes)
+        assert result is not None
+        route, path_params = result
+        payload = await application._fetch_normalized_payload(
+            route,
+            "/api/v1/team/42",
+            "",
+            path_params,
+        )
+
+        self.assertEqual(payload, {"team": {"id": 42}})
+
+    async def test_player_root_path_dispatches_to_player_root_fetcher(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fake_fetch(player_id: int) -> dict[str, int]:
+            return {"player": {"id": player_id}}
+
+        application._fetch_player_root_payload = fake_fetch
+
+        result = match_route("/api/v1/player/288205", application.routes)
+        assert result is not None
+        route, path_params = result
+        payload = await application._fetch_normalized_payload(
+            route,
+            "/api/v1/player/288205",
+            "",
+            path_params,
+        )
+
+        self.assertEqual(payload, {"player": {"id": 288205}})
+
+    async def test_unique_tournament_root_path_dispatches_to_ut_fetcher(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fake_fetch(unique_tournament_id: int) -> dict[str, int]:
+            return {"uniqueTournament": {"id": unique_tournament_id}}
+
+        application._fetch_unique_tournament_root_payload = fake_fetch
+
+        result = match_route("/api/v1/unique-tournament/17", application.routes)
+        assert result is not None
+        route, path_params = result
+        payload = await application._fetch_normalized_payload(
+            route,
+            "/api/v1/unique-tournament/17",
+            "",
+            path_params,
+        )
+
+        self.assertEqual(payload, {"uniqueTournament": {"id": 17}})
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+def _make_fake_connector(connection):
+    async def _connect():
+        return connection
+
+    return _connect
+
+
+class _FakeFetchRowConnection:
+    """Stand-in for an asyncpg connection that maps ``fetchrow`` queries to
+    prepared rows by ``(kind, id)`` keys derived from the SQL shape.
+
+    This keeps the tests hermetic (no DB) while still exercising the real
+    ``_fetch_*_root_payload`` method bodies end-to-end.
+    """
+
+    def __init__(self, rows: dict):
+        self.rows = rows
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args):
+        kind = self._classify_query(query)
+        if kind is None or not args:
+            return None
+        key = (kind, int(args[0]))
+        row = self.rows.get(key)
+        if row is None:
+            return None
+        return row
+
+    async def close(self):
+        self.closed = True
+
+    @staticmethod
+    def _classify_query(query: str) -> str | None:
+        normalized = " ".join(query.split())
+        if "FROM event_terminal_state" in normalized:
+            return "final_payload"
+        if "FROM api_payload_snapshot" in normalized and "event_id" in normalized:
+            return "raw_event_snapshot"
+        if "FROM api_payload_snapshot" in normalized and "team_id" in normalized:
+            return "raw_team_snapshot"
+        if "FROM api_payload_snapshot" in normalized and "player_id" in normalized:
+            return "raw_player_snapshot"
+        if "FROM api_payload_snapshot" in normalized and "manager_id" in normalized:
+            return "raw_manager_snapshot"
+        if "FROM api_payload_snapshot" in normalized and "unique_tournament_id" in normalized:
+            return "raw_unique_tournament_snapshot"
+        if "FROM event " in (normalized + " ") or normalized.endswith("FROM event WHERE id = $1"):
+            return "normalized_event"
+        if "FROM team" in normalized:
+            return "normalized_team"
+        if "FROM player" in normalized:
+            return "normalized_player"
+        if "FROM manager" in normalized:
+            return "normalized_manager"
+        if "FROM unique_tournament" in normalized:
+            return "normalized_unique_tournament"
+        return None
 
 
 class _FakePendingQueue:
