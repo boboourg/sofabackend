@@ -137,7 +137,16 @@ def _read_proxy_urls(env: Mapping[str, str], *, proxy_env_key: str | None = None
     # exclusively so we never accidentally mix proxy pools.
     if proxy_env_key:
         joined = (env.get(proxy_env_key) or "").strip()
-        return [item.strip() for item in joined.split(",") if item.strip()]
+        values = [item.strip() for item in joined.split(",") if item.strip()]
+        # Also honour a companion singular variant when a "...PROXY_URLS" key is
+        # provided, so callers can set either plural or singular interchangeably
+        # (mirrors the default-mode behaviour below).
+        if proxy_env_key.endswith("_PROXY_URLS"):
+            singular_key = proxy_env_key[: -len("_PROXY_URLS")] + "_PROXY_URL"
+            singular = (env.get(singular_key) or "").strip()
+            if singular and singular not in values:
+                values.insert(0, singular)
+        return values
 
     # Default: read from the standard live/scheduled proxy variables.
     values = []
@@ -148,6 +157,46 @@ def _read_proxy_urls(env: Mapping[str, str], *, proxy_env_key: str | None = None
     if joined:
         values.extend(item.strip() for item in joined.split(",") if item.strip())
     return values
+
+
+STRUCTURE_PROXY_ENV_KEY = "SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS"
+
+
+def load_structure_runtime_config(
+    *,
+    env: Mapping[str, str] | None = None,
+    user_agent: str | None = None,
+    extra_headers: Mapping[str, str] | None = None,
+    max_attempts: int | None = None,
+    require_non_residential: bool = True,
+) -> RuntimeConfig:
+    """Build a RuntimeConfig that routes exclusively through the non-residential
+    (datacenter / static) proxy pool reserved for the structural-sync contour.
+
+    The contract: structural sync must NEVER borrow the residential / live pool.
+    We read only ``SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS`` (+ singular variant)
+    via ``proxy_env_key`` so the two pools are mechanically isolated, even when
+    a config refresh races with live workers.
+
+    When ``require_non_residential=True`` and no URLs are configured, this
+    function raises. This is intentional: structure-sync workers must fail-fast
+    rather than silently fall back to direct egress or to the residential pool.
+    """
+
+    resolved_env = env or _load_project_env()
+    config = load_runtime_config(
+        env=resolved_env,
+        proxy_env_key=STRUCTURE_PROXY_ENV_KEY,
+        user_agent=user_agent,
+        extra_headers=extra_headers,
+        max_attempts=max_attempts,
+    )
+    if require_non_residential and not config.proxy_endpoints:
+        raise RuntimeError(
+            "structure-sync contour requires a non-residential proxy pool; "
+            "set SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS (or SCHEMA_INSPECTOR_STRUCTURE_PROXY_URL)"
+        )
+    return config
 
 
 def _load_project_env() -> dict[str, str]:

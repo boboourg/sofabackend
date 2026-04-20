@@ -20,6 +20,7 @@ from ..queue.streams import (
     GROUP_HISTORICAL_TOURNAMENT,
     GROUP_LIVE_HOT,
     GROUP_LIVE_WARM,
+    GROUP_STRUCTURE_SYNC,
     HISTORICAL_CONSUMER_GROUPS,
     OPERATIONAL_CONSUMER_GROUPS,
     STREAM_DISCOVERY,
@@ -33,6 +34,8 @@ from ..queue.streams import (
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
     STREAM_MAINTENANCE,
+    STREAM_STRUCTURE_SYNC,
+    STRUCTURE_CONSUMER_GROUPS,
     RedisStreamQueue,
     StreamEntry,
 )
@@ -48,6 +51,7 @@ from .backpressure_config import (
     LIVE_HOT_MAX_LAG,
     LIVE_WARM_MAX_LAG,
     SCHEDULED_DISCOVERY_MAX_LAG,
+    STRUCTURE_SYNC_MAX_LAG,
 )
 from .freshness_policy import FreshnessPolicy
 from .housekeeping import HousekeepingConfig, HousekeepingLoop
@@ -58,6 +62,12 @@ from .historical_tournament_planner import (
     HistoricalTournamentPlannerDaemon,
     HistoricalTournamentPlanningTarget,
 )
+from .structure_planner import (
+    StructureCursorStore,
+    StructurePlannerDaemon,
+    StructurePlanningTarget,
+    load_managed_tournaments,
+)
 from .job_audit_logger import JobAuditLogger
 from .planner_daemon import PlannerDaemon, ScheduledPlanningTarget
 from ..workers._stream_jobs import decode_stream_payload
@@ -67,6 +77,7 @@ from ..workers.historical_archive_worker import HistoricalEnrichmentWorker, Hist
 from ..workers.live_worker_service import LiveWorkerService
 from ..workers.maintenance_worker import MaintenanceWorker
 from ..workers.maintenance_worker import ReclaimTarget
+from ..workers.structure_worker import StructureSyncWorker
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +147,7 @@ class ServiceApp:
         self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
+        self.structure_cursor_store = StructureCursorStore(self.app.redis_backend)
         database = getattr(self.app, "database", None)
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
@@ -145,6 +157,10 @@ class ServiceApp:
 
     def ensure_historical_consumer_groups(self) -> None:
         for stream, group in HISTORICAL_CONSUMER_GROUPS:
+            self.stream_queue.ensure_group(stream, group)
+
+    def ensure_structure_consumer_groups(self) -> None:
+        for stream, group in STRUCTURE_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
 
     def build_planner_daemon(
@@ -289,6 +305,56 @@ class ServiceApp:
                     ),
                 ),
             ),
+        )
+
+    def build_structure_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        loop_interval_seconds: float = 30.0,
+        targets: tuple[StructurePlanningTarget, ...] | None = None,
+    ) -> StructurePlannerDaemon:
+        """Build a StructurePlannerDaemon.
+
+        ``targets`` lets callers inject an explicit list (used by tests and by
+        operators who want a hot-reloadable config). If None, we compute
+        targets from env + profile at construction time.
+        """
+
+        if targets is None:
+            normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+            computed_targets = load_managed_tournaments(sport_slugs=normalized_sports)
+        else:
+            computed_targets = tuple(targets)
+
+        return StructurePlannerDaemon(
+            queue=self.stream_queue,
+            cursor_store=self.structure_cursor_store,
+            targets=computed_targets,
+            loop_interval_s=loop_interval_seconds,
+            backpressure=QueueBackpressure(
+                queue=self.stream_queue,
+                limits=(
+                    BackpressureLimit(
+                        stream=STREAM_STRUCTURE_SYNC,
+                        group=GROUP_STRUCTURE_SYNC,
+                        max_lag=STRUCTURE_SYNC_MAX_LAG,
+                    ),
+                ),
+            ),
+        )
+
+    def build_structure_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> StructureSyncWorker:
+        self.ensure_structure_consumer_groups()
+        return StructureSyncWorker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
@@ -614,6 +680,25 @@ class ServiceApp:
 
     async def run_historical_tournament_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_historical_tournament_worker(consumer_name=consumer_name, block_ms=block_ms)
+        await worker.run_forever()
+
+    async def run_structure_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        loop_interval_seconds: float = 30.0,
+        targets: tuple[StructurePlanningTarget, ...] | None = None,
+    ) -> None:
+        self.ensure_structure_consumer_groups()
+        daemon = self.build_structure_planner_daemon(
+            sport_slugs=sport_slugs,
+            loop_interval_seconds=loop_interval_seconds,
+            targets=targets,
+        )
+        await daemon.run_forever()
+
+    async def run_structure_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        worker = self.build_structure_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
     async def run_historical_enrichment_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:

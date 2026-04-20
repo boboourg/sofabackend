@@ -30,12 +30,15 @@ from .pipeline.pilot_orchestrator import PilotOrchestrator
 from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue
-from .runtime import load_runtime_config
+from .runtime import load_runtime_config, load_structure_runtime_config
 from .services.historical_archive_service import (
     run_historical_tournament_archive as run_historical_tournament_archive_service,
 )
 from .services.historical_archive_service import (
     run_historical_tournament_enrichment as run_historical_tournament_enrichment_service,
+)
+from .services.structure_sync_service import (
+    run_structure_sync_for_tournament as run_structure_sync_service,
 )
 from .services.service_app import ServiceApp
 from .sofascore_client import SofascoreClient
@@ -189,6 +192,11 @@ class HybridApp:
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
         self.capability_rollup: dict[str, str] = {}
         self._seeded_endpoint_registry_sports: set[str] = set()
+        # Structural sync contour uses a separate non-residential proxy pool.
+        # Both are lazily initialised (so unrelated CLI flows don't require
+        # SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS to be set).
+        self._structure_runtime_config = None
+        self._structure_transport = None
 
         client = SofascoreClient(runtime_config, transport=self.transport)
         self.event_list_job = EventListIngestJob(
@@ -197,8 +205,22 @@ class HybridApp:
             database,
         )
 
+    def ensure_structure_runtime(self):
+        """Lazily build a non-residential RuntimeConfig + transport for the
+        structural-sync contour. Raises if the operator forgot to configure
+        ``SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS`` — structure-sync must never
+        silently borrow the live/residential pool.
+        """
+
+        if self._structure_runtime_config is None:
+            self._structure_runtime_config = load_structure_runtime_config()
+            self._structure_transport = InspectorTransport(self._structure_runtime_config)
+        return self._structure_runtime_config, self._structure_transport
+
     async def close(self) -> None:
         await self.transport.close()
+        if self._structure_transport is not None:
+            await self._structure_transport.close()
         close_backend = getattr(self.redis_backend, "close", None)
         if callable(close_backend):
             maybe_awaitable = close_backend()
@@ -429,6 +451,27 @@ class HybridApp:
             unique_tournament_id=unique_tournament_id,
             sport_slug=sport_slug,
             season_ids=season_ids,
+        )
+
+    async def run_structure_sync_for_tournament(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+    ):
+        """Entry point used by ``StructureSyncWorker``.
+
+        Always runs through the non-residential proxy pool — that's enforced
+        inside ``ensure_structure_runtime`` (fail-fast if the env key is missing).
+        """
+
+        runtime_config, transport = self.ensure_structure_runtime()
+        return await run_structure_sync_service(
+            self,
+            unique_tournament_id=int(unique_tournament_id),
+            sport_slug=sport_slug,
+            runtime_config=runtime_config,
+            transport=transport,
         )
 
     async def select_event_ids(self, *, limit: int | None, offset: int, sport_slug: str | None) -> tuple[int, ...]:
@@ -759,6 +802,13 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "structure-planner-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_structure_planner_daemon(
+                    sport_slugs=tuple(args.sport_slug or ()),
+                    loop_interval_seconds=args.loop_interval_seconds,
+                )
+                return 0
             if args.command == "worker-discovery":
                 service_app = ServiceApp(app)
                 await service_app.run_discovery_worker(
@@ -786,6 +836,13 @@ async def _dispatch(args) -> int:
             if args.command == "worker-historical-tournament":
                 service_app = ServiceApp(app)
                 await service_app.run_historical_tournament_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-structure-sync":
+                service_app = ServiceApp(app)
+                await service_app.run_structure_worker(
                     consumer_name=args.consumer_name,
                     block_ms=args.block_ms,
                 )
@@ -923,6 +980,28 @@ def _build_parser() -> argparse.ArgumentParser:
     historical_tournament_planner_daemon.add_argument("--tournaments-per-tick", type=int, default=10, help="Maximum archival tournaments to publish per sport on each planner tick.")
     historical_tournament_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=10.0, help="Daemon tick loop interval.")
 
+    structure_planner_daemon = subparsers.add_parser(
+        "structure-planner-daemon",
+        help="Run the skeleton-only tournament/season structure planner loop (non-residential proxies).",
+    )
+    structure_planner_daemon.add_argument(
+        "--sport-slug",
+        action="append",
+        default=[],
+        help="Optional repeatable sport slug. Defaults to all sports with structure_sync_mode != disabled.",
+    )
+    structure_planner_daemon.add_argument(
+        "--consumer-name",
+        default="structure-planner-1",
+        help="Opaque planner instance label for logs and tmux naming.",
+    )
+    structure_planner_daemon.add_argument(
+        "--loop-interval-seconds",
+        type=float,
+        default=30.0,
+        help="Daemon tick loop interval (default: 30s).",
+    )
+
     worker_discovery = subparsers.add_parser("worker-discovery", help="Run the discovery consumer group loop.")
     worker_discovery.add_argument("--consumer-name", default="worker-discovery-1", help="Redis consumer name for the discovery worker.")
     worker_discovery.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
@@ -938,6 +1017,22 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_historical_tournament = subparsers.add_parser("worker-historical-tournament", help="Run the archival tournament/season consumer group loop.")
     worker_historical_tournament.add_argument("--consumer-name", default="worker-historical-tournament-1", help="Redis consumer name for the archival tournament worker.")
     worker_historical_tournament.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_structure_sync = subparsers.add_parser(
+        "worker-structure-sync",
+        help="Run the skeleton-only structural-sync consumer group loop (non-residential proxies).",
+    )
+    worker_structure_sync.add_argument(
+        "--consumer-name",
+        default="worker-structure-sync-1",
+        help="Redis consumer name for the structure-sync worker.",
+    )
+    worker_structure_sync.add_argument(
+        "--block-ms",
+        type=int,
+        default=5000,
+        help="XREADGROUP block timeout in milliseconds.",
+    )
 
     worker_historical_enrichment = subparsers.add_parser("worker-historical-enrichment", help="Run the archival enrichment consumer group loop.")
     worker_historical_enrichment.add_argument("--consumer-name", default="worker-historical-enrichment-1", help="Redis consumer name for the archival enrichment worker.")

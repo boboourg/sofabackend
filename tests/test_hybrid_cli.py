@@ -113,6 +113,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         historical_tournament = parser.parse_args(
             ["worker-historical-tournament", "--consumer-name", "historical-tournament-1"]
         )
+        structure_planner = parser.parse_args(["structure-planner-daemon", "--sport-slug", "football"])
+        structure_worker = parser.parse_args(["worker-structure-sync", "--consumer-name", "structure-1"])
         historical_enrichment = parser.parse_args(
             ["worker-historical-enrichment", "--consumer-name", "historical-enrichment-1"]
         )
@@ -139,6 +141,9 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_discovery_planner.command, "live-discovery-planner-daemon")
         self.assertEqual(live_discovery_planner.sport_slug, ["football"])
         self.assertEqual(historical_tournament.command, "worker-historical-tournament")
+        self.assertEqual(structure_planner.command, "structure-planner-daemon")
+        self.assertEqual(structure_planner.sport_slug, ["football"])
+        self.assertEqual(structure_worker.command, "worker-structure-sync")
         self.assertEqual(historical_enrichment.command, "worker-historical-enrichment")
         self.assertEqual(live_discovery.command, "worker-live-discovery")
         self.assertEqual(hydrate.command, "worker-hydrate")
@@ -756,6 +761,79 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_dispatch_structure_service_commands_run_service_loops(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            planner_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="structure-planner-daemon",
+                    sport_slug=["football"],
+                    consumer_name="structure-planner-1",
+                    loop_interval_seconds=11.0,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+            worker_exit = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="worker-structure-sync",
+                    consumer_name="structure-worker-a",
+                    block_ms=2600,
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(planner_exit, 0)
+        self.assertEqual(worker_exit, 0)
+        self.assertEqual(
+            fake_service_app.calls,
+            [
+                ("structure_planner", ("football",), 11.0),
+                ("structure_worker", "structure-worker-a", 2600),
+            ],
+        )
+
     async def test_dispatch_worker_live_and_maintenance_run_service_loops(self) -> None:
         import schema_inspector.cli as hybrid_cli
 
@@ -1314,6 +1392,19 @@ class _FakeServiceApp:
 
     async def run_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int) -> None:
         self.calls.append(("historical_maintenance", consumer_name, block_ms))
+
+    async def run_structure_planner_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...],
+        loop_interval_seconds: float,
+        targets=None,
+    ) -> None:
+        del targets
+        self.calls.append(("structure_planner", sport_slugs, loop_interval_seconds))
+
+    async def run_structure_worker(self, *, consumer_name: str, block_ms: int) -> None:
+        self.calls.append(("structure_worker", consumer_name, block_ms))
 
 
 class _FakeAsyncpgDatabaseContext:

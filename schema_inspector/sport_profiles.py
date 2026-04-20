@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+StructureSyncMode = Literal["auto", "rounds", "calendar", "disabled"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,21 @@ class SportProfile:
     use_scheduled_tournaments: bool = False
     discovery_category_seed_ids: tuple[int, ...] = ()
     include_categories_all_discovery: bool = False
+    # Structural sync contour (skeleton-only tournament/season/event scaffolding).
+    # Modes:
+    #   "auto"     — probe has_rounds from CompetitionBundle; fall back to calendar if unknown
+    #   "rounds"   — strictly round-based (EPL, NBA regular season, league formats)
+    #   "calendar" — strictly calendar-based (tennis, esports, table-tennis ATP-style)
+    #   "disabled" — skip this sport in the structure planner
+    structure_sync_mode: StructureSyncMode = "auto"
+    # Per-sport static list of managed tournaments (can be overridden by env/JSON at runtime).
+    managed_unique_tournament_ids: tuple[int, ...] = ()
+    # Refresh cadence: how often a tournament should be re-synced once bootstrap is done.
+    structure_refresh_interval_seconds: float = 6 * 3600.0
+    # Calendar mode: how many months forward to expand via calendar/scheduled endpoints.
+    structure_calendar_forward_months: int = 3
+    # Rounds mode: if a season lacks round metadata, optionally fall back to calendar.
+    structure_rounds_fallback_calendar: bool = True
 
 
 SUPPORTED_SPORT_SLUGS = (
@@ -76,6 +94,8 @@ FOOTBALL_PROFILE = SportProfile(
     include_trending_top_players=True,
     use_daily_categories_seed=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="rounds",
+    structure_refresh_interval_seconds=6 * 3600.0,
 )
 
 
@@ -98,6 +118,7 @@ BASKETBALL_PROFILE = SportProfile(
     include_trending_top_players=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -123,6 +144,9 @@ TENNIS_PROFILE = SportProfile(
     use_scheduled_tournaments=True,
     discovery_category_seed_ids=(-101,),
     include_categories_all_discovery=False,
+    structure_sync_mode="calendar",
+    structure_calendar_forward_months=2,
+    structure_refresh_interval_seconds=4 * 3600.0,
 )
 
 
@@ -144,6 +168,7 @@ VOLLEYBALL_PROFILE = SportProfile(
     use_daily_categories_seed=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -163,6 +188,7 @@ BASEBALL_PROFILE = SportProfile(
     include_team_events=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="calendar",
 )
 
 
@@ -183,6 +209,7 @@ AMERICAN_FOOTBALL_PROFILE = SportProfile(
     include_team_events=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="rounds",
 )
 
 
@@ -204,6 +231,7 @@ HANDBALL_PROFILE = SportProfile(
     use_daily_categories_seed=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -228,6 +256,8 @@ TABLE_TENNIS_PROFILE = SportProfile(
     include_trending_top_players=False,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=False,
+    structure_sync_mode="calendar",
+    structure_calendar_forward_months=2,
 )
 
 
@@ -248,6 +278,7 @@ ICE_HOCKEY_PROFILE = SportProfile(
     include_team_events=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -269,6 +300,7 @@ RUGBY_PROFILE = SportProfile(
     use_daily_categories_seed=True,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -292,6 +324,7 @@ CRICKET_PROFILE = SportProfile(
     include_team_events=False,
     include_trending_top_players=False,
     use_scheduled_tournaments=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -315,6 +348,7 @@ FUTSAL_PROFILE = SportProfile(
     include_team_events=True,
     use_daily_categories_seed=True,
     include_categories_all_discovery=True,
+    structure_sync_mode="rounds",
 )
 
 
@@ -339,6 +373,8 @@ ESPORTS_PROFILE = SportProfile(
     include_trending_top_players=False,
     use_scheduled_tournaments=True,
     include_categories_all_discovery=False,
+    structure_sync_mode="calendar",
+    structure_calendar_forward_months=1,
 )
 
 
@@ -360,6 +396,7 @@ GENERIC_PROFILE = SportProfile(
     include_team_events=True,
     include_trending_top_players=False,
     use_scheduled_tournaments=True,
+    structure_sync_mode="auto",
 )
 
 
@@ -412,4 +449,9 @@ def resolve_sport_profile(sport_slug: str) -> SportProfile:
         use_scheduled_tournaments=GENERIC_PROFILE.use_scheduled_tournaments,
         discovery_category_seed_ids=GENERIC_PROFILE.discovery_category_seed_ids,
         include_categories_all_discovery=GENERIC_PROFILE.include_categories_all_discovery,
+        structure_sync_mode=GENERIC_PROFILE.structure_sync_mode,
+        managed_unique_tournament_ids=GENERIC_PROFILE.managed_unique_tournament_ids,
+        structure_refresh_interval_seconds=GENERIC_PROFILE.structure_refresh_interval_seconds,
+        structure_calendar_forward_months=GENERIC_PROFILE.structure_calendar_forward_months,
+        structure_rounds_fallback_calendar=GENERIC_PROFILE.structure_rounds_fallback_calendar,
     )
