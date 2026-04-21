@@ -104,6 +104,70 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.coverage_summary.surface_count, 4)
         self.assertAlmostEqual(report.coverage_summary.avg_completeness_ratio, 0.625)
 
+    async def test_collect_health_report_includes_coverage_alert_when_stale_scopes_exist(self) -> None:
+        from schema_inspector.ops.health import collect_health_report
+
+        report = await collect_health_report(
+            sql_executor=_FakeSqlExecutor(
+                {
+                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
+                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                },
+                rows_by_query={
+                    "health_coverage": [
+                        {
+                            "tracked_scope_count": 11,
+                            "fresh_scope_count": 7,
+                            "stale_scope_count": 2,
+                            "other_scope_count": 2,
+                            "source_count": 2,
+                            "sport_count": 3,
+                            "surface_count": 4,
+                            "avg_completeness_ratio": 0.625,
+                        }
+                    ]
+                },
+            ),
+            live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({})),
+            redis_backend=_FakeRedis(),
+        )
+
+        self.assertEqual(report.coverage_alert_summary.flag_count, 1)
+        self.assertEqual(report.coverage_alert_summary.flags[0].severity, "warning")
+        self.assertEqual(report.coverage_alert_summary.flags[0].reason, "stale_coverage_scopes_present")
+        self.assertEqual(report.coverage_alert_summary.flags[0].stale_scope_count, 2)
+
+    async def test_collect_health_report_keeps_coverage_alerts_empty_when_no_stale_scopes_exist(self) -> None:
+        from schema_inspector.ops.health import collect_health_report
+
+        report = await collect_health_report(
+            sql_executor=_FakeSqlExecutor(
+                {
+                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
+                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                },
+                rows_by_query={
+                    "health_coverage": [
+                        {
+                            "tracked_scope_count": 11,
+                            "fresh_scope_count": 11,
+                            "stale_scope_count": 0,
+                            "other_scope_count": 0,
+                            "source_count": 2,
+                            "sport_count": 3,
+                            "surface_count": 4,
+                            "avg_completeness_ratio": 1.0,
+                        }
+                    ]
+                },
+            ),
+            live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({})),
+            redis_backend=_FakeRedis(),
+        )
+
+        self.assertEqual(report.coverage_alert_summary.flag_count, 0)
+        self.assertEqual(report.coverage_alert_summary.flags, ())
+
     def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -431,6 +495,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("coverage_tracked=12", output)
         self.assertIn("coverage_stale=3", output)
         self.assertIn("drift_flags=1", output)
+        self.assertIn("coverage_alerts=1", output)
 
     async def test_dispatch_audit_db_prints_compact_report(self) -> None:
         import schema_inspector.cli as hybrid_cli

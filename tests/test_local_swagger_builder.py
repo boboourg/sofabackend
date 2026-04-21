@@ -58,6 +58,8 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("/ops/coverage/summary", document["paths"])
         self.assertIn("OperationalHealth", document["components"]["schemas"])
         self.assertIn("CoverageRollupSummary", document["components"]["schemas"])
+        self.assertIn("CoverageAlert", document["components"]["schemas"])
+        self.assertIn("CoverageAlertSummary", document["components"]["schemas"])
         self.assertIn("DriftSummary", document["components"]["schemas"])
         self.assertIn("DriftFlag", document["components"]["schemas"])
         self.assertIn("QueueSummary", document["components"]["schemas"])
@@ -67,6 +69,7 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         operational_health = document["components"]["schemas"]["OperationalHealth"]["properties"]
         self.assertEqual(operational_health["drift_summary"]["$ref"], "#/components/schemas/DriftSummary")
         self.assertEqual(operational_health["coverage_summary"]["$ref"], "#/components/schemas/CoverageRollupSummary")
+        self.assertEqual(operational_health["coverage_alert_summary"]["$ref"], "#/components/schemas/CoverageAlertSummary")
 
     def test_document_contains_all_supported_sports_and_special_routes(self) -> None:
         summary = SwaggerDataSummary(

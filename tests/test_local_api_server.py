@@ -209,8 +209,15 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_fetch_ops_health_payload_keeps_drift_and_coverage_summaries_in_payload(self) -> None:
-        from schema_inspector.ops.health import CoverageSummary, DriftFlag, DriftSummary, HealthReport
+    async def test_fetch_ops_health_payload_keeps_drift_coverage_and_alert_summaries_in_payload(self) -> None:
+        from schema_inspector.ops.health import (
+            CoverageAlert,
+            CoverageAlertSummary,
+            CoverageSummary,
+            DriftFlag,
+            DriftSummary,
+            HealthReport,
+        )
 
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeCoverageConnection([])
@@ -251,6 +258,16 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
                     surface_count=4,
                     avg_completeness_ratio=0.625,
                 ),
+                coverage_alert_summary=CoverageAlertSummary(
+                    flag_count=1,
+                    flags=(
+                        CoverageAlert(
+                            severity="warning",
+                            reason="stale_coverage_scopes_present",
+                            stale_scope_count=3,
+                        ),
+                    ),
+                ),
             )
 
         import schema_inspector.local_api_server as local_api_server
@@ -268,6 +285,9 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["coverage_summary"]["tracked_scope_count"], 12)
         self.assertEqual(payload["coverage_summary"]["stale_scope_count"], 3)
         self.assertAlmostEqual(payload["coverage_summary"]["avg_completeness_ratio"], 0.625)
+        self.assertEqual(payload["coverage_alert_summary"]["flag_count"], 1)
+        self.assertEqual(payload["coverage_alert_summary"]["flags"][0]["severity"], "warning")
+        self.assertEqual(payload["coverage_alert_summary"]["flags"][0]["stale_scope_count"], 3)
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):

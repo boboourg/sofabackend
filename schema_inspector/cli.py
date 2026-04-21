@@ -742,6 +742,12 @@ async def _dispatch(args) -> int:
                 return 0
             if args.command == "health":
                 report = await app.collect_health()
+                coverage_alert_summary = getattr(report, "coverage_alert_summary", None)
+                coverage_alert_count = int(
+                    getattr(coverage_alert_summary, "flag_count", 0)
+                    if coverage_alert_summary is not None
+                    else int(getattr(report.coverage_summary, "stale_scope_count", 0) > 0)
+                )
                 print(
                     "health "
                     f"db_ok={int(report.database_ok)} "
@@ -754,6 +760,7 @@ async def _dispatch(args) -> int:
                     f"live_cold={report.live_cold_count} "
                     f"coverage_tracked={report.coverage_summary.tracked_scope_count} "
                     f"coverage_stale={report.coverage_summary.stale_scope_count} "
+                    f"coverage_alerts={coverage_alert_count} "
                     f"drift_flags={report.drift_summary.flag_count}"
                 )
                 return 0

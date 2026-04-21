@@ -31,6 +31,19 @@ class CoverageSummary:
 
 
 @dataclass(frozen=True)
+class CoverageAlert:
+    severity: str
+    reason: str
+    stale_scope_count: int
+
+
+@dataclass(frozen=True)
+class CoverageAlertSummary:
+    flag_count: int = 0
+    flags: tuple[CoverageAlert, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class HealthReport:
     snapshot_count: int
     capability_rollup_count: int
@@ -42,6 +55,7 @@ class HealthReport:
     redis_backend_kind: str
     drift_summary: DriftSummary = DriftSummary()
     coverage_summary: CoverageSummary = CoverageSummary()
+    coverage_alert_summary: CoverageAlertSummary = CoverageAlertSummary()
 
 
 async def collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None) -> HealthReport:
@@ -49,6 +63,7 @@ async def collect_health_report(*, sql_executor, live_state_store=None, redis_ba
     capability_rollup_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM endpoint_capability_rollup"))
     drift_summary = await _fetch_drift_summary(sql_executor)
     coverage_summary = await _fetch_coverage_summary(sql_executor)
+    coverage_alert_summary = _build_coverage_alert_summary(coverage_summary)
     return HealthReport(
         snapshot_count=snapshot_count,
         capability_rollup_count=capability_rollup_count,
@@ -60,6 +75,7 @@ async def collect_health_report(*, sql_executor, live_state_store=None, redis_ba
         redis_backend_kind=_backend_kind(redis_backend),
         drift_summary=drift_summary,
         coverage_summary=coverage_summary,
+        coverage_alert_summary=coverage_alert_summary,
     )
 
 
@@ -185,3 +201,17 @@ async def _fetch_coverage_summary(sql_executor) -> CoverageSummary:
         surface_count=int(row.get("surface_count") or 0),
         avg_completeness_ratio=float(row.get("avg_completeness_ratio") or 0.0),
     )
+
+
+def _build_coverage_alert_summary(coverage_summary: CoverageSummary) -> CoverageAlertSummary:
+    stale_scope_count = int(coverage_summary.stale_scope_count)
+    if stale_scope_count <= 0:
+        return CoverageAlertSummary()
+    flags = (
+        CoverageAlert(
+            severity="warning",
+            reason="stale_coverage_scopes_present",
+            stale_scope_count=stale_scope_count,
+        ),
+    )
+    return CoverageAlertSummary(flag_count=len(flags), flags=flags)

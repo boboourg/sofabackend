@@ -1908,6 +1908,7 @@ def _build_schemas() -> dict[str, Any]:
                     "redis_backend_kind": {"type": "string"},
                     "drift_summary": _ref("DriftSummary"),
                     "coverage_summary": _ref("CoverageRollupSummary"),
+                    "coverage_alert_summary": _ref("CoverageAlertSummary"),
                 }
             ),
             "DriftFlag": _obj(
@@ -1933,6 +1934,19 @@ def _build_schemas() -> dict[str, Any]:
                     "sport_count": _int64(),
                     "surface_count": _int64(),
                     "avg_completeness_ratio": {"type": "number"},
+                }
+            ),
+            "CoverageAlert": _obj(
+                {
+                    "severity": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "stale_scope_count": _int64(),
+                }
+            ),
+            "CoverageAlertSummary": _obj(
+                {
+                    "flag_count": _int64(),
+                    "flags": _array(_ref("CoverageAlert")),
                 }
             ),
             "SnapshotSummary": _obj(
