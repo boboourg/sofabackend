@@ -6,12 +6,9 @@ import argparse
 import asyncio
 import sys
 
-from .competition_job import CompetitionIngestJob
-from .competition_parser import CompetitionParser
-from .competition_repository import CompetitionRepository
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -54,10 +51,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = CompetitionParser(client)
-        repository = CompetitionRepository()
-        job = CompetitionIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        job = adapter.build_competition_job(database)
         result = await job.run(
             args.unique_tournament_id,
             season_id=args.season_id,
