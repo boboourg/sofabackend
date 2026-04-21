@@ -8,11 +8,9 @@ import sys
 
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
 from .statistics_backfill_job import StatisticsBackfillJob
-from .statistics_job import StatisticsIngestJob
-from .statistics_parser import StatisticsParser, StatisticsQuery
-from .statistics_repository import StatisticsRepository
+from .statistics_parser import StatisticsQuery
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -81,10 +79,11 @@ async def _run(args: argparse.Namespace) -> int:
         queries = None
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = StatisticsParser(client)
-        repository = StatisticsRepository()
-        ingest_job = StatisticsIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        ingest_job = adapter.build_statistics_job(database)
         backfill_job = StatisticsBackfillJob(ingest_job, database)
         result = await backfill_job.run(
             season_limit=args.season_limit,
