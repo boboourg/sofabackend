@@ -239,6 +239,50 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.entities_run_kwargs["team_request_limit"], expected_budget.team_request_limit)
         _LAST_FAKE_APP = None
 
+    async def test_enrichment_records_stage_audit_for_event_detail_and_entities(self) -> None:
+        from schema_inspector.services.historical_archive_service import (
+            run_historical_tournament_enrichment,
+        )
+
+        fake_adapter = _FakeHistoricalSourceAdapter()
+        app = _FakeApp()
+        app.stage_audit_logger = _FakeStageAuditLogger()
+
+        with (
+            patch(
+                "schema_inspector.services.historical_archive_service.build_source_adapter",
+                create=True,
+                return_value=fake_adapter,
+            ),
+            patch(
+                "schema_inspector.services.historical_archive_service.EventDetailBackfillJob",
+                new=_FakeEventDetailBackfillJob,
+            ),
+            patch(
+                "schema_inspector.services.historical_archive_service.EntitiesBackfillJob",
+                new=_FakeEntitiesBackfillJob,
+            ),
+        ):
+            global _LAST_FAKE_APP
+            _LAST_FAKE_APP = app
+            await run_historical_tournament_enrichment(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+            )
+
+        stage_names = [item["stage_name"] for item in app.stage_audit_logger.calls]
+        self.assertEqual(
+            stage_names,
+            [
+                "historical.enrichment.event_detail",
+                "historical.enrichment.entities",
+            ],
+        )
+        self.assertEqual(app.stage_audit_logger.calls[0]["meta"]["unique_tournament_id"], 17)
+        self.assertEqual(app.stage_audit_logger.calls[1]["meta"]["sport_slug"], "football")
+        _LAST_FAKE_APP = None
+
     async def test_enrichment_surfaces_unsupported_adapter_error(self) -> None:
         from schema_inspector.services.historical_archive_service import (
             run_historical_tournament_enrichment,
@@ -309,6 +353,7 @@ class _FakeApp:
         self.entities_run_kwargs: dict[str, object] = {}
         self.event_detail_backfill_job = None
         self.entities_backfill_job = None
+        self.stage_audit_logger = None
 
 
 class _FakeEventDetailBackfillJob:
@@ -333,6 +378,27 @@ class _FakeEntitiesBackfillJob:
             team_ids=(2,),
             ingest=SimpleNamespace(written=SimpleNamespace(payload_snapshot_rows=4)),
         )
+
+
+class _FakeStageAuditLogger:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    class _Scope:
+        def __init__(self, owner, payload: dict[str, object]) -> None:
+            self.owner = owner
+            self.payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            self.owner.calls.append(dict(self.payload))
+            return False
+
+    def stage(self, **payload):
+        return self._Scope(self, payload)
 
 
 class _FakeHistoricalSourceAdapter:

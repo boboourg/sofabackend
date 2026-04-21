@@ -98,6 +98,9 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(raw_repository.snapshots), 1)
         self.assertEqual(len(raw_repository.snapshot_heads), 1)
         self.assertEqual(transport.calls[0][2], 12.5)
+        self.assertEqual(raw_repository.request_logs[0].payload_bytes, len(b'{"event":{"id":1,"slug":"match"}}'))
+        self.assertEqual(raw_repository.request_logs[0].attempts_json[0]["proxy_name"], "proxy_1")
+        self.assertIsNone(raw_repository.request_logs[0].error_message)
 
     async def test_executor_can_defer_raw_writes_and_collect_prefetched_record(self) -> None:
         transport = _FakeTransport(
@@ -231,6 +234,38 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(raw_repository.request_logs), 1)
         self.assertEqual(len(raw_repository.snapshots), 1)
         self.assertEqual(len(raw_repository.snapshot_heads), 0)
+        self.assertEqual(raw_repository.request_logs[0].attempts_json[0]["challenge_reason"], "bot_challenge")
+        self.assertEqual(raw_repository.request_logs[0].payload_bytes, len(b"<html>captcha</html>"))
+
+    async def test_executor_writes_network_error_message_into_request_log(self) -> None:
+        class _FailingTransport:
+            async def fetch(self, url: str, *, headers=None, timeout: float = 20.0):
+                del url, headers, timeout
+                raise TimeoutError("transport timed out")
+
+        raw_repository = _FakeRawRepository()
+        executor = FetchExecutor(
+            transport=_FailingTransport(),
+            raw_repository=raw_repository,
+            sql_executor=object(),
+        )
+
+        outcome = await executor.execute(
+            FetchTask(
+                trace_id="trace-timeout",
+                job_id="job-timeout",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}",
+                source_url="https://www.sofascore.com/api/v1/event/77",
+                timeout_profile="standard_json",
+                fetch_reason="hydrate_event_root",
+            )
+        )
+
+        self.assertEqual(outcome.classification, "network_error")
+        self.assertEqual(len(raw_repository.request_logs), 1)
+        self.assertEqual(raw_repository.request_logs[0].error_message, "transport timed out")
+        self.assertIsNone(raw_repository.request_logs[0].attempts_json)
 
 
 if __name__ == "__main__":

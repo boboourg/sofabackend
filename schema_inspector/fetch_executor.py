@@ -100,6 +100,9 @@ class FetchExecutor:
                 started_at=started_at,
                 finished_at=finished_at,
                 latency_ms=latency_ms,
+                attempts_json=None,
+                payload_bytes=None,
+                error_message=str(exc),
             )
             outcome = FetchOutcomeEnvelope(
                 trace_id=task.trace_id,
@@ -153,6 +156,9 @@ class FetchExecutor:
             started_at=started_at,
             finished_at=finished_at,
             latency_ms=latency_ms,
+            attempts_json=_attempts_json(transport_result.attempts),
+            payload_bytes=len(transport_result.body_bytes),
+            error_message=None,
         )
 
         payload_hash = hashlib.sha256(transport_result.body_bytes).hexdigest() if transport_result.body_bytes else None
@@ -271,3 +277,18 @@ def _scope_key(task: FetchTask) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _attempts_json(attempts: tuple[TransportAttempt, ...]) -> list[dict[str, object]] | None:
+    if not attempts:
+        return None
+    return [
+        {
+            "attempt_number": int(item.attempt_number),
+            "proxy_name": item.proxy_name,
+            "status_code": item.status_code,
+            "error": item.error,
+            "challenge_reason": item.challenge_reason,
+        }
+        for item in attempts
+    ]

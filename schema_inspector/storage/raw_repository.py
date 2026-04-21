@@ -45,6 +45,9 @@ class ApiRequestLogRecord:
     started_at: str
     finished_at: str | None
     latency_ms: int | None
+    attempts_json: object | None = None
+    payload_bytes: int | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -185,11 +188,15 @@ class RawRepository:
                 challenge_reason,
                 started_at,
                 finished_at,
-                latency_ms
+                latency_ms,
+                attempts_json,
+                payload_bytes,
+                error_message
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
-                $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15, $16
+                $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15, $16,
+                $17::jsonb, $18, $19
             )
             """,
             record.trace_id,
@@ -208,6 +215,9 @@ class RawRepository:
             coerce_timestamptz(record.started_at),
             coerce_timestamptz(record.finished_at),
             record.latency_ms,
+            _jsonb(record.attempts_json),
+            record.payload_bytes,
+            record.error_message,
         )
 
     async def insert_payload_snapshot(self, executor: SqlExecutor, record: PayloadSnapshotRecord) -> None:

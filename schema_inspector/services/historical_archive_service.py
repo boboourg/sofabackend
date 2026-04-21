@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from ..default_tournaments_pipeline_cli import _run_tournament_worker
@@ -91,7 +92,6 @@ async def run_historical_tournament_enrichment(
     timeout: float = 20.0,
     now_factory=None,
 ) -> dict[str, object]:
-    del season_ids
     adapter = build_source_adapter(
         app.runtime_config.source_slug,
         runtime_config=app.runtime_config,
@@ -111,26 +111,53 @@ async def run_historical_tournament_enrichment(
         adapter.build_entities_job(app.database),
         app.database,
     )
-    event_detail_result = await event_detail_backfill_job.run(
-        limit=event_detail_limit,
-        only_missing=True,
-        unique_tournament_ids=(int(unique_tournament_id),),
-        start_timestamp_from=recent_window_start,
-        start_timestamp_to=recent_window_end,
-        concurrency=max(1, int(event_detail_concurrency)),
-        timeout=timeout,
-    )
-    entities_result = await entities_backfill_job.run(
-        only_missing=True,
-        player_limit=saturation_budget.player_limit,
-        team_limit=saturation_budget.team_limit,
-        player_request_limit=saturation_budget.player_request_limit,
-        team_request_limit=saturation_budget.team_request_limit,
-        unique_tournament_ids=(int(unique_tournament_id),),
-        event_timestamp_from=recent_window_start,
-        event_timestamp_to=recent_window_end,
-        timeout=timeout,
-    )
+    async with _stage_scope(
+        app,
+        stage_name="historical.enrichment.event_detail",
+        meta={
+            "unique_tournament_id": int(unique_tournament_id),
+            "sport_slug": sport_slug,
+            "season_ids": [int(item) for item in season_ids],
+            "window_start": recent_window_start,
+            "window_end": recent_window_end,
+            "event_detail_limit": event_detail_limit,
+            "event_detail_concurrency": max(1, int(event_detail_concurrency)),
+        },
+    ):
+        event_detail_result = await event_detail_backfill_job.run(
+            limit=event_detail_limit,
+            only_missing=True,
+            unique_tournament_ids=(int(unique_tournament_id),),
+            start_timestamp_from=recent_window_start,
+            start_timestamp_to=recent_window_end,
+            concurrency=max(1, int(event_detail_concurrency)),
+            timeout=timeout,
+        )
+    async with _stage_scope(
+        app,
+        stage_name="historical.enrichment.entities",
+        meta={
+            "unique_tournament_id": int(unique_tournament_id),
+            "sport_slug": sport_slug,
+            "window_start": recent_window_start,
+            "window_end": recent_window_end,
+            "player_limit": saturation_budget.player_limit,
+            "team_limit": saturation_budget.team_limit,
+            "player_request_limit": saturation_budget.player_request_limit,
+            "team_request_limit": saturation_budget.team_request_limit,
+        },
+    ):
+        entities_result = await entities_backfill_job.run(
+            only_missing=True,
+            player_limit=saturation_budget.player_limit,
+            team_limit=saturation_budget.team_limit,
+            player_request_limit=saturation_budget.player_request_limit,
+            team_request_limit=saturation_budget.team_request_limit,
+            unique_tournament_ids=(int(unique_tournament_id),),
+            event_timestamp_from=recent_window_start,
+            event_timestamp_to=recent_window_end,
+            timeout=timeout,
+        )
     return {
         "event_detail_candidates": int(event_detail_result.total_candidates),
         "event_detail_succeeded": int(event_detail_result.succeeded),
@@ -143,3 +170,13 @@ async def run_historical_tournament_enrichment(
 
 def _default_now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@asynccontextmanager
+async def _stage_scope(app, **kwargs):
+    stage_audit_logger = getattr(app, "stage_audit_logger", None)
+    if stage_audit_logger is None:
+        yield
+        return
+    async with stage_audit_logger.stage(**kwargs):
+        yield

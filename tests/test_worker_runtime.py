@@ -7,6 +7,59 @@ from schema_inspector.queue.streams import STREAM_HYDRATE, StreamEntry
 
 
 class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_runtime_exposes_execution_context_and_reuses_job_run_id_for_audit(self) -> None:
+        from schema_inspector.services.job_execution_context import current_job_execution_context
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(
+            entries=(
+                StreamEntry(
+                    stream=STREAM_HYDRATE,
+                    message_id="ctx-1",
+                    values={
+                        "job_id": "job-ctx",
+                        "job_type": "enrich_tournament_archive",
+                        "trace_id": "trace-ctx",
+                        "attempt": "1",
+                    },
+                ),
+            )
+        )
+        audit = _FakeAuditLogger()
+        seen_context = None
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            del entry
+            nonlocal seen_context
+            seen_context = current_job_execution_context()
+            self.assertIsNotNone(seen_context)
+            self.assertEqual(seen_context.job_id, "job-ctx")
+            self.assertEqual(seen_context.job_type, "enrich_tournament_archive")
+            self.assertEqual(seen_context.trace_id, "trace-ctx")
+            self.assertEqual(seen_context.worker_id, "worker-a")
+            assert runtime is not None
+            runtime.request_shutdown()
+            return "ok"
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            job_audit_logger=audit,
+            block_ms=0,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertIsNotNone(seen_context)
+        self.assertEqual(len(audit.calls), 1)
+        self.assertEqual(audit.calls[0]["status"], "succeeded")
+        self.assertEqual(audit.calls[0]["job_run_id"], seen_context.job_run_id)
+
     async def test_worker_runtime_acks_success_and_stops_after_shutdown_request(self) -> None:
         from schema_inspector.services.worker_runtime import WorkerRuntime
 

@@ -35,6 +35,7 @@ from .services.historical_archive_service import (
 from .services.historical_archive_service import (
     run_historical_tournament_enrichment as run_historical_tournament_enrichment_service,
 )
+from .services.stage_audit_logger import StageAuditLogger
 from .services.structure_sync_service import (
     run_structure_sync_for_tournament as run_structure_sync_service,
 )
@@ -190,6 +191,7 @@ class HybridApp:
         self.capability_repository = CapabilityRepository()
         self.live_state_repository = LiveStateRepository()
         self.normalize_repository = NormalizeRepository()
+        self.stage_audit_logger = StageAuditLogger(database=database)
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
         self.capability_rollup: dict[str, str] = {}

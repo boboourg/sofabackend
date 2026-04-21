@@ -20,6 +20,7 @@ class JobAuditLogger:
         *,
         values: dict[str, object] | dict[str, str],
         fallback_job_id: str | None,
+        job_run_id: str | None,
         worker_id: str,
         status: str,
         started_at: str,
@@ -30,7 +31,7 @@ class JobAuditLogger:
     ) -> None:
         job = decode_stream_payload(values, fallback_job_id=fallback_job_id)
         record = JobRunRecord(
-            job_run_id=str(uuid.uuid4()),
+            job_run_id=str(job_run_id or uuid.uuid4()),
             job_id=job.job_id,
             job_type=job.job_type,
             parent_job_id=job.parent_job_id,

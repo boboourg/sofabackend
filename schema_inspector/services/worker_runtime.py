@@ -8,11 +8,18 @@ import logging
 import os
 import signal
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..queue.streams import StreamEntry
+from ..workers._stream_jobs import decode_stream_payload
+from .job_execution_context import (
+    JobExecutionContext,
+    push_job_execution_context,
+    reset_job_execution_context,
+)
 from .retry_policy import is_retryable_db_error, retry_delay_ms
 
 StreamHandler = Callable[[StreamEntry], object]
@@ -199,39 +206,49 @@ class WorkerRuntime:
     async def _handle_entry(self, entry: StreamEntry) -> object:
         started_at = _utc_now_iso()
         started_perf = time.perf_counter()
+        job_context = _build_job_execution_context(entry=entry, worker_id=self.consumer)
+        context_token = push_job_execution_context(job_context)
         try:
-            outcome = await _await_maybe(self.handler(entry))
-        except Exception as exc:
-            if self.retry_handler is not None and is_retryable_db_error(exc):
-                delay_ms = retry_delay_ms(attempt=_entry_attempt(entry), exc=exc)
-                await _await_maybe(self.retry_handler(entry, exc, delay_ms=delay_ms))
+            try:
+                outcome = await _await_maybe(self.handler(entry))
+            except Exception as exc:
+                if self.retry_handler is not None and is_retryable_db_error(exc):
+                    delay_ms = retry_delay_ms(attempt=_entry_attempt(entry), exc=exc)
+                    await _await_maybe(self.retry_handler(entry, exc, delay_ms=delay_ms))
+                    await self._record_job_run(
+                        entry,
+                        status="retry_scheduled",
+                        started_at=started_at,
+                        duration_ms=_duration_ms(started_perf),
+                        error=exc,
+                        retry_delay_ms=delay_ms,
+                        job_context=job_context,
+                    )
+                    self.queue.ack(entry.stream, self.group, (entry.message_id,))
+                    return "requeued"
                 await self._record_job_run(
                     entry,
-                    status="retry_scheduled",
+                    status="failed",
                     started_at=started_at,
                     duration_ms=_duration_ms(started_perf),
                     error=exc,
-                    retry_delay_ms=delay_ms,
+                    job_context=job_context,
                 )
-                self.queue.ack(entry.stream, self.group, (entry.message_id,))
-                return "requeued"
+                raise
             await self._record_job_run(
                 entry,
-                status="failed",
+                status="succeeded",
                 started_at=started_at,
                 duration_ms=_duration_ms(started_perf),
-                error=exc,
+                job_context=job_context,
             )
+            self.mark_entry_completed(entry)
+            self.queue.ack(entry.stream, self.group, (entry.message_id,))
+            return outcome
+        except Exception as exc:
             raise
-        await self._record_job_run(
-            entry,
-            status="succeeded",
-            started_at=started_at,
-            duration_ms=_duration_ms(started_perf),
-        )
-        self.mark_entry_completed(entry)
-        self.queue.ack(entry.stream, self.group, (entry.message_id,))
-        return outcome
+        finally:
+            reset_job_execution_context(context_token)
 
     async def handle_reclaimed_entry(self, entry: StreamEntry) -> object:
         if self.is_entry_completed(entry):
@@ -268,6 +285,7 @@ class WorkerRuntime:
         status: str,
         started_at: str,
         duration_ms: int,
+        job_context: JobExecutionContext,
         error: Exception | None = None,
         retry_delay_ms: int | None = None,
     ) -> None:
@@ -282,6 +300,7 @@ class WorkerRuntime:
                 self.job_audit_logger.record_run(
                     values=entry.values,
                     fallback_job_id=entry.message_id,
+                    job_run_id=job_context.job_run_id,
                     worker_id=self.consumer,
                     status=status,
                     started_at=started_at,
@@ -320,3 +339,14 @@ def _utc_now_iso() -> str:
 
 def _duration_ms(started_perf: float) -> int:
     return max(0, int((time.perf_counter() - float(started_perf)) * 1000))
+
+
+def _build_job_execution_context(*, entry: StreamEntry, worker_id: str) -> JobExecutionContext:
+    job = decode_stream_payload(entry.values, fallback_job_id=entry.message_id)
+    return JobExecutionContext(
+        job_run_id=str(uuid.uuid4()),
+        job_id=job.job_id,
+        job_type=job.job_type,
+        trace_id=job.trace_id,
+        worker_id=worker_id,
+    )
