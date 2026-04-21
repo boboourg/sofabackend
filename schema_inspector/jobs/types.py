@@ -3,6 +3,8 @@
 JOB_DISCOVER_SPORT_SURFACE = "discover_sport_surface"
 JOB_SYNC_TOURNAMENT_ARCHIVE = "sync_tournament_archive"
 JOB_ENRICH_TOURNAMENT_ARCHIVE = "enrich_tournament_archive"
+JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH = "enrich_tournament_event_detail_batch"
+JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH = "enrich_tournament_entities_batch"
 JOB_SYNC_TOURNAMENT_STRUCTURE = "sync_tournament_structure"
 JOB_EXPAND_CATEGORY = "expand_category"
 JOB_SYNC_UNIQUE_TOURNAMENT = "sync_unique_tournament"

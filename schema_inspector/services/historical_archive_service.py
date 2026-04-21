@@ -92,23 +92,121 @@ async def run_historical_tournament_enrichment(
     timeout: float = 20.0,
     now_factory=None,
 ) -> dict[str, object]:
-    adapter = build_source_adapter(
+    adapter = _build_historical_enrichment_adapter(app)
+    inputs = _resolve_historical_enrichment_inputs(sport_slug, now_factory=now_factory)
+    event_detail_payload = await _run_historical_tournament_event_detail_batch(
+        app,
+        adapter=adapter,
+        unique_tournament_id=unique_tournament_id,
+        sport_slug=sport_slug,
+        season_ids=season_ids,
+        recent_window_start=inputs["recent_window_start"],
+        recent_window_end=inputs["recent_window_end"],
+        event_detail_limit=inputs["event_detail_limit"],
+        event_detail_concurrency=max(1, int(event_detail_concurrency)),
+        timeout=timeout,
+    )
+    entities_payload = await _run_historical_tournament_entities_batch(
+        app,
+        adapter=adapter,
+        unique_tournament_id=unique_tournament_id,
+        sport_slug=sport_slug,
+        season_ids=season_ids,
+        recent_window_start=inputs["recent_window_start"],
+        recent_window_end=inputs["recent_window_end"],
+        saturation_budget=inputs["saturation_budget"],
+        timeout=timeout,
+    )
+    return {
+        **event_detail_payload,
+        **entities_payload,
+    }
+
+
+async def run_historical_tournament_event_detail_batch(
+    app,
+    *,
+    unique_tournament_id: int,
+    sport_slug: str,
+    season_ids: tuple[int, ...] = (),
+    event_detail_concurrency: int = 6,
+    timeout: float = 20.0,
+    now_factory=None,
+) -> dict[str, object]:
+    adapter = _build_historical_enrichment_adapter(app)
+    inputs = _resolve_historical_enrichment_inputs(sport_slug, now_factory=now_factory)
+    return await _run_historical_tournament_event_detail_batch(
+        app,
+        adapter=adapter,
+        unique_tournament_id=unique_tournament_id,
+        sport_slug=sport_slug,
+        season_ids=season_ids,
+        recent_window_start=inputs["recent_window_start"],
+        recent_window_end=inputs["recent_window_end"],
+        event_detail_limit=inputs["event_detail_limit"],
+        event_detail_concurrency=max(1, int(event_detail_concurrency)),
+        timeout=timeout,
+    )
+
+
+async def run_historical_tournament_entities_batch(
+    app,
+    *,
+    unique_tournament_id: int,
+    sport_slug: str,
+    season_ids: tuple[int, ...] = (),
+    timeout: float = 20.0,
+    now_factory=None,
+) -> dict[str, object]:
+    adapter = _build_historical_enrichment_adapter(app)
+    inputs = _resolve_historical_enrichment_inputs(sport_slug, now_factory=now_factory)
+    return await _run_historical_tournament_entities_batch(
+        app,
+        adapter=adapter,
+        unique_tournament_id=unique_tournament_id,
+        sport_slug=sport_slug,
+        season_ids=season_ids,
+        recent_window_start=inputs["recent_window_start"],
+        recent_window_end=inputs["recent_window_end"],
+        saturation_budget=inputs["saturation_budget"],
+        timeout=timeout,
+    )
+
+
+def _build_historical_enrichment_adapter(app):
+    return build_source_adapter(
         app.runtime_config.source_slug,
         runtime_config=app.runtime_config,
         transport=app.transport,
     )
+
+
+def _resolve_historical_enrichment_inputs(sport_slug: str, *, now_factory=None) -> dict[str, object]:
     resolved_now = (now_factory or _default_now_utc)()
     recent_window_days = choose_recent_history_window(sport_slug)
-    saturation_budget = choose_saturation_budget(sport_slug)
-    event_detail_limit = choose_event_detail_budget(sport_slug)
-    recent_window_start = int((resolved_now - timedelta(days=recent_window_days)).timestamp())
-    recent_window_end = int(resolved_now.timestamp())
+    return {
+        "recent_window_start": int((resolved_now - timedelta(days=recent_window_days)).timestamp()),
+        "recent_window_end": int(resolved_now.timestamp()),
+        "saturation_budget": choose_saturation_budget(sport_slug),
+        "event_detail_limit": choose_event_detail_budget(sport_slug),
+    }
+
+
+async def _run_historical_tournament_event_detail_batch(
+    app,
+    *,
+    adapter,
+    unique_tournament_id: int,
+    sport_slug: str,
+    season_ids: tuple[int, ...],
+    recent_window_start: int,
+    recent_window_end: int,
+    event_detail_limit: int,
+    event_detail_concurrency: int,
+    timeout: float,
+) -> dict[str, object]:
     event_detail_backfill_job = EventDetailBackfillJob(
         adapter.build_event_detail_job(app.database),
-        app.database,
-    )
-    entities_backfill_job = EntitiesBackfillJob(
-        adapter.build_entities_job(app.database),
         app.database,
     )
     async with _stage_scope(
@@ -133,12 +231,36 @@ async def run_historical_tournament_enrichment(
             concurrency=max(1, int(event_detail_concurrency)),
             timeout=timeout,
         )
+    return {
+        "event_detail_candidates": int(event_detail_result.total_candidates),
+        "event_detail_succeeded": int(event_detail_result.succeeded),
+        "event_detail_failed": int(event_detail_result.failed),
+    }
+
+
+async def _run_historical_tournament_entities_batch(
+    app,
+    *,
+    adapter,
+    unique_tournament_id: int,
+    sport_slug: str,
+    season_ids: tuple[int, ...],
+    recent_window_start: int,
+    recent_window_end: int,
+    saturation_budget,
+    timeout: float,
+) -> dict[str, object]:
+    entities_backfill_job = EntitiesBackfillJob(
+        adapter.build_entities_job(app.database),
+        app.database,
+    )
     async with _stage_scope(
         app,
         stage_name="historical.enrichment.entities",
         meta={
             "unique_tournament_id": int(unique_tournament_id),
             "sport_slug": sport_slug,
+            "season_ids": [int(item) for item in season_ids],
             "window_start": recent_window_start,
             "window_end": recent_window_end,
             "player_limit": saturation_budget.player_limit,
@@ -159,9 +281,6 @@ async def run_historical_tournament_enrichment(
             timeout=timeout,
         )
     return {
-        "event_detail_candidates": int(event_detail_result.total_candidates),
-        "event_detail_succeeded": int(event_detail_result.succeeded),
-        "event_detail_failed": int(event_detail_result.failed),
         "entity_players": len(entities_result.player_ids),
         "entity_teams": len(entities_result.team_ids),
         "entity_snapshots": int(entities_result.ingest.written.payload_snapshot_rows),

@@ -14,7 +14,7 @@ from schema_inspector.queue.streams import (
 
 
 class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tournament_worker_runs_archive_and_publishes_enrichment_job(self) -> None:
+    async def test_tournament_worker_runs_archive_and_publishes_stage_enrichment_jobs(self) -> None:
         from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
 
         orchestrator = _FakeArchiveOrchestrator()
@@ -45,15 +45,21 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "completed")
         self.assertEqual(orchestrator.archive_calls, [(17, "football")])
-        self.assertEqual(queue.published_streams, [STREAM_HISTORICAL_ENRICHMENT])
-        payload = queue.published_payloads[0]
-        self.assertEqual(payload["job_type"], "enrich_tournament_archive")
-        self.assertEqual(int(payload["entity_id"]), 17)
-        self.assertEqual(json.loads(str(payload["params_json"])), {"season_ids": [701, 702]})
+        self.assertEqual(
+            queue.published_streams,
+            [STREAM_HISTORICAL_ENRICHMENT, STREAM_HISTORICAL_ENRICHMENT],
+        )
+        payloads = queue.published_payloads
+        self.assertEqual(payloads[0]["job_type"], "enrich_tournament_event_detail_batch")
+        self.assertEqual(payloads[1]["job_type"], "enrich_tournament_entities_batch")
+        self.assertEqual(int(payloads[0]["entity_id"]), 17)
+        self.assertEqual(int(payloads[1]["entity_id"]), 17)
+        self.assertEqual(json.loads(str(payloads[0]["params_json"])), {"season_ids": [701, 702]})
+        self.assertEqual(json.loads(str(payloads[1]["params_json"])), {"season_ids": [701, 702]})
 
 
 class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_enrichment_worker_runs_archive_enrichment(self) -> None:
+    async def test_enrichment_worker_runs_archive_enrichment_for_legacy_job_type(self) -> None:
         from schema_inspector.workers.historical_archive_worker import HistoricalEnrichmentWorker
 
         orchestrator = _FakeArchiveOrchestrator()
@@ -83,6 +89,68 @@ class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "completed")
         self.assertEqual(orchestrator.enrichment_calls, [(17, "football", (701, 702))])
+
+    async def test_enrichment_worker_dispatches_event_detail_batch_job(self) -> None:
+        from schema_inspector.workers.historical_archive_worker import HistoricalEnrichmentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        worker = HistoricalEnrichmentWorker(
+            orchestrator=orchestrator,
+            queue=_FakeQueue(),
+            consumer="worker-historical-enrichment-1",
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_ENRICHMENT,
+                message_id="1-3",
+                values={
+                    "job_id": "job-3",
+                    "job_type": "enrich_tournament_event_detail_batch",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"season_ids":[701,702]}',
+                    "attempt": "1",
+                    "idempotency_key": "key-3",
+                },
+            )
+        )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(orchestrator.event_detail_batch_calls, [(17, "football", (701, 702))])
+
+    async def test_enrichment_worker_dispatches_entities_batch_job(self) -> None:
+        from schema_inspector.workers.historical_archive_worker import HistoricalEnrichmentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        worker = HistoricalEnrichmentWorker(
+            orchestrator=orchestrator,
+            queue=_FakeQueue(),
+            consumer="worker-historical-enrichment-1",
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_ENRICHMENT,
+                message_id="1-4",
+                values={
+                    "job_id": "job-4",
+                    "job_type": "enrich_tournament_entities_batch",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"season_ids":[701,702]}',
+                    "attempt": "1",
+                    "idempotency_key": "key-4",
+                },
+            )
+        )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(orchestrator.entities_batch_calls, [(17, "football", (701, 702))])
 
 
 class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -239,6 +307,121 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.entities_run_kwargs["team_request_limit"], expected_budget.team_request_limit)
         _LAST_FAKE_APP = None
 
+    async def test_event_detail_batch_builds_source_adapter_and_uses_adapter_job(self) -> None:
+        from schema_inspector.services.historical_archive_service import (
+            run_historical_tournament_event_detail_batch,
+        )
+        from schema_inspector.services.historical_planner import choose_event_detail_budget
+
+        fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        expected_from = int((fixed_now - timedelta(days=730)).timestamp())
+        expected_to = int(fixed_now.timestamp())
+        expected_event_detail_limit = choose_event_detail_budget("football")
+        fake_adapter = _FakeHistoricalSourceAdapter()
+
+        with (
+            patch(
+                "schema_inspector.services.historical_archive_service.build_source_adapter",
+                create=True,
+                return_value=fake_adapter,
+            ) as adapter_factory,
+            patch(
+                "schema_inspector.services.historical_archive_service.EventDetailBackfillJob",
+                new=_FakeEventDetailBackfillJob,
+            ),
+        ):
+            app = _FakeApp()
+            global _LAST_FAKE_APP
+            _LAST_FAKE_APP = app
+
+            payload = await run_historical_tournament_event_detail_batch(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+                season_ids=(701, 702),
+                now_factory=lambda: fixed_now,
+            )
+
+        adapter_factory.assert_called_once_with(
+            "secondary_source",
+            runtime_config=app.runtime_config,
+            transport=app.transport,
+        )
+        self.assertEqual(fake_adapter.event_detail_build_calls, [app.database])
+        self.assertIs(app.event_detail_backfill_job, fake_adapter.event_detail_job)
+        self.assertEqual(app.event_detail_run_kwargs["unique_tournament_ids"], (17,))
+        self.assertEqual(app.event_detail_run_kwargs["start_timestamp_from"], expected_from)
+        self.assertEqual(app.event_detail_run_kwargs["start_timestamp_to"], expected_to)
+        self.assertEqual(app.event_detail_run_kwargs["limit"], expected_event_detail_limit)
+        self.assertEqual(
+            payload,
+            {
+                "event_detail_candidates": 3,
+                "event_detail_succeeded": 3,
+                "event_detail_failed": 0,
+            },
+        )
+        _LAST_FAKE_APP = None
+
+    async def test_entities_batch_builds_source_adapter_and_uses_adapter_job(self) -> None:
+        from schema_inspector.services.historical_archive_service import (
+            run_historical_tournament_entities_batch,
+        )
+        from schema_inspector.services.historical_planner import choose_saturation_budget
+
+        fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        expected_from = int((fixed_now - timedelta(days=730)).timestamp())
+        expected_to = int(fixed_now.timestamp())
+        expected_budget = choose_saturation_budget("football")
+        fake_adapter = _FakeHistoricalSourceAdapter()
+
+        with (
+            patch(
+                "schema_inspector.services.historical_archive_service.build_source_adapter",
+                create=True,
+                return_value=fake_adapter,
+            ) as adapter_factory,
+            patch(
+                "schema_inspector.services.historical_archive_service.EntitiesBackfillJob",
+                new=_FakeEntitiesBackfillJob,
+            ),
+        ):
+            app = _FakeApp()
+            global _LAST_FAKE_APP
+            _LAST_FAKE_APP = app
+
+            payload = await run_historical_tournament_entities_batch(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+                season_ids=(701, 702),
+                now_factory=lambda: fixed_now,
+            )
+
+        adapter_factory.assert_called_once_with(
+            "secondary_source",
+            runtime_config=app.runtime_config,
+            transport=app.transport,
+        )
+        self.assertEqual(fake_adapter.entities_build_calls, [app.database])
+        self.assertIs(app.entities_backfill_job, fake_adapter.entities_job)
+        self.assertEqual(app.entities_run_kwargs["unique_tournament_ids"], (17,))
+        self.assertEqual(app.entities_run_kwargs["event_timestamp_from"], expected_from)
+        self.assertEqual(app.entities_run_kwargs["event_timestamp_to"], expected_to)
+        self.assertEqual(app.entities_run_kwargs["player_limit"], expected_budget.player_limit)
+        self.assertEqual(app.entities_run_kwargs["team_limit"], expected_budget.team_limit)
+        self.assertEqual(app.entities_run_kwargs["player_request_limit"], expected_budget.player_request_limit)
+        self.assertEqual(app.entities_run_kwargs["team_request_limit"], expected_budget.team_request_limit)
+        self.assertEqual(
+            payload,
+            {
+                "entity_players": 1,
+                "entity_teams": 1,
+                "entity_snapshots": 4,
+            },
+        )
+        _LAST_FAKE_APP = None
+
     async def test_enrichment_records_stage_audit_for_event_detail_and_entities(self) -> None:
         from schema_inspector.services.historical_archive_service import (
             run_historical_tournament_enrichment,
@@ -309,6 +492,8 @@ class _FakeArchiveOrchestrator:
     def __init__(self) -> None:
         self.archive_calls: list[tuple[int, str]] = []
         self.enrichment_calls: list[tuple[int, str, tuple[int, ...]]] = []
+        self.event_detail_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
+        self.entities_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
 
     async def run_historical_tournament_archive(self, *, unique_tournament_id: int, sport_slug: str):
         self.archive_calls.append((unique_tournament_id, sport_slug))
@@ -322,6 +507,26 @@ class _FakeArchiveOrchestrator:
         season_ids: tuple[int, ...],
     ):
         self.enrichment_calls.append((unique_tournament_id, sport_slug, season_ids))
+        return {"ok": True}
+
+    async def run_historical_tournament_event_detail_batch(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        season_ids: tuple[int, ...],
+    ):
+        self.event_detail_batch_calls.append((unique_tournament_id, sport_slug, season_ids))
+        return {"ok": True}
+
+    async def run_historical_tournament_entities_batch(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        season_ids: tuple[int, ...],
+    ):
+        self.entities_batch_calls.append((unique_tournament_id, sport_slug, season_ids))
         return {"ok": True}
 
 

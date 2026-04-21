@@ -33,6 +33,12 @@ from .services.historical_archive_service import (
     run_historical_tournament_archive as run_historical_tournament_archive_service,
 )
 from .services.historical_archive_service import (
+    run_historical_tournament_entities_batch as run_historical_tournament_entities_batch_service,
+)
+from .services.historical_archive_service import (
+    run_historical_tournament_event_detail_batch as run_historical_tournament_event_detail_batch_service,
+)
+from .services.historical_archive_service import (
     run_historical_tournament_enrichment as run_historical_tournament_enrichment_service,
 )
 from .services.stage_audit_logger import StageAuditLogger
@@ -469,6 +475,34 @@ class HybridApp:
         season_ids: tuple[int, ...] = (),
     ):
         return await run_historical_tournament_enrichment_service(
+            self,
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            season_ids=season_ids,
+        )
+
+    async def run_historical_tournament_event_detail_batch(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        season_ids: tuple[int, ...] = (),
+    ):
+        return await run_historical_tournament_event_detail_batch_service(
+            self,
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            season_ids=season_ids,
+        )
+
+    async def run_historical_tournament_entities_batch(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        season_ids: tuple[int, ...] = (),
+    ):
+        return await run_historical_tournament_entities_batch_service(
             self,
             unique_tournament_id=unique_tournament_id,
             sport_slug=sport_slug,

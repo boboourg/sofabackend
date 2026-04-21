@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import time
 
-from ..jobs.types import JOB_ENRICH_TOURNAMENT_ARCHIVE, JOB_SYNC_TOURNAMENT_ARCHIVE
+from ..jobs.types import (
+    JOB_ENRICH_TOURNAMENT_ARCHIVE,
+    JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+    JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+    JOB_SYNC_TOURNAMENT_ARCHIVE,
+)
 from ..queue.streams import (
     GROUP_HISTORICAL_ENRICHMENT,
     GROUP_HISTORICAL_TOURNAMENT,
@@ -68,15 +73,19 @@ class HistoricalTournamentWorker:
             sport_slug=sport_slug,
         )
         season_ids = tuple(int(item) for item in result.get("season_ids", ()) or ())
-        enrich_job = job.spawn_child(
-            job_type=JOB_ENRICH_TOURNAMENT_ARCHIVE,
-            entity_type="unique_tournament",
-            entity_id=int(job.entity_id),
-            scope="historical",
-            params={"season_ids": list(season_ids)},
-            priority=job.priority,
-        )
-        self.queue.publish(self.enrichment_stream, encode_stream_job(enrich_job))
+        for child_job_type in (
+            JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+            JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+        ):
+            enrich_job = job.spawn_child(
+                job_type=child_job_type,
+                entity_type="unique_tournament",
+                entity_id=int(job.entity_id),
+                scope="historical",
+                params={"season_ids": list(season_ids)},
+                priority=job.priority,
+            )
+            self.queue.publish(self.enrichment_stream, encode_stream_job(enrich_job))
         return "completed"
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
@@ -131,12 +140,30 @@ class HistoricalEnrichmentWorker:
 
     async def handle(self, entry: StreamEntry) -> str:
         job = decode_stream_job(entry)
-        if job.job_type != JOB_ENRICH_TOURNAMENT_ARCHIVE:
+        if job.job_type not in {
+            JOB_ENRICH_TOURNAMENT_ARCHIVE,
+            JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+            JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+        }:
             return "ignored"
         if job.entity_id is None:
             raise RuntimeError("Historical enrichment worker requires unique_tournament entity_id.")
         sport_slug = str(job.sport_slug or "").strip().lower()
         season_ids = tuple(int(item) for item in job.params.get("season_ids", ()) or ())
+        if job.job_type == JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH:
+            await self.orchestrator.run_historical_tournament_event_detail_batch(
+                unique_tournament_id=int(job.entity_id),
+                sport_slug=sport_slug,
+                season_ids=season_ids,
+            )
+            return "completed"
+        if job.job_type == JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH:
+            await self.orchestrator.run_historical_tournament_entities_batch(
+                unique_tournament_id=int(job.entity_id),
+                sport_slug=sport_slug,
+                season_ids=season_ids,
+            )
+            return "completed"
         await self.orchestrator.run_historical_tournament_enrichment(
             unique_tournament_id=int(job.entity_id),
             sport_slug=sport_slug,

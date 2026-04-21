@@ -14,6 +14,8 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import (
     JOB_DISCOVER_SPORT_SURFACE,
     JOB_ENRICH_TOURNAMENT_ARCHIVE,
+    JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+    JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
     JOB_REFRESH_LIVE_EVENT,
     JOB_SYNC_TOURNAMENT_ARCHIVE,
 )
@@ -157,7 +159,11 @@ def _stream_for_job(job: JobEnvelope) -> str:
     if str(job.scope or "").strip().lower() == "historical":
         if job.job_type == JOB_SYNC_TOURNAMENT_ARCHIVE:
             return STREAM_HISTORICAL_TOURNAMENT
-        if job.job_type == JOB_ENRICH_TOURNAMENT_ARCHIVE:
+        if job.job_type in {
+            JOB_ENRICH_TOURNAMENT_ARCHIVE,
+            JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+            JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+        }:
             return STREAM_HISTORICAL_ENRICHMENT
         if job.job_type.startswith("discover_") or job.job_type.startswith("sync_"):
             return STREAM_HISTORICAL_DISCOVERY

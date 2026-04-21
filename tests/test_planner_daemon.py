@@ -4,12 +4,19 @@ import json
 import unittest
 
 from schema_inspector.jobs.envelope import JobEnvelope
-from schema_inspector.jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_HYDRATE_EVENT_ROOT, JOB_REFRESH_LIVE_EVENT
+from schema_inspector.jobs.types import (
+    JOB_DISCOVER_SPORT_SURFACE,
+    JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+    JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+    JOB_HYDRATE_EVENT_ROOT,
+    JOB_REFRESH_LIVE_EVENT,
+)
 from schema_inspector.queue.delayed import DelayedJob
 from schema_inspector.queue.live_state import LiveEventState
 from schema_inspector.queue.streams import (
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
+    STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HYDRATE,
     STREAM_LIVE_HOT,
@@ -97,6 +104,53 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [stream for stream, _ in queue.published],
             [STREAM_HISTORICAL_DISCOVERY, STREAM_HISTORICAL_HYDRATE],
+        )
+
+    async def test_planner_daemon_routes_historical_enrichment_batch_jobs_into_enrichment_stream(self) -> None:
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        delayed_jobs = (
+            DelayedJob(job_id="job-historical-event-detail", run_at_epoch_ms=1_800_000_000_000),
+            DelayedJob(job_id="job-historical-entities", run_at_epoch_ms=1_800_000_000_000),
+        )
+        event_detail_envelope = JobEnvelope.create(
+            job_type=JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+            sport_slug="tennis",
+            entity_type="unique_tournament",
+            entity_id=25831,
+            scope="historical",
+            params={"season_ids": [90572]},
+            priority=20,
+            trace_id="trace-he1",
+        )
+        entities_envelope = JobEnvelope.create(
+            job_type=JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+            sport_slug="tennis",
+            entity_type="unique_tournament",
+            entity_id=25831,
+            scope="historical",
+            params={"season_ids": [90572]},
+            priority=20,
+            trace_id="trace-he2",
+        )
+        queue = _FakeQueue()
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(delayed_jobs),
+            delayed_job_loader=lambda job_id: {
+                "job-historical-event-detail": event_detail_envelope,
+                "job-historical-entities": entities_envelope,
+            }.get(job_id),
+            live_state_store=_FakeLiveStateStore(),
+            scheduled_targets=(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(
+            [stream for stream, _ in queue.published],
+            [STREAM_HISTORICAL_ENRICHMENT, STREAM_HISTORICAL_ENRICHMENT],
         )
 
     async def test_planner_daemon_reads_live_lanes_and_emits_refresh_jobs(self) -> None:
