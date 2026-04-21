@@ -10,21 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Sequence
 
-from .category_tournaments_job import CategoryTournamentsIngestJob
-from .category_tournaments_parser import CategoryTournamentsParser
-from .competition_job import CompetitionIngestJob
-from .competition_parser import CompetitionParser
-from .competition_repository import CompetitionRepository
 from .db import AsyncpgDatabase, load_database_config
-from .event_detail_job import EventDetailIngestJob
-from .event_detail_parser import EventDetailParser
-from .event_detail_repository import EventDetailRepository
-from .event_list_job import EventListIngestJob
-from .event_list_parser import EventListParser
-from .event_list_repository import EventListRepository
 from .limit_utils import normalize_limit
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 
 
 @dataclass(frozen=True)
@@ -139,27 +128,14 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        category_job = CategoryTournamentsIngestJob(
-            CategoryTournamentsParser(client),
-            CompetitionRepository(),
-            database,
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
         )
-        competition_job = CompetitionIngestJob(
-            CompetitionParser(client),
-            CompetitionRepository(),
-            database,
-        )
-        event_list_job = EventListIngestJob(
-            EventListParser(client),
-            EventListRepository(),
-            database,
-        )
-        event_detail_job = EventDetailIngestJob(
-            EventDetailParser(client),
-            EventDetailRepository(),
-            database,
-        )
+        category_job = adapter.build_category_tournaments_job(database)
+        competition_job = adapter.build_competition_job(database)
+        event_list_job = adapter.build_event_list_job(database)
+        event_detail_job = adapter.build_event_detail_job(database)
 
         _progress(
             "category_tournaments",
