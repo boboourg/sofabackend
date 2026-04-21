@@ -10,11 +10,8 @@ from datetime import datetime
 
 from .db import AsyncpgDatabase, load_database_config
 from .entities_backfill_job import EntitiesBackfillJob
-from .entities_job import EntitiesIngestJob
-from .entities_parser import EntitiesParser
-from .entities_repository import EntitiesRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .timezone_utils import resolve_timestamp_bounds
 
 
@@ -132,10 +129,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = EntitiesParser(client)
-        repository = EntitiesRepository()
-        ingest_job = EntitiesIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        ingest_job = adapter.build_entities_job(database)
         backfill_job = EntitiesBackfillJob(ingest_job, database)
         result = await backfill_job.run(
             player_limit=args.player_limit,
