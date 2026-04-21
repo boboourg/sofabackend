@@ -22,6 +22,8 @@ class EndpointRegistryEntry:
     envelope_key: str
     target_table: str | None = None
     notes: str | None = None
+    source_slug: str = "sofascore"
+    contract_version: str = "v1"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,8 @@ class SofascoreEndpoint:
     target_table: str | None = None
     query_template: str | None = None
     notes: str | None = None
+    source_slug: str = "sofascore"
+    contract_version: str = "v1"
 
     @property
     def pattern(self) -> str:
@@ -58,6 +62,8 @@ class SofascoreEndpoint:
             envelope_key=self.envelope_key,
             target_table=self.target_table,
             notes=self.notes,
+            source_slug=self.source_slug,
+            contract_version=self.contract_version,
         )
 
 

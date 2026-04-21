@@ -232,6 +232,9 @@ class LeaderboardsStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.top_player_entry_rows, 1)
         self.assertEqual(result.top_team_entry_rows, 1)
         statements = [sql for sql, _ in executor.executemany_calls]
+        endpoint_registry_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO endpoint_registry" in sql)
+        self.assertEqual(endpoint_registry_rows[0][6], "sofascore")
+        self.assertEqual(endpoint_registry_rows[0][7], "v1")
         self.assertTrue(any("INSERT INTO period " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO team_of_the_week " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO team_of_the_week_player " in sql for sql in statements))

@@ -180,6 +180,9 @@ class StandingsStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.standing_rows, 1)
         self.assertEqual(result.standing_row_rows, 1)
         statements = [sql for sql, _ in executor.executemany_calls]
+        endpoint_registry_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO endpoint_registry" in sql)
+        self.assertEqual(endpoint_registry_rows[0][6], "sofascore")
+        self.assertEqual(endpoint_registry_rows[0][7], "v1")
         self.assertTrue(any("INSERT INTO standing_tie_breaking_rule " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO standing_promotion " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO standing (" in sql for sql in statements))

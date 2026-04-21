@@ -70,6 +70,7 @@ _SUPPORTED_TABLES = (
     "category_daily_summary",
     "category_daily_unique_tournament",
     "category_daily_team",
+    "coverage_ledger",
     "endpoint_capability_rollup",
     "event",
     "event_comment",
@@ -284,6 +285,7 @@ def _build_operations_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
     snapshot_rows = int(summary.table_counts.get("api_payload_snapshot", 0))
     job_run_rows = int(summary.table_counts.get("etl_job_run", 0))
     live_history_rows = int(summary.table_counts.get("event_live_state_history", 0))
+    coverage_rows = int(summary.table_counts.get("coverage_ledger", 0))
     return {
         "/ops/health": {
             "get": {
@@ -353,6 +355,23 @@ def _build_operations_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
                     "200": {
                         "description": "Recent ETL job runs",
                         "content": {"application/json": {"schema": _ref("JobRunsEnvelope")}},
+                    }
+                },
+            }
+        },
+        "/ops/coverage/summary": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getCoverageSummary",
+                "summary": "Coverage ledger summary",
+                "description": (
+                    "Returns grouped coverage-ledger counts by source, sport, surface and freshness status.\n\n"
+                    f"- Coverage ledger rows in summary: `{coverage_rows}`"
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Coverage ledger summary",
+                        "content": {"application/json": {"schema": _ref("CoverageSummary")}},
                     }
                 },
             }
@@ -1953,6 +1972,20 @@ def _build_schemas() -> dict[str, Any]:
                     "limit": _int32(),
                     "status_counts": {"type": "object", "additionalProperties": _int64()},
                     "jobRuns": _array(_ref("JobRunEntry")),
+                }
+            ),
+            "CoverageSummaryEntry": _obj(
+                {
+                    "source_slug": {"type": "string"},
+                    "sport_slug": {"type": "string"},
+                    "surface_name": {"type": "string"},
+                    "freshness_status": {"type": "string"},
+                    "tracked_scopes": _int64(),
+                }
+            ),
+            "CoverageSummary": _obj(
+                {
+                    "coverage": _array(_ref("CoverageSummaryEntry")),
                 }
             ),
         }

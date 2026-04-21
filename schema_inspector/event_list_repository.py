@@ -9,6 +9,10 @@ from typing import Any, Iterable, Protocol
 
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
+from .storage.raw_repository import RawRepository
+
+
+_RAW_REPOSITORY = RawRepository()
 
 
 class SqlExecutor(Protocol):
@@ -170,31 +174,7 @@ class EventListRepository:
         )
 
     async def _upsert_endpoint_registry(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
-        rows = [
-            (
-                item.pattern,
-                item.path_template,
-                item.query_template,
-                item.envelope_key,
-                item.target_table,
-                item.notes,
-            )
-            for item in bundle.registry_entries
-        ]
-        await _executemany(
-            executor,
-            """
-            INSERT INTO endpoint_registry (pattern, path_template, query_template, envelope_key, target_table, notes)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (pattern) DO UPDATE SET
-                path_template = EXCLUDED.path_template,
-                query_template = EXCLUDED.query_template,
-                envelope_key = EXCLUDED.envelope_key,
-                target_table = EXCLUDED.target_table,
-                notes = EXCLUDED.notes
-            """,
-            rows,
-        )
+        await _RAW_REPOSITORY.upsert_endpoint_registry_entries(executor, bundle.registry_entries)
 
     async def _upsert_sports(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.id, item.slug, item.name) for item in bundle.sports]

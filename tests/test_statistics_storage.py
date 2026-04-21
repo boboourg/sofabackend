@@ -189,6 +189,9 @@ class StatisticsStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.snapshot_rows, 1)
         self.assertEqual(result.result_rows, 1)
         statements = [sql for sql, _ in executor.executemany_calls]
+        endpoint_registry_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO endpoint_registry" in sql)
+        self.assertEqual(endpoint_registry_rows[0][6], "sofascore")
+        self.assertEqual(endpoint_registry_rows[0][7], "v1")
         self.assertTrue(any("INSERT INTO season_statistics_config " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO season_statistics_config_team " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO season_statistics_nationality " in sql for sql in statements))

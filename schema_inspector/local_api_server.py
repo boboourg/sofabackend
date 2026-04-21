@@ -198,6 +198,8 @@ class LocalApiApplication:
         if path == "/ops/jobs/runs":
             limit = _query_int(raw_query, "limit", default=20, minimum=1, maximum=200)
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_job_runs_payload(limit))
+        if path == "/ops/coverage/summary":
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_coverage_summary_payload())
         return ApiResponse(
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
@@ -213,8 +215,12 @@ class LocalApiApplication:
         context_value = _parse_context_value(route, path_params)
         query = "SELECT source_url, payload FROM api_payload_snapshot WHERE endpoint_pattern = $1"
         arguments: list[Any] = [route.endpoint.pattern]
+        source_slug = getattr(route.endpoint, "source_slug", None)
+        if source_slug:
+            query += f" AND source_slug = ${len(arguments) + 1}"
+            arguments.append(source_slug)
         if route.context_entity_type is not None and context_value is not None:
-            query += " AND context_entity_type = $2 AND context_entity_id = $3"
+            query += f" AND context_entity_type = ${len(arguments) + 1} AND context_entity_id = ${len(arguments) + 2}"
             arguments.extend([route.context_entity_type, context_value])
         query += " ORDER BY id DESC LIMIT 500"
 
@@ -865,6 +871,37 @@ class LocalApiApplication:
                 }
                 for row in rows
             ],
+        }
+
+    async def _fetch_ops_coverage_summary_payload(self) -> dict[str, Any]:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    source_slug,
+                    sport_slug,
+                    surface_name,
+                    freshness_status,
+                    COUNT(*)::bigint AS tracked_scopes
+                FROM coverage_ledger
+                GROUP BY source_slug, sport_slug, surface_name, freshness_status
+                ORDER BY source_slug, sport_slug, surface_name, freshness_status
+                """
+            )
+        finally:
+            await connection.close()
+        return {
+            "coverage": [
+                {
+                    "source_slug": str(row["source_slug"]),
+                    "sport_slug": str(row["sport_slug"]),
+                    "surface_name": str(row["surface_name"]),
+                    "freshness_status": str(row["freshness_status"]),
+                    "tracked_scopes": int(row["tracked_scopes"] or 0),
+                }
+                for row in rows
+            ]
         }
 
     async def _connect(self):

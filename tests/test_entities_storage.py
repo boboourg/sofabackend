@@ -193,6 +193,9 @@ class EntitiesStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.player_season_statistics_rows, 1)
         self.assertEqual(result.entity_statistics_season_rows, 2)
         statements = [sql for sql, _ in executor.executemany_calls]
+        endpoint_registry_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO endpoint_registry" in sql)
+        self.assertEqual(endpoint_registry_rows[0][6], "sofascore")
+        self.assertEqual(endpoint_registry_rows[0][7], "v1")
         self.assertTrue(any("INSERT INTO category_transfer_period" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO unique_tournament_season" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO player_transfer_history" in sql for sql in statements))

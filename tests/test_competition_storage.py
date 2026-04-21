@@ -224,6 +224,9 @@ class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.payload_snapshot_rows, 1)
         statements = [sql for sql, _ in executor.executemany_calls]
         self.assertTrue(any("INSERT INTO endpoint_registry" in sql for sql in statements))
+        endpoint_registry_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO endpoint_registry" in sql)
+        self.assertEqual(endpoint_registry_rows[0][6], "sofascore")
+        self.assertEqual(endpoint_registry_rows[0][7], "v1")
         self.assertTrue(any("INSERT INTO unique_tournament " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO unique_tournament_most_title_team" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO api_payload_snapshot" in sql for sql in statements))

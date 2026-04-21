@@ -1,6 +1,7 @@
 """Storage helpers for hybrid ETL control-plane data."""
 
 from .capability_repository import CapabilityObservationRecord, CapabilityRepository, CapabilityRollupRecord
+from .coverage_repository import CoverageLedgerRecord, CoverageRepository
 from .job_repository import JobEffectRecord, JobRepository, JobRunRecord, ReplayLogRecord
 from .live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord, LiveStateRepository
 from .normalize_repository import NormalizeRepository
@@ -18,6 +19,8 @@ __all__ = [
     "CapabilityObservationRecord",
     "CapabilityRollupRecord",
     "CapabilityRepository",
+    "CoverageLedgerRecord",
+    "CoverageRepository",
     "EventLiveStateHistoryRecord",
     "EventTerminalStateRecord",
     "LiveStateRepository",

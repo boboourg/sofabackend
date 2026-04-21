@@ -159,10 +159,20 @@ class CategoriesSeedStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.daily_summary_rows, 1)
         self.assertEqual(result.daily_unique_tournament_rows, 2)
         self.assertEqual(result.daily_team_rows, 2)
-        self.assertEqual(len(executor.executemany_calls), 8)
-        self.assertIn("INSERT INTO category_daily_summary", executor.executemany_calls[4][0])
-        self.assertIn("INSERT INTO category_daily_unique_tournament", executor.executemany_calls[5][0])
-        self.assertIn("INSERT INTO category_daily_team", executor.executemany_calls[6][0])
+        self.assertEqual(len(executor.executemany_calls), 9)
+        contract_sql, contract_rows = executor.executemany_calls[0]
+        serving_sql, serving_rows = executor.executemany_calls[1]
+        self.assertIn("INSERT INTO endpoint_contract_registry", contract_sql)
+        self.assertIn("source_slug", contract_sql)
+        self.assertIn("contract_version", contract_sql)
+        self.assertEqual(contract_rows[0][6], "sofascore")
+        self.assertEqual(contract_rows[0][7], "v1")
+        self.assertIn("INSERT INTO endpoint_registry", serving_sql)
+        self.assertEqual(serving_rows[0][6], "sofascore")
+        self.assertEqual(serving_rows[0][7], "v1")
+        self.assertIn("INSERT INTO category_daily_summary", executor.executemany_calls[5][0])
+        self.assertIn("INSERT INTO category_daily_unique_tournament", executor.executemany_calls[6][0])
+        self.assertIn("INSERT INTO category_daily_team", executor.executemany_calls[7][0])
 
     async def test_categories_seed_ingest_job_runs_transactionally(self) -> None:
         bundle = _build_bundle()

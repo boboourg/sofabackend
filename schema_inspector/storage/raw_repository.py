@@ -88,6 +88,8 @@ class ApiSnapshotHeadRecord:
 class RawRepository:
     """Writes raw request and snapshot metadata for hybrid ETL control-plane flows."""
 
+    _SERVING_SOURCE_SLUG = "sofascore"
+
     async def upsert_endpoint_registry_entries(
         self,
         executor: SqlExecutor,
@@ -101,27 +103,65 @@ class RawRepository:
                 item.envelope_key,
                 item.target_table,
                 item.notes,
+                item.source_slug,
+                item.contract_version,
             )
             for item in entries
         ]
         if not rows:
             return
-        query = """
-            INSERT INTO endpoint_registry (pattern, path_template, query_template, envelope_key, target_table, notes)
-            VALUES ($1, $2, $3, $4, $5, $6)
+        contract_query = """
+            INSERT INTO endpoint_contract_registry (
+                pattern,
+                path_template,
+                query_template,
+                envelope_key,
+                target_table,
+                notes,
+                source_slug,
+                contract_version
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (pattern, source_slug) DO UPDATE SET
+                path_template = EXCLUDED.path_template,
+                query_template = EXCLUDED.query_template,
+                envelope_key = EXCLUDED.envelope_key,
+                target_table = EXCLUDED.target_table,
+                notes = EXCLUDED.notes,
+                contract_version = EXCLUDED.contract_version
+        """
+        serving_rows = [row for row in rows if row[6] == self._SERVING_SOURCE_SLUG]
+        serving_query = """
+            INSERT INTO endpoint_registry (
+                pattern,
+                path_template,
+                query_template,
+                envelope_key,
+                target_table,
+                notes,
+                source_slug,
+                contract_version
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (pattern) DO UPDATE SET
                 path_template = EXCLUDED.path_template,
                 query_template = EXCLUDED.query_template,
                 envelope_key = EXCLUDED.envelope_key,
                 target_table = EXCLUDED.target_table,
-                notes = EXCLUDED.notes
+                notes = EXCLUDED.notes,
+                source_slug = EXCLUDED.source_slug,
+                contract_version = EXCLUDED.contract_version
         """
         executemany = getattr(executor, "executemany", None)
         if callable(executemany):
-            await executemany(query, rows)
+            await executemany(contract_query, rows)
+            if serving_rows:
+                await executemany(serving_query, serving_rows)
             return
         for row in rows:
-            await executor.execute(query, *row)
+            await executor.execute(contract_query, *row)
+        for row in serving_rows:
+            await executor.execute(serving_query, *row)
 
     async def insert_request_log(self, executor: SqlExecutor, record: ApiRequestLogRecord) -> None:
         # Intentionally append-only: retries must remain visible as separate transport

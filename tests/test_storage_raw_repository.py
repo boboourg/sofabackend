@@ -9,14 +9,20 @@ from schema_inspector.storage.raw_repository import (
     PayloadSnapshotRecord,
     RawRepository,
 )
+from schema_inspector.endpoints import EndpointRegistryEntry
 
 
 class _FakeExecutor:
     def __init__(self) -> None:
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.executemany_calls: list[tuple[str, list[tuple[object, ...]]]] = []
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
+        return "OK"
+
+    async def executemany(self, query: str, args: list[tuple[object, ...]]) -> str:
+        self.executemany_calls.append((query, args))
         return "OK"
 
 
@@ -32,6 +38,110 @@ class _FakeReturningExecutor(_FakeExecutor):
 
 
 class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upsert_endpoint_registry_entries_persists_source_contract_rows_for_all_sources(self) -> None:
+        repository = RawRepository()
+        executor = _FakeExecutor()
+
+        await repository.upsert_endpoint_registry_entries(
+            executor,
+            [
+                EndpointRegistryEntry(
+                    pattern="/api/v1/event/{event_id}",
+                    path_template="/api/v1/event/{event_id}",
+                    query_template=None,
+                    envelope_key="event",
+                    target_table="event",
+                    notes="primary route",
+                    source_slug="sofascore",
+                    contract_version="v1",
+                ),
+                EndpointRegistryEntry(
+                    pattern="/api/v1/event/{event_id}",
+                    path_template="/api/v1/event/{event_id}",
+                    query_template=None,
+                    envelope_key="event",
+                    target_table="event",
+                    notes="detail route",
+                    source_slug="secondary-source",
+                    contract_version="v2",
+                )
+            ],
+        )
+
+        self.assertEqual(len(executor.executemany_calls), 2)
+        query, rows = executor.executemany_calls[0]
+        self.assertIn("INSERT INTO endpoint_contract_registry", query)
+        self.assertIn("ON CONFLICT (pattern, source_slug)", query)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][6], "sofascore")
+        self.assertEqual(rows[1][6], "secondary-source")
+        self.assertEqual(rows[1][7], "v2")
+
+    async def test_upsert_endpoint_registry_entries_only_updates_serving_registry_for_primary_source(self) -> None:
+        repository = RawRepository()
+        executor = _FakeExecutor()
+
+        await repository.upsert_endpoint_registry_entries(
+            executor,
+            [
+                EndpointRegistryEntry(
+                    pattern="/api/v1/event/{event_id}",
+                    path_template="/api/v1/event/{event_id}",
+                    query_template=None,
+                    envelope_key="event",
+                    target_table="event",
+                    notes="detail route",
+                    source_slug="secondary-source",
+                    contract_version="v2",
+                )
+            ],
+        )
+
+        self.assertEqual(len(executor.executemany_calls), 1)
+        query, rows = executor.executemany_calls[0]
+        self.assertIn("INSERT INTO endpoint_contract_registry", query)
+        self.assertIn("source_slug", query)
+        self.assertIn("contract_version", query)
+        self.assertEqual(len(rows[0]), 8)
+        self.assertEqual(rows[0][6], "secondary-source")
+        self.assertEqual(rows[0][7], "v2")
+
+    async def test_upsert_endpoint_registry_entries_keeps_secondary_source_out_of_serving_registry(self) -> None:
+        repository = RawRepository()
+        executor = _FakeExecutor()
+
+        await repository.upsert_endpoint_registry_entries(
+            executor,
+            [
+                EndpointRegistryEntry(
+                    pattern="/api/v1/event/{event_id}",
+                    path_template="/api/v1/event/{event_id}",
+                    query_template=None,
+                    envelope_key="event",
+                    target_table="event",
+                    notes="primary route",
+                    source_slug="sofascore",
+                    contract_version="v1",
+                ),
+                EndpointRegistryEntry(
+                    pattern="/api/v1/event/{event_id}",
+                    path_template="/api/v1/event/{event_id}",
+                    query_template=None,
+                    envelope_key="event",
+                    target_table="event",
+                    notes="secondary route",
+                    source_slug="secondary-source",
+                    contract_version="v2",
+                ),
+            ],
+        )
+
+        serving_query, serving_rows = executor.executemany_calls[1]
+        self.assertIn("INSERT INTO endpoint_registry", serving_query)
+        self.assertEqual(len(serving_rows), 1)
+        self.assertEqual(serving_rows[0][6], "sofascore")
+        self.assertEqual(serving_rows[0][7], "v1")
+
     async def test_repository_writes_request_snapshot_and_head(self) -> None:
         repository = RawRepository()
         executor = _FakeExecutor()

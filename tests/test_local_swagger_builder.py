@@ -42,6 +42,7 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
             generated_at="2026-04-17T18:00:00+00:00",
             table_counts={
                 "api_payload_snapshot": 42,
+                "coverage_ledger": 11,
                 "etl_job_run": 7,
                 "event_live_state_history": 3,
             },
@@ -54,9 +55,12 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("/ops/snapshots/summary", document["paths"])
         self.assertIn("/ops/queues/summary", document["paths"])
         self.assertIn("/ops/jobs/runs", document["paths"])
+        self.assertIn("/ops/coverage/summary", document["paths"])
         self.assertIn("OperationalHealth", document["components"]["schemas"])
         self.assertIn("QueueSummary", document["components"]["schemas"])
         self.assertIn("JobRunEntry", document["components"]["schemas"])
+        self.assertIn("CoverageSummary", document["components"]["schemas"])
+        self.assertIn("Coverage ledger rows in summary: `11`", document["paths"]["/ops/coverage/summary"]["get"]["description"])
 
     def test_document_contains_all_supported_sports_and_special_routes(self) -> None:
         summary = SwaggerDataSummary(

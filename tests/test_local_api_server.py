@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from schema_inspector.local_api_server import (
@@ -115,20 +116,27 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
             calls.append(("jobs", limit))
             return {"jobRuns": []}
 
+        async def fake_coverage() -> dict[str, object]:
+            calls.append(("coverage", None))
+            return {"coverage": []}
+
         application._fetch_ops_health_payload = fake_health
         application._fetch_ops_snapshots_summary_payload = fake_snapshots
         application._fetch_ops_queue_summary_payload = fake_queues
         application._fetch_ops_job_runs_payload = fake_jobs
+        application._fetch_ops_coverage_summary_payload = fake_coverage
 
         health = await application.handle_ops_get("/ops/health", "")
         snapshots = await application.handle_ops_get("/ops/snapshots/summary", "")
         queues = await application.handle_ops_get("/ops/queues/summary", "")
         jobs = await application.handle_ops_get("/ops/jobs/runs", "limit=5")
+        coverage = await application.handle_ops_get("/ops/coverage/summary", "")
 
         self.assertEqual(health, ApiResponse(status_code=200, payload={"database_ok": True}))
         self.assertEqual(snapshots, ApiResponse(status_code=200, payload={"raw_snapshots": 12}))
         self.assertEqual(queues, ApiResponse(status_code=200, payload={"pending_total": 4}))
         self.assertEqual(jobs, ApiResponse(status_code=200, payload={"jobRuns": []}))
+        self.assertEqual(coverage, ApiResponse(status_code=200, payload={"coverage": []}))
         self.assertEqual(
             calls,
             [
@@ -136,6 +144,7 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
                 ("snapshots", None),
                 ("queues", None),
                 ("jobs", 5),
+                ("coverage", None),
             ],
         )
 
@@ -167,6 +176,38 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("length", first_stream)
         self.assertIn("lag", first_stream)
         self.assertIn("group_consumers", first_stream)
+
+    async def test_fetch_ops_coverage_summary_groups_rows(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeCoverageConnection(
+            [
+                {
+                    "source_slug": "sofascore",
+                    "sport_slug": "football",
+                    "surface_name": "season_structure",
+                    "freshness_status": "fresh",
+                    "tracked_scopes": 325,
+                }
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_ops_coverage_summary_payload()
+
+        self.assertEqual(
+            payload,
+            {
+                "coverage": [
+                    {
+                        "source_slug": "sofascore",
+                        "sport_slug": "football",
+                        "surface_name": "season_structure",
+                        "freshness_status": "fresh",
+                        "tracked_scopes": 325,
+                    }
+                ]
+            },
+        )
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -216,6 +257,36 @@ class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.payload["endpointPattern"], "/api/v1/sport/baseball/categories")
+
+    async def test_fetch_snapshot_payload_pins_to_route_source_slug(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        result = match_route("/api/v1/sport/football/events/live", routes)
+        assert result is not None
+        route, path_params = result
+        route = replace(route, endpoint=replace(route.endpoint, source_slug="sofascore"))
+        connection = _FakeSnapshotConnection(
+            rows=[
+                {
+                    "source_slug": "secondary-source",
+                    "source_url": "https://mirror.example/api/v1/sport/football/events/live",
+                    "payload": {"events": [{"id": 2}]},
+                },
+                {
+                    "source_slug": "sofascore",
+                    "source_url": "https://www.sofascore.com/api/v1/sport/football/events/live",
+                    "payload": {"events": [{"id": 1}]},
+                },
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+        application._reconcile_snapshot_payload = _passthrough_reconcile
+
+        payload = await application._fetch_snapshot_payload(route, "/api/v1/sport/football/events/live", "", path_params)
+
+        self.assertEqual(payload, {"events": [{"id": 1}]})
+        self.assertIn("source_slug = $2", connection.fetch_calls[0][0])
+        self.assertEqual(connection.fetch_calls[0][1][1], "sofascore")
 
 
 class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
@@ -790,6 +861,41 @@ class _FakeFetchRowConnection:
         if "FROM unique_tournament" in normalized:
             return "normalized_unique_tournament"
         return None
+
+
+class _FakeCoverageConnection:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        del query, args
+        return self.rows
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeSnapshotConnection:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        if "source_slug =" not in query or len(args) < 2:
+            return self.rows
+        expected_source_slug = args[1]
+        return [row for row in self.rows if row.get("source_slug") == expected_source_slug]
+
+    async def close(self):
+        self.closed = True
+
+
+async def _passthrough_reconcile(executor, route, payload):
+    del executor, route
+    return payload
 
 
 class _FakePendingQueue:
