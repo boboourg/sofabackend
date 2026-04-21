@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from .db import AsyncpgDatabase
@@ -38,10 +39,12 @@ class EventDetailBackfillJob:
         database: AsyncpgDatabase,
         *,
         logger: logging.Logger | None = None,
+        now_factory=None,
     ) -> None:
         self.detail_job = detail_job
         self.database = database
         self.logger = logger or logging.getLogger(__name__)
+        self.now_factory = now_factory or _default_now_utc
 
     async def run(
         self,
@@ -59,6 +62,14 @@ class EventDetailBackfillJob:
     ) -> EventDetailBackfillResult:
         resolved_unique_tournament_ids = tuple(
             dict.fromkeys(int(item) for item in (unique_tournament_ids or ()) if item is not None)
+        )
+        start_timestamp_from, start_timestamp_to = _resolve_default_window(
+            only_missing=only_missing,
+            unique_tournament_id=unique_tournament_id,
+            unique_tournament_ids=resolved_unique_tournament_ids or None,
+            start_timestamp_from=start_timestamp_from,
+            start_timestamp_to=start_timestamp_to,
+            now_factory=self.now_factory,
         )
         event_ids = await self._load_event_ids(
             limit=limit,
@@ -186,3 +197,31 @@ class EventDetailBackfillJob:
                     resolved_limit,
                 )
         return tuple(int(row["id"]) for row in rows if row["id"] is not None)
+
+
+def _resolve_default_window(
+    *,
+    only_missing: bool,
+    unique_tournament_id: int | None,
+    unique_tournament_ids: tuple[int, ...] | None,
+    start_timestamp_from: int | None,
+    start_timestamp_to: int | None,
+    now_factory,
+) -> tuple[int | None, int | None]:
+    if (
+        not only_missing
+        or unique_tournament_id is not None
+        or unique_tournament_ids
+        or start_timestamp_from is not None
+        or start_timestamp_to is not None
+    ):
+        return start_timestamp_from, start_timestamp_to
+    resolved_now = now_factory()
+    return (
+        int((resolved_now - timedelta(days=180)).timestamp()),
+        int((resolved_now + timedelta(days=7)).timestamp()),
+    )
+
+
+def _default_now_utc() -> datetime:
+    return datetime.now(timezone.utc)

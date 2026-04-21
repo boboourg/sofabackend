@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import ANY
+from datetime import datetime, timedelta, timezone
 
 from schema_inspector.event_detail_backfill_job import EventDetailBackfillJob
 from schema_inspector.event_detail_job import EventDetailIngestResult
@@ -105,7 +105,10 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
         connection = _FakeConnection(rows=[{"id": 14083191}, {"id": 14083192}])
         database = _FakeDatabase(connection)
         detail_job = _FakeDetailJob(failing_ids=(14083192,))
-        job = EventDetailBackfillJob(detail_job, database)
+        fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        expected_from = int((fixed_now - timedelta(days=180)).timestamp())
+        expected_to = int((fixed_now + timedelta(days=7)).timestamp())
+        job = EventDetailBackfillJob(detail_job, database, now_factory=lambda: fixed_now)
 
         result = await job.run(limit=2, offset=5, only_missing=True, provider_ids=(1, 2, 1), concurrency=2, timeout=12.5)
 
@@ -113,8 +116,8 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
             connection.fetch_calls,
             [
                 (
-                    ANY,
-                    (True, None, None, None, None, 5, 2),
+                    connection.fetch_calls[0][0],
+                    (True, None, None, expected_from, expected_to, 5, 2),
                 )
             ],
         )
@@ -133,7 +136,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(limit=0, offset=7, only_missing=False)
 
-        self.assertEqual(connection.fetch_calls, [(ANY, (False, None, None, None, None, 7))])
+        self.assertEqual(connection.fetch_calls, [(connection.fetch_calls[0][0], (False, None, None, None, None, 7))])
         self.assertEqual(result.total_candidates, 1)
         self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
 
@@ -145,9 +148,25 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(limit=3, offset=0, only_missing=False, unique_tournament_id=17)
 
-        self.assertEqual(connection.fetch_calls, [(ANY, (False, 17, None, None, None, 0, 3))])
+        self.assertEqual(connection.fetch_calls, [(connection.fetch_calls[0][0], (False, 17, None, None, None, 0, 3))])
         self.assertEqual(result.total_candidates, 1)
         self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
+
+    async def test_event_detail_backfill_only_missing_defaults_to_recent_window_when_unscoped(self) -> None:
+        connection = _FakeConnection(rows=[{"id": 14083191}])
+        database = _FakeDatabase(connection)
+        detail_job = _FakeDetailJob()
+        fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        expected_from = int((fixed_now - timedelta(days=180)).timestamp())
+        expected_to = int((fixed_now + timedelta(days=7)).timestamp())
+        job = EventDetailBackfillJob(detail_job, database, now_factory=lambda: fixed_now)
+
+        await job.run(only_missing=True)
+
+        self.assertEqual(
+            connection.fetch_calls,
+            [(connection.fetch_calls[0][0], (True, None, None, expected_from, expected_to, 0))],
+        )
 
 
 if __name__ == "__main__":

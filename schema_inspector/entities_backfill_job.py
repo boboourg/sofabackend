@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from .db import AsyncpgDatabase
 from .endpoints import (
@@ -46,10 +47,12 @@ class EntitiesBackfillJob:
         database: AsyncpgDatabase,
         *,
         logger: logging.Logger | None = None,
+        now_factory=None,
     ) -> None:
         self.ingest_job = ingest_job
         self.database = database
         self.logger = logger or logging.getLogger(__name__)
+        self.now_factory = now_factory or _default_now_utc
 
     async def run(
         self,
@@ -80,6 +83,13 @@ class EntitiesBackfillJob:
         resolved_unique_tournament_ids = tuple(
             dict.fromkeys(int(item) for item in (unique_tournament_ids or ()) if item is not None)
         ) or None
+        event_timestamp_from, event_timestamp_to = _resolve_default_event_window(
+            only_missing=only_missing,
+            unique_tournament_ids=resolved_unique_tournament_ids,
+            event_timestamp_from=event_timestamp_from,
+            event_timestamp_to=event_timestamp_to,
+            now_factory=self.now_factory,
+        )
         async with self.database.connection() as connection:
             player_ids = await self._load_player_ids(
                 connection,
@@ -567,3 +577,29 @@ class EntitiesBackfillJob:
             list(urls),
         )
         return {str(row["source_url"]) for row in rows if row["source_url"] is not None}
+
+
+def _resolve_default_event_window(
+    *,
+    only_missing: bool,
+    unique_tournament_ids: tuple[int, ...] | None,
+    event_timestamp_from: int | None,
+    event_timestamp_to: int | None,
+    now_factory,
+) -> tuple[int | None, int | None]:
+    if (
+        not only_missing
+        or unique_tournament_ids
+        or event_timestamp_from is not None
+        or event_timestamp_to is not None
+    ):
+        return event_timestamp_from, event_timestamp_to
+    resolved_now = now_factory()
+    return (
+        int((resolved_now - timedelta(days=180)).timestamp()),
+        int((resolved_now + timedelta(days=7)).timestamp()),
+    )
+
+
+def _default_now_utc() -> datetime:
+    return datetime.now(timezone.utc)

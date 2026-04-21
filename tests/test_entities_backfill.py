@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from schema_inspector.entities_backfill_job import EntitiesBackfillJob
 from schema_inspector.entities_job import EntitiesIngestResult
@@ -20,6 +21,15 @@ class _FakeConnection:
     async def fetch(self, sql: str, *args):
         self.fetch_calls.append((sql, args))
         normalized = " ".join(sql.split())
+        if "SELECT seed.player_id AS id" in normalized:
+            return [{"id": 1152}, {"id": 2001}]
+        if "SELECT seed.team_id AS id" in normalized:
+            return [{"id": 41}, {"id": 43}]
+        if "SELECT seed.player_id, seed.unique_tournament_id, seed.season_id" in normalized:
+            return [
+                {"player_id": 1152, "unique_tournament_id": 17, "season_id": 76986},
+                {"player_id": 2001, "unique_tournament_id": 17, "season_id": 76986},
+            ]
         if "FROM player AS p" in normalized:
             return [{"id": 1152}, {"id": 2001}]
         if "FROM team AS t" in normalized:
@@ -195,6 +205,26 @@ class EntitiesBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.player_ids, (1152, 2001))
         self.assertEqual(result.player_statistics_ids, (1152, 2001))
         self.assertEqual(result.team_ids, (41, 43))
+
+    async def test_entities_backfill_only_missing_defaults_to_recent_event_window_when_unscoped(self) -> None:
+        connection = _FakeConnection()
+        database = _FakeDatabase(connection)
+        ingest_job = _FakeIngestJob()
+        fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        expected_from = int((fixed_now - timedelta(days=180)).timestamp())
+        expected_to = int((fixed_now + timedelta(days=7)).timestamp())
+        job = EntitiesBackfillJob(ingest_job, database, now_factory=lambda: fixed_now)
+
+        await job.run(only_missing=True)
+
+        seed_calls = [
+            call for call in connection.fetch_calls if "FROM api_payload_snapshot" not in " ".join(call[0].split())
+        ]
+        self.assertIn("FROM (", " ".join(seed_calls[0][0].split()))
+        self.assertEqual(seed_calls[0][1], (expected_from, expected_to, None, 0))
+        self.assertEqual(seed_calls[1][1], (expected_from, expected_to, None, 0))
+        self.assertEqual(seed_calls[2][1], (expected_from, expected_to, None, 0))
+        self.assertEqual(seed_calls[3][1], (expected_from, expected_to, None, 0))
 
 
 if __name__ == "__main__":
