@@ -193,6 +193,37 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_hybrid_app_collect_health_passes_stream_queue_to_report_builder(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        captured: dict[str, object] = {}
+
+        async def _fake_collect_health_report(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        class _FakeDatabase:
+            def connection(self):
+                return _FakeAsyncpgDatabaseContext(object())
+
+        original_collect_health_report = hybrid_cli.collect_health_report
+        try:
+            hybrid_cli.collect_health_report = _fake_collect_health_report
+            app = hybrid_cli.HybridApp(
+                database=_FakeDatabase(),
+                runtime_config=RuntimeConfig(require_proxy=False),
+                redis_backend=_FakeRedisBackend(),
+            )
+            await app.collect_health()
+            await app.close()
+        finally:
+            hybrid_cli.collect_health_report = original_collect_health_report
+
+        self.assertIs(captured["stream_queue"], app.stream_queue)
+        self.assertIs(captured["live_state_store"], app.live_state_store)
+        self.assertIs(captured["redis_backend"], app.redis_backend)
+
     def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
         from schema_inspector.cli import _build_parser
 

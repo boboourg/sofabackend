@@ -654,6 +654,7 @@ class HybridApp:
                 sql_executor=connection,
                 live_state_store=self.live_state_store,
                 redis_backend=self.redis_backend,
+                stream_queue=self.stream_queue,
             )
 
     async def recover_live_state(self):
