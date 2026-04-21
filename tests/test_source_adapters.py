@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from schema_inspector.runtime import TransportAttempt
+
 
 class SourceAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_adapter_exposes_source_slug(self) -> None:
@@ -26,6 +28,9 @@ class SourceAdapterTests(unittest.IsolatedAsyncioTestCase):
                 headers={"content-type": "application/json"},
                 body_bytes=b'{"ok": true}',
                 payload={"ok": True},
+                attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+                final_proxy_name="proxy_1",
+                challenge_reason=None,
             )
         )
         adapter = SofascoreSourceAdapter(runtime_config=RuntimeConfig(require_proxy=False), client=fake_client)
@@ -47,15 +52,22 @@ class SourceAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["content-type"], "application/json")
         self.assertEqual(response.body_bytes, b'{"ok": true}')
         self.assertEqual(response.payload, {"ok": True})
+        self.assertEqual(response.attempts[0].proxy_name, "proxy_1")
+        self.assertEqual(response.final_proxy_name, "proxy_1")
+        self.assertEqual(response.challenge_reason, None)
 
     async def test_secondary_stub_is_disabled_and_raises_actionable_error(self) -> None:
-        from schema_inspector.sources import SecondaryStubSourceAdapter, SourceFetchRequest
+        from schema_inspector.sources import (
+            DisabledSourceAdapterError,
+            SecondaryStubSourceAdapter,
+            SourceFetchRequest,
+        )
 
         adapter = SecondaryStubSourceAdapter()
 
         self.assertEqual(adapter.source_slug, "secondary_source")
         self.assertFalse(adapter.is_enabled)
-        with self.assertRaisesRegex(RuntimeError, "secondary_source adapter is disabled"):
+        with self.assertRaisesRegex(DisabledSourceAdapterError, "secondary_source adapter is disabled"):
             await adapter.get_json(SourceFetchRequest(url="https://secondary.example/api/test"))
 
     def test_factory_returns_sofascore_by_default_and_stub_for_secondary_source(self) -> None:
@@ -76,9 +88,9 @@ class SourceAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     def test_factory_raises_clean_error_for_unknown_source(self) -> None:
         from schema_inspector.runtime import RuntimeConfig
-        from schema_inspector.sources import build_source_adapter
+        from schema_inspector.sources import UnknownSourceAdapterError, build_source_adapter
 
-        with self.assertRaisesRegex(ValueError, "Unknown source adapter: mirror_x"):
+        with self.assertRaisesRegex(UnknownSourceAdapterError, "Unknown source adapter: mirror_x"):
             build_source_adapter("mirror_x", runtime_config=RuntimeConfig(require_proxy=False))
 
 
@@ -93,6 +105,9 @@ class _FakeSofascoreResponse:
         headers: dict[str, str],
         body_bytes: bytes,
         payload: object,
+        attempts=None,
+        final_proxy_name: str | None = None,
+        challenge_reason: str | None = None,
     ) -> None:
         self.source_url = source_url
         self.resolved_url = resolved_url
@@ -101,6 +116,9 @@ class _FakeSofascoreResponse:
         self.headers = headers
         self.body_bytes = body_bytes
         self.payload = payload
+        self.attempts = attempts or ()
+        self.final_proxy_name = final_proxy_name
+        self.challenge_reason = challenge_reason
 
 
 class _FakeSofascoreClient:
@@ -113,6 +131,9 @@ class _FakeSofascoreClient:
             headers={"content-type": "application/json"},
             body_bytes=b"{}",
             payload={},
+            attempts=(),
+            final_proxy_name=None,
+            challenge_reason=None,
         )
         self.calls: list[tuple[str, dict[str, str] | None, float]] = []
 

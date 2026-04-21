@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from ..runtime import RuntimeConfig
 from ..transport import InspectorTransport
-from .base import SourceAdapter, SourceFetchRequest, SourceFetchResponse
+from .base import (
+    DisabledSourceAdapterError,
+    SourceAdapter,
+    SourceAdapterError,
+    SourceFetchRequest,
+    SourceFetchResponse,
+    UnknownSourceAdapterError,
+    UnsupportedSourceAdapterError,
+)
 from .secondary_stub_adapter import SecondaryStubSourceAdapter
 from .sofascore_adapter import SofascoreSourceAdapter
 
@@ -18,14 +26,18 @@ def build_source_adapter(
         return SofascoreSourceAdapter(runtime_config=runtime_config, transport=transport)
     if normalized_source_slug == "secondary_source":
         return SecondaryStubSourceAdapter()
-    raise ValueError(f"Unknown source adapter: {normalized_source_slug}")
+    raise UnknownSourceAdapterError(f"Unknown source adapter: {normalized_source_slug}")
 
 
 __all__ = [
+    "DisabledSourceAdapterError",
     "SecondaryStubSourceAdapter",
     "SofascoreSourceAdapter",
     "SourceAdapter",
+    "SourceAdapterError",
     "SourceFetchRequest",
     "SourceFetchResponse",
+    "UnknownSourceAdapterError",
+    "UnsupportedSourceAdapterError",
     "build_source_adapter",
 ]

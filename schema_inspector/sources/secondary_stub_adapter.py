@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from .base import SourceAdapter, SourceFetchRequest, SourceFetchResponse
+from .base import (
+    DisabledSourceAdapterError,
+    SourceAdapter,
+    SourceFetchRequest,
+    SourceFetchResponse,
+    UnsupportedSourceAdapterError,
+)
 
 
 class SecondaryStubSourceAdapter(SourceAdapter):
@@ -9,8 +15,8 @@ class SecondaryStubSourceAdapter(SourceAdapter):
 
     async def get_json(self, request: SourceFetchRequest) -> SourceFetchResponse:
         del request
-        raise RuntimeError("secondary_source adapter is disabled")
+        raise DisabledSourceAdapterError("secondary_source adapter is disabled")
 
     def build_event_list_job(self, database):
         del database
-        raise RuntimeError("event-list discovery is not wired for source secondary_source")
+        raise UnsupportedSourceAdapterError("event-list discovery is not wired for source secondary_source")

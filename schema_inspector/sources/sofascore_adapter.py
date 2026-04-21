@@ -37,6 +37,9 @@ class SofascoreSourceAdapter(SourceAdapter):
             headers=response.headers,
             body_bytes=response.body_bytes,
             payload=response.payload,
+            attempts=response.attempts,
+            final_proxy_name=response.final_proxy_name,
+            challenge_reason=response.challenge_reason,
         )
 
     def build_event_list_job(self, database):

@@ -7,13 +7,8 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .runtime import RuntimeConfig, TransportAttempt, load_runtime_config
-from .sofascore_client import (
-    SofascoreAccessDeniedError,
-    SofascoreClient,
-    SofascoreClientError,
-    SofascoreJsonDecodeError,
-    SofascoreRateLimitError,
-)
+from .sofascore_client import SofascoreClientError
+from .sources import SourceAdapterError, SourceFetchRequest, build_source_adapter
 
 
 @dataclass(frozen=True)
@@ -45,10 +40,10 @@ async def fetch_json(
     """Fetch JSON through the inspector transport architecture."""
 
     runtime_config = runtime_config or load_runtime_config(extra_headers=headers)
-    client = SofascoreClient(runtime_config)
     try:
-        result = await client.get_json(url, headers=headers, timeout=timeout)
-    except (SofascoreRateLimitError, SofascoreAccessDeniedError, SofascoreJsonDecodeError, SofascoreClientError) as exc:
+        adapter = build_source_adapter(runtime_config.source_slug, runtime_config=runtime_config)
+        result = await adapter.get_json(SourceFetchRequest(url=url, headers=headers, timeout=timeout))
+    except (SofascoreClientError, SourceAdapterError) as exc:
         raise FetchJsonError(str(exc)) from exc
 
     return FetchResult(

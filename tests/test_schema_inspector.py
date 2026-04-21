@@ -404,12 +404,56 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_json_raises_on_challenge_response(self) -> None:
         config = RuntimeConfig()
-        with patch(
-            "schema_inspector.fetch.SofascoreClient.get_json",
-            side_effect=SofascoreAccessDeniedError("Access denied by upstream: status=403, proxy=direct, challenge=bot_challenge"),
-        ):
+        fake_adapter = _FakeSourceAdapter(
+            error=SofascoreAccessDeniedError("Access denied by upstream: status=403, proxy=direct, challenge=bot_challenge")
+        )
+        with patch("schema_inspector.fetch.build_source_adapter", return_value=fake_adapter):
             with self.assertRaises(FetchJsonError):
                 await fetch_json("https://example.test/protected", runtime_config=config)
+
+    async def test_fetch_json_uses_source_adapter_and_preserves_transport_metadata(self) -> None:
+        config = RuntimeConfig(source_slug="secondary_source")
+        fake_adapter = _FakeSourceAdapter(
+            response=_FakeSourceFetchResponse(
+                source_slug="secondary_source",
+                source_url="https://secondary.example/api/test",
+                resolved_url="https://secondary.edge/api/test",
+                fetched_at="2026-04-21T12:00:00+00:00",
+                status_code=200,
+                headers={"content-type": "application/json"},
+                body_bytes=b'{"ok": true}',
+                payload={"ok": True},
+                attempts=(TransportAttempt(1, "proxy_a", 200, None, None),),
+                final_proxy_name="proxy_a",
+                challenge_reason=None,
+            )
+        )
+
+        with patch("schema_inspector.fetch.build_source_adapter", return_value=fake_adapter) as adapter_factory:
+            result = await fetch_json("https://secondary.example/api/test", runtime_config=config)
+
+        adapter_factory.assert_called_once_with("secondary_source", runtime_config=config)
+        self.assertEqual(fake_adapter.requests[0].url, "https://secondary.example/api/test")
+        self.assertEqual(result.source_url, "https://secondary.example/api/test")
+        self.assertEqual(result.resolved_url, "https://secondary.edge/api/test")
+        self.assertEqual(result.fetched_at, "2026-04-21T12:00:00+00:00")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers["content-type"], "application/json")
+        self.assertEqual(result.body_bytes, b'{"ok": true}')
+        self.assertEqual(result.payload, {"ok": True})
+        self.assertEqual(result.attempts[0].proxy_name, "proxy_a")
+        self.assertEqual(result.final_proxy_name, "proxy_a")
+        self.assertIsNone(result.challenge_reason)
+
+    async def test_fetch_json_wraps_adapter_factory_error_into_fetch_json_error(self) -> None:
+        from schema_inspector.sources import UnknownSourceAdapterError
+
+        with patch(
+            "schema_inspector.fetch.build_source_adapter",
+            side_effect=UnknownSourceAdapterError("Unknown source adapter: mirror_x"),
+        ):
+            with self.assertRaisesRegex(FetchJsonError, "Unknown source adapter: mirror_x"):
+                await fetch_json("https://mirror.example/api/test", runtime_config=RuntimeConfig(source_slug="mirror_x"))
 
     async def test_sofascore_client_returns_json_payload(self) -> None:
         config = RuntimeConfig()
@@ -489,6 +533,49 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeSourceFetchResponse:
+    def __init__(
+        self,
+        *,
+        source_slug: str,
+        source_url: str,
+        resolved_url: str,
+        fetched_at: str,
+        status_code: int,
+        headers: dict[str, str],
+        body_bytes: bytes,
+        payload: object,
+        attempts: tuple[TransportAttempt, ...],
+        final_proxy_name: str | None,
+        challenge_reason: str | None,
+    ) -> None:
+        self.source_slug = source_slug
+        self.source_url = source_url
+        self.resolved_url = resolved_url
+        self.fetched_at = fetched_at
+        self.status_code = status_code
+        self.headers = headers
+        self.body_bytes = body_bytes
+        self.payload = payload
+        self.attempts = attempts
+        self.final_proxy_name = final_proxy_name
+        self.challenge_reason = challenge_reason
+
+
+class _FakeSourceAdapter:
+    def __init__(self, *, response: _FakeSourceFetchResponse | None = None, error: Exception | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.requests = []
+
+    async def get_json(self, request) -> _FakeSourceFetchResponse:
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        assert self.response is not None
+        return self.response
 
 
 class _FakeAsyncResponse:

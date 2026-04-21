@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Mapping
 
+from ..runtime import TransportAttempt
+
 if False:
     from ..db import AsyncpgDatabase
 
@@ -25,6 +27,25 @@ class SourceFetchResponse:
     headers: Mapping[str, str]
     body_bytes: bytes
     payload: object
+    attempts: tuple[TransportAttempt, ...]
+    final_proxy_name: str | None
+    challenge_reason: str | None
+
+
+class SourceAdapterError(RuntimeError):
+    """Base adapter-boundary error."""
+
+
+class UnknownSourceAdapterError(SourceAdapterError, ValueError):
+    """Raised when no adapter is registered for a source slug."""
+
+
+class DisabledSourceAdapterError(SourceAdapterError, RuntimeError):
+    """Raised when an adapter exists but is intentionally disabled."""
+
+
+class UnsupportedSourceAdapterError(SourceAdapterError, RuntimeError):
+    """Raised when a source exists but a specific operation is not wired yet."""
 
 
 class SourceAdapter(ABC):
