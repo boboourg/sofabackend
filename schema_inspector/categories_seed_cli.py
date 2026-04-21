@@ -6,12 +6,9 @@ import argparse
 import asyncio
 import sys
 
-from .categories_seed_job import CategoriesSeedIngestJob
-from .categories_seed_parser import CategoriesSeedParser
-from .categories_seed_repository import CategoriesSeedRepository
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .timezone_utils import resolve_timezone_offset_seconds
 
 
@@ -70,10 +67,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = CategoriesSeedParser(client)
-        repository = CategoriesSeedRepository()
-        job = CategoriesSeedIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        job = adapter.build_categories_seed_job(database)
         result = await job.run(
             args.date,
             timezone_offset_seconds,
