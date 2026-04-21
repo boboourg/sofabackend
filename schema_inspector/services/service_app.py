@@ -10,6 +10,7 @@ from typing import Any
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
+from ..sources import build_source_adapter
 from ..storage.tournament_registry_repository import TournamentRegistryRepository
 from ..queue.streams import (
     GROUP_DISCOVERY,
@@ -40,7 +41,7 @@ from ..queue.streams import (
     RedisStreamQueue,
     StreamEntry,
 )
-from ..sport_profiles import resolve_sport_profile
+from ..sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
 from .backpressure import BackpressureLimit, QueueBackpressure
 from .backpressure_config import (
     HISTORICAL_DISCOVERY_MAX_LAG,
@@ -69,6 +70,11 @@ from .structure_planner import (
     StructurePlanningTarget,
     load_managed_tournaments,
 )
+from .tournament_registry_refresh import (
+    TournamentRegistryRefreshCursorStore,
+    TournamentRegistryRefreshDaemon,
+    refresh_tournament_registry_for_sport,
+)
 from .job_audit_logger import JobAuditLogger
 from .planner_daemon import PlannerDaemon, ScheduledPlanningTarget
 from ..workers._stream_jobs import decode_stream_payload
@@ -83,21 +89,7 @@ from ..workers.structure_worker import StructureSyncWorker
 logger = logging.getLogger(__name__)
 
 DELAYED_ENVELOPE_HASH = "hash:etl:delayed_envelopes"
-DEFAULT_SERVICE_SPORT_SLUGS = (
-    "football",
-    "basketball",
-    "tennis",
-    "volleyball",
-    "baseball",
-    "american-football",
-    "handball",
-    "table-tennis",
-    "ice-hockey",
-    "rugby",
-    "cricket",
-    "futsal",
-    "esports",
-)
+DEFAULT_SERVICE_SPORT_SLUGS = SUPPORTED_SPORT_SLUGS
 
 
 def _historical_tournament_targets_from_registry(
@@ -430,6 +422,47 @@ class ServiceApp:
                     ),
                 ),
             ),
+        )
+
+    def build_tournament_registry_refresh_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        refresh_interval_seconds: float = 86_400.0,
+        loop_interval_seconds: float = 300.0,
+        sports_per_tick: int = 1,
+        timeout_s: float = 20.0,
+    ) -> TournamentRegistryRefreshDaemon:
+        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        database = getattr(self.app, "database", None)
+        connection_factory = getattr(database, "connection", None) if database is not None else None
+        runtime_config = getattr(self.app, "runtime_config", None)
+        if not callable(connection_factory) or runtime_config is None:
+            raise RuntimeError("Tournament registry refresh daemon requires database and runtime_config.")
+
+        repository = TournamentRegistryRepository()
+        adapter = build_source_adapter(runtime_config.source_slug, runtime_config=runtime_config)
+        category_job = adapter.build_category_tournaments_job(database)
+
+        async def _has_registry_rows(sport_slug: str) -> bool:
+            async with connection_factory() as connection:
+                return await repository.has_rows(connection, sport_slug=sport_slug)
+
+        async def _refresh_sport(sport_slug: str):
+            return await refresh_tournament_registry_for_sport(
+                category_job=category_job,
+                sport_slug=sport_slug,
+                timeout_s=timeout_s,
+            )
+
+        return TournamentRegistryRefreshDaemon(
+            cursor_store=TournamentRegistryRefreshCursorStore(self.app.redis_backend),
+            targets=normalized_sports,
+            has_registry_rows=_has_registry_rows,
+            refresh_sport=_refresh_sport,
+            refresh_interval_seconds=refresh_interval_seconds,
+            sports_per_tick=sports_per_tick,
+            loop_interval_s=loop_interval_seconds,
         )
 
     def build_structure_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> StructureSyncWorker:
@@ -782,6 +815,24 @@ class ServiceApp:
             sport_slugs=sport_slugs,
             loop_interval_seconds=loop_interval_seconds,
             targets=targets,
+        )
+        await daemon.run_forever()
+
+    async def run_tournament_registry_refresh_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+        refresh_interval_seconds: float = 86_400.0,
+        loop_interval_seconds: float = 300.0,
+        sports_per_tick: int = 1,
+        timeout_s: float = 20.0,
+    ) -> None:
+        daemon = self.build_tournament_registry_refresh_daemon(
+            sport_slugs=sport_slugs,
+            refresh_interval_seconds=refresh_interval_seconds,
+            loop_interval_seconds=loop_interval_seconds,
+            sports_per_tick=sports_per_tick,
+            timeout_s=timeout_s,
         )
         await daemon.run_forever()
 

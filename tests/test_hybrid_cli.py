@@ -305,6 +305,9 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         historical_tournament_planner = parser.parse_args(
             ["historical-tournament-planner-daemon", "--consumer-name", "historical-tournament-planner-1"]
         )
+        registry_refresh_planner = parser.parse_args(
+            ["tournament-registry-refresh-daemon", "--sport-slug", "esports"]
+        )
         live_discovery_planner = parser.parse_args(["live-discovery-planner-daemon", "--sport-slug", "football"])
         historical_tournament = parser.parse_args(
             ["worker-historical-tournament", "--consumer-name", "historical-tournament-1"]
@@ -334,6 +337,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(discovery.command, "worker-discovery")
         self.assertEqual(historical_discovery.command, "worker-historical-discovery")
         self.assertEqual(historical_tournament_planner.command, "historical-tournament-planner-daemon")
+        self.assertEqual(registry_refresh_planner.command, "tournament-registry-refresh-daemon")
+        self.assertEqual(registry_refresh_planner.sport_slug, ["esports"])
         self.assertEqual(live_discovery_planner.command, "live-discovery-planner-daemon")
         self.assertEqual(live_discovery_planner.sport_slug, ["football"])
         self.assertEqual(historical_tournament.command, "worker-historical-tournament")
@@ -1280,6 +1285,57 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_dispatch_registry_refresh_service_command_runs_service_loop(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_app = _FakeDispatchHybridApp()
+        fake_service_app = _FakeServiceApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        original_service_app = hybrid_cli.ServiceApp
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+            hybrid_cli.HybridApp = lambda **kwargs: fake_app
+            hybrid_cli.ServiceApp = lambda app: fake_service_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="tournament-registry-refresh-daemon",
+                    sport_slug=["esports"],
+                    refresh_interval_seconds=86400.0,
+                    loop_interval_seconds=300.0,
+                    sports_per_tick=1,
+                    timeout=19.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+            hybrid_cli.ServiceApp = original_service_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            fake_service_app.calls,
+            [("registry_refresh", ("esports",), 86400.0, 300.0, 1, 19.0)],
+        )
+
     async def test_dispatch_worker_live_and_maintenance_run_service_loops(self) -> None:
         import schema_inspector.cli as hybrid_cli
 
@@ -1989,6 +2045,19 @@ class _FakeServiceApp:
 
     async def run_structure_worker(self, *, consumer_name: str, block_ms: int) -> None:
         self.calls.append(("structure_worker", consumer_name, block_ms))
+
+    async def run_tournament_registry_refresh_daemon(
+        self,
+        *,
+        sport_slugs: tuple[str, ...],
+        refresh_interval_seconds: float,
+        loop_interval_seconds: float,
+        sports_per_tick: int,
+        timeout_s: float,
+    ) -> None:
+        self.calls.append(
+            ("registry_refresh", sport_slugs, refresh_interval_seconds, loop_interval_seconds, sports_per_tick, timeout_s)
+        )
 
 
 class _FakeAsyncpgDatabaseContext:

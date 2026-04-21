@@ -181,3 +181,15 @@ class TournamentRegistryRepository:
             )
             for row in rows
         )
+
+    async def has_rows(self, executor: SqlFetchExecutor, *, sport_slug: str) -> bool:
+        rows = await executor.fetch(
+            """
+            SELECT 1
+            FROM tournament_registry
+            WHERE sport_slug = $1
+            LIMIT 1
+            """,
+            str(sport_slug).strip().lower(),
+        )
+        return bool(rows)

@@ -961,6 +961,16 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "tournament-registry-refresh-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_tournament_registry_refresh_daemon(
+                    sport_slugs=tuple(args.sport_slug or ()),
+                    refresh_interval_seconds=args.refresh_interval_seconds,
+                    loop_interval_seconds=args.loop_interval_seconds,
+                    sports_per_tick=args.sports_per_tick,
+                    timeout_s=args.timeout,
+                )
+                return 0
             if args.command == "worker-discovery":
                 service_app = ServiceApp(app)
                 await service_app.run_discovery_worker(
@@ -1165,6 +1175,35 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         help="Daemon tick loop interval (default: 30s).",
+    )
+
+    tournament_registry_refresh_daemon = subparsers.add_parser(
+        "tournament-registry-refresh-daemon",
+        help="Run the periodic tournament_registry refresh loop from category discovery.",
+    )
+    tournament_registry_refresh_daemon.add_argument(
+        "--sport-slug",
+        action="append",
+        default=[],
+        help="Optional repeatable sport slug. Defaults to all supported sports.",
+    )
+    tournament_registry_refresh_daemon.add_argument(
+        "--refresh-interval-seconds",
+        type=float,
+        default=86400.0,
+        help="Minimum refresh interval per sport in seconds (default: 86400 = once per day).",
+    )
+    tournament_registry_refresh_daemon.add_argument(
+        "--loop-interval-seconds",
+        type=float,
+        default=300.0,
+        help="Daemon tick loop interval (default: 300s).",
+    )
+    tournament_registry_refresh_daemon.add_argument(
+        "--sports-per-tick",
+        type=int,
+        default=1,
+        help="Maximum sports to refresh on one daemon tick (default: 1).",
     )
 
     worker_discovery = subparsers.add_parser("worker-discovery", help="Run the discovery consumer group loop.")
