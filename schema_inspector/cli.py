@@ -673,6 +673,8 @@ async def _dispatch(args) -> int:
         user_agent=args.user_agent,
         max_attempts=args.max_attempts,
     )
+    if _normalized_source_slug(getattr(args, "source", None)) is not None:
+        runtime_config = replace(runtime_config, source_slug=_normalized_source_slug(args.source))
     database_config = load_database_config(
         dsn=args.database_url,
         min_size=args.db_min_size,
@@ -930,6 +932,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified hybrid ETL runner.")
     parser.add_argument("--timeout", type=float, default=20.0, help="Request timeout in seconds.")
     parser.add_argument("--proxy", action="append", default=[], help="Optional proxy URL. Can be passed multiple times.")
+    parser.add_argument("--source", default=None, help="Optional upstream source slug override.")
     parser.add_argument("--user-agent", default=None, help="Override User-Agent for the transport layer.")
     parser.add_argument("--max-attempts", type=int, default=None, help="Override retry attempts for the transport layer.")
     parser.add_argument("--database-url", default=None, help="PostgreSQL DSN override.")
@@ -1157,6 +1160,13 @@ def _load_project_env() -> dict[str, str]:
         key, value = line.split("=", 1)
         merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
     return merged
+
+
+def _normalized_source_slug(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized or None
 
 
 def _prefetched_run_size_limit_bytes() -> int:

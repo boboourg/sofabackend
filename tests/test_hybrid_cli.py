@@ -207,6 +207,21 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(args.allow_memory_redis)
 
+    def test_parser_accepts_source_override(self) -> None:
+        from schema_inspector.cli import _build_parser
+
+        parser = _build_parser()
+
+        args = parser.parse_args(
+            [
+                "--source",
+                "secondary_source",
+                "health",
+            ]
+        )
+
+        self.assertEqual(args.source, "secondary_source")
+
     def test_parser_accepts_audit_db_on_hydration_commands(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -523,6 +538,104 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("coverage_alerts=1", output)
         self.assertIn("reconcile_sources=2", output)
         self.assertIn("primary_source=sofascore", output)
+
+    async def test_dispatch_overrides_runtime_config_source_slug_when_source_is_passed(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        fake_app = _FakeDispatchHybridApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        captured_runtime_configs: list[RuntimeConfig] = []
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: RuntimeConfig(require_proxy=False, source_slug="sofascore")
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+
+            def _build_app(**kwargs):
+                captured_runtime_configs.append(kwargs["runtime_config"])
+                return fake_app
+
+            hybrid_cli.HybridApp = _build_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="health",
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                    source=" Secondary_Source ",
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(captured_runtime_configs), 1)
+        self.assertEqual(captured_runtime_configs[0].source_slug, "secondary_source")
+
+    async def test_dispatch_keeps_default_runtime_source_when_source_not_passed(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        fake_app = _FakeDispatchHybridApp()
+        original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_database_config = hybrid_cli.load_database_config
+        original_database_class = hybrid_cli.AsyncpgDatabase
+        original_hybrid_app = hybrid_cli.HybridApp
+        captured_runtime_configs: list[RuntimeConfig] = []
+        try:
+            hybrid_cli.load_runtime_config = lambda **kwargs: RuntimeConfig(require_proxy=False, source_slug="sofascore")
+            hybrid_cli.load_database_config = lambda **kwargs: object()
+            hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
+
+            def _build_app(**kwargs):
+                captured_runtime_configs.append(kwargs["runtime_config"])
+                return fake_app
+
+            hybrid_cli.HybridApp = _build_app
+
+            exit_code = await hybrid_cli._dispatch(
+                argparse.Namespace(
+                    command="health",
+                    timeout=20.0,
+                    proxy=[],
+                    user_agent=None,
+                    max_attempts=None,
+                    database_url=None,
+                    db_min_size=None,
+                    db_max_size=None,
+                    db_timeout=None,
+                    redis_url=None,
+                    allow_memory_redis=True,
+                    event_concurrency=None,
+                    log_level="INFO",
+                    source=None,
+                )
+            )
+        finally:
+            hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_database_config = original_load_database_config
+            hybrid_cli.AsyncpgDatabase = original_database_class
+            hybrid_cli.HybridApp = original_hybrid_app
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(captured_runtime_configs), 1)
+        self.assertEqual(captured_runtime_configs[0].source_slug, "sofascore")
 
     async def test_dispatch_audit_db_prints_compact_report(self) -> None:
         import schema_inspector.cli as hybrid_cli
