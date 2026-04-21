@@ -8,6 +8,7 @@ from schema_inspector.endpoints import (
     SPORT_FOOTBALL_SCHEDULED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
     UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
     sport_live_events_endpoint,
     sport_scheduled_events_endpoint,
@@ -232,7 +233,11 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         bundle = await parser.fetch_scheduled_events("2026-04-10")
 
         self.assertEqual(fake_client.seen_urls, [scheduled_url])
-        self.assertEqual(len(bundle.registry_entries), 5)
+        self.assertEqual(len(bundle.registry_entries), 6)
+        self.assertIn(
+            UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT.path_template,
+            {item.path_template for item in bundle.registry_entries},
+        )
         self.assertEqual(len(bundle.payload_snapshots), 1)
         self.assertEqual({item.id for item in bundle.events}, {15726260})
         self.assertEqual({item.id for item in bundle.tournaments}, {1})

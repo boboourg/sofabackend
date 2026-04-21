@@ -285,6 +285,328 @@ class StructureServiceAppAsyncTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structure_sync_explicit_brackets_mode_uses_bracket_path(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+        from schema_inspector.sport_profiles import resolve_sport_profile
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=700,
+                            slug="cup",
+                            name="Cup",
+                            category_id=5,
+                            has_rounds=False,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=700,
+                            slug="cup",
+                            name="Cup",
+                            category_id=5,
+                            has_rounds=False,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock()
+        event_list_job.run_brackets = mock.AsyncMock(return_value=_event_result((301, 302)))
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+
+        brackets_profile = replace(resolve_sport_profile("basketball"), structure_sync_mode="brackets")
+
+        with (
+            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
+            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=brackets_profile),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=700,
+                sport_slug="basketball",
+                runtime_config=object(),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "brackets")
+        self.assertEqual(result.event_ids, (301, 302))
+        event_list_job.run_brackets.assert_awaited_once_with(
+            unique_tournament_id=700,
+            season_id=9001,
+            sport_slug="basketball",
+            timeout=20.0,
+        )
+        event_list_job.run_round.assert_not_awaited()
+        event_list_job.run_featured.assert_not_awaited()
+        event_list_job.run_unique_tournament_scheduled.assert_not_awaited()
+
+    async def test_structure_sync_auto_prefers_rounds_over_brackets_when_both_are_present(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(side_effect=[_event_result((101, 102)), _event_result(())])
+        event_list_job.run_brackets = mock.AsyncMock()
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+
+        with (
+            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
+            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=17,
+                sport_slug="football",
+                runtime_config=object(),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "rounds")
+        self.assertEqual(result.event_ids, (101, 102))
+        event_list_job.run_round.assert_awaited()
+        event_list_job.run_brackets.assert_not_awaited()
+
+    async def test_structure_sync_auto_chooses_brackets_when_rounds_absent_but_playoff_capability_present(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+        from schema_inspector.sport_profiles import resolve_sport_profile
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=88,
+                            slug="playoffs",
+                            name="Playoffs",
+                            category_id=2,
+                            has_rounds=False,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(7001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=88,
+                            slug="playoffs",
+                            name="Playoffs",
+                            category_id=2,
+                            has_rounds=False,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(7001,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock()
+        event_list_job.run_brackets = mock.AsyncMock(return_value=_event_result((601,)))
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+
+        auto_profile = replace(resolve_sport_profile("basketball"), structure_sync_mode="auto")
+
+        with (
+            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
+            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=auto_profile),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=88,
+                sport_slug="basketball",
+                runtime_config=object(),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "brackets")
+        self.assertEqual(result.event_ids, (601,))
+        event_list_job.run_brackets.assert_awaited_once_with(
+            unique_tournament_id=88,
+            season_id=7001,
+            sport_slug="basketball",
+            timeout=20.0,
+        )
+        event_list_job.run_round.assert_not_awaited()
+
+    async def test_structure_sync_rounds_empty_tries_brackets_before_calendar_when_playoff_capability_exists(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=91,
+                            slug="cup",
+                            name="Cup",
+                            category_id=4,
+                            has_rounds=True,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(8101,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=91,
+                            slug="cup",
+                            name="Cup",
+                            category_id=4,
+                            has_rounds=True,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(8101,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(side_effect=[_event_result(()), _event_result(()), _event_result(())])
+        event_list_job.run_brackets = mock.AsyncMock(return_value=_event_result((901,)))
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+
+        with (
+            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
+            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=91,
+                sport_slug="football",
+                runtime_config=object(),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "rounds->brackets")
+        self.assertEqual(result.event_ids, (901,))
+        event_list_job.run_brackets.assert_awaited_once_with(
+            unique_tournament_id=91,
+            season_id=8101,
+            sport_slug="football",
+            timeout=20.0,
+        )
+        event_list_job.run_featured.assert_not_awaited()
+        event_list_job.run_unique_tournament_scheduled.assert_not_awaited()
+
+    async def test_structure_sync_explicit_brackets_failure_degrades_without_failing_sync(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+        from schema_inspector.sport_profiles import resolve_sport_profile
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=701,
+                            slug="cup",
+                            name="Cup",
+                            category_id=5,
+                            has_rounds=False,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=701,
+                            slug="cup",
+                            name="Cup",
+                            category_id=5,
+                            has_rounds=False,
+                            has_playoff_series=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock()
+        event_list_job.run_brackets = mock.AsyncMock(side_effect=RuntimeError("bracket timeout"))
+        event_list_job.run_featured = mock.AsyncMock(return_value=_event_result((401,)))
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock(return_value=_event_result(()))
+
+        brackets_profile = replace(resolve_sport_profile("basketball"), structure_sync_mode="brackets")
+
+        with (
+            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
+            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=brackets_profile),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=701,
+                sport_slug="basketball",
+                runtime_config=object(),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "brackets->calendar")
+        self.assertTrue(result.success)
+        self.assertEqual(result.event_ids, (401,))
+        self.assertIn("brackets", result.reason or "")
+        event_list_job.run_brackets.assert_awaited_once()
+        event_list_job.run_featured.assert_awaited_once()
+
     async def test_structure_sync_uses_rounds_path_for_round_based_profiles(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament

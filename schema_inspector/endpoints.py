@@ -259,6 +259,13 @@ UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT = SofascoreEndpoint(
     target_table="event",
 )
 
+UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/brackets",
+    envelope_key="brackets",
+    target_table="event",
+    notes="Bracket/playoff tree payload; event-like nodes are recursively extracted for skeleton event ingestion.",
+)
+
 
 def season_rounds_endpoint() -> SofascoreEndpoint:
     return SofascoreEndpoint(
@@ -306,6 +313,7 @@ def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoin
         UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
         UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
         UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+        UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
     )
 
 

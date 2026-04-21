@@ -11,6 +11,7 @@ from .endpoints import (
     EndpointRegistryEntry,
     UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
     UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
     event_list_registry_entries,
     sport_live_events_endpoint,
@@ -296,6 +297,40 @@ class EventListParser:
             season_id=season_id,
             round_number=round_number,
         )
+
+    async def fetch_bracket_events(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        endpoint = UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT
+        url = endpoint.build_url(unique_tournament_id=unique_tournament_id, season_id=season_id)
+        response = await self.client.get_json(url, timeout=timeout)
+        payload = _require_root_mapping(response.payload, url)
+        events = _extract_bracket_events(payload, url)
+
+        state = _EventListAccumulator()
+        state.add_payload_snapshot(
+            endpoint_pattern=endpoint.pattern,
+            response=response,
+            envelope_key=endpoint.envelope_key,
+            context_entity_type="season",
+            context_entity_id=season_id,
+            payload=payload,
+        )
+        for event_payload in events:
+            state.ingest_event(event_payload)
+
+        self.logger.info(
+            "Bracket event bundle collected: events=%s tournaments=%s teams=%s",
+            len(state.events),
+            len(state.tournaments),
+            len(state.teams),
+        )
+        return state.to_bundle(registry_entries=event_list_registry_entries(sport_slug=sport_slug))
 
     async def _fetch_event_collection(
         self,
@@ -790,6 +825,36 @@ def _require_event_array(payload: Mapping[str, Any], envelope_key: str, source_u
     if not isinstance(envelope, list):
         raise EventListParserError(f"Missing array envelope '{envelope_key}' for {source_url}")
     return tuple(envelope)
+
+
+def _extract_bracket_events(payload: Mapping[str, Any], source_url: str) -> tuple[Mapping[str, Any], ...]:
+    envelope_key = UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT.envelope_key
+    root = payload.get(envelope_key)
+    if root is None:
+        raise EventListParserError(f"Missing bracket envelope '{envelope_key}' for {source_url}")
+
+    found: dict[int, Mapping[str, Any]] = {}
+    stack: list[object] = [root]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            event_id = _as_int(current.get("id"))
+            if event_id is not None and (
+                isinstance(current.get("homeTeam"), Mapping)
+                or isinstance(current.get("awayTeam"), Mapping)
+                or isinstance(current.get("tournament"), Mapping)
+            ):
+                found.setdefault(event_id, current)
+                continue
+            for value in current.values():
+                if isinstance(value, (Mapping, list)):
+                    stack.append(value)
+        elif isinstance(current, list):
+            for item in reversed(current):
+                if isinstance(item, (Mapping, list)):
+                    stack.append(item)
+
+    return tuple(found[event_id] for event_id in sorted(found))
 
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:

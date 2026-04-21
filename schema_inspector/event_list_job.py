@@ -102,6 +102,24 @@ class EventListIngestJob:
             ),
         )
 
+    async def run_brackets(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"brackets:{unique_tournament_id}:{season_id}",
+            self.parser.fetch_bracket_events(
+                unique_tournament_id,
+                season_id,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
+        )
+
     async def _run(self, job_name: str, bundle_awaitable) -> EventListIngestResult:
         bundle = await bundle_awaitable
         corrections: tuple[SurfaceCorrection, ...] = ()

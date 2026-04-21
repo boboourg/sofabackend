@@ -132,11 +132,24 @@ async def run_structure_sync_for_tournament(
             unique_tournament_id=int(unique_tournament_id),
             sport_slug=normalized_sport,
             profile=profile,
+            tournament=tournament_record,
             season_ids=season_ids,
             current_season_id=current_season_id,
             event_list_job=event_list_job,
             now_factory=now_factory,
             max_rounds_probe=max_rounds_probe,
+            timeout=timeout,
+        )
+
+    if mode == "brackets":
+        return await _run_brackets_mode(
+            unique_tournament_id=int(unique_tournament_id),
+            sport_slug=normalized_sport,
+            profile=profile,
+            season_ids=season_ids,
+            current_season_id=current_season_id,
+            event_list_job=event_list_job,
+            now_factory=now_factory,
             timeout=timeout,
         )
 
@@ -164,7 +177,7 @@ def _pick_tournament(
 
 def _resolve_mode(profile: SportProfile, tournament: UniqueTournamentRecord | None) -> str:
     mode = profile.structure_sync_mode
-    if mode in ("rounds", "calendar"):
+    if mode in ("rounds", "brackets", "calendar"):
         return mode
     if mode == "disabled":
         return "disabled"
@@ -172,8 +185,9 @@ def _resolve_mode(profile: SportProfile, tournament: UniqueTournamentRecord | No
     has_rounds = None if tournament is None else tournament.has_rounds
     if has_rounds is True:
         return "rounds"
-    if has_rounds is False:
-        return "calendar"
+    has_playoff_series = None if tournament is None else tournament.has_playoff_series
+    if has_playoff_series is True:
+        return "brackets"
     # Unknown / missing — fall back to calendar (always produces *some* skeleton).
     return "calendar"
 
@@ -183,6 +197,7 @@ async def _run_rounds_mode(
     unique_tournament_id: int,
     sport_slug: str,
     profile: SportProfile,
+    tournament: UniqueTournamentRecord | None,
     season_ids: tuple[int, ...],
     current_season_id: int,
     event_list_job: EventListIngestJob,
@@ -228,6 +243,46 @@ async def _run_rounds_mode(
         collected_event_ids.extend(int(event.id) for event in result.parsed.events)
 
     if rounds_with_events == 0 and profile.structure_rounds_fallback_calendar:
+        if _has_bracket_capability(tournament):
+            logger.info(
+                "structure-sync rounds mode empty for tournament=%s; trying brackets before calendar",
+                unique_tournament_id,
+            )
+            fallback = await _run_brackets_mode(
+                unique_tournament_id=unique_tournament_id,
+                sport_slug=sport_slug,
+                profile=profile,
+                season_ids=season_ids,
+                current_season_id=current_season_id,
+                event_list_job=event_list_job,
+                now_factory=now_factory,
+                timeout=timeout,
+            )
+            if fallback.mode == "brackets":
+                return StructureSyncResult(
+                    unique_tournament_id=unique_tournament_id,
+                    sport_slug=sport_slug,
+                    mode="rounds->brackets",
+                    season_ids=season_ids,
+                    rounds_probed=rounds_probed,
+                    rounds_with_events=0,
+                    event_ids=fallback.event_ids,
+                    success=fallback.success,
+                    reason="rounds empty; fell back to brackets",
+                )
+            if fallback.mode == "brackets->calendar":
+                return StructureSyncResult(
+                    unique_tournament_id=unique_tournament_id,
+                    sport_slug=sport_slug,
+                    mode="rounds->brackets->calendar",
+                    season_ids=season_ids,
+                    rounds_probed=rounds_probed,
+                    rounds_with_events=0,
+                    calendar_dates_probed=fallback.calendar_dates_probed,
+                    event_ids=fallback.event_ids,
+                    success=fallback.success,
+                    reason="rounds empty; fell back to brackets then calendar",
+                )
         logger.info(
             "structure-sync rounds mode empty for tournament=%s; falling back to calendar",
             unique_tournament_id,
@@ -343,6 +398,87 @@ async def _run_calendar_mode(
         event_ids=tuple(collected_event_ids),
         success=True,
     )
+
+
+async def _run_brackets_mode(
+    *,
+    unique_tournament_id: int,
+    sport_slug: str,
+    profile: SportProfile,
+    season_ids: tuple[int, ...],
+    current_season_id: int,
+    event_list_job: EventListIngestJob,
+    now_factory,
+    timeout: float,
+) -> StructureSyncResult:
+    try:
+        result = await event_list_job.run_brackets(
+            unique_tournament_id=unique_tournament_id,
+            season_id=current_season_id,
+            sport_slug=sport_slug,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning(
+            "structure-sync brackets failed tournament=%s season=%s: %s",
+            unique_tournament_id,
+            current_season_id,
+            exc,
+        )
+        fallback = await _run_calendar_mode(
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            profile=profile,
+            season_ids=season_ids,
+            event_list_job=event_list_job,
+            now_factory=now_factory,
+            timeout=timeout,
+        )
+        return StructureSyncResult(
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            mode="brackets->calendar",
+            season_ids=season_ids,
+            calendar_dates_probed=fallback.calendar_dates_probed,
+            event_ids=fallback.event_ids,
+            success=True,
+            reason=f"brackets failed; fell back to calendar: {exc}",
+        )
+
+    event_ids = tuple(int(event.id) for event in result.parsed.events)
+    if event_ids:
+        return StructureSyncResult(
+            unique_tournament_id=unique_tournament_id,
+            sport_slug=sport_slug,
+            mode="brackets",
+            season_ids=season_ids,
+            event_ids=event_ids,
+            success=True,
+        )
+
+    fallback = await _run_calendar_mode(
+        unique_tournament_id=unique_tournament_id,
+        sport_slug=sport_slug,
+        profile=profile,
+        season_ids=season_ids,
+        event_list_job=event_list_job,
+        now_factory=now_factory,
+        timeout=timeout,
+    )
+    return StructureSyncResult(
+        unique_tournament_id=unique_tournament_id,
+        sport_slug=sport_slug,
+        mode="brackets->calendar",
+        season_ids=season_ids,
+        calendar_dates_probed=fallback.calendar_dates_probed,
+        event_ids=fallback.event_ids,
+        success=True,
+        reason="brackets empty; fell back to calendar",
+    )
+
+
+def _has_bracket_capability(tournament: UniqueTournamentRecord | None) -> bool:
+    return bool(tournament is not None and tournament.has_playoff_series is True)
 
 
 def _default_now_utc() -> datetime:

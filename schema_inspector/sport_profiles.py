@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-StructureSyncMode = Literal["auto", "rounds", "calendar", "disabled"]
+StructureSyncMode = Literal["auto", "rounds", "brackets", "calendar", "disabled"]
 
 
 @dataclass(frozen=True)
