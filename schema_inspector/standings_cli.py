@@ -8,10 +8,7 @@ import sys
 
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
-from .standings_job import StandingsIngestJob
-from .standings_parser import StandingsParser
-from .standings_repository import StandingsRepository
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -62,10 +59,11 @@ async def _run(args: argparse.Namespace) -> int:
     scopes = tuple(dict.fromkeys(args.scope or ["total"]))
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = StandingsParser(client)
-        repository = StandingsRepository()
-        job = StandingsIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        job = adapter.build_standings_job(database)
 
         if args.unique_tournament_id is not None:
             result = await job.run_for_unique_tournament(
