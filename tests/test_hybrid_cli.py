@@ -238,6 +238,27 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
                 args = parser.parse_args(argv)
                 self.assertTrue(args.audit_db)
 
+    def test_parser_accepts_coverage_missing_flags_for_full_backfill(self) -> None:
+        from schema_inspector.cli import _build_parser
+
+        parser = _build_parser()
+
+        args = parser.parse_args(
+            [
+                "full-backfill",
+                "--sport-slug",
+                "football",
+                "--coverage-missing",
+                "--coverage-surface",
+                "statistics",
+                "--coverage-surface",
+                "lineups",
+            ]
+        )
+
+        self.assertTrue(args.coverage_missing)
+        self.assertEqual(args.coverage_surface, ["statistics", "lineups"])
+
     def test_parser_accepts_event_concurrency_after_scheduled_subcommand(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -1504,7 +1525,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         orchestrator = _FakeOrchestrator()
         selector = _FakeEventSelector((20, 21, 22))
-        args = argparse.Namespace(limit=3, offset=0, event_id=[], sport_slug=None)
+        args = argparse.Namespace(limit=3, offset=0, event_id=[], sport_slug=None, coverage_missing=False, coverage_surface=[])
 
         report = await run_full_backfill_command(
             args,
@@ -1518,6 +1539,61 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             orchestrator.calls,
             [(None, 20, "full"), (None, 21, "full"), (None, 22, "full")],
         )
+
+    async def test_run_full_backfill_uses_coverage_selector_when_requested(self) -> None:
+        from schema_inspector.cli import run_full_backfill_command
+
+        orchestrator = _FakeOrchestrator()
+        selector = _FakeEventSelector((30, 31))
+        args = argparse.Namespace(
+            limit=5,
+            offset=2,
+            event_id=[],
+            sport_slug="football",
+            coverage_missing=True,
+            coverage_surface=["statistics", "lineups"],
+        )
+
+        report = await run_full_backfill_command(
+            args,
+            orchestrator=orchestrator,
+            event_selector=selector,
+        )
+
+        self.assertEqual(selector.calls, [])
+        self.assertEqual(selector.coverage_calls, [(5, 2, "football", ("statistics", "lineups"))])
+        self.assertEqual(report.processed_event_ids, (30, 31))
+        self.assertEqual(
+            orchestrator.calls,
+            [("football", 30, "full"), ("football", 31, "full")],
+        )
+
+    async def test_run_full_backfill_uses_default_coverage_surfaces_when_not_passed(self) -> None:
+        from schema_inspector.cli import run_full_backfill_command
+
+        orchestrator = _FakeOrchestrator()
+        selector = _FakeEventSelector((41,))
+        args = argparse.Namespace(
+            limit=1,
+            offset=0,
+            event_id=[],
+            sport_slug=None,
+            coverage_missing=True,
+            coverage_surface=[],
+        )
+
+        report = await run_full_backfill_command(
+            args,
+            orchestrator=orchestrator,
+            event_selector=selector,
+        )
+
+        self.assertEqual(selector.calls, [])
+        self.assertEqual(
+            selector.coverage_calls,
+            [(1, 0, None, ("event_core", "statistics", "incidents", "lineups"))],
+        )
+        self.assertEqual(report.processed_event_ids, (41,))
 
 
 class _FakeOrchestrator:
@@ -1548,9 +1624,21 @@ class _FakeEventSelector:
     def __init__(self, event_ids) -> None:
         self.event_ids = tuple(event_ids)
         self.calls = []
+        self.coverage_calls = []
 
     async def select_event_ids(self, *, limit: int | None, offset: int, sport_slug: str | None):
         self.calls.append((limit, offset, sport_slug))
+        return self.event_ids
+
+    async def select_event_ids_for_missing_coverage(
+        self,
+        *,
+        limit: int | None,
+        offset: int,
+        sport_slug: str | None,
+        surface_names: tuple[str, ...],
+    ):
+        self.coverage_calls.append((limit, offset, sport_slug, surface_names))
         return self.event_ids
 
 

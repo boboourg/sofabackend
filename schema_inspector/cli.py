@@ -41,12 +41,15 @@ from .services.service_app import ServiceApp
 from .sofascore_client import SofascoreClient
 from .sources import build_source_adapter
 from .storage.capability_repository import CapabilityRepository
+from .storage.coverage_repository import CoverageRepository
 from .storage.live_state_repository import LiveStateRepository
 from .storage.normalize_repository import NormalizeRepository
 from .storage.raw_repository import RawRepository
 from .transport import InspectorTransport
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_EVENT_COVERAGE_SURFACES = ("event_core", "statistics", "incidents", "lineups")
 
 
 @dataclass(frozen=True)
@@ -546,6 +549,27 @@ class HybridApp:
                 )
         return tuple(int(row["id"]) for row in rows)
 
+    async def select_event_ids_for_missing_coverage(
+        self,
+        *,
+        limit: int | None,
+        offset: int,
+        sport_slug: str | None,
+        surface_names: tuple[str, ...],
+    ) -> tuple[int, ...]:
+        normalized_surfaces = tuple(str(item) for item in surface_names if str(item)) or DEFAULT_EVENT_COVERAGE_SURFACES
+        repository = CoverageRepository()
+        async with self.database.connection() as connection:
+            return await repository.select_event_scope_ids(
+                connection,
+                source_slug=self.runtime_config.source_slug,
+                surface_names=normalized_surfaces,
+                freshness_statuses=("missing", "partial"),
+                sport_slug=sport_slug,
+                limit=limit,
+                offset=offset,
+            )
+
     async def resolve_event_sport_slug(self, event_id: int) -> str | None:
         async with self.database.connection() as connection:
             row = await connection.fetchrow(
@@ -616,6 +640,16 @@ async def run_full_backfill_command(args, *, orchestrator, event_selector) -> Hy
     explicit_event_ids = tuple(int(item) for item in getattr(args, "event_id", ()) or ())
     if explicit_event_ids:
         event_ids = explicit_event_ids
+    elif bool(getattr(args, "coverage_missing", False)):
+        surface_names = tuple(str(item) for item in (getattr(args, "coverage_surface", ()) or ()) if str(item))
+        event_ids = tuple(
+            await event_selector.select_event_ids_for_missing_coverage(
+                limit=args.limit,
+                offset=args.offset,
+                sport_slug=getattr(args, "sport_slug", None),
+                surface_names=surface_names or DEFAULT_EVENT_COVERAGE_SURFACES,
+            )
+        )
     else:
         event_ids = tuple(
             await event_selector.select_event_ids(
@@ -990,6 +1024,18 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--event-id", type=int, action="append", default=[], help="Optional explicit event id.")
     backfill.add_argument("--limit", type=int, default=None, help="Optional event limit when selecting from PostgreSQL.")
     backfill.add_argument("--offset", type=int, default=0, help="Optional event offset when selecting from PostgreSQL.")
+    backfill.add_argument(
+        "--coverage-missing",
+        action="store_true",
+        help="Select tracked event ids from coverage_ledger where requested SofaScore surfaces are missing or partial.",
+    )
+    backfill.add_argument(
+        "--coverage-surface",
+        action="append",
+        choices=DEFAULT_EVENT_COVERAGE_SURFACES,
+        default=[],
+        help="Repeatable coverage surface used with --coverage-missing. Defaults to all tracked event surfaces.",
+    )
     backfill.add_argument("--event-concurrency", type=int, default=None, help="Optional concurrent event hydration limit.")
     backfill.add_argument("--audit-db", action="store_true", help="Run a post-hydration database audit and fail if raw/durable rows are missing.")
 

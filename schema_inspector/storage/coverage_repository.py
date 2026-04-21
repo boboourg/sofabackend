@@ -59,3 +59,103 @@ class CoverageRepository:
             coerce_timestamptz(record.last_success_at),
             coerce_timestamptz(record.last_checked_at),
         )
+
+    async def select_event_scope_ids(
+        self,
+        executor,
+        *,
+        source_slug: str,
+        surface_names: tuple[str, ...],
+        freshness_statuses: tuple[str, ...],
+        sport_slug: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[int, ...]:
+        normalized_surface_names = tuple(str(item) for item in surface_names if str(item))
+        normalized_statuses = tuple(str(item) for item in freshness_statuses if str(item))
+        if not normalized_surface_names or not normalized_statuses:
+            return ()
+        normalized_offset = max(0, int(offset or 0))
+        normalized_limit = None if limit is None else max(0, int(limit))
+        if sport_slug and normalized_limit is None:
+            rows = await executor.fetch(
+                """
+                SELECT scope_id
+                FROM coverage_ledger
+                WHERE source_slug = $1
+                  AND scope_type = 'event'
+                  AND surface_name = ANY($2::text[])
+                  AND freshness_status = ANY($3::text[])
+                  AND sport_slug = $4
+                GROUP BY scope_id
+                ORDER BY MAX(last_checked_at) DESC NULLS LAST, scope_id DESC
+                OFFSET $5
+                """,
+                source_slug,
+                normalized_surface_names,
+                normalized_statuses,
+                sport_slug,
+                normalized_offset,
+            )
+        elif sport_slug:
+            rows = await executor.fetch(
+                """
+                SELECT scope_id
+                FROM coverage_ledger
+                WHERE source_slug = $1
+                  AND scope_type = 'event'
+                  AND surface_name = ANY($2::text[])
+                  AND freshness_status = ANY($3::text[])
+                  AND sport_slug = $4
+                GROUP BY scope_id
+                ORDER BY MAX(last_checked_at) DESC NULLS LAST, scope_id DESC
+                OFFSET $5 LIMIT $6
+                """,
+                source_slug,
+                normalized_surface_names,
+                normalized_statuses,
+                sport_slug,
+                normalized_offset,
+                normalized_limit,
+            )
+        elif normalized_limit is None:
+            rows = await executor.fetch(
+                """
+                SELECT scope_id
+                FROM coverage_ledger
+                WHERE source_slug = $1
+                  AND scope_type = 'event'
+                  AND surface_name = ANY($2::text[])
+                  AND freshness_status = ANY($3::text[])
+                GROUP BY scope_id
+                ORDER BY MAX(last_checked_at) DESC NULLS LAST, scope_id DESC
+                OFFSET $4
+                """,
+                source_slug,
+                normalized_surface_names,
+                normalized_statuses,
+                normalized_offset,
+            )
+        else:
+            rows = await executor.fetch(
+                """
+                SELECT scope_id
+                FROM coverage_ledger
+                WHERE source_slug = $1
+                  AND scope_type = 'event'
+                  AND surface_name = ANY($2::text[])
+                  AND freshness_status = ANY($3::text[])
+                GROUP BY scope_id
+                ORDER BY MAX(last_checked_at) DESC NULLS LAST, scope_id DESC
+                OFFSET $4 LIMIT $5
+                """,
+                source_slug,
+                normalized_surface_names,
+                normalized_statuses,
+                normalized_offset,
+                normalized_limit,
+            )
+        return tuple(
+            int(row["scope_id"]) if isinstance(row, dict) else int(row[0])
+            for row in rows
+        )
