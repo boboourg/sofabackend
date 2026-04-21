@@ -30,6 +30,16 @@ ALTER TABLE endpoint_registry
     ADD COLUMN IF NOT EXISTS source_slug text NOT NULL DEFAULT 'sofascore',
     ADD COLUMN IF NOT EXISTS contract_version text NOT NULL DEFAULT 'v1';
 
+INSERT INTO provider_source (
+    source_slug,
+    display_name,
+    transport_kind,
+    trust_rank,
+    is_active
+)
+VALUES ('sofascore', 'Sofascore', 'http', 100, true)
+ON CONFLICT (source_slug) DO NOTHING;
+
 INSERT INTO endpoint_contract_registry (
     pattern,
     source_slug,
