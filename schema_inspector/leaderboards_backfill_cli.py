@@ -8,11 +8,8 @@ import sys
 
 from .db import AsyncpgDatabase, load_database_config
 from .leaderboards_backfill_job import LeaderboardsBackfillJob
-from .leaderboards_job import LeaderboardsIngestJob
-from .leaderboards_parser import LeaderboardsParser
-from .leaderboards_repository import LeaderboardsRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -76,10 +73,11 @@ async def _run(args: argparse.Namespace) -> int:
     team_event_scopes = tuple(args.team_events_scope or ["home", "away", "total"])
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = LeaderboardsParser(client)
-        repository = LeaderboardsRepository()
-        ingest_job = LeaderboardsIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        ingest_job = adapter.build_leaderboards_job(database)
         backfill_job = LeaderboardsBackfillJob(ingest_job, database)
         result = await backfill_job.run(
             season_limit=args.season_limit,
