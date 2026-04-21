@@ -751,7 +751,10 @@ async def _dispatch(args) -> int:
                     f"rollups={report.capability_rollup_count} "
                     f"live_hot={report.live_hot_count} "
                     f"live_warm={report.live_warm_count} "
-                    f"live_cold={report.live_cold_count}"
+                    f"live_cold={report.live_cold_count} "
+                    f"coverage_tracked={report.coverage_summary.tracked_scope_count} "
+                    f"coverage_stale={report.coverage_summary.stale_scope_count} "
+                    f"drift_flags={report.drift_summary.flag_count}"
                 )
                 return 0
             if args.command == "audit-db":

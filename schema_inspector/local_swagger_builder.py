@@ -1906,6 +1906,33 @@ def _build_schemas() -> dict[str, Any]:
                     "database_ok": {"type": "boolean"},
                     "redis_ok": {"type": "boolean"},
                     "redis_backend_kind": {"type": "string"},
+                    "drift_summary": _ref("DriftSummary"),
+                    "coverage_summary": _ref("CoverageRollupSummary"),
+                }
+            ),
+            "DriftFlag": _obj(
+                {
+                    "surface": {"type": "string"},
+                    "sport_slug": {"type": "string"},
+                    "reason": {"type": "string"},
+                }
+            ),
+            "DriftSummary": _obj(
+                {
+                    "flag_count": _int64(),
+                    "flags": _array(_ref("DriftFlag")),
+                }
+            ),
+            "CoverageRollupSummary": _obj(
+                {
+                    "tracked_scope_count": _int64(),
+                    "fresh_scope_count": _int64(),
+                    "stale_scope_count": _int64(),
+                    "other_scope_count": _int64(),
+                    "source_count": _int64(),
+                    "sport_count": _int64(),
+                    "surface_count": _int64(),
+                    "avg_completeness_ratio": {"type": "number"},
                 }
             ),
             "SnapshotSummary": _obj(

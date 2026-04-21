@@ -67,6 +67,43 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             "snapshot_older_than_terminal_state",
         )
 
+    async def test_collect_health_report_includes_coverage_summary_rollup(self) -> None:
+        from schema_inspector.ops.health import collect_health_report
+
+        report = await collect_health_report(
+            sql_executor=_FakeSqlExecutor(
+                {
+                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
+                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                },
+                rows_by_query={
+                    "health_coverage": [
+                        {
+                            "tracked_scope_count": 11,
+                            "fresh_scope_count": 7,
+                            "stale_scope_count": 2,
+                            "other_scope_count": 2,
+                            "source_count": 2,
+                            "sport_count": 3,
+                            "surface_count": 4,
+                            "avg_completeness_ratio": 0.625,
+                        }
+                    ]
+                },
+            ),
+            live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({})),
+            redis_backend=_FakeRedis(),
+        )
+
+        self.assertEqual(report.coverage_summary.tracked_scope_count, 11)
+        self.assertEqual(report.coverage_summary.fresh_scope_count, 7)
+        self.assertEqual(report.coverage_summary.stale_scope_count, 2)
+        self.assertEqual(report.coverage_summary.other_scope_count, 2)
+        self.assertEqual(report.coverage_summary.source_count, 2)
+        self.assertEqual(report.coverage_summary.sport_count, 3)
+        self.assertEqual(report.coverage_summary.surface_count, 4)
+        self.assertAlmostEqual(report.coverage_summary.avg_completeness_ratio, 0.625)
+
     def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -391,6 +428,9 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("db_ok=1", output)
         self.assertIn("redis_ok=1", output)
         self.assertIn("redis_backend=fakeredis", output)
+        self.assertIn("coverage_tracked=12", output)
+        self.assertIn("coverage_stale=3", output)
+        self.assertIn("drift_flags=1", output)
 
     async def test_dispatch_audit_db_prints_compact_report(self) -> None:
         import schema_inspector.cli as hybrid_cli
@@ -1301,6 +1341,8 @@ class _FakeSqlExecutor:
         normalized = " ".join(query.split())
         if "FROM event_terminal_state AS ets" in normalized:
             return list(self.rows_by_query.get("health_drift", ()))
+        if "FROM coverage_ledger" in normalized:
+            return list(self.rows_by_query.get("health_coverage", ()))
         return []
 
 
@@ -1322,6 +1364,12 @@ class _FakeDispatchHybridApp:
                 "database_ok": True,
                 "redis_ok": True,
                 "redis_backend_kind": "fakeredis",
+                "drift_summary": type("DriftSummary", (), {"flag_count": 1})(),
+                "coverage_summary": type(
+                    "CoverageSummary",
+                    (),
+                    {"tracked_scope_count": 12, "stale_scope_count": 3},
+                )(),
             },
         )()
 

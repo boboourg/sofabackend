@@ -209,8 +209,8 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_fetch_ops_health_payload_keeps_drift_summary_in_payload(self) -> None:
-        from schema_inspector.ops.health import DriftFlag, DriftSummary, HealthReport
+    async def test_fetch_ops_health_payload_keeps_drift_and_coverage_summaries_in_payload(self) -> None:
+        from schema_inspector.ops.health import CoverageSummary, DriftFlag, DriftSummary, HealthReport
 
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeCoverageConnection([])
@@ -241,6 +241,16 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     ),
                 ),
+                coverage_summary=CoverageSummary(
+                    tracked_scope_count=12,
+                    fresh_scope_count=8,
+                    stale_scope_count=3,
+                    other_scope_count=1,
+                    source_count=2,
+                    sport_count=3,
+                    surface_count=4,
+                    avg_completeness_ratio=0.625,
+                ),
             )
 
         import schema_inspector.local_api_server as local_api_server
@@ -255,6 +265,9 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["drift_summary"]["flag_count"], 1)
         self.assertEqual(payload["drift_summary"]["flags"][0]["surface"], "sport_live_events")
         self.assertEqual(payload["drift_summary"]["flags"][0]["sport_slug"], "football")
+        self.assertEqual(payload["coverage_summary"]["tracked_scope_count"], 12)
+        self.assertEqual(payload["coverage_summary"]["stale_scope_count"], 3)
+        self.assertAlmostEqual(payload["coverage_summary"]["avg_completeness_ratio"], 0.625)
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):

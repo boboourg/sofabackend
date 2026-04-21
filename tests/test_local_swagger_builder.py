@@ -57,10 +57,16 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("/ops/jobs/runs", document["paths"])
         self.assertIn("/ops/coverage/summary", document["paths"])
         self.assertIn("OperationalHealth", document["components"]["schemas"])
+        self.assertIn("CoverageRollupSummary", document["components"]["schemas"])
+        self.assertIn("DriftSummary", document["components"]["schemas"])
+        self.assertIn("DriftFlag", document["components"]["schemas"])
         self.assertIn("QueueSummary", document["components"]["schemas"])
         self.assertIn("JobRunEntry", document["components"]["schemas"])
         self.assertIn("CoverageSummary", document["components"]["schemas"])
         self.assertIn("Coverage ledger rows in summary: `11`", document["paths"]["/ops/coverage/summary"]["get"]["description"])
+        operational_health = document["components"]["schemas"]["OperationalHealth"]["properties"]
+        self.assertEqual(operational_health["drift_summary"]["$ref"], "#/components/schemas/DriftSummary")
+        self.assertEqual(operational_health["coverage_summary"]["$ref"], "#/components/schemas/CoverageRollupSummary")
 
     def test_document_contains_all_supported_sports_and_special_routes(self) -> None:
         summary = SwaggerDataSummary(

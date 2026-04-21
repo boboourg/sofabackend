@@ -19,6 +19,18 @@ class DriftSummary:
 
 
 @dataclass(frozen=True)
+class CoverageSummary:
+    tracked_scope_count: int = 0
+    fresh_scope_count: int = 0
+    stale_scope_count: int = 0
+    other_scope_count: int = 0
+    source_count: int = 0
+    sport_count: int = 0
+    surface_count: int = 0
+    avg_completeness_ratio: float = 0.0
+
+
+@dataclass(frozen=True)
 class HealthReport:
     snapshot_count: int
     capability_rollup_count: int
@@ -29,12 +41,14 @@ class HealthReport:
     redis_ok: bool
     redis_backend_kind: str
     drift_summary: DriftSummary = DriftSummary()
+    coverage_summary: CoverageSummary = CoverageSummary()
 
 
 async def collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None) -> HealthReport:
     snapshot_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM api_payload_snapshot"))
     capability_rollup_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM endpoint_capability_rollup"))
     drift_summary = await _fetch_drift_summary(sql_executor)
+    coverage_summary = await _fetch_coverage_summary(sql_executor)
     return HealthReport(
         snapshot_count=snapshot_count,
         capability_rollup_count=capability_rollup_count,
@@ -45,6 +59,7 @@ async def collect_health_report(*, sql_executor, live_state_store=None, redis_ba
         redis_ok=_ping_redis(redis_backend),
         redis_backend_kind=_backend_kind(redis_backend),
         drift_summary=drift_summary,
+        coverage_summary=coverage_summary,
     )
 
 
@@ -138,3 +153,35 @@ async def _fetch_drift_summary(sql_executor) -> DriftSummary:
         for row in rows
     )
     return DriftSummary(flag_count=len(flags), flags=flags)
+
+
+async def _fetch_coverage_summary(sql_executor) -> CoverageSummary:
+    rows = await sql_executor.fetch(
+        """
+        SELECT
+            COUNT(*)::bigint AS tracked_scope_count,
+            COUNT(*) FILTER (WHERE freshness_status = 'fresh')::bigint AS fresh_scope_count,
+            COUNT(*) FILTER (WHERE freshness_status = 'stale')::bigint AS stale_scope_count,
+            COUNT(*) FILTER (
+                WHERE freshness_status <> 'fresh' AND freshness_status <> 'stale'
+            )::bigint AS other_scope_count,
+            COUNT(DISTINCT source_slug)::bigint AS source_count,
+            COUNT(DISTINCT sport_slug)::bigint AS sport_count,
+            COUNT(DISTINCT surface_name)::bigint AS surface_count,
+            COALESCE(AVG(completeness_ratio), 0)::double precision AS avg_completeness_ratio
+        FROM coverage_ledger
+        """
+    )
+    if not rows:
+        return CoverageSummary()
+    row = rows[0]
+    return CoverageSummary(
+        tracked_scope_count=int(row.get("tracked_scope_count") or 0),
+        fresh_scope_count=int(row.get("fresh_scope_count") or 0),
+        stale_scope_count=int(row.get("stale_scope_count") or 0),
+        other_scope_count=int(row.get("other_scope_count") or 0),
+        source_count=int(row.get("source_count") or 0),
+        sport_count=int(row.get("sport_count") or 0),
+        surface_count=int(row.get("surface_count") or 0),
+        avg_completeness_ratio=float(row.get("avg_completeness_ratio") or 0.0),
+    )
