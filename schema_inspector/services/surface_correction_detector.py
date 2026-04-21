@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..event_list_parser import EventListBundle
+from ..source_priority import should_existing_source_win
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,15 @@ class SurfaceCorrectionDetector:
         *,
         bundle: EventListBundle,
         previous_states: dict[int, SurfaceEventState],
+        existing_source_slug: str | None = None,
+        incoming_source_slug: str | None = None,
     ) -> tuple[SurfaceCorrection, ...]:
+        if existing_source_slug is not None or incoming_source_slug is not None:
+            if should_existing_source_win(
+                existing_source_slug=existing_source_slug,
+                incoming_source_slug=incoming_source_slug,
+            ):
+                return ()
         current_states = self._states_from_bundle(bundle)
         corrections: list[SurfaceCorrection] = []
         for event_id, current in sorted(current_states.items()):

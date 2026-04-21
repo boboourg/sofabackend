@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ._temporal import coerce_timestamptz
+from ..source_priority import should_existing_source_win
 
 
 class SqlExecutor(Protocol):
@@ -61,7 +62,20 @@ class LiveStateRepository:
             coerce_timestamptz(record.observed_at),
         )
 
-    async def upsert_terminal_state(self, executor: SqlExecutor, record: EventTerminalStateRecord) -> None:
+    async def upsert_terminal_state(
+        self,
+        executor: SqlExecutor,
+        record: EventTerminalStateRecord,
+        *,
+        existing_source_slug: str | None = None,
+        incoming_source_slug: str | None = None,
+    ) -> bool:
+        if existing_source_slug is not None or incoming_source_slug is not None:
+            if should_existing_source_win(
+                existing_source_slug=existing_source_slug,
+                incoming_source_slug=incoming_source_slug,
+            ):
+                return False
         await executor.execute(
             """
             INSERT INTO event_terminal_state (
@@ -81,6 +95,7 @@ class LiveStateRepository:
             coerce_timestamptz(record.finalized_at),
             record.final_snapshot_id,
         )
+        return True
 
     async def insert_terminal_state_if_missing(
         self,

@@ -20,6 +20,63 @@ class _FakeExecutor:
 
 
 class LiveStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_higher_priority_source_wins_over_lower_priority_source(self) -> None:
+        repository = LiveStateRepository()
+        executor = _FakeExecutor()
+
+        result = await repository.upsert_terminal_state(
+            executor,
+            EventTerminalStateRecord(
+                event_id=14201603,
+                terminal_status="finished",
+                finalized_at="2026-04-16T20:05:00+00:00",
+                final_snapshot_id=777,
+            ),
+            existing_source_slug="sofascore",
+            incoming_source_slug="secondary_source",
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(executor.execute_calls, [])
+
+    async def test_same_priority_source_does_not_reject_update_by_default(self) -> None:
+        repository = LiveStateRepository()
+        executor = _FakeExecutor()
+
+        result = await repository.upsert_terminal_state(
+            executor,
+            EventTerminalStateRecord(
+                event_id=14201603,
+                terminal_status="finished",
+                finalized_at="2026-04-16T20:05:00+00:00",
+                final_snapshot_id=777,
+            ),
+            existing_source_slug="secondary_source",
+            incoming_source_slug="secondary_source",
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(len(executor.execute_calls), 1)
+
+    async def test_unknown_source_is_lower_priority_than_sofascore(self) -> None:
+        repository = LiveStateRepository()
+        executor = _FakeExecutor()
+
+        result = await repository.upsert_terminal_state(
+            executor,
+            EventTerminalStateRecord(
+                event_id=14201603,
+                terminal_status="finished",
+                finalized_at="2026-04-16T20:05:00+00:00",
+                final_snapshot_id=777,
+            ),
+            existing_source_slug="sofascore",
+            incoming_source_slug=None,
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(executor.execute_calls, [])
+
     async def test_repository_writes_live_history_and_terminal_state(self) -> None:
         repository = LiveStateRepository()
         executor = _FakeExecutor()
