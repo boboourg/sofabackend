@@ -7,33 +7,16 @@ import asyncio
 import sys
 from datetime import datetime
 
-from .competition_job import CompetitionIngestJob
-from .competition_parser import CompetitionParser
-from .competition_repository import CompetitionRepository
 from .db import AsyncpgDatabase, load_database_config
-from .entities_job import EntitiesIngestJob
 from .entities_parser import (
-    EntitiesParser,
     PlayerHeatmapRequest,
     PlayerOverallRequest,
     TeamOverallRequest,
     TeamPerformanceGraphRequest,
 )
-from .entities_repository import EntitiesRepository
-from .event_detail_job import EventDetailIngestJob
-from .event_detail_parser import EventDetailParser
-from .event_detail_repository import EventDetailRepository
-from .leaderboards_job import LeaderboardsIngestJob
-from .leaderboards_parser import LeaderboardsParser
-from .leaderboards_repository import LeaderboardsRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
-from .standings_job import StandingsIngestJob
-from .standings_parser import StandingsParser
-from .standings_repository import StandingsRepository
-from .statistics_job import StatisticsIngestJob
-from .statistics_parser import StatisticsParser, StatisticsQuery
-from .statistics_repository import StatisticsRepository
+from .sources import build_source_adapter
+from .statistics_parser import StatisticsQuery
 
 
 def main() -> int:
@@ -119,14 +102,17 @@ async def _run(args: argparse.Namespace) -> int:
     statistics_queries = (stats_query,)
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
 
-        competition_job = CompetitionIngestJob(CompetitionParser(client), CompetitionRepository(), database)
-        statistics_job = StatisticsIngestJob(StatisticsParser(client), StatisticsRepository(), database)
-        standings_job = StandingsIngestJob(StandingsParser(client), StandingsRepository(), database)
-        leaderboards_job = LeaderboardsIngestJob(LeaderboardsParser(client), LeaderboardsRepository(), database)
-        entities_job = EntitiesIngestJob(EntitiesParser(client), EntitiesRepository(), database)
-        event_detail_job = EventDetailIngestJob(EventDetailParser(client), EventDetailRepository(), database)
+        competition_job = adapter.build_competition_job(database)
+        statistics_job = adapter.build_statistics_job(database)
+        standings_job = adapter.build_standings_job(database)
+        leaderboards_job = adapter.build_leaderboards_job(database)
+        entities_job = adapter.build_entities_job(database)
+        event_detail_job = adapter.build_event_detail_job(database)
 
         competition_result = None
         statistics_result = None
