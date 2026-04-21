@@ -330,15 +330,17 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         brackets_profile = replace(resolve_sport_profile("basketball"), structure_sync_mode="brackets")
 
         with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch(
+                "schema_inspector.services.structure_sync_service.build_source_adapter",
+                return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+            ),
             mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=brackets_profile),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=700,
                 sport_slug="basketball",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -395,15 +397,15 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured = mock.AsyncMock()
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
 
-        with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=17,
                 sport_slug="football",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -457,15 +459,17 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         auto_profile = replace(resolve_sport_profile("basketball"), structure_sync_mode="auto")
 
         with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch(
+                "schema_inspector.services.structure_sync_service.build_source_adapter",
+                return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+            ),
             mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=auto_profile),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=88,
                 sport_slug="basketball",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -520,15 +524,15 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured = mock.AsyncMock()
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
 
-        with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=91,
                 sport_slug="football",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -588,15 +592,17 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         brackets_profile = replace(resolve_sport_profile("basketball"), structure_sync_mode="brackets")
 
         with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch(
+                "schema_inspector.services.structure_sync_service.build_source_adapter",
+                return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+            ),
             mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=brackets_profile),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=701,
                 sport_slug="basketball",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -650,15 +656,15 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured = mock.AsyncMock()
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
 
-        with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=17,
                 sport_slug="football",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -734,15 +740,17 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+            mock.patch(
+                "schema_inspector.services.structure_sync_service.build_source_adapter",
+                return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+            ),
             mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=tennis_auto),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=501,
                 sport_slug="tennis",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -774,15 +782,15 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         event_list_job = mock.Mock()
 
-        with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=77,
                 sport_slug="football",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
             )
 
@@ -835,15 +843,15 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured = mock.AsyncMock(return_value=_event_result((501,)))
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock(return_value=_event_result(()))
 
-        with (
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob", return_value=competition_job),
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob", return_value=event_list_job),
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
                 unique_tournament_id=17,
                 sport_slug="football",
-                runtime_config=object(),
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
                 now_factory=lambda: datetime(2025, 1, 15, tzinfo=timezone.utc),
             )
@@ -861,9 +869,7 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=disabled_profile),
-            mock.patch("schema_inspector.services.structure_sync_service.SofascoreClient") as client_cls,
-            mock.patch("schema_inspector.services.structure_sync_service.CompetitionIngestJob") as competition_job_cls,
-            mock.patch("schema_inspector.services.structure_sync_service.EventListIngestJob") as event_list_job_cls,
+            mock.patch("schema_inspector.services.structure_sync_service.build_source_adapter") as adapter_factory,
         ):
             result = await run_structure_sync_for_tournament(
                 _FakeStructureApp(),
@@ -873,9 +879,91 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.mode, "disabled")
         self.assertTrue(result.success)
-        client_cls.assert_not_called()
-        competition_job_cls.assert_not_called()
-        event_list_job_cls.assert_not_called()
+        adapter_factory.assert_not_called()
+
+    async def test_structure_sync_builds_source_adapter_and_uses_adapter_jobs(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(side_effect=[_event_result((101,)), _event_result(())])
+        event_list_job.run_brackets = mock.AsyncMock()
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+        adapter = _FakeStructureSourceAdapter(competition_job, event_list_job)
+        runtime_config = SimpleNamespace(source_slug="secondary_source")
+        transport = object()
+        app = _FakeStructureApp()
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=adapter,
+        ) as adapter_factory:
+            result = await run_structure_sync_for_tournament(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+                runtime_config=runtime_config,
+                transport=transport,
+            )
+
+        self.assertEqual(result.mode, "rounds")
+        adapter_factory.assert_called_once_with(
+            "secondary_source",
+            runtime_config=runtime_config,
+            transport=transport,
+        )
+        self.assertEqual(adapter.competition_build_calls, [app.database])
+        self.assertEqual(adapter.event_list_build_calls, [app.database])
+
+    async def test_structure_sync_surfaces_unsupported_adapter_error(self) -> None:
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+        from schema_inspector.sources import UnsupportedSourceAdapterError
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_UnsupportedStructureSourceAdapter(),
+        ):
+            with self.assertRaisesRegex(
+                UnsupportedSourceAdapterError,
+                "competition ingestion is not wired for source secondary_source",
+            ):
+                await run_structure_sync_for_tournament(
+                    _FakeStructureApp(),
+                    unique_tournament_id=17,
+                    sport_slug="football",
+                    runtime_config=SimpleNamespace(source_slug="secondary_source"),
+                    transport=object(),
+                )
 
 
 class _FakeRedisBackend:
@@ -933,6 +1021,36 @@ class _FakeStructureApp:
         self.runtime_config = object()
         self.transport = object()
         self.database = object()
+
+
+class _FakeStructureSourceAdapter:
+    def __init__(self, competition_job, event_list_job) -> None:
+        self.competition_job = competition_job
+        self.event_list_job = event_list_job
+        self.competition_build_calls: list[object] = []
+        self.event_list_build_calls: list[object] = []
+
+    def build_competition_job(self, database):
+        self.competition_build_calls.append(database)
+        return self.competition_job
+
+    def build_event_list_job(self, database):
+        self.event_list_build_calls.append(database)
+        return self.event_list_job
+
+
+class _UnsupportedStructureSourceAdapter:
+    def build_competition_job(self, database):
+        del database
+        from schema_inspector.sources import UnsupportedSourceAdapterError
+
+        raise UnsupportedSourceAdapterError(
+            "competition ingestion is not wired for source secondary_source"
+        )
+
+    def build_event_list_job(self, database):
+        del database
+        return object()
 
 
 class _FakeDatabaseConnection:

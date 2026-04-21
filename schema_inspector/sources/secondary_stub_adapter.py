@@ -21,6 +21,10 @@ class SecondaryStubSourceAdapter(SourceAdapter):
         del database
         raise UnsupportedSourceAdapterError("event-list discovery is not wired for source secondary_source")
 
+    def build_competition_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError("competition ingestion is not wired for source secondary_source")
+
     def build_event_detail_job(self, database):
         del database
         raise UnsupportedSourceAdapterError("event-detail enrichment is not wired for source secondary_source")

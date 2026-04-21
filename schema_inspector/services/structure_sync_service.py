@@ -26,13 +26,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from ..competition_job import CompetitionIngestJob
-from ..competition_parser import CompetitionParser, UniqueTournamentRecord
-from ..competition_repository import CompetitionRepository
+from ..competition_parser import UniqueTournamentRecord
 from ..event_list_job import EventListIngestJob
-from ..event_list_parser import EventListParser
-from ..event_list_repository import EventListRepository
-from ..sofascore_client import SofascoreClient
+from ..sources import build_source_adapter
 from ..sport_profiles import SportProfile, resolve_sport_profile
 
 logger = logging.getLogger(__name__)
@@ -84,18 +80,13 @@ async def run_structure_sync_for_tournament(
 
     client_runtime = runtime_config if runtime_config is not None else app.runtime_config
     client_transport = transport if transport is not None else getattr(app, "transport", None)
-    client = SofascoreClient(client_runtime, transport=client_transport)
-
-    competition_job = CompetitionIngestJob(
-        CompetitionParser(client),
-        CompetitionRepository(),
-        app.database,
+    adapter = build_source_adapter(
+        client_runtime.source_slug,
+        runtime_config=client_runtime,
+        transport=client_transport,
     )
-    event_list_job = EventListIngestJob(
-        EventListParser(client),
-        EventListRepository(),
-        app.database,
-    )
+    competition_job = adapter.build_competition_job(app.database)
+    event_list_job = adapter.build_event_list_job(app.database)
 
     # Phase 1 — pull tournament + seasons caps (cheap, 2 endpoints).
     competition_result = await competition_job.run(

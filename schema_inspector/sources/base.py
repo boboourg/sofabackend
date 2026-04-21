@@ -61,6 +61,10 @@ class SourceAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def build_competition_job(self, database: "AsyncpgDatabase"):
+        raise NotImplementedError
+
+    @abstractmethod
     def build_event_detail_job(self, database: "AsyncpgDatabase"):
         raise NotImplementedError
 

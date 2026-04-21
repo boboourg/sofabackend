@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from ..competition_job import CompetitionIngestJob
+from ..competition_parser import CompetitionParser
+from ..competition_repository import CompetitionRepository
 from ..entities_job import EntitiesIngestJob
 from ..entities_parser import EntitiesParser
 from ..entities_repository import EntitiesRepository
@@ -52,6 +55,13 @@ class SofascoreSourceAdapter(SourceAdapter):
         return EventListIngestJob(
             EventListParser(self.client),
             EventListRepository(),
+            database,
+        )
+
+    def build_competition_job(self, database):
+        return CompetitionIngestJob(
+            CompetitionParser(self.client),
+            CompetitionRepository(),
             database,
         )
 
