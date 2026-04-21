@@ -17,6 +17,11 @@ class SecondaryStubSourceAdapter(SourceAdapter):
         del request
         raise DisabledSourceAdapterError("secondary_source adapter is disabled")
 
+    def build_default_tournament_list_parser(self):
+        raise UnsupportedSourceAdapterError(
+            "default tournament list is not wired for source secondary_source"
+        )
+
     def build_event_list_job(self, database):
         del database
         raise UnsupportedSourceAdapterError("event-list discovery is not wired for source secondary_source")

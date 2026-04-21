@@ -3,6 +3,7 @@ from __future__ import annotations
 from ..competition_job import CompetitionIngestJob
 from ..competition_parser import CompetitionParser
 from ..competition_repository import CompetitionRepository
+from ..default_tournaments_parser import DefaultTournamentListParser
 from ..entities_job import EntitiesIngestJob
 from ..entities_parser import EntitiesParser
 from ..entities_repository import EntitiesRepository
@@ -59,6 +60,9 @@ class SofascoreSourceAdapter(SourceAdapter):
             final_proxy_name=response.final_proxy_name,
             challenge_reason=response.challenge_reason,
         )
+
+    def build_default_tournament_list_parser(self):
+        return DefaultTournamentListParser(self.client)
 
     def build_event_list_job(self, database):
         return EventListIngestJob(
