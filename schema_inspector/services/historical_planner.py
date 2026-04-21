@@ -16,6 +16,13 @@ HISTORICAL_CURSOR_HASH = "hash:etl:historical_cursor"
 logger = logging.getLogger(__name__)
 
 
+def choose_recent_history_window(sport_slug: str) -> int:
+    normalized = str(sport_slug).strip().lower()
+    if normalized in {"football", "basketball", "ice-hockey", "baseball"}:
+        return 730
+    return 180
+
+
 @dataclass(frozen=True)
 class HistoricalPlanningTarget:
     sport_slug: str

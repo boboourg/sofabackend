@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from ..competition_job import CompetitionIngestJob
 from ..competition_parser import CompetitionParser
 from ..competition_repository import CompetitionRepository
@@ -21,6 +23,7 @@ from ..leaderboards_job import LeaderboardsIngestJob
 from ..leaderboards_parser import LeaderboardsParser
 from ..leaderboards_repository import LeaderboardsRepository
 from ..sofascore_client import SofascoreClient
+from .historical_planner import choose_recent_history_window
 from ..sport_profiles import resolve_sport_profile
 from ..standings_job import StandingsIngestJob
 from ..standings_parser import StandingsParser
@@ -28,6 +31,8 @@ from ..standings_repository import StandingsRepository
 from ..statistics_job import StatisticsIngestJob
 from ..statistics_parser import StatisticsParser, StatisticsQuery
 from ..statistics_repository import StatisticsRepository
+
+HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT = 500
 
 
 async def run_historical_tournament_archive(
@@ -99,9 +104,14 @@ async def run_historical_tournament_enrichment(
     season_ids: tuple[int, ...] = (),
     event_detail_concurrency: int = 6,
     timeout: float = 20.0,
+    now_factory=None,
 ) -> dict[str, object]:
-    del sport_slug, season_ids
+    del season_ids
     client = SofascoreClient(app.runtime_config, transport=app.transport)
+    resolved_now = (now_factory or _default_now_utc)()
+    recent_window_days = choose_recent_history_window(sport_slug)
+    recent_window_start = int((resolved_now - timedelta(days=recent_window_days)).timestamp())
+    recent_window_end = int(resolved_now.timestamp())
     event_detail_backfill_job = EventDetailBackfillJob(
         EventDetailIngestJob(EventDetailParser(client), EventDetailRepository(), app.database),
         app.database,
@@ -111,14 +121,19 @@ async def run_historical_tournament_enrichment(
         app.database,
     )
     event_detail_result = await event_detail_backfill_job.run(
+        limit=HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT,
         only_missing=True,
         unique_tournament_ids=(int(unique_tournament_id),),
+        start_timestamp_from=recent_window_start,
+        start_timestamp_to=recent_window_end,
         concurrency=max(1, int(event_detail_concurrency)),
         timeout=timeout,
     )
     entities_result = await entities_backfill_job.run(
         only_missing=True,
         unique_tournament_ids=(int(unique_tournament_id),),
+        event_timestamp_from=recent_window_start,
+        event_timestamp_to=recent_window_end,
         timeout=timeout,
     )
     return {
@@ -129,3 +144,7 @@ async def run_historical_tournament_enrichment(
         "entity_teams": len(entities_result.team_ids),
         "entity_snapshots": int(entities_result.ingest.written.payload_snapshot_rows),
     }
+
+
+def _default_now_utc() -> datetime:
+    return datetime.now(timezone.utc)
