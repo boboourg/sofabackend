@@ -23,7 +23,11 @@ from ..leaderboards_job import LeaderboardsIngestJob
 from ..leaderboards_parser import LeaderboardsParser
 from ..leaderboards_repository import LeaderboardsRepository
 from ..sofascore_client import SofascoreClient
-from .historical_planner import choose_recent_history_window, choose_saturation_budget
+from .historical_planner import (
+    choose_event_detail_budget,
+    choose_recent_history_window,
+    choose_saturation_budget,
+)
 from ..sport_profiles import resolve_sport_profile
 from ..standings_job import StandingsIngestJob
 from ..standings_parser import StandingsParser
@@ -31,9 +35,6 @@ from ..standings_repository import StandingsRepository
 from ..statistics_job import StatisticsIngestJob
 from ..statistics_parser import StatisticsParser, StatisticsQuery
 from ..statistics_repository import StatisticsRepository
-
-HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT = 500
-
 
 async def run_historical_tournament_archive(
     app,
@@ -111,6 +112,7 @@ async def run_historical_tournament_enrichment(
     resolved_now = (now_factory or _default_now_utc)()
     recent_window_days = choose_recent_history_window(sport_slug)
     saturation_budget = choose_saturation_budget(sport_slug)
+    event_detail_limit = choose_event_detail_budget(sport_slug)
     recent_window_start = int((resolved_now - timedelta(days=recent_window_days)).timestamp())
     recent_window_end = int(resolved_now.timestamp())
     event_detail_backfill_job = EventDetailBackfillJob(
@@ -122,7 +124,7 @@ async def run_historical_tournament_enrichment(
         app.database,
     )
     event_detail_result = await event_detail_backfill_job.run(
-        limit=HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT,
+        limit=event_detail_limit,
         only_missing=True,
         unique_tournament_ids=(int(unique_tournament_id),),
         start_timestamp_from=recent_window_start,

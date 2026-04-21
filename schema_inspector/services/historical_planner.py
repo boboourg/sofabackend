@@ -56,6 +56,13 @@ def choose_saturation_budget(sport_slug: str) -> HistoricalSaturationBudget:
     )
 
 
+def choose_event_detail_budget(sport_slug: str) -> int:
+    normalized = str(sport_slug).strip().lower()
+    if normalized in {"football", "basketball", "ice-hockey", "baseball"}:
+        return 500
+    return 180
+
+
 class HistoricalCursorStore:
     def __init__(self, backend, *, hash_key: str = HISTORICAL_CURSOR_HASH) -> None:
         self.backend = backend

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.services.historical_planner import (
+    choose_event_detail_budget,
     choose_recent_history_window,
     choose_saturation_budget,
 )
@@ -23,6 +24,12 @@ class RecentHistoryPolicyTests(unittest.TestCase):
         self.assertGreater(football.team_limit, table_tennis.team_limit)
         self.assertGreater(football.player_request_limit, table_tennis.player_request_limit)
         self.assertGreater(football.team_request_limit, table_tennis.team_request_limit)
+
+    def test_priority_sports_get_larger_event_detail_budget_than_other_sports(self) -> None:
+        self.assertGreater(
+            choose_event_detail_budget("football"),
+            choose_event_detail_budget("table-tennis"),
+        )
 
 
 if __name__ == "__main__":

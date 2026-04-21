@@ -88,15 +88,18 @@ class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
 class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrichment_uses_recent_history_window_for_backfills(self) -> None:
         from schema_inspector.services.historical_archive_service import (
-            HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT,
             run_historical_tournament_enrichment,
         )
-        from schema_inspector.services.historical_planner import choose_saturation_budget
+        from schema_inspector.services.historical_planner import (
+            choose_event_detail_budget,
+            choose_saturation_budget,
+        )
 
         fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
         expected_from = int((fixed_now - timedelta(days=730)).timestamp())
         expected_to = int(fixed_now.timestamp())
         expected_budget = choose_saturation_budget("football")
+        expected_event_detail_limit = choose_event_detail_budget("football")
 
         with (
             patch(
@@ -150,7 +153,7 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.event_detail_run_kwargs["unique_tournament_ids"], (17,))
         self.assertEqual(app.event_detail_run_kwargs["start_timestamp_from"], expected_from)
         self.assertEqual(app.event_detail_run_kwargs["start_timestamp_to"], expected_to)
-        self.assertEqual(app.event_detail_run_kwargs["limit"], HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT)
+        self.assertEqual(app.event_detail_run_kwargs["limit"], expected_event_detail_limit)
         self.assertEqual(app.entities_run_kwargs["unique_tournament_ids"], (17,))
         self.assertEqual(app.entities_run_kwargs["event_timestamp_from"], expected_from)
         self.assertEqual(app.entities_run_kwargs["event_timestamp_to"], expected_to)
