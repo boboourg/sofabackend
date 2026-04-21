@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class HistoricalTournamentPlanningTarget:
     sport_slug: str
+    allowed_unique_tournament_ids: tuple[int, ...] = ()
     priority: int = 40
 
 
@@ -58,15 +59,18 @@ class HistoricalTournamentPlannerDaemon:
         tournaments_per_tick: int = 10,
         loop_interval_s: float = 10.0,
         backpressure=None,
+        target_loader=None,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
         self.selector = selector
-        self.targets = tuple(targets)
+        self._static_targets = tuple(targets)
+        self.targets = self._static_targets
         self.stream = stream
         self.tournaments_per_tick = max(1, int(tournaments_per_tick))
         self.loop_interval_s = float(loop_interval_s)
         self.backpressure = backpressure
+        self._target_loader = target_loader
         self.shutdown_requested = False
 
     def request_shutdown(self) -> None:
@@ -85,15 +89,21 @@ class HistoricalTournamentPlannerDaemon:
             if reason:
                 logger.info("Historical tournament planner paused by backpressure: %s", reason)
                 return 0
+        targets = await _await_maybe(self._target_loader()) if self._target_loader else self._static_targets
         published = 0
-        for target in self.targets:
+        for target in targets:
             after_unique_tournament_id = self.cursor_store.load_last_unique_tournament_id(target.sport_slug)
-            selected_ids = await _await_maybe(
-                self.selector(
-                    sport_slug=target.sport_slug,
-                    after_unique_tournament_id=after_unique_tournament_id,
-                    limit=self.tournaments_per_tick,
+            selector_kwargs = {
+                "sport_slug": target.sport_slug,
+                "after_unique_tournament_id": after_unique_tournament_id,
+                "limit": self.tournaments_per_tick,
+            }
+            if target.allowed_unique_tournament_ids:
+                selector_kwargs["allowed_unique_tournament_ids"] = tuple(
+                    int(item) for item in target.allowed_unique_tournament_ids
                 )
+            selected_ids = await _await_maybe(
+                self.selector(**selector_kwargs)
             )
             if not selected_ids:
                 continue

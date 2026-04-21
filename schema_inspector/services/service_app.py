@@ -99,6 +99,31 @@ DEFAULT_SERVICE_SPORT_SLUGS = (
     "esports",
 )
 
+
+def _historical_tournament_targets_from_registry(
+    registry_targets,
+    *,
+    sport_slugs: tuple[str, ...] | None = None,
+) -> tuple[HistoricalTournamentPlanningTarget, ...]:
+    allowed_sports = set(sport_slugs or ())
+    grouped_ids: dict[str, list[int]] = {}
+    for registry_target in registry_targets:
+        sport_slug = str(registry_target.sport_slug).strip().lower()
+        if allowed_sports and sport_slug not in allowed_sports:
+            continue
+        unique_tournament_id = int(registry_target.unique_tournament_id)
+        sport_ids = grouped_ids.setdefault(sport_slug, [])
+        if unique_tournament_id in sport_ids:
+            continue
+        sport_ids.append(unique_tournament_id)
+    return tuple(
+        HistoricalTournamentPlanningTarget(
+            sport_slug=sport_slug,
+            allowed_unique_tournament_ids=tuple(unique_tournament_ids),
+        )
+        for sport_slug, unique_tournament_ids in grouped_ids.items()
+    )
+
 class DelayedEnvelopeStore:
     """Stores serialized job payloads so delayed jobs can be reconstructed later."""
 
@@ -280,17 +305,47 @@ class ServiceApp:
         loop_interval_seconds: float = 10.0,
     ) -> HistoricalTournamentPlannerDaemon:
         normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
-        targets = tuple(
+        fallback_targets = tuple(
             HistoricalTournamentPlanningTarget(sport_slug=sport_slug)
             for sport_slug in normalized_sports
         )
+        database = getattr(self.app, "database", None)
+        connection_factory = getattr(database, "connection", None) if database is not None else None
+        if callable(connection_factory):
+            repository = TournamentRegistryRepository()
+
+            async def _target_loader():
+                try:
+                    async with connection_factory() as connection:
+                        registry_targets = await repository.list_active_targets(
+                            connection,
+                            sport_slugs=normalized_sports,
+                            surface="historical",
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "historical tournament planner: tournament registry unavailable, falling back to sport-scoped targets: %s",
+                        exc,
+                    )
+                    return fallback_targets
+                return _historical_tournament_targets_from_registry(
+                    registry_targets,
+                    sport_slugs=normalized_sports,
+                )
+
+            computed_targets = ()
+            target_loader = _target_loader
+        else:
+            computed_targets = fallback_targets
+            target_loader = None
         return HistoricalTournamentPlannerDaemon(
             queue=self.stream_queue,
             cursor_store=self.historical_tournament_cursor_store,
             selector=self.app.select_unique_tournament_ids_after_cursor,
-            targets=targets,
+            targets=computed_targets,
             tournaments_per_tick=tournaments_per_tick,
             loop_interval_s=loop_interval_seconds,
+            target_loader=target_loader,
             backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
@@ -336,6 +391,7 @@ class ServiceApp:
                             registry_targets = await repository.list_active_targets(
                                 connection,
                                 sport_slugs=normalized_sports,
+                                surface="structure",
                             )
                     except Exception as exc:
                         logger.warning(
@@ -346,6 +402,7 @@ class ServiceApp:
                     return load_managed_tournaments(
                         sport_slugs=normalized_sports,
                         registry_targets=registry_targets,
+                        registry_authoritative=True,
                     )
 
                 computed_targets = ()

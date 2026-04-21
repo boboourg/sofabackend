@@ -441,7 +441,11 @@ class HybridApp:
         sport_slug: str,
         after_unique_tournament_id: int,
         limit: int,
+        allowed_unique_tournament_ids: tuple[int, ...] = (),
     ) -> tuple[int, ...]:
+        normalized_allowed_ids = tuple(
+            int(item) for item in allowed_unique_tournament_ids if int(item) > 0
+        )
         async with self.database.connection() as connection:
             rows = await connection.fetch(
                 """
@@ -451,11 +455,16 @@ class HybridApp:
                 JOIN sport AS s ON s.id = c.sport_id
                 WHERE s.slug = $1
                   AND ut.id > $2
+                  AND (
+                    cardinality($3::bigint[]) = 0
+                    OR ut.id = ANY($3::bigint[])
+                  )
                 ORDER BY ut.id
-                LIMIT $3
+                LIMIT $4
                 """,
                 sport_slug,
                 int(after_unique_tournament_id),
+                list(normalized_allowed_ids),
                 max(1, int(limit)),
             )
         return tuple(int(row["id"]) for row in rows if row["id"] is not None)

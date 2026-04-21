@@ -74,6 +74,7 @@ def load_managed_tournaments(
     env: dict[str, str] | None = None,
     sport_slugs: tuple[str, ...] | None = None,
     registry_targets: tuple[TournamentRegistryTarget, ...] | None = None,
+    registry_authoritative: bool = False,
 ) -> tuple[StructurePlanningTarget, ...]:
     """Build structural-sync targets from (in order of precedence):
 
@@ -90,10 +91,10 @@ def load_managed_tournaments(
 
     resolved_env = env if env is not None else dict(os.environ)
     allowed_sports = set(sport_slugs or ())
-    registry_by_sport: dict[str, list[int]] = {}
+    registry_by_sport: dict[str, list[TournamentRegistryTarget]] = {}
     for target in registry_targets or ():
         sport_slug = str(target.sport_slug).strip().lower()
-        registry_by_sport.setdefault(sport_slug, []).append(int(target.unique_tournament_id))
+        registry_by_sport.setdefault(sport_slug, []).append(target)
 
     env_overrides = _parse_managed_json(resolved_env.get(MANAGED_TOURNAMENTS_ENV_KEY))
     file_path = resolved_env.get(MANAGED_TOURNAMENTS_FILE_ENV_KEY, "").strip()
@@ -107,7 +108,10 @@ def load_managed_tournaments(
 
     targets: list[StructurePlanningTarget] = []
     # Build a discriminated set of sport slugs: union of overrides + explicit arg.
-    discovered_sports = set(registry_by_sport) | set(env_overrides) | set(file_overrides) | allowed_sports
+    if registry_authoritative:
+        discovered_sports = set(registry_by_sport) | allowed_sports
+    else:
+        discovered_sports = set(registry_by_sport) | set(env_overrides) | set(file_overrides) | allowed_sports
 
     for sport_slug in sorted(discovered_sports):
         if allowed_sports and sport_slug not in allowed_sports:
@@ -115,9 +119,34 @@ def load_managed_tournaments(
         profile = resolve_sport_profile(sport_slug)
         if profile.structure_sync_mode == "disabled":
             continue
-        if registry_by_sport.get(sport_slug):
-            ids = _merge_ids(registry_by_sport[sport_slug])
-        elif env_overrides.get(sport_slug) or file_overrides.get(sport_slug):
+        registry_rows = registry_by_sport.get(sport_slug, [])
+        if registry_rows:
+            seen_ids: set[int] = set()
+            for registry_target in registry_rows:
+                unique_tournament_id = int(registry_target.unique_tournament_id)
+                if unique_tournament_id in seen_ids:
+                    continue
+                seen_ids.add(unique_tournament_id)
+                refresh_interval_seconds = registry_target.refresh_interval_seconds
+                targets.append(
+                    StructurePlanningTarget(
+                        sport_slug=sport_slug,
+                        unique_tournament_id=unique_tournament_id,
+                        refresh_interval_seconds=float(
+                            refresh_interval_seconds
+                            if refresh_interval_seconds is not None
+                            else profile.structure_refresh_interval_seconds
+                        ),
+                    )
+                )
+            continue
+        if registry_authoritative:
+            continue
+        if env_overrides.get(sport_slug) or file_overrides.get(sport_slug):
+            logger.warning(
+                "structure planner: using env/file fallback for %s; production should use tournament_registry",
+                sport_slug,
+            )
             ids = _merge_ids(
                 env_overrides.get(sport_slug, []),
                 file_overrides.get(sport_slug, []),

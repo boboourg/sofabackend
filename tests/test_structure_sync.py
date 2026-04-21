@@ -116,6 +116,44 @@ class StructurePlannerTests(unittest.IsolatedAsyncioTestCase):
             [("football", 99), ("tennis", 101)],
         )
 
+    def test_load_managed_tournaments_uses_registry_refresh_interval_override(self) -> None:
+        from schema_inspector.services.structure_planner import load_managed_tournaments
+        from schema_inspector.services.tournament_registry_service import TournamentRegistryTarget
+
+        targets = load_managed_tournaments(
+            sport_slugs=("football",),
+            registry_targets=(
+                TournamentRegistryTarget(
+                    source_slug="sofascore",
+                    sport_slug="football",
+                    unique_tournament_id=99,
+                    refresh_interval_seconds=123,
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            [
+                (target.sport_slug, target.unique_tournament_id, target.refresh_interval_seconds)
+                for target in targets
+            ],
+            [("football", 99, 123.0)],
+        )
+
+    def test_load_managed_tournaments_registry_authoritative_skips_env_fallback_for_missing_sport(self) -> None:
+        from schema_inspector.services.structure_planner import load_managed_tournaments
+
+        targets = load_managed_tournaments(
+            env={
+                "SCHEMA_INSPECTOR_STRUCTURE_MANAGED_TOURNAMENTS": '{"football":[17,8]}'
+            },
+            sport_slugs=("football",),
+            registry_targets=(),
+            registry_authoritative=True,
+        )
+
+        self.assertEqual(targets, ())
+
 
 class StructureWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_structure_worker_invokes_orchestrator_for_structure_jobs(self) -> None:
@@ -282,6 +320,37 @@ class StructureServiceAppAsyncTests(unittest.IsolatedAsyncioTestCase):
             [("football", 17), ("football", 8)],
         )
         logger_mock.warning.assert_called_once()
+
+    async def test_service_app_registry_loader_keeps_registry_authoritative_when_rows_are_empty(self) -> None:
+        from schema_inspector.services.service_app import ServiceApp
+
+        stream_queue = _FakeStreamQueue()
+        app = type(
+            "App",
+            (),
+            {
+                "redis_backend": object(),
+                "stream_queue": stream_queue,
+                "live_state_store": object(),
+                "database": _FakeDatabase(),
+            },
+        )()
+
+        with (
+            mock.patch("schema_inspector.services.service_app.TournamentRegistryRepository") as repository_cls,
+            mock.patch.dict(
+                "os.environ",
+                {"SCHEMA_INSPECTOR_STRUCTURE_MANAGED_TOURNAMENTS": '{"football":[17,8]}'},
+                clear=False,
+            ),
+        ):
+            repository = repository_cls.return_value
+            repository.list_active_targets = mock.AsyncMock(return_value=())
+            daemon = ServiceApp(app).build_structure_planner_daemon(sport_slugs=("football",))
+            targets = await daemon._target_loader()
+
+        self.assertEqual(targets, ())
+        self.assertEqual(repository.list_active_targets.await_args.kwargs["surface"], "structure")
 
 
 class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
