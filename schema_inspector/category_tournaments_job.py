@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from .category_tournaments_parser import CategoryTournamentsBundle, CategoryTournamentsParser
 from .competition_repository import CompetitionRepository, CompetitionWriteResult
 from .db import AsyncpgDatabase
+from .services.tournament_registry_service import records_from_category_tournaments_bundle
+from .storage.tournament_registry_repository import TournamentRegistryRepository
 
 
 @dataclass(frozen=True)
@@ -26,11 +28,13 @@ class CategoryTournamentsIngestJob:
         repository: CompetitionRepository,
         database: AsyncpgDatabase,
         *,
+        tournament_registry_repository: TournamentRegistryRepository | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.parser = parser
         self.repository = repository
         self.database = database
+        self.tournament_registry_repository = tournament_registry_repository or TournamentRegistryRepository()
         self.logger = logger or logging.getLogger(__name__)
 
     async def run_categories_all(
@@ -42,6 +46,7 @@ class CategoryTournamentsIngestJob:
         return await self._run(
             f"categories_all:{sport_slug}",
             self.parser.fetch_categories_all(sport_slug=sport_slug, timeout=timeout),
+            sport_slug=sport_slug,
         )
 
     async def run_category_unique_tournaments(
@@ -54,12 +59,20 @@ class CategoryTournamentsIngestJob:
         return await self._run(
             f"category_unique_tournaments:{category_id}",
             self.parser.fetch_category_unique_tournaments(category_id, sport_slug=sport_slug, timeout=timeout),
+            sport_slug=sport_slug,
         )
 
-    async def _run(self, job_name: str, bundle_awaitable) -> CategoryTournamentsIngestResult:
+    async def _run(self, job_name: str, bundle_awaitable, *, sport_slug: str) -> CategoryTournamentsIngestResult:
         bundle = await bundle_awaitable
+        registry_records = records_from_category_tournaments_bundle(
+            bundle,
+            source_slug=bundle.source_slug,
+            sport_slug=sport_slug,
+            discovery_surface=bundle.discovery_surface,
+        )
         async with self.database.transaction() as connection:
             write_result = await self.repository.upsert_bundle(connection, bundle.competition_bundle)
+            await self.tournament_registry_repository.upsert_records(connection, registry_records)
         self.logger.info(
             "Category/tournament discovery completed: job=%s categories=%s tournaments=%s",
             job_name,

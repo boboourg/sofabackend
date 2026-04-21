@@ -97,6 +97,25 @@ class StructurePlannerTests(unittest.IsolatedAsyncioTestCase):
             [("football", 17), ("football", 8), ("tennis", 101)],
         )
 
+    def test_load_managed_tournaments_prefers_registry_rows_over_env_overrides_for_sport(self) -> None:
+        from schema_inspector.services.structure_planner import load_managed_tournaments
+        from schema_inspector.services.tournament_registry_service import TournamentRegistryTarget
+
+        targets = load_managed_tournaments(
+            env={
+                "SCHEMA_INSPECTOR_STRUCTURE_MANAGED_TOURNAMENTS": '{"football":[17,8],"tennis":[101]}'
+            },
+            sport_slugs=("football", "tennis"),
+            registry_targets=(
+                TournamentRegistryTarget(source_slug="sofascore", sport_slug="football", unique_tournament_id=99),
+            ),
+        )
+
+        self.assertEqual(
+            [(target.sport_slug, target.unique_tournament_id) for target in targets],
+            [("football", 99), ("tennis", 101)],
+        )
+
 
 class StructureWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_structure_worker_invokes_orchestrator_for_structure_jobs(self) -> None:
@@ -189,6 +208,80 @@ class StructureServiceAppTests(unittest.TestCase):
             [(target.sport_slug, target.unique_tournament_id) for target in daemon._static_targets],
             [("football", 17), ("football", 8)],
         )
+
+
+class StructureServiceAppAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_app_build_structure_planner_daemon_uses_registry_backed_targets_when_database_available(self) -> None:
+        from schema_inspector.services.service_app import ServiceApp
+        from schema_inspector.services.tournament_registry_service import TournamentRegistryTarget
+
+        stream_queue = _FakeStreamQueue()
+        app = type(
+            "App",
+            (),
+            {
+                "redis_backend": object(),
+                "stream_queue": stream_queue,
+                "live_state_store": object(),
+                "database": _FakeDatabase(),
+            },
+        )()
+
+        with mock.patch("schema_inspector.services.service_app.TournamentRegistryRepository") as repository_cls:
+            repository = repository_cls.return_value
+            repository.list_active_targets = mock.AsyncMock(
+                return_value=(
+                    TournamentRegistryTarget(
+                        source_slug="sofascore",
+                        sport_slug="football",
+                        unique_tournament_id=42,
+                    ),
+                )
+            )
+            daemon = ServiceApp(app).build_structure_planner_daemon(sport_slugs=("football",))
+            targets = await daemon._target_loader()
+
+        self.assertEqual(daemon._static_targets, ())
+        self.assertEqual(
+            [(target.sport_slug, target.unique_tournament_id) for target in targets],
+            [("football", 42)],
+        )
+        repository.list_active_targets.assert_awaited_once()
+
+    async def test_service_app_registry_loader_falls_back_to_env_targets_when_registry_read_fails(self) -> None:
+        from schema_inspector.services.service_app import ServiceApp
+
+        stream_queue = _FakeStreamQueue()
+        app = type(
+            "App",
+            (),
+            {
+                "redis_backend": object(),
+                "stream_queue": stream_queue,
+                "live_state_store": object(),
+                "database": _FakeDatabase(),
+            },
+        )()
+
+        with (
+            mock.patch("schema_inspector.services.service_app.TournamentRegistryRepository") as repository_cls,
+            mock.patch.dict(
+                "os.environ",
+                {"SCHEMA_INSPECTOR_STRUCTURE_MANAGED_TOURNAMENTS": '{"football":[17,8]}'},
+                clear=False,
+            ),
+            mock.patch("schema_inspector.services.service_app.logger") as logger_mock,
+        ):
+            repository = repository_cls.return_value
+            repository.list_active_targets = mock.AsyncMock(side_effect=RuntimeError("registry unavailable"))
+            daemon = ServiceApp(app).build_structure_planner_daemon(sport_slugs=("football",))
+            targets = await daemon._target_loader()
+
+        self.assertEqual(
+            [(target.sport_slug, target.unique_tournament_id) for target in targets],
+            [("football", 17), ("football", 8)],
+        )
+        logger_mock.warning.assert_called_once()
 
 
 class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -518,6 +611,19 @@ class _FakeStructureApp:
         self.runtime_config = object()
         self.transport = object()
         self.database = object()
+
+
+class _FakeDatabaseConnection:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+
+class _FakeDatabase:
+    def connection(self):
+        return _FakeDatabaseConnection()
 
 
 def _structure_entry(*, job_type: str, entity_id: int | None) -> StreamEntry:

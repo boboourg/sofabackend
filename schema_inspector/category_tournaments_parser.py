@@ -29,6 +29,8 @@ class CategoryTournamentsBundle:
     unique_tournament_ids: tuple[int, ...]
     active_unique_tournament_ids: tuple[int, ...]
     group_names: tuple[str, ...]
+    source_slug: str = "sofascore"
+    discovery_surface: str = "category_unique_tournaments"
 
 
 class CategoryTournamentsParserError(RuntimeError):
@@ -72,7 +74,11 @@ class CategoryTournamentsParser:
             sport_slug,
             len(state.categories),
         )
-        return state.to_bundle(sport_slug=sport_slug)
+        return state.to_bundle(
+            sport_slug=sport_slug,
+            source_slug=endpoint.source_slug,
+            discovery_surface="categories_all",
+        )
 
     async def fetch_category_unique_tournaments(
         self,
@@ -110,7 +116,11 @@ class CategoryTournamentsParser:
             len(state.unique_tournaments),
             len(state.active_unique_tournament_ids),
         )
-        return state.to_bundle(sport_slug=sport_slug)
+        return state.to_bundle(
+            sport_slug=sport_slug,
+            source_slug=endpoint.source_slug,
+            discovery_surface="category_unique_tournaments",
+        )
 
 
 class _CategoryTournamentAccumulator:
@@ -253,7 +263,13 @@ class _CategoryTournamentAccumulator:
         )
         return alpha2
 
-    def to_bundle(self, *, sport_slug: str) -> CategoryTournamentsBundle:
+    def to_bundle(
+        self,
+        *,
+        sport_slug: str,
+        source_slug: str = "sofascore",
+        discovery_surface: str = "category_unique_tournaments",
+    ) -> CategoryTournamentsBundle:
         competition_bundle = CompetitionBundle(
             registry_entries=category_tournament_discovery_registry_entries(sport_slug=sport_slug),
             payload_snapshots=tuple(self.payload_snapshots),
@@ -276,6 +292,8 @@ class _CategoryTournamentAccumulator:
             unique_tournament_ids=tuple(sorted(self.unique_tournaments)),
             active_unique_tournament_ids=tuple(sorted(self.active_unique_tournament_ids)),
             group_names=tuple(sorted(self.group_names)),
+            source_slug=source_slug,
+            discovery_surface=discovery_surface,
         )
 
     @staticmethod

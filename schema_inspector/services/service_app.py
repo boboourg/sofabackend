@@ -10,6 +10,7 @@ from typing import Any
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
+from ..storage.tournament_registry_repository import TournamentRegistryRepository
 from ..queue.streams import (
     GROUP_DISCOVERY,
     GROUP_HYDRATE,
@@ -323,15 +324,45 @@ class ServiceApp:
 
         if targets is None:
             normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
-            computed_targets = load_managed_tournaments(sport_slugs=normalized_sports)
+            fallback_targets = load_managed_tournaments(sport_slugs=normalized_sports)
+            database = getattr(self.app, "database", None)
+            connection_factory = getattr(database, "connection", None) if database is not None else None
+            if callable(connection_factory):
+                repository = TournamentRegistryRepository()
+
+                async def _target_loader():
+                    try:
+                        async with connection_factory() as connection:
+                            registry_targets = await repository.list_active_targets(
+                                connection,
+                                sport_slugs=normalized_sports,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "structure planner: tournament registry unavailable, falling back to env/profile targets: %s",
+                            exc,
+                        )
+                        return fallback_targets
+                    return load_managed_tournaments(
+                        sport_slugs=normalized_sports,
+                        registry_targets=registry_targets,
+                    )
+
+                computed_targets = ()
+                target_loader = _target_loader
+            else:
+                computed_targets = fallback_targets
+                target_loader = None
         else:
             computed_targets = tuple(targets)
+            target_loader = None
 
         return StructurePlannerDaemon(
             queue=self.stream_queue,
             cursor_store=self.structure_cursor_store,
             targets=computed_targets,
             loop_interval_s=loop_interval_seconds,
+            target_loader=target_loader,
             backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(

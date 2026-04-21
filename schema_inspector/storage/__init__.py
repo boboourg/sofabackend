@@ -6,6 +6,7 @@ from .job_repository import JobEffectRecord, JobRepository, JobRunRecord, Replay
 from .live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord, LiveStateRepository
 from .normalize_repository import NormalizeRepository
 from .raw_repository import ApiRequestLogRecord, ApiSnapshotHeadRecord, PayloadSnapshotRecord, RawRepository
+from .tournament_registry_repository import TournamentRegistryRecord, TournamentRegistryRepository, TournamentRegistryTarget
 
 __all__ = [
     "ApiRequestLogRecord",
@@ -25,4 +26,7 @@ __all__ = [
     "EventTerminalStateRecord",
     "LiveStateRepository",
     "NormalizeRepository",
+    "TournamentRegistryRecord",
+    "TournamentRegistryRepository",
+    "TournamentRegistryTarget",
 ]

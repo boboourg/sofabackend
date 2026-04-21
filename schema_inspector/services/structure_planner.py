@@ -26,6 +26,7 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_SYNC_TOURNAMENT_STRUCTURE
 from ..queue.streams import STREAM_STRUCTURE_SYNC
 from ..sport_profiles import SportProfile, resolve_sport_profile
+from ..storage.tournament_registry_repository import TournamentRegistryTarget
 from ..workers._stream_jobs import encode_stream_job
 
 STRUCTURE_SYNC_CURSOR_HASH = "hash:etl:structure_sync_cursor"
@@ -72,21 +73,27 @@ def load_managed_tournaments(
     *,
     env: dict[str, str] | None = None,
     sport_slugs: tuple[str, ...] | None = None,
+    registry_targets: tuple[TournamentRegistryTarget, ...] | None = None,
 ) -> tuple[StructurePlanningTarget, ...]:
     """Build structural-sync targets from (in order of precedence):
 
-    1. ``SCHEMA_INSPECTOR_STRUCTURE_MANAGED_TOURNAMENTS`` env JSON (mapping
+    1. Tournament registry rows keyed by sport/source.
+    2. ``SCHEMA_INSPECTOR_STRUCTURE_MANAGED_TOURNAMENTS`` env JSON (mapping
        sport_slug -> list[int]).
-    2. ``SCHEMA_INSPECTOR_STRUCTURE_MANAGED_FILE`` pointing at a JSON file
+    3. ``SCHEMA_INSPECTOR_STRUCTURE_MANAGED_FILE`` pointing at a JSON file
        with the same shape.
-    3. Each sport's ``SportProfile.managed_unique_tournament_ids``.
+    4. Each sport's ``SportProfile.managed_unique_tournament_ids``.
 
-    Precedence is per-sport: an env override for one sport does not erase the
-    profile defaults of another sport — the two sources are merged.
+    Precedence is per-sport: registry rows outrank env/file overrides, and
+    env/file overrides outrank profile defaults.
     """
 
     resolved_env = env if env is not None else dict(os.environ)
     allowed_sports = set(sport_slugs or ())
+    registry_by_sport: dict[str, list[int]] = {}
+    for target in registry_targets or ():
+        sport_slug = str(target.sport_slug).strip().lower()
+        registry_by_sport.setdefault(sport_slug, []).append(int(target.unique_tournament_id))
 
     env_overrides = _parse_managed_json(resolved_env.get(MANAGED_TOURNAMENTS_ENV_KEY))
     file_path = resolved_env.get(MANAGED_TOURNAMENTS_FILE_ENV_KEY, "").strip()
@@ -100,7 +107,7 @@ def load_managed_tournaments(
 
     targets: list[StructurePlanningTarget] = []
     # Build a discriminated set of sport slugs: union of overrides + explicit arg.
-    discovered_sports = set(env_overrides) | set(file_overrides) | allowed_sports
+    discovered_sports = set(registry_by_sport) | set(env_overrides) | set(file_overrides) | allowed_sports
 
     for sport_slug in sorted(discovered_sports):
         if allowed_sports and sport_slug not in allowed_sports:
@@ -108,11 +115,15 @@ def load_managed_tournaments(
         profile = resolve_sport_profile(sport_slug)
         if profile.structure_sync_mode == "disabled":
             continue
-        ids = _merge_ids(
-            env_overrides.get(sport_slug, []),
-            file_overrides.get(sport_slug, []),
-            list(profile.managed_unique_tournament_ids),
-        )
+        if registry_by_sport.get(sport_slug):
+            ids = _merge_ids(registry_by_sport[sport_slug])
+        elif env_overrides.get(sport_slug) or file_overrides.get(sport_slug):
+            ids = _merge_ids(
+                env_overrides.get(sport_slug, []),
+                file_overrides.get(sport_slug, []),
+            )
+        else:
+            ids = _merge_ids(list(profile.managed_unique_tournament_ids))
         for unique_tournament_id in ids:
             targets.append(
                 StructurePlanningTarget(
