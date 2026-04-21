@@ -112,6 +112,100 @@ class _FakeDatabase:
         return _FakeTransaction(self.connection)
 
 
+class _FakeConnectionContext:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> object:
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+        return None
+
+
+class _FakeDatabaseWithReads:
+    def __init__(self, *, read_connection: object, write_connection: object) -> None:
+        self._read_connection = read_connection
+        self._write_connection = write_connection
+        self.transaction_calls = 0
+        self.connection_calls = 0
+
+    def transaction(self) -> _FakeTransaction:
+        self.transaction_calls += 1
+        return _FakeTransaction(self._write_connection)
+
+    def connection(self) -> _FakeConnectionContext:
+        self.connection_calls += 1
+        return _FakeConnectionContext(self._read_connection)
+
+
+class _FakeBundleAwareRepository(_FakeRepository):
+    def __init__(self, result: EventListWriteResult, previous_states) -> None:
+        super().__init__(result)
+        self.previous_states = previous_states
+        self.bundle_loader_calls: list[tuple[object, EventListBundle]] = []
+
+    async def load_surface_states_for_bundle(self, executor, bundle: EventListBundle):
+        self.bundle_loader_calls.append((executor, bundle))
+        return self.previous_states
+
+    async def load_surface_states(self, executor, event_ids):
+        del executor, event_ids
+        raise AssertionError("bundle-aware surface loader should be preferred")
+
+
+class _FakeCorrectionDetector:
+    def __init__(self) -> None:
+        self.calls: list[tuple[EventListBundle, object]] = []
+
+    def detect(self, *, bundle: EventListBundle, previous_states, existing_source_slug=None, incoming_source_slug=None):
+        del existing_source_slug, incoming_source_slug
+        self.calls.append((bundle, previous_states))
+        return ()
+
+
+class _FakeSurfaceStateExecutor:
+    async def fetch(self, command: str, *args):
+        normalized = " ".join(command.split())
+        if normalized.startswith("SELECT id, status_code, winner_code, aggregated_winner_code FROM event WHERE id = ANY"):
+            requested_ids = tuple(int(item) for item in args[0])
+            if requested_ids == (15362622,):
+                return [
+                    {
+                        "id": 15362622,
+                        "status_code": 100,
+                        "winner_code": 1,
+                        "aggregated_winner_code": 1,
+                    }
+                ]
+            return []
+        if "JOIN unique_tournament AS ut" in normalized and "WHERE e.custom_id = ANY($1::text[])" in normalized:
+            return [
+                {
+                    "id": 15362622,
+                    "custom_id": "xyz123",
+                    "sport_id": 1,
+                    "start_timestamp": 1775779200,
+                    "home_team_id": 44,
+                    "away_team_id": 45,
+                }
+            ]
+        if normalized.startswith("SELECT event_id, side, current FROM event_score"):
+            requested_ids = tuple(int(item) for item in args[0])
+            if requested_ids == (15362622,):
+                return [
+                    {"event_id": 15362622, "side": "home", "current": 2},
+                    {"event_id": 15362622, "side": "away", "current": 1},
+                ]
+            return []
+        if normalized.startswith("SELECT event_id, home_team, away_team FROM event_var_in_progress"):
+            return [{"event_id": 15362622, "home_team": True, "away_team": False}]
+        if normalized.startswith("SELECT event_id, change_timestamp, ordinal, change_value FROM event_change_item"):
+            return [{"event_id": 15362622, "change_timestamp": 1712745600, "ordinal": 0, "change_value": "score"}]
+        raise AssertionError(f"Unexpected query: {normalized}")
+
+
 def _build_bundle() -> EventListBundle:
     return EventListBundle(
         registry_entries=event_list_registry_entries(),
@@ -290,6 +384,78 @@ def _build_bundle() -> EventListBundle:
 
 
 class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_event_list_repository_matches_previous_surface_state_by_custom_id(self) -> None:
+        bundle = _build_bundle()
+        incoming_event = bundle.events[0]
+        bundle = EventListBundle(
+            **{
+                **bundle.__dict__,
+                "events": (
+                    EventRecord(
+                        id=16006762,
+                        slug=incoming_event.slug,
+                        custom_id=incoming_event.custom_id,
+                        detail_id=incoming_event.detail_id,
+                        tournament_id=incoming_event.tournament_id,
+                        unique_tournament_id=incoming_event.unique_tournament_id,
+                        season_id=incoming_event.season_id,
+                        home_team_id=incoming_event.home_team_id,
+                        away_team_id=incoming_event.away_team_id,
+                        status_code=incoming_event.status_code,
+                        season_statistics_type=incoming_event.season_statistics_type,
+                        start_timestamp=incoming_event.start_timestamp,
+                        coverage=incoming_event.coverage,
+                        winner_code=incoming_event.winner_code,
+                        aggregated_winner_code=incoming_event.aggregated_winner_code,
+                        home_red_cards=incoming_event.home_red_cards,
+                        away_red_cards=incoming_event.away_red_cards,
+                        previous_leg_event_id=incoming_event.previous_leg_event_id,
+                        cup_matches_in_round=incoming_event.cup_matches_in_round,
+                        default_period_count=incoming_event.default_period_count,
+                        default_period_length=incoming_event.default_period_length,
+                        default_overtime_length=incoming_event.default_overtime_length,
+                        last_period=incoming_event.last_period,
+                        correct_ai_insight=incoming_event.correct_ai_insight,
+                        correct_halftime_ai_insight=incoming_event.correct_halftime_ai_insight,
+                        feed_locked=incoming_event.feed_locked,
+                        is_editor=incoming_event.is_editor,
+                        show_toto_promo=incoming_event.show_toto_promo,
+                        crowdsourcing_enabled=incoming_event.crowdsourcing_enabled,
+                        crowdsourcing_data_display_enabled=incoming_event.crowdsourcing_data_display_enabled,
+                        final_result_only=incoming_event.final_result_only,
+                        has_event_player_statistics=incoming_event.has_event_player_statistics,
+                        has_event_player_heat_map=incoming_event.has_event_player_heat_map,
+                        has_global_highlights=incoming_event.has_global_highlights,
+                        has_xg=incoming_event.has_xg,
+                    ),
+                ),
+                "event_scores": (
+                    EventScoreRecord(event_id=16006762, side="home", current=1, display=1, period1=1),
+                    EventScoreRecord(event_id=16006762, side="away", current=0, display=0, period1=0),
+                ),
+                "event_var_in_progress_items": (
+                    EventVarInProgressRecord(event_id=16006762, home_team=True, away_team=False),
+                ),
+                "event_change_items": (
+                    EventChangeItemRecord(
+                        event_id=16006762,
+                        change_timestamp=1712745600,
+                        ordinal=0,
+                        change_value="score",
+                    ),
+                ),
+            }
+        )
+        repository = EventListRepository()
+
+        previous_states = await repository.load_surface_states_for_bundle(_FakeSurfaceStateExecutor(), bundle)
+
+        self.assertEqual(tuple(previous_states), (16006762,))
+        self.assertEqual(previous_states[16006762].event_id, 15362622)
+        self.assertEqual(previous_states[16006762].home_score, 2)
+        self.assertEqual(previous_states[16006762].away_score, 1)
+        self.assertEqual(previous_states[16006762].changes, ("score",))
+
     async def test_event_list_repository_writes_expected_tables(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()
@@ -345,6 +511,47 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(database.transaction_calls, 1)
         self.assertEqual(result.written.event_rows, 1)
         self.assertEqual(result.job_name, "round:17:76986:32")
+
+    async def test_event_list_ingest_job_prefers_bundle_aware_surface_loader(self) -> None:
+        bundle = _build_bundle()
+        parser = _FakeParser(bundle)
+        repository_result = EventListWriteResult(
+            endpoint_registry_rows=4,
+            payload_snapshot_rows=1,
+            sport_rows=1,
+            country_rows=1,
+            category_rows=1,
+            team_rows=3,
+            unique_tournament_rows=1,
+            season_rows=1,
+            tournament_rows=1,
+            event_status_rows=1,
+            event_rows=1,
+            event_round_info_rows=1,
+            event_status_time_rows=1,
+            event_time_rows=1,
+            event_var_in_progress_rows=1,
+            event_score_rows=2,
+            event_filter_value_rows=1,
+            event_change_item_rows=1,
+        )
+        previous_states = {14083191: object()}
+        repository = _FakeBundleAwareRepository(repository_result, previous_states)
+        detector = _FakeCorrectionDetector()
+        read_connection = object()
+        write_connection = object()
+        database = _FakeDatabaseWithReads(read_connection=read_connection, write_connection=write_connection)
+        job = EventListIngestJob(parser, repository, database, correction_detector=detector)
+
+        result = await job.run_live(timeout=11.0)
+
+        self.assertEqual(parser.calls, [("live", (), "football", 11.0)])
+        self.assertEqual(repository.bundle_loader_calls, [(read_connection, bundle)])
+        self.assertEqual(repository.calls, [(write_connection, bundle)])
+        self.assertEqual(detector.calls, [(bundle, previous_states)])
+        self.assertEqual(database.connection_calls, 1)
+        self.assertEqual(database.transaction_calls, 1)
+        self.assertEqual(result.job_name, "live:football")
 
 
 if __name__ == "__main__":

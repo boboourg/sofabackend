@@ -124,13 +124,17 @@ class EventListIngestJob:
         bundle = await bundle_awaitable
         corrections: tuple[SurfaceCorrection, ...] = ()
         load_surface_states = getattr(self.repository, "load_surface_states", None)
+        load_surface_states_for_bundle = getattr(self.repository, "load_surface_states_for_bundle", None)
         connection_factory = getattr(self.database, "connection", None)
-        if callable(load_surface_states) and callable(connection_factory):
+        if (callable(load_surface_states) or callable(load_surface_states_for_bundle)) and callable(connection_factory):
             async with connection_factory() as connection:
-                previous_states = await load_surface_states(
-                    connection,
-                    tuple(int(item.id) for item in bundle.events),
-                )
+                if callable(load_surface_states_for_bundle):
+                    previous_states = await load_surface_states_for_bundle(connection, bundle)
+                else:
+                    previous_states = await load_surface_states(
+                        connection,
+                        tuple(int(item.id) for item in bundle.events),
+                    )
             corrections = self.correction_detector.detect(bundle=bundle, previous_states=previous_states)
         async with self.database.transaction() as connection:
             write_result = await self.repository.upsert_bundle(connection, bundle)

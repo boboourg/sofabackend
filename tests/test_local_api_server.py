@@ -227,10 +227,11 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         application.live_state_store = None
         application.redis_backend = None
 
-        async def fake_collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None):
+        async def fake_collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None, stream_queue=None):
             self.assertIs(sql_executor, connection)
             self.assertIsNone(live_state_store)
             self.assertIsNone(redis_backend)
+            self.assertIsNone(stream_queue)
             return HealthReport(
                 snapshot_count=7,
                 capability_rollup_count=3,
@@ -528,6 +529,51 @@ class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item["id"] for item in reconciled["events"]], [14109883])
         self.assertEqual(reconciled["events"][0]["status"]["type"], "inprogress")
+
+    async def test_live_events_snapshot_matches_terminal_status_by_custom_id_when_event_id_changes(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        result = match_route("/api/v1/sport/football/events/live", routes)
+        assert result is not None
+        route, _ = result
+
+        payload = {
+            "events": [
+                {
+                    "id": 16006762,
+                    "customId": "KzcsAoRb",
+                    "startTimestamp": 1775779200,
+                    "homeTeam": {"id": 44},
+                    "awayTeam": {"id": 45},
+                    "status": {"code": 7, "type": "inprogress", "description": "2nd half"},
+                }
+            ]
+        }
+        executor = _FakeFetchExecutor(
+            [
+                {
+                    "event_id": 15362622,
+                    "custom_id": "KzcsAoRb",
+                    "start_timestamp": 1775779200,
+                    "home_team_id": 44,
+                    "away_team_id": 45,
+                    "terminal_status": "finished",
+                    "finalized_at": "2026-04-21T20:00:00+00:00",
+                    "final_payload": {
+                        "event": {
+                            "id": 15362622,
+                            "status": {"code": 100, "type": "finished", "description": "Ended"},
+                        }
+                    },
+                }
+            ]
+        )
+
+        reconciled = await application._reconcile_snapshot_payload(executor, route, payload)
+
+        self.assertEqual([item["id"] for item in reconciled["events"]], [16006762])
+        self.assertEqual(reconciled["events"][0]["status"]["code"], 100)
+        self.assertEqual(reconciled["events"][0]["status"]["type"], "finished")
 
     async def test_scheduled_events_snapshot_overrides_terminal_status_from_final_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)

@@ -132,6 +132,171 @@ class EventListRepository:
 
         return {event_id: SurfaceEventState(**state) for event_id, state in states.items()}
 
+    async def load_surface_states_for_bundle(
+        self,
+        executor: SqlExecutor,
+        bundle: EventListBundle,
+    ) -> dict[int, SurfaceEventState]:
+        incoming_events = tuple(bundle.events)
+        exact_states = await self.load_surface_states(executor, (int(item.id) for item in incoming_events))
+        resolved_states = {
+            int(item.id): exact_states[int(item.id)]
+            for item in incoming_events
+            if int(item.id) in exact_states
+        }
+        unmatched_events = tuple(
+            item for item in incoming_events if int(item.id) not in resolved_states and item.custom_id is not None
+        )
+        if not unmatched_events:
+            return resolved_states
+
+        candidate_rows = await self._load_identity_candidate_rows(executor, unmatched_events)
+        if not candidate_rows:
+            return resolved_states
+
+        candidates_by_custom_id: dict[str, list[dict[str, Any]]] = {}
+        for row in candidate_rows:
+            custom_id = row.get("custom_id")
+            if custom_id is None:
+                continue
+            candidates_by_custom_id.setdefault(str(custom_id), []).append(dict(row))
+
+        bundle_sport_ids = self._bundle_event_sport_ids(bundle)
+        matched_state_ids: set[int] = set()
+        matched_previous_ids: dict[int, int] = {}
+        for item in unmatched_events:
+            matched_row = self._select_identity_candidate(
+                item=item,
+                bundle_sport_id=bundle_sport_ids.get(int(item.id)),
+                candidates=candidates_by_custom_id.get(str(item.custom_id), ()),
+            )
+            if matched_row is None:
+                continue
+            matched_event_id = int(matched_row["id"])
+            matched_previous_ids[int(item.id)] = matched_event_id
+            matched_state_ids.add(matched_event_id)
+
+        if not matched_state_ids:
+            return resolved_states
+
+        candidate_states = await self.load_surface_states(executor, tuple(sorted(matched_state_ids)))
+        for incoming_event_id, matched_event_id in matched_previous_ids.items():
+            state = candidate_states.get(matched_event_id)
+            if state is not None:
+                resolved_states[incoming_event_id] = state
+        return resolved_states
+
+    async def _load_identity_candidate_rows(
+        self,
+        executor: SqlExecutor,
+        events: Iterable[Any],
+    ) -> tuple[dict[str, Any], ...]:
+        custom_ids = tuple(sorted({str(item.custom_id) for item in events if item.custom_id is not None}))
+        if not custom_ids:
+            return ()
+        rows = await executor.fetch(
+            """
+            SELECT
+                e.id,
+                e.custom_id,
+                e.start_timestamp,
+                e.home_team_id,
+                e.away_team_id,
+                s.id AS sport_id
+            FROM event AS e
+            LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
+            LEFT JOIN category AS c ON c.id = ut.category_id
+            LEFT JOIN sport AS s ON s.id = c.sport_id
+            WHERE e.custom_id = ANY($1::text[])
+            """,
+            custom_ids,
+        )
+        return tuple(dict(row) for row in rows)
+
+    def _bundle_event_sport_ids(self, bundle: EventListBundle) -> dict[int, int]:
+        category_sport_ids = {
+            int(item.id): int(item.sport_id)
+            for item in bundle.categories
+            if item.id is not None and item.sport_id is not None
+        }
+        unique_tournament_category_ids = {
+            int(item.id): int(item.category_id)
+            for item in bundle.unique_tournaments
+            if item.id is not None and item.category_id is not None
+        }
+        tournament_category_ids = {
+            int(item.id): int(item.category_id)
+            for item in bundle.tournaments
+            if item.id is not None and item.category_id is not None
+        }
+        event_sport_ids: dict[int, int] = {}
+        for item in bundle.events:
+            category_id = None
+            if item.unique_tournament_id is not None:
+                category_id = unique_tournament_category_ids.get(int(item.unique_tournament_id))
+            if category_id is None and item.tournament_id is not None:
+                category_id = tournament_category_ids.get(int(item.tournament_id))
+            sport_id = None if category_id is None else category_sport_ids.get(int(category_id))
+            if sport_id is not None:
+                event_sport_ids[int(item.id)] = int(sport_id)
+        return event_sport_ids
+
+    def _select_identity_candidate(
+        self,
+        *,
+        item: Any,
+        bundle_sport_id: int | None,
+        candidates: Iterable[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        best_row: dict[str, Any] | None = None
+        best_key: tuple[int, int] | None = None
+        for row in candidates:
+            if not self._identity_candidate_matches(item=item, bundle_sport_id=bundle_sport_id, row=row):
+                continue
+            score = self._identity_candidate_score(item=item, bundle_sport_id=bundle_sport_id, row=row)
+            candidate_key = (score, int(row["id"]))
+            if best_key is None or candidate_key > best_key:
+                best_key = candidate_key
+                best_row = row
+        return best_row
+
+    def _identity_candidate_matches(
+        self,
+        *,
+        item: Any,
+        bundle_sport_id: int | None,
+        row: dict[str, Any],
+    ) -> bool:
+        if item.custom_id is None or str(row.get("custom_id")) != str(item.custom_id):
+            return False
+        row_sport_id = row.get("sport_id")
+        if bundle_sport_id is not None and row_sport_id is not None and int(row_sport_id) != int(bundle_sport_id):
+            return False
+        for field_name in ("start_timestamp", "home_team_id", "away_team_id"):
+            incoming_value = getattr(item, field_name, None)
+            existing_value = row.get(field_name)
+            if incoming_value is not None and existing_value is not None and int(existing_value) != int(incoming_value):
+                return False
+        return True
+
+    def _identity_candidate_score(
+        self,
+        *,
+        item: Any,
+        bundle_sport_id: int | None,
+        row: dict[str, Any],
+    ) -> int:
+        score = 0
+        row_sport_id = row.get("sport_id")
+        if bundle_sport_id is not None and row_sport_id is not None and int(row_sport_id) == int(bundle_sport_id):
+            score += 1
+        for field_name in ("start_timestamp", "home_team_id", "away_team_id"):
+            incoming_value = getattr(item, field_name, None)
+            existing_value = row.get(field_name)
+            if incoming_value is not None and existing_value is not None and int(existing_value) == int(incoming_value):
+                score += 1
+        return score
+
     async def upsert_bundle(self, executor: SqlExecutor, bundle: EventListBundle) -> EventListWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
         await self._upsert_sports(executor, bundle)

@@ -23,7 +23,7 @@ from .endpoints import SofascoreEndpoint, local_api_endpoints
 from .ops.health import collect_health_report
 from .ops.queue_summary import collect_queue_summary
 from .queue.live_state import LiveEventStateStore
-from .queue.streams import RedisStreamQueue
+from .queue.streams import ALL_CONSUMER_GROUPS, RedisStreamQueue
 
 from .local_swagger_builder import (
     _build_viewer_html,
@@ -44,6 +44,7 @@ _ZOMBIE_TERMINAL_STATUS = "zombie_stale"
 _NATURAL_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"finished", "afterextra", "afterpen", "cancelled", "postponed"}
 )
+_QUEUE_GROUPS = ALL_CONSUMER_GROUPS
 
 
 @dataclass(frozen=True)
@@ -257,26 +258,43 @@ class LocalApiApplication:
             return payload
 
         event_ids = [int(item["id"]) for item in raw_items if isinstance(item, dict) and item.get("id") is not None]
-        if not event_ids:
+        event_custom_ids = sorted(
+            {
+                str(item.get("customId"))
+                for item in raw_items
+                if isinstance(item, dict) and item.get("customId") is not None
+            }
+        )
+        if not event_ids and not event_custom_ids:
             return payload
 
         rows = await executor.fetch(
             """
             SELECT
                 ets.event_id,
+                e.custom_id,
+                e.start_timestamp,
+                e.home_team_id,
+                e.away_team_id,
                 ets.terminal_status,
+                ets.finalized_at,
                 aps.payload AS final_payload
             FROM event_terminal_state AS ets
+            JOIN event AS e
+                ON e.id = ets.event_id
             LEFT JOIN api_payload_snapshot AS aps
                 ON aps.id = ets.final_snapshot_id
             WHERE ets.event_id = ANY($1::bigint[])
+               OR (cardinality($2::text[]) > 0 AND e.custom_id = ANY($2::text[]))
             """,
             event_ids,
+            event_custom_ids,
         )
         if not rows:
             return payload
 
         terminal_by_event: dict[int, dict[str, Any]] = {}
+        terminal_by_custom_id: dict[str, dict[str, Any]] = {}
         for row in rows:
             event_id = int(row["event_id"])
             terminal_status_raw = row.get("terminal_status")
@@ -294,9 +312,21 @@ class LocalApiApplication:
                     _extract_existing_event_status(raw_items, event_id),
                 )
             if status_payload is not None:
-                terminal_by_event[event_id] = status_payload
+                candidate = {
+                    "status": status_payload,
+                    "finalized_at": row.get("finalized_at"),
+                    "row": dict(row),
+                }
+                existing_by_event = terminal_by_event.get(event_id)
+                if existing_by_event is None or _terminal_candidate_sort_key(candidate) > _terminal_candidate_sort_key(existing_by_event):
+                    terminal_by_event[event_id] = candidate
+                custom_id = row.get("custom_id")
+                if custom_id is not None:
+                    existing_by_custom_id = terminal_by_custom_id.get(str(custom_id))
+                    if existing_by_custom_id is None or _terminal_candidate_sort_key(candidate) > _terminal_candidate_sort_key(existing_by_custom_id):
+                        terminal_by_custom_id[str(custom_id)] = candidate
 
-        if not terminal_by_event:
+        if not terminal_by_event and not terminal_by_custom_id:
             return payload
 
         # Previously this branch unconditionally dropped every event that had
@@ -319,11 +349,18 @@ class LocalApiApplication:
                 reconciled_items.append(item)
                 continue
             event_id = int(event_id)
-            if event_id not in terminal_by_event:
+            terminal_candidate = terminal_by_event.get(event_id)
+            if terminal_candidate is None:
+                custom_id = item.get("customId")
+                if custom_id is not None:
+                    by_custom_id = terminal_by_custom_id.get(str(custom_id))
+                    if by_custom_id is not None and _event_item_identity_matches_terminal_row(item, by_custom_id["row"]):
+                        terminal_candidate = by_custom_id
+            if terminal_candidate is None:
                 reconciled_items.append(item)
                 continue
             updated = dict(item)
-            updated["status"] = terminal_by_event[event_id]
+            updated["status"] = terminal_candidate["status"]
             reconciled_items.append(updated)
 
         reconciled_payload = dict(payload)
@@ -710,9 +747,9 @@ class LocalApiApplication:
         try:
             report = await collect_health_report(
                 sql_executor=connection,
-                live_state_store=self.live_state_store,
-                redis_backend=self.redis_backend,
-                stream_queue=self.stream_queue,
+                live_state_store=getattr(self, "live_state_store", None),
+                redis_backend=getattr(self, "redis_backend", None),
+                stream_queue=getattr(self, "stream_queue", None),
             )
         finally:
             await connection.close()
@@ -754,9 +791,9 @@ class LocalApiApplication:
 
     async def _fetch_ops_queue_summary_payload(self) -> dict[str, Any]:
         summary = await collect_queue_summary(
-            stream_queue=self.stream_queue,
-            live_state_store=self.live_state_store,
-            redis_backend=self.redis_backend,
+            stream_queue=getattr(self, "stream_queue", None),
+            live_state_store=getattr(self, "live_state_store", None),
+            redis_backend=getattr(self, "redis_backend", None),
             now_ms=time.time() * 1000.0,
         )
         return dataclasses.asdict(summary)
@@ -1283,6 +1320,43 @@ def _extract_existing_event_status(items: list[Any], event_id: int) -> dict[str,
             return dict(status_payload)
         return None
     return None
+
+
+def _terminal_candidate_sort_key(candidate: dict[str, Any]) -> tuple[str, int]:
+    row = candidate.get("row")
+    event_id = 0
+    if isinstance(row, dict) and row.get("event_id") is not None:
+        try:
+            event_id = int(row["event_id"])
+        except (TypeError, ValueError):
+            event_id = 0
+    return (str(candidate.get("finalized_at") or ""), event_id)
+
+
+def _event_item_identity_matches_terminal_row(item: dict[str, Any], row: dict[str, Any]) -> bool:
+    custom_id = item.get("customId")
+    existing_custom_id = row.get("custom_id")
+    if custom_id is None or existing_custom_id is None:
+        return False
+    if str(custom_id) != str(existing_custom_id):
+        return False
+    for item_key, row_key in (
+        ("startTimestamp", "start_timestamp"),
+        ("homeTeam", "home_team_id"),
+        ("awayTeam", "away_team_id"),
+    ):
+        item_value = item.get(item_key)
+        if isinstance(item_value, dict):
+            item_value = item_value.get("id")
+        row_value = row.get(row_key)
+        if item_value is not None and row_value is not None:
+            try:
+                if int(item_value) != int(row_value):
+                    return False
+            except (TypeError, ValueError):
+                if str(item_value) != str(row_value):
+                    return False
+    return True
 
 
 def _fallback_terminal_status_payload(
