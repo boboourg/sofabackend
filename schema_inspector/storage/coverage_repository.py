@@ -25,6 +25,14 @@ class CoverageLedgerRecord:
     last_checked_at: str | None = None
 
 
+@dataclass(frozen=True)
+class CoverageEventScopeStatus:
+    scope_id: int
+    surface_name: str
+    freshness_status: str
+    start_timestamp: int | None = None
+
+
 class CoverageRepository:
     """Writes coverage-ledger rows for source/surface scopes."""
 
@@ -159,3 +167,79 @@ class CoverageRepository:
             int(row["scope_id"]) if isinstance(row, dict) else int(row[0])
             for row in rows
         )
+
+    async def fetch_event_scope_statuses(
+        self,
+        executor,
+        *,
+        source_slug: str,
+        surface_names: tuple[str, ...],
+        freshness_statuses: tuple[str, ...],
+        sport_slug: str | None = None,
+    ) -> tuple[CoverageEventScopeStatus, ...]:
+        normalized_surface_names = tuple(str(item) for item in surface_names if str(item))
+        normalized_statuses = tuple(str(item) for item in freshness_statuses if str(item))
+        if not normalized_surface_names or not normalized_statuses:
+            return ()
+        if sport_slug:
+            rows = await executor.fetch(
+                """
+                SELECT
+                    cl.scope_id,
+                    cl.surface_name,
+                    cl.freshness_status,
+                    e.start_timestamp
+                FROM coverage_ledger AS cl
+                LEFT JOIN event AS e ON e.id = cl.scope_id
+                WHERE cl.source_slug = $1
+                  AND cl.scope_type = 'event'
+                  AND cl.surface_name = ANY($2::text[])
+                  AND cl.freshness_status = ANY($3::text[])
+                  AND cl.sport_slug = $4
+                ORDER BY cl.last_checked_at DESC NULLS LAST, cl.scope_id DESC, cl.surface_name ASC
+                """,
+                source_slug,
+                normalized_surface_names,
+                normalized_statuses,
+                sport_slug,
+            )
+        else:
+            rows = await executor.fetch(
+                """
+                SELECT
+                    cl.scope_id,
+                    cl.surface_name,
+                    cl.freshness_status,
+                    e.start_timestamp
+                FROM coverage_ledger AS cl
+                LEFT JOIN event AS e ON e.id = cl.scope_id
+                WHERE cl.source_slug = $1
+                  AND cl.scope_type = 'event'
+                  AND cl.surface_name = ANY($2::text[])
+                  AND cl.freshness_status = ANY($3::text[])
+                ORDER BY cl.last_checked_at DESC NULLS LAST, cl.scope_id DESC, cl.surface_name ASC
+                """,
+                source_slug,
+                normalized_surface_names,
+                normalized_statuses,
+            )
+        records: list[CoverageEventScopeStatus] = []
+        for row in rows:
+            if isinstance(row, dict):
+                scope_id = row.get("scope_id")
+                surface_name = row.get("surface_name")
+                freshness_status = row.get("freshness_status")
+                start_timestamp = row.get("start_timestamp")
+            else:
+                scope_id, surface_name, freshness_status, start_timestamp = row
+            if scope_id is None or surface_name is None or freshness_status is None:
+                continue
+            records.append(
+                CoverageEventScopeStatus(
+                    scope_id=int(scope_id),
+                    surface_name=str(surface_name),
+                    freshness_status=str(freshness_status),
+                    start_timestamp=int(start_timestamp) if isinstance(start_timestamp, int) else None,
+                )
+            )
+        return tuple(records)

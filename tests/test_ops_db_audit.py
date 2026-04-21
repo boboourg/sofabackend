@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import unittest
 
 
@@ -215,6 +216,51 @@ class DatabaseAuditTests(unittest.IsolatedAsyncioTestCase):
         stats_args = executor.execute_calls[5][1]
         self.assertEqual(stats_args[2], "statistics")
         self.assertEqual(stats_args[5], "fresh")
+
+    def test_build_audit_coverage_records_marks_early_lineups_as_possible(self) -> None:
+        from schema_inspector.ops.db_audit import (
+            DatabaseAuditEventReport,
+            DatabaseAuditReport,
+            build_audit_coverage_records,
+        )
+
+        checked_at = datetime(2026, 4, 21, 16, 0, tzinfo=timezone.utc)
+        report = DatabaseAuditReport(
+            sport_slug="football",
+            event_count=1,
+            raw_requests=1,
+            raw_snapshots=1,
+            events=1,
+            statistics=0,
+            incidents=0,
+            lineup_sides=2,
+            lineup_players=22,
+            special_counts={},
+            event_reports=(
+                DatabaseAuditEventReport(
+                    event_id=101,
+                    raw_requests=1,
+                    raw_snapshots=1,
+                    events=1,
+                    statistics=0,
+                    incidents=0,
+                    lineup_sides=2,
+                    lineup_players=22,
+                    special_counts={},
+                    start_timestamp=int((checked_at + timedelta(minutes=120)).timestamp()),
+                ),
+            ),
+        )
+
+        records = build_audit_coverage_records(
+            source_slug="sofascore",
+            report=report,
+            checked_at=checked_at.isoformat(),
+        )
+
+        lineups_record = next(item for item in records if item.surface_name == "lineups")
+        self.assertEqual(lineups_record.freshness_status, "possible")
+        self.assertEqual(lineups_record.completeness_ratio, 1.0)
 
 
 class _FakeSqlExecutor:

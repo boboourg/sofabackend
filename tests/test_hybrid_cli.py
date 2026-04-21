@@ -567,6 +567,51 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"job": "live"})
         self.assertEqual(fake_adapter.build_event_list_job_calls, 1)
 
+    async def test_hybrid_app_select_event_ids_for_missing_coverage_skips_early_lineups_until_recheck_window(self) -> None:
+        from schema_inspector.cli import HybridApp
+        from schema_inspector.runtime import RuntimeConfig
+
+        now_seconds = 1_800_000_000
+        database = _FakeCoverageSelectionDatabase(
+            fetch_rows=[
+                {
+                    "scope_id": 9001,
+                    "surface_name": "lineups",
+                    "freshness_status": "possible",
+                    "start_timestamp": now_seconds + (2 * 60 * 60),
+                },
+                {
+                    "scope_id": 9002,
+                    "surface_name": "lineups",
+                    "freshness_status": "possible",
+                    "start_timestamp": now_seconds + (40 * 60),
+                },
+                {
+                    "scope_id": 9003,
+                    "surface_name": "lineups",
+                    "freshness_status": "missing",
+                    "start_timestamp": now_seconds + (3 * 60 * 60),
+                },
+                {
+                    "scope_id": 9004,
+                    "surface_name": "lineups",
+                    "freshness_status": "missing",
+                    "start_timestamp": now_seconds + (30 * 60),
+                },
+            ]
+        )
+        app = HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+
+        with mock.patch("schema_inspector.cli.time.time", return_value=float(now_seconds)):
+            event_ids = await app.select_event_ids_for_missing_coverage(
+                limit=2,
+                offset=0,
+                sport_slug="football",
+                surface_names=("lineups",),
+            )
+
+        self.assertEqual(event_ids, (9002, 9004))
+
     async def test_dispatch_closes_hybrid_app_before_return(self) -> None:
         import schema_inspector.cli as hybrid_cli
 
@@ -1650,6 +1695,24 @@ class _FakeDatabase:
     def transaction(self):
         self.transaction_calls += 1
         return _FakeTransaction(self.connection)
+
+
+class _FakeCoverageSelectionDatabase:
+    def __init__(self, *, fetch_rows: list[dict[str, object]]) -> None:
+        self._connection = _FakeCoverageSelectionConnection(fetch_rows)
+
+    def connection(self):
+        return _FakeTransaction(self._connection)
+
+
+class _FakeCoverageSelectionConnection:
+    def __init__(self, fetch_rows: list[dict[str, object]]) -> None:
+        self.fetch_rows = list(fetch_rows)
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetch(self, query: str, *args: object):
+        self.fetch_calls.append((query, args))
+        return list(self.fetch_rows)
 
 
 class _FakeTransaction:

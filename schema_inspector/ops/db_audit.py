@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from ..coverage_policy import lineups_coverage_state
 from ..storage.coverage_repository import CoverageLedgerRecord, CoverageRepository
 
 
@@ -26,6 +27,11 @@ EVENT_ROWS_BY_EVENT_QUERY = (
     "FROM event "
     "WHERE id = ANY($1::bigint[]) "
     "GROUP BY id"
+)
+EVENT_START_TIMESTAMPS_BY_EVENT_QUERY = (
+    "SELECT id AS event_id, start_timestamp "
+    "FROM event "
+    "WHERE id = ANY($1::bigint[])"
 )
 EVENT_STATISTICS_BY_EVENT_QUERY = (
     "SELECT event_id, COUNT(*)::bigint AS count "
@@ -64,6 +70,7 @@ class DatabaseAuditEventReport:
     lineup_sides: int
     lineup_players: int
     special_counts: dict[str, int]
+    start_timestamp: int | None = None
 
 
 @dataclass(frozen=True)
@@ -157,13 +164,17 @@ async def persist_audit_coverage(*, sql_executor, source_slug: str, report: Data
 
 def build_audit_coverage_records(*, source_slug: str, report: DatabaseAuditReport, checked_at: str | None = None) -> tuple[CoverageLedgerRecord, ...]:
     normalized_checked_at = checked_at or datetime.now(timezone.utc).isoformat()
+    checked_at_dt = datetime.fromisoformat(normalized_checked_at)
+    if checked_at_dt.tzinfo is None:
+        checked_at_dt = checked_at_dt.replace(tzinfo=timezone.utc)
+    checked_at_timestamp = int(checked_at_dt.timestamp())
     records: list[CoverageLedgerRecord] = []
     for event_report in report.event_reports:
         surface_states = (
             ("event_core", *_core_coverage_state(event_report)),
             ("statistics", *_binary_coverage_state(event_report.statistics)),
             ("incidents", *_binary_coverage_state(event_report.incidents)),
-            ("lineups", *_lineups_coverage_state(event_report)),
+            ("lineups", *_lineups_coverage_state(event_report, checked_at_timestamp=checked_at_timestamp)),
         )
         for surface_name, freshness_status, completeness_ratio in surface_states:
             records.append(
@@ -204,6 +215,7 @@ async def _collect_event_reports(*, sql_executor, sport_slug: str, event_ids: tu
         "lineup_sides": await _count_by_event(sql_executor, EVENT_LINEUP_SIDES_BY_EVENT_QUERY, event_ids),
         "lineup_players": await _count_by_event(sql_executor, EVENT_LINEUP_PLAYERS_BY_EVENT_QUERY, event_ids),
     }
+    start_timestamps_by_event = await _start_timestamps_by_event(sql_executor, EVENT_START_TIMESTAMPS_BY_EVENT_QUERY, event_ids)
     special_counts_by_event = await _collect_special_counts_by_event(
         sql_executor=sql_executor,
         sport_slug=sport_slug,
@@ -220,6 +232,7 @@ async def _collect_event_reports(*, sql_executor, sport_slug: str, event_ids: tu
             lineup_sides=int(event_maps["lineup_sides"].get(int(event_id), 0)),
             lineup_players=int(event_maps["lineup_players"].get(int(event_id), 0)),
             special_counts=dict(special_counts_by_event.get(int(event_id), {})),
+            start_timestamp=start_timestamps_by_event.get(int(event_id)),
         )
         for event_id in event_ids
     )
@@ -269,11 +282,25 @@ def _core_coverage_state(report: DatabaseAuditEventReport) -> tuple[str, float]:
     return freshness_status, completeness_ratio
 
 
-def _lineups_coverage_state(report: DatabaseAuditEventReport) -> tuple[str, float]:
-    signals = (int(report.lineup_sides > 0), int(report.lineup_players > 0))
-    completeness_ratio = sum(signals) / len(signals)
-    freshness_status = "fresh" if completeness_ratio >= 1.0 else ("partial" if completeness_ratio > 0 else "missing")
-    return freshness_status, completeness_ratio
+def _lineups_coverage_state(report: DatabaseAuditEventReport, *, checked_at_timestamp: int) -> tuple[str, float]:
+    return lineups_coverage_state(
+        lineup_sides=int(report.lineup_sides),
+        lineup_players=int(report.lineup_players),
+        start_timestamp=report.start_timestamp,
+        now_timestamp=checked_at_timestamp,
+    )
+
+
+async def _start_timestamps_by_event(sql_executor, query: str, event_ids: tuple[int, ...]) -> dict[int, int | None]:
+    rows = await sql_executor.fetch(query, event_ids)
+    timestamps: dict[int, int | None] = {}
+    for row in rows:
+        event_id = row.get("event_id") if isinstance(row, dict) else row[0]
+        start_timestamp = row.get("start_timestamp") if isinstance(row, dict) else row[1]
+        if event_id is None:
+            continue
+        timestamps[int(event_id)] = int(start_timestamp) if isinstance(start_timestamp, int) else None
+    return timestamps
 
 
 async def _count(sql_executor, query: str, event_ids: tuple[int, ...]) -> int:

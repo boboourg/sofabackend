@@ -103,6 +103,39 @@ class CoverageLedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[4], 4)
         self.assertEqual(args[5], 25)
 
+    async def test_repository_fetches_event_scope_status_rows_with_start_timestamps(self) -> None:
+        repository = CoverageRepository()
+        executor = _FakeExecutor(
+            fetch_rows=[
+                {
+                    "scope_id": 901,
+                    "surface_name": "lineups",
+                    "freshness_status": "possible",
+                    "start_timestamp": 1_800_000_000,
+                }
+            ]
+        )
+
+        result = await repository.fetch_event_scope_statuses(
+            executor,
+            source_slug="sofascore",
+            surface_names=("lineups",),
+            freshness_statuses=("missing", "partial", "possible"),
+            sport_slug="football",
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].scope_id, 901)
+        self.assertEqual(result[0].surface_name, "lineups")
+        self.assertEqual(result[0].freshness_status, "possible")
+        self.assertEqual(result[0].start_timestamp, 1_800_000_000)
+        query, args = executor.fetch_calls[0]
+        self.assertIn("LEFT JOIN event AS e ON e.id = cl.scope_id", query)
+        self.assertEqual(args[0], "sofascore")
+        self.assertEqual(args[1], ("lineups",))
+        self.assertEqual(args[2], ("missing", "partial", "possible"))
+        self.assertEqual(args[3], "football")
+
 
 if __name__ == "__main__":
     unittest.main()

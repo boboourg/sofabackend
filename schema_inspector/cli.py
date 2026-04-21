@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .db import AsyncpgDatabase, load_database_config
+from .coverage_policy import lineup_recheck_window_open
 from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
 from .normalizers.sink import DurableNormalizeSink
@@ -560,15 +561,30 @@ class HybridApp:
         normalized_surfaces = tuple(str(item) for item in surface_names if str(item)) or DEFAULT_EVENT_COVERAGE_SURFACES
         repository = CoverageRepository()
         async with self.database.connection() as connection:
-            return await repository.select_event_scope_ids(
+            rows = await repository.fetch_event_scope_statuses(
                 connection,
                 source_slug=self.runtime_config.source_slug,
                 surface_names=normalized_surfaces,
-                freshness_statuses=("missing", "partial"),
+                freshness_statuses=("missing", "partial", "possible"),
                 sport_slug=sport_slug,
-                limit=limit,
-                offset=offset,
             )
+        now_timestamp = int(time.time())
+        selected_event_ids: list[int] = []
+        seen_event_ids: set[int] = set()
+        skip_count = max(0, int(offset or 0))
+        for row in rows:
+            if row.scope_id in seen_event_ids:
+                continue
+            if not _coverage_scope_needs_refill(row, now_timestamp=now_timestamp):
+                continue
+            seen_event_ids.add(row.scope_id)
+            if skip_count > 0:
+                skip_count -= 1
+                continue
+            selected_event_ids.append(int(row.scope_id))
+            if limit is not None and len(selected_event_ids) >= max(0, int(limit)):
+                break
+        return tuple(selected_event_ids)
 
     async def resolve_event_sport_slug(self, event_id: int) -> str | None:
         async with self.database.connection() as connection:
@@ -634,6 +650,19 @@ async def run_event_command(args, *, orchestrator) -> HydrationBatchReport:
 
     results = await asyncio.gather(*(hydrate_one(event_id) for event_id in event_ids))
     return HydrationBatchReport(processed_event_ids=event_ids, results=tuple(results))
+
+
+def _coverage_scope_needs_refill(row, *, now_timestamp: int) -> bool:
+    surface_name = str(getattr(row, "surface_name", "") or "")
+    freshness_status = str(getattr(row, "freshness_status", "") or "")
+    if surface_name != "lineups":
+        return freshness_status in {"missing", "partial"}
+    if freshness_status not in {"missing", "partial", "possible"}:
+        return False
+    return lineup_recheck_window_open(
+        start_timestamp=getattr(row, "start_timestamp", None),
+        now_timestamp=now_timestamp,
+    )
 
 
 async def run_full_backfill_command(args, *, orchestrator, event_selector) -> HydrationBatchReport:
