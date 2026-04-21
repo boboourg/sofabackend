@@ -168,6 +168,31 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.coverage_alert_summary.flag_count, 0)
         self.assertEqual(report.coverage_alert_summary.flags, ())
 
+    async def test_collect_health_report_includes_reconcile_policy_summary(self) -> None:
+        from schema_inspector.ops.health import collect_health_report
+
+        report = await collect_health_report(
+            sql_executor=_FakeSqlExecutor(
+                {
+                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
+                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                }
+            ),
+            live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({})),
+            redis_backend=_FakeRedis(),
+        )
+
+        self.assertTrue(report.reconcile_policy_summary.policy_enabled)
+        self.assertEqual(report.reconcile_policy_summary.primary_source_slug, "sofascore")
+        self.assertEqual(report.reconcile_policy_summary.source_count, 2)
+        self.assertEqual(
+            tuple((item.source_slug, item.priority) for item in report.reconcile_policy_summary.sources),
+            (
+                ("sofascore", 100),
+                ("secondary_source", 80),
+            ),
+        )
+
     def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -496,6 +521,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("coverage_stale=3", output)
         self.assertIn("drift_flags=1", output)
         self.assertIn("coverage_alerts=1", output)
+        self.assertIn("reconcile_sources=2", output)
+        self.assertIn("primary_source=sofascore", output)
 
     async def test_dispatch_audit_db_prints_compact_report(self) -> None:
         import schema_inspector.cli as hybrid_cli
@@ -1434,6 +1461,15 @@ class _FakeDispatchHybridApp:
                     "CoverageSummary",
                     (),
                     {"tracked_scope_count": 12, "stale_scope_count": 3},
+                )(),
+                "reconcile_policy_summary": type(
+                    "ReconcilePolicySummary",
+                    (),
+                    {
+                        "policy_enabled": True,
+                        "primary_source_slug": "sofascore",
+                        "source_count": 2,
+                    },
                 )(),
             },
         )()

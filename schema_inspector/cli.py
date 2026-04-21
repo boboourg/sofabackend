@@ -743,11 +743,22 @@ async def _dispatch(args) -> int:
             if args.command == "health":
                 report = await app.collect_health()
                 coverage_alert_summary = getattr(report, "coverage_alert_summary", None)
+                reconcile_policy_summary = getattr(report, "reconcile_policy_summary", None)
                 coverage_alert_count = int(
                     getattr(coverage_alert_summary, "flag_count", 0)
                     if coverage_alert_summary is not None
                     else int(getattr(report.coverage_summary, "stale_scope_count", 0) > 0)
                 )
+                reconcile_source_count = int(
+                    getattr(reconcile_policy_summary, "source_count", 0)
+                    if reconcile_policy_summary is not None
+                    else 0
+                )
+                primary_source_slug = (
+                    getattr(reconcile_policy_summary, "primary_source_slug", None)
+                    if reconcile_policy_summary is not None
+                    else None
+                ) or "none"
                 print(
                     "health "
                     f"db_ok={int(report.database_ok)} "
@@ -761,6 +772,8 @@ async def _dispatch(args) -> int:
                     f"coverage_tracked={report.coverage_summary.tracked_scope_count} "
                     f"coverage_stale={report.coverage_summary.stale_scope_count} "
                     f"coverage_alerts={coverage_alert_count} "
+                    f"reconcile_sources={reconcile_source_count} "
+                    f"primary_source={primary_source_slug} "
                     f"drift_flags={report.drift_summary.flag_count}"
                 )
                 return 0

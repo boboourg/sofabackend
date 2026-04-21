@@ -217,6 +217,8 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
             DriftFlag,
             DriftSummary,
             HealthReport,
+            ReconcilePolicySourceEntry,
+            ReconcilePolicySummary,
         )
 
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -268,6 +270,15 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     ),
                 ),
+                reconcile_policy_summary=ReconcilePolicySummary(
+                    policy_enabled=True,
+                    primary_source_slug="sofascore",
+                    source_count=2,
+                    sources=(
+                        ReconcilePolicySourceEntry(source_slug="sofascore", priority=100),
+                        ReconcilePolicySourceEntry(source_slug="secondary_source", priority=80),
+                    ),
+                ),
             )
 
         import schema_inspector.local_api_server as local_api_server
@@ -288,6 +299,10 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["coverage_alert_summary"]["flag_count"], 1)
         self.assertEqual(payload["coverage_alert_summary"]["flags"][0]["severity"], "warning")
         self.assertEqual(payload["coverage_alert_summary"]["flags"][0]["stale_scope_count"], 3)
+        self.assertTrue(payload["reconcile_policy_summary"]["policy_enabled"])
+        self.assertEqual(payload["reconcile_policy_summary"]["primary_source_slug"], "sofascore")
+        self.assertEqual(payload["reconcile_policy_summary"]["source_count"], 2)
+        self.assertEqual(payload["reconcile_policy_summary"]["sources"][0]["source_slug"], "sofascore")
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):

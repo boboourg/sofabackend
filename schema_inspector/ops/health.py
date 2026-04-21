@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..source_priority import SOURCE_PRIORITY
+
 
 @dataclass(frozen=True)
 class DriftFlag:
@@ -44,6 +46,20 @@ class CoverageAlertSummary:
 
 
 @dataclass(frozen=True)
+class ReconcilePolicySourceEntry:
+    source_slug: str
+    priority: int
+
+
+@dataclass(frozen=True)
+class ReconcilePolicySummary:
+    policy_enabled: bool
+    primary_source_slug: str | None
+    source_count: int
+    sources: tuple[ReconcilePolicySourceEntry, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class HealthReport:
     snapshot_count: int
     capability_rollup_count: int
@@ -56,6 +72,11 @@ class HealthReport:
     drift_summary: DriftSummary = DriftSummary()
     coverage_summary: CoverageSummary = CoverageSummary()
     coverage_alert_summary: CoverageAlertSummary = CoverageAlertSummary()
+    reconcile_policy_summary: ReconcilePolicySummary = ReconcilePolicySummary(
+        policy_enabled=False,
+        primary_source_slug=None,
+        source_count=0,
+    )
 
 
 async def collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None) -> HealthReport:
@@ -64,6 +85,7 @@ async def collect_health_report(*, sql_executor, live_state_store=None, redis_ba
     drift_summary = await _fetch_drift_summary(sql_executor)
     coverage_summary = await _fetch_coverage_summary(sql_executor)
     coverage_alert_summary = _build_coverage_alert_summary(coverage_summary)
+    reconcile_policy_summary = _build_reconcile_policy_summary()
     return HealthReport(
         snapshot_count=snapshot_count,
         capability_rollup_count=capability_rollup_count,
@@ -76,6 +98,7 @@ async def collect_health_report(*, sql_executor, live_state_store=None, redis_ba
         drift_summary=drift_summary,
         coverage_summary=coverage_summary,
         coverage_alert_summary=coverage_alert_summary,
+        reconcile_policy_summary=reconcile_policy_summary,
     )
 
 
@@ -215,3 +238,20 @@ def _build_coverage_alert_summary(coverage_summary: CoverageSummary) -> Coverage
         ),
     )
     return CoverageAlertSummary(flag_count=len(flags), flags=flags)
+
+
+def _build_reconcile_policy_summary() -> ReconcilePolicySummary:
+    sources = tuple(
+        ReconcilePolicySourceEntry(source_slug=source_slug, priority=int(priority))
+        for source_slug, priority in sorted(
+            SOURCE_PRIORITY.items(),
+            key=lambda item: (-int(item[1]), str(item[0])),
+        )
+    )
+    primary_source_slug = sources[0].source_slug if sources else None
+    return ReconcilePolicySummary(
+        policy_enabled=bool(sources),
+        primary_source_slug=primary_source_slug,
+        source_count=len(sources),
+        sources=sources,
+    )

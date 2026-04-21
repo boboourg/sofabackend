@@ -1909,6 +1909,7 @@ def _build_schemas() -> dict[str, Any]:
                     "drift_summary": _ref("DriftSummary"),
                     "coverage_summary": _ref("CoverageRollupSummary"),
                     "coverage_alert_summary": _ref("CoverageAlertSummary"),
+                    "reconcile_policy_summary": _ref("ReconcilePolicySummary"),
                 }
             ),
             "DriftFlag": _obj(
@@ -1947,6 +1948,20 @@ def _build_schemas() -> dict[str, Any]:
                 {
                     "flag_count": _int64(),
                     "flags": _array(_ref("CoverageAlert")),
+                }
+            ),
+            "ReconcilePolicySourceEntry": _obj(
+                {
+                    "source_slug": {"type": "string"},
+                    "priority": _int64(),
+                }
+            ),
+            "ReconcilePolicySummary": _obj(
+                {
+                    "policy_enabled": {"type": "boolean"},
+                    "primary_source_slug": {"type": "string", "nullable": True},
+                    "source_count": _int64(),
+                    "sources": _array(_ref("ReconcilePolicySourceEntry")),
                 }
             ),
             "SnapshotSummary": _obj(
