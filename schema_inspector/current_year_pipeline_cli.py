@@ -10,30 +10,11 @@ from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime, timedelta
 
-from .categories_seed_job import CategoriesSeedIngestJob
-from .categories_seed_parser import CategoriesSeedParser
-from .categories_seed_repository import CategoriesSeedRepository
-from .category_tournaments_job import CategoryTournamentsIngestJob
-from .category_tournaments_parser import CategoryTournamentsParser
-from .competition_job import CompetitionIngestJob
-from .competition_parser import CompetitionParser
-from .competition_repository import CompetitionRepository
 from .db import AsyncpgDatabase, load_database_config
 from .entities_backfill_job import EntitiesBackfillJob
-from .entities_job import EntitiesIngestJob
-from .entities_parser import EntitiesParser
-from .entities_repository import EntitiesRepository
 from .event_detail_backfill_job import EventDetailBackfillJob
-from .event_detail_job import EventDetailIngestJob
-from .event_detail_parser import EventDetailParser
-from .event_detail_repository import EventDetailRepository
-from .event_list_job import EventListIngestJob
-from .event_list_parser import EventListParser
-from .event_list_repository import EventListRepository
 from .runtime import load_runtime_config
-from .scheduled_tournaments_job import ScheduledTournamentsIngestJob
-from .scheduled_tournaments_parser import ScheduledTournamentsParser
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .sport_profiles import resolve_sport_profile
 from .timezone_utils import resolve_timestamp_bounds, resolve_timezone_offset_seconds
 
@@ -210,38 +191,21 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        categories_job = CategoriesSeedIngestJob(
-            CategoriesSeedParser(client),
-            CategoriesSeedRepository(),
-            database,
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
         )
-        category_tournaments_job = CategoryTournamentsIngestJob(
-            CategoryTournamentsParser(client),
-            CompetitionRepository(),
-            database,
-        )
-        scheduled_tournaments_job = ScheduledTournamentsIngestJob(
-            ScheduledTournamentsParser(client),
-            EventListRepository(),
-            database,
-        )
-        competition_job = CompetitionIngestJob(
-            CompetitionParser(client),
-            CompetitionRepository(),
-            database,
-        )
-        event_list_job = EventListIngestJob(
-            EventListParser(client),
-            EventListRepository(),
-            database,
-        )
+        categories_job = adapter.build_categories_seed_job(database)
+        category_tournaments_job = adapter.build_category_tournaments_job(database)
+        scheduled_tournaments_job = adapter.build_scheduled_tournaments_job(database)
+        competition_job = adapter.build_competition_job(database)
+        event_list_job = adapter.build_event_list_job(database)
         event_detail_backfill_job = EventDetailBackfillJob(
-            EventDetailIngestJob(EventDetailParser(client), EventDetailRepository(), database),
+            adapter.build_event_detail_job(database),
             database,
         )
         entities_backfill_job = EntitiesBackfillJob(
-            EntitiesIngestJob(EntitiesParser(client), EntitiesRepository(), database),
+            adapter.build_entities_job(database),
             database,
         )
 
