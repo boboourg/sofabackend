@@ -888,6 +888,9 @@ async def _dispatch(args) -> int:
                     if reconcile_policy_summary is not None
                     else None
                 ) or "none"
+                go_live = getattr(report, "go_live", None)
+                go_live_ready = bool(getattr(go_live, "ready", False))
+                go_live_flag_count = int(getattr(go_live, "flag_count", 0) or 0)
                 print(
                     "health "
                     f"db_ok={int(report.database_ok)} "
@@ -903,7 +906,9 @@ async def _dispatch(args) -> int:
                     f"coverage_alerts={coverage_alert_count} "
                     f"reconcile_sources={reconcile_source_count} "
                     f"primary_source={primary_source_slug} "
-                    f"drift_flags={report.drift_summary.flag_count}"
+                    f"drift_flags={report.drift_summary.flag_count} "
+                    f"go_live={int(go_live_ready)} "
+                    f"gate_flags={go_live_flag_count}"
                 )
                 return 0
             if args.command == "audit-db":

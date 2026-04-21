@@ -21,12 +21,9 @@ from urllib.parse import parse_qs, urlsplit
 from .db import DatabaseConfig, load_database_config
 from .endpoints import SofascoreEndpoint, local_api_endpoints
 from .ops.health import collect_health_report
-from .queue.delayed import DELAYED_JOBS_KEY
+from .ops.queue_summary import collect_queue_summary
 from .queue.live_state import LiveEventStateStore
-from .queue.streams import (
-    ALL_CONSUMER_GROUPS,
-    RedisStreamQueue,
-)
+from .queue.streams import RedisStreamQueue
 
 from .local_swagger_builder import (
     _build_viewer_html,
@@ -37,8 +34,6 @@ from .local_swagger_builder import (
 )
 
 _ALL_ENDPOINTS = local_api_endpoints()
-_QUEUE_GROUPS = ALL_CONSUMER_GROUPS
-
 # Mirrors schema_inspector/services/housekeeping.ZOMBIE_TERMINAL_STATUS.
 # Housekeeping stamps this sentinel into event_terminal_state for events whose
 # live polling went quiet past the zombie cutoff. It is NOT an authoritative
@@ -717,6 +712,7 @@ class LocalApiApplication:
                 sql_executor=connection,
                 live_state_store=self.live_state_store,
                 redis_backend=self.redis_backend,
+                stream_queue=self.stream_queue,
             )
         finally:
             await connection.close()
@@ -757,54 +753,13 @@ class LocalApiApplication:
         }
 
     async def _fetch_ops_queue_summary_payload(self) -> dict[str, Any]:
-        now_ms = int(time.time() * 1000)
-        lane_counts = {
-            "hot": _lane_count(self.live_state_store, "hot"),
-            "warm": _lane_count(self.live_state_store, "warm"),
-            "cold": _lane_count(self.live_state_store, "cold"),
-        }
-        streams: list[dict[str, Any]] = []
-        if self.stream_queue is not None:
-            for stream_name, group_name in _QUEUE_GROUPS:
-                try:
-                    summary = self.stream_queue.pending_summary(stream_name, group_name)
-                except Exception:
-                    summary = None
-                try:
-                    stream_length = self.stream_queue.stream_length(stream_name)
-                except Exception:
-                    stream_length = 0
-                try:
-                    group_info = self.stream_queue.group_info(stream_name, group_name)
-                except Exception:
-                    group_info = None
-                streams.append(
-                    {
-                        "stream": stream_name,
-                        "group": group_name,
-                        "length": int(stream_length),
-                        "pending_total": 0 if summary is None else int(summary.total),
-                        "smallest_id": None if summary is None else summary.smallest_id,
-                        "largest_id": None if summary is None else summary.largest_id,
-                        "consumers": {} if summary is None else dict(summary.consumers),
-                        "group_consumers": 0 if group_info is None else int(group_info.consumers),
-                        "entries_read": None if group_info is None else group_info.entries_read,
-                        "lag": None if group_info is None else group_info.lag,
-                        "last_delivered_id": None if group_info is None else group_info.last_delivered_id,
-                    }
-                )
-        delayed_total = 0
-        delayed_due = 0
-        if self.redis_backend is not None:
-            delayed_total = len(tuple(self.redis_backend.zrangebyscore(DELAYED_JOBS_KEY, float("-inf"), float("inf"))))
-            delayed_due = len(tuple(self.redis_backend.zrangebyscore(DELAYED_JOBS_KEY, float("-inf"), float(now_ms))))
-        return {
-            "redis_backend_kind": type(self.redis_backend).__name__ if self.redis_backend is not None else "none",
-            "live_lanes": lane_counts,
-            "streams": streams,
-            "delayed_total": delayed_total,
-            "delayed_due": delayed_due,
-        }
+        summary = await collect_queue_summary(
+            stream_queue=self.stream_queue,
+            live_state_store=self.live_state_store,
+            redis_backend=self.redis_backend,
+            now_ms=time.time() * 1000.0,
+        )
+        return dataclasses.asdict(summary)
 
     async def _fetch_ops_job_runs_payload(self, limit: int) -> dict[str, Any]:
         connection = await self._connect()
@@ -1097,12 +1052,6 @@ def _query_int(raw_query: str, name: str, *, default: int, minimum: int, maximum
     except ValueError:
         return default
     return max(minimum, min(maximum, value))
-
-
-def _lane_count(live_state_store: LiveEventStateStore | None, lane: str) -> int:
-    if live_state_store is None:
-        return 0
-    return len(tuple(live_state_store.backend.zrangebyscore(live_state_store._lane_key(lane), float("-inf"), float("inf"))))
 
 
 def _serialize_scalar(value: Any) -> Any:

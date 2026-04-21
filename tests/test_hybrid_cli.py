@@ -711,6 +711,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("coverage_alerts=1", output)
         self.assertIn("reconcile_sources=2", output)
         self.assertIn("primary_source=sofascore", output)
+        self.assertIn("go_live=0", output)
+        self.assertIn("gate_flags=2", output)
 
     async def test_dispatch_overrides_runtime_config_source_slug_when_source_is_passed(self) -> None:
         import schema_inspector.cli as hybrid_cli
@@ -1918,6 +1920,18 @@ class _FakeDispatchHybridApp:
                         "policy_enabled": True,
                         "primary_source_slug": "sofascore",
                         "source_count": 2,
+                    },
+                )(),
+                "go_live": type(
+                    "GoLiveSummary",
+                    (),
+                    {
+                        "ready": False,
+                        "flag_count": 2,
+                        "snapshot_age_seconds": 420,
+                        "historical_enrichment_lag": 2400,
+                        "historical_retry_share": 0.024,
+                        "housekeeping_dry_run": True,
                     },
                 )(),
             },
