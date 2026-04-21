@@ -9,37 +9,17 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 
-from .competition_job import CompetitionIngestJob
-from .competition_parser import CompetitionParser
-from .competition_repository import CompetitionRepository
 from .db import AsyncpgDatabase, load_database_config
-from .entities_job import EntitiesIngestJob
 from .entities_parser import (
-    EntitiesParser,
     PlayerHeatmapRequest,
     PlayerOverallRequest,
     TeamOverallRequest,
     TeamPerformanceGraphRequest,
 )
-from .entities_repository import EntitiesRepository
-from .event_detail_job import EventDetailIngestJob
-from .event_detail_parser import EventDetailParser
-from .event_detail_repository import EventDetailRepository
-from .event_list_job import EventListIngestJob
-from .event_list_parser import EventListParser
-from .event_list_repository import EventListRepository
-from .leaderboards_job import LeaderboardsIngestJob
-from .leaderboards_parser import LeaderboardsParser
-from .leaderboards_repository import LeaderboardsRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .sport_profiles import resolve_sport_profile
-from .standings_job import StandingsIngestJob
-from .standings_parser import StandingsParser
-from .standings_repository import StandingsRepository
-from .statistics_job import StatisticsIngestJob
-from .statistics_parser import StatisticsParser, StatisticsQuery
-from .statistics_repository import StatisticsRepository
+from .statistics_parser import StatisticsQuery
 
 
 @dataclass(frozen=True)
@@ -131,15 +111,17 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-
-        competition_job = CompetitionIngestJob(CompetitionParser(client), CompetitionRepository(), database)
-        event_list_job = EventListIngestJob(EventListParser(client), EventListRepository(), database)
-        statistics_job = StatisticsIngestJob(StatisticsParser(client), StatisticsRepository(), database)
-        standings_job = StandingsIngestJob(StandingsParser(client), StandingsRepository(), database)
-        leaderboards_job = LeaderboardsIngestJob(LeaderboardsParser(client), LeaderboardsRepository(), database)
-        event_detail_job = EventDetailIngestJob(EventDetailParser(client), EventDetailRepository(), database)
-        entities_job = EntitiesIngestJob(EntitiesParser(client), EntitiesRepository(), database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        competition_job = adapter.build_competition_job(database)
+        event_list_job = adapter.build_event_list_job(database)
+        statistics_job = adapter.build_statistics_job(database)
+        standings_job = adapter.build_standings_job(database)
+        leaderboards_job = adapter.build_leaderboards_job(database)
+        event_detail_job = adapter.build_event_detail_job(database)
+        entities_job = adapter.build_entities_job(database)
 
         _progress(
             "slice_pipeline",
