@@ -10,11 +10,8 @@ from datetime import datetime
 
 from .db import AsyncpgDatabase, load_database_config
 from .event_detail_backfill_job import EventDetailBackfillJob
-from .event_detail_job import EventDetailIngestJob
-from .event_detail_parser import EventDetailParser
-from .event_detail_repository import EventDetailRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .timezone_utils import resolve_timestamp_bounds
 
 
@@ -102,10 +99,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = EventDetailParser(client)
-        repository = EventDetailRepository()
-        detail_job = EventDetailIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        detail_job = adapter.build_event_detail_job(database)
         backfill_job = EventDetailBackfillJob(detail_job, database)
         result = await backfill_job.run(
             limit=args.limit,
