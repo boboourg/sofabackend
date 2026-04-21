@@ -8,10 +8,8 @@ import sys
 
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
-from .statistics_job import StatisticsIngestJob
-from .statistics_parser import StatisticsParser, StatisticsQuery
-from .statistics_repository import StatisticsRepository
+from .statistics_parser import StatisticsQuery
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -72,10 +70,11 @@ async def _run(args: argparse.Namespace) -> int:
     queries = (query,) if query.to_query_params() else ()
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = StatisticsParser(client)
-        repository = StatisticsRepository()
-        job = StatisticsIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        job = adapter.build_statistics_job(database)
         result = await job.run(
             args.unique_tournament_id,
             args.season_id,
