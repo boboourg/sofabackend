@@ -84,6 +84,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
     def test_load_runtime_config_reads_proxy_and_retry_settings(self) -> None:
         config = load_runtime_config(
             env={
+                "SCHEMA_INSPECTOR_SOURCE_SLUG": "  secondary-source  ",
                 "SCHEMA_INSPECTOR_PROXY_URL": "http://proxy-1.local:8080",
                 "SCHEMA_INSPECTOR_PROXY_URLS": "http://proxy-2.local:8080,http://proxy-3.local:8080",
                 "SCHEMA_INSPECTOR_MAX_ATTEMPTS": "5",
@@ -92,6 +93,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+        self.assertEqual(config.source_slug, "secondary-source")
         self.assertEqual(config.user_agent, "custom-agent")
         self.assertEqual(config.require_proxy, True)
         self.assertEqual(config.retry_policy.max_attempts, 5)

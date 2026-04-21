@@ -69,6 +69,9 @@ class PayloadSnapshotRecord:
     is_valid_json: bool
     is_soft_error_payload: bool
     fetched_at: str | None
+    source_slug: str = "sofascore"
+    schema_fingerprint: str | None = None
+    scope_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -190,11 +193,14 @@ class RawRepository:
                 payload_size_bytes,
                 content_type,
                 is_valid_json,
-                is_soft_error_payload
+                is_soft_error_payload,
+                source_slug,
+                schema_fingerprint,
+                scope_hash
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
             )
             """,
             record.endpoint_pattern,
@@ -217,6 +223,9 @@ class RawRepository:
             record.content_type,
             record.is_valid_json,
             record.is_soft_error_payload,
+            record.source_slug,
+            record.schema_fingerprint,
+            record.scope_hash,
         )
 
     async def insert_payload_snapshot_returning_id(
@@ -266,12 +275,15 @@ class RawRepository:
                 content_type,
                 is_valid_json,
                 is_soft_error_payload,
-                scope_key
+                scope_key,
+                source_slug,
+                schema_fingerprint,
+                scope_hash
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21
+                $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+                $22, $23, $24
             )
             ON CONFLICT (scope_key, payload_hash)
                 WHERE scope_key IS NOT NULL AND payload_hash IS NOT NULL
@@ -300,6 +312,9 @@ class RawRepository:
             record.is_valid_json,
             record.is_soft_error_payload,
             scope_key,
+            record.source_slug,
+            record.schema_fingerprint,
+            record.scope_hash,
         )
         fetchval = getattr(executor, "fetchval", None)
         if callable(fetchval):
@@ -395,5 +410,5 @@ def _maybe_int(value: object) -> int | None:
 
 def _snapshot_scope_key(record: PayloadSnapshotRecord) -> str:
     if record.context_entity_type and record.context_entity_id is not None:
-        return f"{record.context_entity_type}:{record.context_entity_id}:{record.endpoint_pattern}"
-    return record.endpoint_pattern
+        return f"{record.source_slug}:{record.context_entity_type}:{record.context_entity_id}:{record.endpoint_pattern}"
+    return f"{record.source_slug}:{record.endpoint_pattern}"

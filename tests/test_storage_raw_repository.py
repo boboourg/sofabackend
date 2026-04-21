@@ -107,6 +107,50 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(snapshot_args[10], datetime)
         self.assertIsInstance(head_args[6], datetime)
 
+    async def test_insert_payload_snapshot_binds_all_source_metadata_columns(self) -> None:
+        repository = RawRepository()
+        executor = _FakeExecutor()
+
+        await repository.insert_payload_snapshot(
+            executor,
+            PayloadSnapshotRecord(
+                trace_id="trace-2",
+                job_id="job-2",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}",
+                source_url="https://provider.test/api/v1/event/1",
+                resolved_url="https://provider.test/api/v1/event/1",
+                envelope_key="event",
+                context_entity_type="event",
+                context_entity_id=1,
+                context_unique_tournament_id=17,
+                context_season_id=76986,
+                context_event_id=1,
+                http_status=200,
+                payload={"event": {"id": 1}},
+                payload_hash="hash-2",
+                payload_size_bytes=18,
+                content_type="application/json",
+                is_valid_json=True,
+                is_soft_error_payload=False,
+                fetched_at="2026-04-16T09:00:01+00:00",
+                source_slug="secondary-source",
+                schema_fingerprint="schema-1",
+                scope_hash="scope-1",
+            ),
+        )
+
+        self.assertEqual(len(executor.execute_calls), 1)
+        query, args = executor.execute_calls[0]
+        self.assertIn("source_slug", query)
+        self.assertIn("schema_fingerprint", query)
+        self.assertIn("scope_hash", query)
+        self.assertIn("$23", query)
+        self.assertEqual(len(args), 23)
+        self.assertEqual(args[20], "secondary-source")
+        self.assertEqual(args[21], "schema-1")
+        self.assertEqual(args[22], "scope-1")
+
     async def test_repository_inserts_payload_snapshot_idempotently_by_scope_and_hash(self) -> None:
         repository = RawRepository()
         executor = _FakeReturningExecutor(return_value=42)
@@ -145,9 +189,47 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("WHERE scope_key IS NOT NULL AND payload_hash IS NOT NULL", query)
         self.assertIn("RETURNING id", query)
         self.assertNotIn("IS NOT DISTINCT FROM", query)
-        # scope_key is the last positional parameter ($21); payload_hash is $16.
+        # scope_key is the positional parameter before source metadata; payload_hash is $16.
         self.assertEqual(args[15], "hash-1")
-        self.assertEqual(args[20], "event:1:/api/v1/event/{event_id}")
+        self.assertEqual(args[20], "sofascore:event:1:/api/v1/event/{event_id}")
+
+    async def test_payload_snapshot_dedup_scope_includes_source_slug(self) -> None:
+        repository = RawRepository()
+        executor = _FakeReturningExecutor(return_value=42)
+        base_record = PayloadSnapshotRecord(
+            trace_id="trace-1",
+            job_id="job-1",
+            sport_slug="football",
+            endpoint_pattern="/api/v1/event/{event_id}",
+            source_url="https://www.sofascore.com/api/v1/event/1",
+            resolved_url="https://www.sofascore.com/api/v1/event/1",
+            envelope_key="event",
+            context_entity_type="event",
+            context_entity_id=1,
+            context_unique_tournament_id=17,
+            context_season_id=76986,
+            context_event_id=1,
+            http_status=200,
+            payload={"event": {"id": 1}},
+            payload_hash="hash-1",
+            payload_size_bytes=18,
+            content_type="application/json",
+            is_valid_json=True,
+            is_soft_error_payload=False,
+            fetched_at="2026-04-16T09:00:01+00:00",
+        )
+
+        await repository.insert_payload_snapshot_if_missing_returning_id(executor, base_record)
+        await repository.insert_payload_snapshot_if_missing_returning_id(
+            executor,
+            PayloadSnapshotRecord(**{**base_record.__dict__, "source_slug": "secondary-source"}),
+        )
+
+        first_args = executor.fetchval_calls[0][1]
+        second_args = executor.fetchval_calls[1][1]
+        self.assertNotEqual(first_args[20], second_args[20])
+        self.assertTrue(str(first_args[20]).startswith("sofascore:"))
+        self.assertTrue(str(second_args[20]).startswith("secondary-source:"))
 
 
 if __name__ == "__main__":

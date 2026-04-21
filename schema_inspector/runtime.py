@@ -41,6 +41,7 @@ class TlsPolicy:
 class RuntimeConfig:
     """All network settings for schema inspector requests."""
 
+    source_slug: str = "sofascore"
     user_agent: str = "schema-inspector/1.0"
     require_proxy: bool = True
     default_headers: Mapping[str, str] = field(default_factory=dict)
@@ -114,7 +115,10 @@ def load_runtime_config(
     if extra_headers:
         headers.update(extra_headers)
 
+    source_slug = env.get("SCHEMA_INSPECTOR_SOURCE_SLUG", "sofascore").strip() or "sofascore"
+
     return RuntimeConfig(
+        source_slug=source_slug,
         user_agent=user_agent or env.get("SCHEMA_INSPECTOR_USER_AGENT", "schema-inspector/1.0"),
         require_proxy=_env_bool(env, "SCHEMA_INSPECTOR_REQUIRE_PROXY", True),
         default_headers=headers,
