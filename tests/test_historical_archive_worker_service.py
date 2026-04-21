@@ -86,6 +86,95 @@ class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_archive_builds_source_adapter_and_passes_adapter_jobs_to_worker(self) -> None:
+        from schema_inspector.services.historical_archive_service import (
+            run_historical_tournament_archive,
+        )
+
+        fake_adapter = _FakeHistoricalSourceAdapter()
+        app = _FakeApp()
+        run_result = SimpleNamespace(
+            season_ids=(701, 702),
+            completed_seasons=2,
+            discovered_event_ids=14,
+            stage_failures=0,
+            success=True,
+        )
+
+        with (
+            patch(
+                "schema_inspector.services.historical_archive_service.build_source_adapter",
+                create=True,
+                return_value=fake_adapter,
+            ) as adapter_factory,
+            patch(
+                "schema_inspector.services.historical_archive_service._run_tournament_worker",
+                new=_fake_run_tournament_worker,
+            ),
+        ):
+            global _LAST_ARCHIVE_APP, _LAST_TOURNAMENT_WORKER_RESULT
+            _LAST_ARCHIVE_APP = app
+            _LAST_TOURNAMENT_WORKER_RESULT = run_result
+
+            payload = await run_historical_tournament_archive(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+            )
+
+        adapter_factory.assert_called_once_with(
+            "secondary_source",
+            runtime_config=app.runtime_config,
+            transport=app.transport,
+        )
+        self.assertEqual(fake_adapter.competition_build_calls, [app.database])
+        self.assertEqual(fake_adapter.event_list_build_calls, [app.database])
+        self.assertEqual(fake_adapter.statistics_build_calls, [app.database])
+        self.assertEqual(fake_adapter.standings_build_calls, [app.database])
+        self.assertEqual(fake_adapter.leaderboards_build_calls, [app.database])
+        self.assertEqual(fake_adapter.event_detail_build_calls, [app.database])
+        self.assertEqual(fake_adapter.entities_build_calls, [app.database])
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["competition_job"], fake_adapter.competition_job)
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["event_list_job"], fake_adapter.event_list_job)
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["statistics_job"], fake_adapter.statistics_job)
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["standings_job"], fake_adapter.standings_job)
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["leaderboards_job"], fake_adapter.leaderboards_job)
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["event_detail_job"], fake_adapter.event_detail_job)
+        self.assertIs(_LAST_TOURNAMENT_WORKER_KWARGS["entities_job"], fake_adapter.entities_job)
+        self.assertEqual(
+            payload,
+            {
+                "season_ids": (701, 702),
+                "completed_seasons": 2,
+                "discovered_event_ids": 14,
+                "stage_failures": 0,
+                "success": True,
+            },
+        )
+        _LAST_ARCHIVE_APP = None
+        _LAST_TOURNAMENT_WORKER_RESULT = None
+
+    async def test_archive_surfaces_unsupported_adapter_error(self) -> None:
+        from schema_inspector.services.historical_archive_service import (
+            run_historical_tournament_archive,
+        )
+        from schema_inspector.sources import UnsupportedSourceAdapterError
+
+        with patch(
+            "schema_inspector.services.historical_archive_service.build_source_adapter",
+            create=True,
+            return_value=_UnsupportedArchiveSourceAdapter(),
+        ):
+            with self.assertRaisesRegex(
+                UnsupportedSourceAdapterError,
+                "statistics ingestion is not wired for source secondary_source",
+            ):
+                await run_historical_tournament_archive(
+                    _FakeApp(),
+                    unique_tournament_id=17,
+                    sport_slug="football",
+                )
+
     async def test_enrichment_builds_source_adapter_and_uses_adapter_jobs(self) -> None:
         from schema_inspector.services.historical_archive_service import (
             run_historical_tournament_enrichment,
@@ -248,10 +337,40 @@ class _FakeEntitiesBackfillJob:
 
 class _FakeHistoricalSourceAdapter:
     def __init__(self) -> None:
+        self.competition_job = object()
+        self.event_list_job = object()
+        self.statistics_job = object()
+        self.standings_job = object()
+        self.leaderboards_job = object()
         self.event_detail_job = object()
         self.entities_job = object()
+        self.competition_build_calls: list[object] = []
+        self.event_list_build_calls: list[object] = []
+        self.statistics_build_calls: list[object] = []
+        self.standings_build_calls: list[object] = []
+        self.leaderboards_build_calls: list[object] = []
         self.event_detail_build_calls: list[object] = []
         self.entities_build_calls: list[object] = []
+
+    def build_competition_job(self, database):
+        self.competition_build_calls.append(database)
+        return self.competition_job
+
+    def build_event_list_job(self, database):
+        self.event_list_build_calls.append(database)
+        return self.event_list_job
+
+    def build_statistics_job(self, database):
+        self.statistics_build_calls.append(database)
+        return self.statistics_job
+
+    def build_standings_job(self, database):
+        self.standings_build_calls.append(database)
+        return self.standings_job
+
+    def build_leaderboards_job(self, database):
+        self.leaderboards_build_calls.append(database)
+        return self.leaderboards_job
 
     def build_event_detail_job(self, database):
         self.event_detail_build_calls.append(database)
@@ -276,7 +395,51 @@ class _UnsupportedHistoricalSourceAdapter:
         return object()
 
 
+class _UnsupportedArchiveSourceAdapter:
+    def build_competition_job(self, database):
+        del database
+        return object()
+
+    def build_event_list_job(self, database):
+        del database
+        return object()
+
+    def build_statistics_job(self, database):
+        del database
+        from schema_inspector.sources import UnsupportedSourceAdapterError
+
+        raise UnsupportedSourceAdapterError(
+            "statistics ingestion is not wired for source secondary_source"
+        )
+
+    def build_standings_job(self, database):
+        del database
+        return object()
+
+    def build_leaderboards_job(self, database):
+        del database
+        return object()
+
+    def build_event_detail_job(self, database):
+        del database
+        return object()
+
+    def build_entities_job(self, database):
+        del database
+        return object()
+
+
+async def _fake_run_tournament_worker(database, **kwargs):
+    del database
+    global _LAST_TOURNAMENT_WORKER_KWARGS, _LAST_TOURNAMENT_WORKER_RESULT
+    _LAST_TOURNAMENT_WORKER_KWARGS = dict(kwargs)
+    return _LAST_TOURNAMENT_WORKER_RESULT
+
+
 _LAST_FAKE_APP = None
+_LAST_ARCHIVE_APP = None
+_LAST_TOURNAMENT_WORKER_KWARGS = {}
+_LAST_TOURNAMENT_WORKER_RESULT = None
 
 
 if __name__ == "__main__":

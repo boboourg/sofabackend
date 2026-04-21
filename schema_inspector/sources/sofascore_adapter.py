@@ -12,8 +12,17 @@ from ..event_detail_repository import EventDetailRepository
 from ..event_list_job import EventListIngestJob
 from ..event_list_parser import EventListParser
 from ..event_list_repository import EventListRepository
+from ..leaderboards_job import LeaderboardsIngestJob
+from ..leaderboards_parser import LeaderboardsParser
+from ..leaderboards_repository import LeaderboardsRepository
 from ..runtime import RuntimeConfig
 from ..sofascore_client import SofascoreClient
+from ..standings_job import StandingsIngestJob
+from ..standings_parser import StandingsParser
+from ..standings_repository import StandingsRepository
+from ..statistics_job import StatisticsIngestJob
+from ..statistics_parser import StatisticsParser
+from ..statistics_repository import StatisticsRepository
 from ..transport import InspectorTransport
 from .base import SourceAdapter, SourceFetchRequest, SourceFetchResponse
 
@@ -76,5 +85,26 @@ class SofascoreSourceAdapter(SourceAdapter):
         return EntitiesIngestJob(
             EntitiesParser(self.client),
             EntitiesRepository(),
+            database,
+        )
+
+    def build_statistics_job(self, database):
+        return StatisticsIngestJob(
+            StatisticsParser(self.client),
+            StatisticsRepository(),
+            database,
+        )
+
+    def build_standings_job(self, database):
+        return StandingsIngestJob(
+            StandingsParser(self.client),
+            StandingsRepository(),
+            database,
+        )
+
+    def build_leaderboards_job(self, database):
+        return LeaderboardsIngestJob(
+            LeaderboardsParser(self.client),
+            LeaderboardsRepository(),
             database,
         )

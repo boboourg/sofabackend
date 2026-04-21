@@ -32,3 +32,15 @@ class SecondaryStubSourceAdapter(SourceAdapter):
     def build_entities_job(self, database):
         del database
         raise UnsupportedSourceAdapterError("entities enrichment is not wired for source secondary_source")
+
+    def build_statistics_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError("statistics ingestion is not wired for source secondary_source")
+
+    def build_standings_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError("standings ingestion is not wired for source secondary_source")
+
+    def build_leaderboards_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError("leaderboards ingestion is not wired for source secondary_source")

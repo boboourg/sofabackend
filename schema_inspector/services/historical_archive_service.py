@@ -4,25 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from ..competition_job import CompetitionIngestJob
-from ..competition_parser import CompetitionParser
-from ..competition_repository import CompetitionRepository
 from ..default_tournaments_pipeline_cli import _run_tournament_worker
 from ..entities_backfill_job import EntitiesBackfillJob
-from ..entities_job import EntitiesIngestJob
-from ..entities_parser import EntitiesParser
-from ..entities_repository import EntitiesRepository
 from ..event_detail_backfill_job import EventDetailBackfillJob
-from ..event_detail_job import EventDetailIngestJob
-from ..event_detail_parser import EventDetailParser
-from ..event_detail_repository import EventDetailRepository
-from ..event_list_job import EventListIngestJob
-from ..event_list_parser import EventListParser
-from ..event_list_repository import EventListRepository
-from ..leaderboards_job import LeaderboardsIngestJob
-from ..leaderboards_parser import LeaderboardsParser
-from ..leaderboards_repository import LeaderboardsRepository
-from ..sofascore_client import SofascoreClient
 from ..sources import build_source_adapter
 from .historical_planner import (
     choose_event_detail_budget,
@@ -30,12 +14,7 @@ from .historical_planner import (
     choose_saturation_budget,
 )
 from ..sport_profiles import resolve_sport_profile
-from ..standings_job import StandingsIngestJob
-from ..standings_parser import StandingsParser
-from ..standings_repository import StandingsRepository
-from ..statistics_job import StatisticsIngestJob
-from ..statistics_parser import StatisticsParser, StatisticsQuery
-from ..statistics_repository import StatisticsRepository
+from ..statistics_parser import StatisticsQuery
 
 async def run_historical_tournament_archive(
     app,
@@ -46,15 +25,19 @@ async def run_historical_tournament_archive(
     event_concurrency: int = 4,
     timeout: float = 20.0,
 ) -> dict[str, object]:
-    client = SofascoreClient(app.runtime_config, transport=app.transport)
+    adapter = build_source_adapter(
+        app.runtime_config.source_slug,
+        runtime_config=app.runtime_config,
+        transport=app.transport,
+    )
     sport_profile = resolve_sport_profile(sport_slug)
-    competition_job = CompetitionIngestJob(CompetitionParser(client), CompetitionRepository(), app.database)
-    event_list_job = EventListIngestJob(EventListParser(client), EventListRepository(), app.database)
-    statistics_job = StatisticsIngestJob(StatisticsParser(client), StatisticsRepository(), app.database)
-    standings_job = StandingsIngestJob(StandingsParser(client), StandingsRepository(), app.database)
-    leaderboards_job = LeaderboardsIngestJob(LeaderboardsParser(client), LeaderboardsRepository(), app.database)
-    event_detail_job = EventDetailIngestJob(EventDetailParser(client), EventDetailRepository(), app.database)
-    entities_job = EntitiesIngestJob(EntitiesParser(client), EntitiesRepository(), app.database)
+    competition_job = adapter.build_competition_job(app.database)
+    event_list_job = adapter.build_event_list_job(app.database)
+    statistics_job = adapter.build_statistics_job(app.database)
+    standings_job = adapter.build_standings_job(app.database)
+    leaderboards_job = adapter.build_leaderboards_job(app.database)
+    event_detail_job = adapter.build_event_detail_job(app.database)
+    entities_job = adapter.build_entities_job(app.database)
     result = await _run_tournament_worker(
         app.database,
         competition_job=competition_job,
