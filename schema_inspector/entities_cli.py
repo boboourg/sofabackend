@@ -7,17 +7,14 @@ import asyncio
 import sys
 
 from .db import AsyncpgDatabase, load_database_config
-from .entities_job import EntitiesIngestJob
 from .entities_parser import (
-    EntitiesParser,
     PlayerHeatmapRequest,
     PlayerOverallRequest,
     TeamOverallRequest,
     TeamPerformanceGraphRequest,
 )
-from .entities_repository import EntitiesRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -105,10 +102,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = EntitiesParser(client)
-        repository = EntitiesRepository()
-        job = EntitiesIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        job = adapter.build_entities_job(database)
         result = await job.run(
             player_ids=args.player_id,
             player_statistics_ids=args.player_id,
