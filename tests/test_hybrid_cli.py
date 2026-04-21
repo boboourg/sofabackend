@@ -33,6 +33,40 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.live_warm_count, 1)
         self.assertEqual(report.live_cold_count, 0)
 
+    async def test_collect_health_report_includes_drift_summary_flags(self) -> None:
+        from schema_inspector.ops.health import collect_health_report
+
+        report = await collect_health_report(
+            sql_executor=_FakeSqlExecutor(
+                {
+                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
+                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                },
+                rows_by_query={
+                    "health_drift": [
+                        {
+                            "sport_slug": "football",
+                            "surface": "sport_live_events",
+                            "reason": "snapshot_older_than_terminal_state",
+                        }
+                    ]
+                },
+            ),
+            live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({})),
+            redis_backend=_FakeRedis(),
+        )
+
+        self.assertEqual(report.drift_summary.flag_count, 1)
+        self.assertEqual(
+            report.drift_summary.flags[0].surface,
+            "sport_live_events",
+        )
+        self.assertEqual(report.drift_summary.flags[0].sport_slug, "football")
+        self.assertEqual(
+            report.drift_summary.flags[0].reason,
+            "snapshot_older_than_terminal_state",
+        )
+
     def test_parser_accepts_allow_memory_redis_global_flag(self) -> None:
         from schema_inspector.cli import _build_parser
 
@@ -1256,11 +1290,18 @@ class _FakeLiveStateStore:
 
 
 class _FakeSqlExecutor:
-    def __init__(self, values_by_query: dict[str, int]) -> None:
+    def __init__(self, values_by_query: dict[str, int], rows_by_query: dict[str, list[dict[str, object]]] | None = None) -> None:
         self.values_by_query = values_by_query
+        self.rows_by_query = dict(rows_by_query or {})
 
     async def fetchval(self, query: str):
         return self.values_by_query[query]
+
+    async def fetch(self, query: str):
+        normalized = " ".join(query.split())
+        if "FROM event_terminal_state AS ets" in normalized:
+            return list(self.rows_by_query.get("health_drift", ()))
+        return []
 
 
 class _FakeDispatchHybridApp:

@@ -209,6 +209,53 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_fetch_ops_health_payload_keeps_drift_summary_in_payload(self) -> None:
+        from schema_inspector.ops.health import DriftFlag, DriftSummary, HealthReport
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeCoverageConnection([])
+        application._connect = _make_fake_connector(connection)
+        application.live_state_store = None
+        application.redis_backend = None
+
+        async def fake_collect_health_report(*, sql_executor, live_state_store=None, redis_backend=None):
+            self.assertIs(sql_executor, connection)
+            self.assertIsNone(live_state_store)
+            self.assertIsNone(redis_backend)
+            return HealthReport(
+                snapshot_count=7,
+                capability_rollup_count=3,
+                live_hot_count=0,
+                live_warm_count=0,
+                live_cold_count=0,
+                database_ok=True,
+                redis_ok=False,
+                redis_backend_kind="none",
+                drift_summary=DriftSummary(
+                    flag_count=1,
+                    flags=(
+                        DriftFlag(
+                            surface="sport_live_events",
+                            sport_slug="football",
+                            reason="snapshot_older_than_terminal_state",
+                        ),
+                    ),
+                ),
+            )
+
+        import schema_inspector.local_api_server as local_api_server
+
+        original = local_api_server.collect_health_report
+        local_api_server.collect_health_report = fake_collect_health_report
+        try:
+            payload = await application._fetch_ops_health_payload()
+        finally:
+            local_api_server.collect_health_report = original
+
+        self.assertEqual(payload["drift_summary"]["flag_count"], 1)
+        self.assertEqual(payload["drift_summary"]["flags"][0]["surface"], "sport_live_events")
+        self.assertEqual(payload["drift_summary"]["flags"][0]["sport_slug"], "football")
+
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_api_get_uses_normalized_category_fallback_when_snapshot_missing(self) -> None:
