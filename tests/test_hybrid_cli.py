@@ -447,6 +447,26 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(transport.closed)
 
+    async def test_hybrid_app_write_db_audit_coverage_uses_transaction(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        database = _FakeDatabase()
+        app = hybrid_cli.HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+        report = object()
+
+        async def _fake_persist_audit_coverage(**kwargs):
+            return kwargs
+
+        with mock.patch.object(hybrid_cli, "persist_audit_coverage", side_effect=_fake_persist_audit_coverage) as persist:
+            result = await app.write_db_audit_coverage(report=report)
+
+        self.assertEqual(database.transaction_calls, 1)
+        self.assertIs(result["sql_executor"], database.connection)
+        self.assertEqual(result["source_slug"], "sofascore")
+        self.assertIs(result["report"], report)
+        persist.assert_called_once()
+
     def test_hybrid_app_init_does_not_build_source_adapter_eagerly(self) -> None:
         import schema_inspector.cli as hybrid_cli
         from schema_inspector.runtime import RuntimeConfig
@@ -810,6 +830,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(fake_app.audit_calls, [("football", (101, 202))])
+        self.assertEqual(len(fake_app.coverage_write_reports), 1)
+        self.assertEqual(fake_app.coverage_write_reports[0].sport_slug, "football")
         output = stdout.getvalue().strip()
         self.assertIn("scheduled_hydrate events=2 event_ids=101,202", output)
         self.assertIn("db_audit sport=football", output)
@@ -1719,6 +1741,7 @@ class _FakeHydrationDispatchApp:
         self.closed = False
         self.redis_backend = _FakeRedisBackend()
         self.audit_calls: list[tuple[str, tuple[int, ...]]] = []
+        self.coverage_write_reports: list[object] = []
         self.run_event_calls: list[tuple[int, str | None, str]] = []
         self.audit_report_overrides = dict(audit_report_overrides or {})
 
@@ -1746,6 +1769,9 @@ class _FakeHydrationDispatchApp:
         }
         payload.update(self.audit_report_overrides)
         return type("DatabaseAuditReport", (), payload)()
+
+    async def write_db_audit_coverage(self, *, report) -> None:
+        self.coverage_write_reports.append(report)
 
     async def close(self) -> None:
         self.closed = True

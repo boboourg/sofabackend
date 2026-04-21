@@ -46,7 +46,7 @@ class CoverageRepository:
             ON CONFLICT (source_slug, sport_slug, surface_name, scope_type, scope_id) DO UPDATE SET
                 freshness_status = EXCLUDED.freshness_status,
                 completeness_ratio = EXCLUDED.completeness_ratio,
-                last_success_at = EXCLUDED.last_success_at,
+                last_success_at = COALESCE(EXCLUDED.last_success_at, coverage_ledger.last_success_at),
                 last_checked_at = EXCLUDED.last_checked_at
             """,
             record.source_slug,

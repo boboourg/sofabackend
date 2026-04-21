@@ -18,7 +18,7 @@ from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
 from .normalizers.sink import DurableNormalizeSink
 from .normalizers.worker import NormalizeWorker
-from .ops.db_audit import collect_db_audit
+from .ops.db_audit import collect_db_audit, persist_audit_coverage
 from .ops.health import collect_health_report
 from .ops.recovery import rebuild_live_state_from_postgres
 from .parsers.base import RawSnapshot
@@ -386,6 +386,14 @@ class HybridApp:
                 event_ids=tuple(int(item) for item in event_ids),
             )
 
+    async def write_db_audit_coverage(self, *, report):
+        async with self.database.transaction() as connection:
+            return await persist_audit_coverage(
+                sql_executor=connection,
+                source_slug=self.runtime_config.source_slug,
+                report=report,
+            )
+
     async def discover_live_event_ids(self, *, sport_slug: str, timeout: float) -> tuple[int, ...]:
         result = await self.discover_live_events(sport_slug=sport_slug, timeout=timeout)
         return tuple(int(item.id) for item in result.parsed.events)
@@ -644,6 +652,9 @@ async def _run_post_hydration_audit(args, *, app, report: HydrationBatchReport):
     _print_db_audit_report(audit_report)
     if int(audit_report.raw_snapshots) <= 0 or int(audit_report.events) <= 0:
         raise RuntimeError("DB audit failed: raw or durable counts are empty.")
+    write_db_audit_coverage = getattr(app, "write_db_audit_coverage", None)
+    if callable(write_db_audit_coverage):
+        await write_db_audit_coverage(report=audit_report)
     return audit_report
 
 

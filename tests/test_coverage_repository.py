@@ -56,6 +56,7 @@ class CoverageLedgerTests(unittest.IsolatedAsyncioTestCase):
         query, args = executor.execute_calls[0]
         self.assertIn("INSERT INTO coverage_ledger", query)
         self.assertIn("ON CONFLICT", query)
+        self.assertIn("COALESCE(EXCLUDED.last_success_at, coverage_ledger.last_success_at)", query)
         self.assertEqual(args[0], "secondary-source")
         self.assertEqual(args[2], "season_structure")
         self.assertEqual(args[4], 17)
