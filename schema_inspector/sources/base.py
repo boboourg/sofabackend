@@ -4,6 +4,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Mapping
 
+if False:
+    from ..db import AsyncpgDatabase
+
 
 @dataclass(frozen=True)
 class SourceFetchRequest:
@@ -30,4 +33,8 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     async def get_json(self, request: SourceFetchRequest) -> SourceFetchResponse:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_event_list_job(self, database: "AsyncpgDatabase"):
         raise NotImplementedError

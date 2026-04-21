@@ -447,6 +447,85 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(transport.closed)
 
+    def test_hybrid_app_init_does_not_build_source_adapter_eagerly(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        fake_adapter = object()
+        runtime_config = RuntimeConfig(require_proxy=False, source_slug="secondary_source")
+
+        with mock.patch.object(hybrid_cli, "build_source_adapter", return_value=fake_adapter) as adapter_factory:
+            app = hybrid_cli.HybridApp(database=_FakeDatabase(), runtime_config=runtime_config, redis_backend=None)
+
+        self.assertIsNone(app._source_adapter)
+        adapter_factory.assert_not_called()
+
+    async def test_hybrid_app_unsupported_adapter_does_not_fail_init_but_blocks_live_discovery(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        class _UnsupportedAdapter:
+            source_slug = "secondary_source"
+
+            def build_event_list_job(self, database):
+                del database
+                raise RuntimeError("event-list discovery is not wired for source secondary_source")
+
+        unsupported_adapter = _UnsupportedAdapter()
+
+        with mock.patch.object(hybrid_cli, "build_source_adapter", return_value=unsupported_adapter):
+            app = hybrid_cli.HybridApp(
+                database=_FakeDatabase(),
+                runtime_config=RuntimeConfig(require_proxy=False, source_slug="secondary_source"),
+                redis_backend=None,
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "event-list discovery is not wired for source secondary_source"):
+            await app.discover_live_events(sport_slug="football", timeout=20.0)
+
+    async def test_hybrid_app_first_live_discovery_builds_source_adapter_from_runtime_config(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        fake_adapter = _FakeAdapterWithEventListJob()
+
+        with mock.patch.object(hybrid_cli, "build_source_adapter", return_value=fake_adapter) as adapter_factory:
+            app = hybrid_cli.HybridApp(
+                database=_FakeDatabase(),
+                runtime_config=RuntimeConfig(require_proxy=False, source_slug="sofascore"),
+                redis_backend=None,
+            )
+
+            result = await app.discover_live_events(sport_slug="football", timeout=12.0)
+
+        self.assertEqual(result, {"job": "live"})
+        adapter_factory.assert_called_once()
+        self.assertEqual(adapter_factory.call_args.args[0], "sofascore")
+        self.assertIs(adapter_factory.call_args.kwargs["runtime_config"], app.runtime_config)
+        self.assertIs(adapter_factory.call_args.kwargs["transport"], app.transport)
+
+    async def test_hybrid_app_builds_event_list_job_lazily_using_adapter_contract(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        job_instances: list[_FakeLazyEventListJob] = []
+        fake_adapter = _FakeAdapterWithEventListJob(job_instances=job_instances)
+
+        with mock.patch.object(hybrid_cli, "build_source_adapter", return_value=fake_adapter):
+            app = hybrid_cli.HybridApp(
+                database=_FakeDatabase(),
+                runtime_config=RuntimeConfig(require_proxy=False),
+                redis_backend=None,
+            )
+
+            self.assertIsNone(app._event_list_job)
+            result = await app.discover_live_events(sport_slug="football", timeout=12.0)
+
+        self.assertEqual(len(job_instances), 1)
+        self.assertEqual(job_instances[0].run_live_calls, [("football", 12.0)])
+        self.assertEqual(result, {"job": "live"})
+        self.assertEqual(fake_adapter.build_event_list_job_calls, 1)
+
     async def test_dispatch_closes_hybrid_app_before_return(self) -> None:
         import schema_inspector.cli as hybrid_cli
 
@@ -1498,6 +1577,31 @@ class _FakeClosableTransport:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakeLazyEventListJob:
+    def __init__(self, *, parser, repository, database) -> None:
+        self.parser = parser
+        self.repository = repository
+        self.database = database
+        self.run_live_calls: list[tuple[str, float]] = []
+
+    async def run_live(self, *, sport_slug: str, timeout: float):
+        self.run_live_calls.append((sport_slug, timeout))
+        return {"job": "live"}
+
+
+class _FakeAdapterWithEventListJob:
+    def __init__(self, *, job_instances: list[_FakeLazyEventListJob] | None = None) -> None:
+        self.source_slug = "sofascore"
+        self.job_instances = job_instances if job_instances is not None else []
+        self.build_event_list_job_calls = 0
+
+    def build_event_list_job(self, database):
+        self.build_event_list_job_calls += 1
+        job = _FakeLazyEventListJob(parser=None, repository=None, database=database)
+        self.job_instances.append(job)
+        return job
 
 
 class _FakeRedisBackend:

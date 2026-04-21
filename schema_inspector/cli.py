@@ -15,9 +15,6 @@ from pathlib import Path
 
 from .db import AsyncpgDatabase, load_database_config
 from .endpoints import hybrid_runtime_registry_entries_for_sport
-from .event_list_job import EventListIngestJob
-from .event_list_parser import EventListParser
-from .event_list_repository import EventListRepository
 from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
 from .normalizers.sink import DurableNormalizeSink
 from .normalizers.worker import NormalizeWorker
@@ -42,6 +39,7 @@ from .services.structure_sync_service import (
 )
 from .services.service_app import ServiceApp
 from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .storage.capability_repository import CapabilityRepository
 from .storage.live_state_repository import LiveStateRepository
 from .storage.normalize_repository import NormalizeRepository
@@ -197,13 +195,8 @@ class HybridApp:
         # SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS to be set).
         self._structure_runtime_config = None
         self._structure_transport = None
-
-        client = SofascoreClient(runtime_config, transport=self.transport)
-        self.event_list_job = EventListIngestJob(
-            EventListParser(client),
-            EventListRepository(),
-            database,
-        )
+        self._source_adapter = None
+        self._event_list_job = None
 
     def ensure_structure_runtime(self):
         """Lazily build a non-residential RuntimeConfig + transport for the
@@ -402,10 +395,25 @@ class HybridApp:
         return tuple(int(item.id) for item in result.parsed.events)
 
     async def discover_live_events(self, *, sport_slug: str, timeout: float):
-        return await self.event_list_job.run_live(sport_slug=sport_slug, timeout=timeout)
+        return await self._get_event_list_job().run_live(sport_slug=sport_slug, timeout=timeout)
 
     async def discover_scheduled_events(self, *, sport_slug: str, date: str, timeout: float):
-        return await self.event_list_job.run_scheduled(date, sport_slug=sport_slug, timeout=timeout)
+        return await self._get_event_list_job().run_scheduled(date, sport_slug=sport_slug, timeout=timeout)
+
+    def _get_source_adapter(self):
+        if self._source_adapter is None:
+            self._source_adapter = build_source_adapter(
+                self.runtime_config.source_slug,
+                runtime_config=self.runtime_config,
+                transport=self.transport,
+            )
+        return self._source_adapter
+
+    def _get_event_list_job(self):
+        if self._event_list_job is not None:
+            return self._event_list_job
+        self._event_list_job = self._get_source_adapter().build_event_list_job(self.database)
+        return self._event_list_job
 
     async def select_unique_tournament_ids_after_cursor(
         self,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from ..event_list_job import EventListIngestJob
+from ..event_list_parser import EventListParser
+from ..event_list_repository import EventListRepository
 from ..runtime import RuntimeConfig
 from ..sofascore_client import SofascoreClient
 from ..transport import InspectorTransport
@@ -34,4 +37,11 @@ class SofascoreSourceAdapter(SourceAdapter):
             headers=response.headers,
             body_bytes=response.body_bytes,
             payload=response.payload,
+        )
+
+    def build_event_list_job(self, database):
+        return EventListIngestJob(
+            EventListParser(self.client),
+            EventListRepository(),
+            database,
         )
