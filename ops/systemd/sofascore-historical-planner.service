@@ -1,5 +1,5 @@
 [Unit]
-Description=Sofascore Hydrate Worker %i
+Description=Sofascore Historical Planner Daemon
 After=network-online.target redis-server.service postgresql.service
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/sofascore
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/sofascore/deploy/run_service.sh worker-hydrate --consumer-name hydrate-%i --block-ms 5000
+ExecStart=/opt/sofascore/deploy/run_service.sh historical-planner-daemon
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

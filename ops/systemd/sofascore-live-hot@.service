@@ -1,16 +1,18 @@
 [Unit]
 Description=Sofascore Live Hot Worker %i
-After=network-online.target
+After=network-online.target redis-server.service postgresql.service
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=root
 WorkingDirectory=/opt/sofascore
-EnvironmentFile=/opt/sofascore/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.cli --log-level INFO worker-live-hot --consumer-name live-hot-%i --block-ms 5000
+ExecStart=/opt/sofascore/deploy/run_service.sh worker-live-hot --consumer-name live-hot-%i --block-ms 5000
 Restart=always
 RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
