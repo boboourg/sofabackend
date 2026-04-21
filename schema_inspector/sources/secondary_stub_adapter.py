@@ -23,6 +23,12 @@ class SecondaryStubSourceAdapter(SourceAdapter):
             "categories bootstrap is not wired for source secondary_source"
         )
 
+    def build_scheduled_tournaments_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError(
+            "scheduled tournaments discovery is not wired for source secondary_source"
+        )
+
     def build_default_tournament_list_parser(self):
         raise UnsupportedSourceAdapterError(
             "default tournament list is not wired for source secondary_source"

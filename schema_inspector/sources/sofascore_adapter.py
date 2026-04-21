@@ -20,6 +20,8 @@ from ..leaderboards_job import LeaderboardsIngestJob
 from ..leaderboards_parser import LeaderboardsParser
 from ..leaderboards_repository import LeaderboardsRepository
 from ..runtime import RuntimeConfig
+from ..scheduled_tournaments_job import ScheduledTournamentsIngestJob
+from ..scheduled_tournaments_parser import ScheduledTournamentsParser
 from ..sofascore_client import SofascoreClient
 from ..standings_job import StandingsIngestJob
 from ..standings_parser import StandingsParser
@@ -68,6 +70,13 @@ class SofascoreSourceAdapter(SourceAdapter):
         return CategoriesSeedIngestJob(
             CategoriesSeedParser(self.client),
             CategoriesSeedRepository(),
+            database,
+        )
+
+    def build_scheduled_tournaments_job(self, database):
+        return ScheduledTournamentsIngestJob(
+            ScheduledTournamentsParser(self.client),
+            EventListRepository(),
             database,
         )
 
