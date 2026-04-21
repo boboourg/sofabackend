@@ -69,6 +69,55 @@ class TournamentRegistryServiceTests(unittest.TestCase):
         self.assertTrue(all(record.category_id == 3 for record in records))
         self.assertTrue(all(record.discovery_surface == "category_unique_tournaments" for record in records))
 
+    def test_registry_record_generation_marks_all_discovered_tournaments_active_when_metadata_is_missing(self) -> None:
+        from schema_inspector.services.tournament_registry_service import records_from_category_tournaments_bundle
+
+        bundle = CategoryTournamentsBundle(
+            competition_bundle=CompetitionBundle(
+                registry_entries=(),
+                payload_snapshots=(),
+                image_assets=(),
+                sports=(),
+                countries=(),
+                categories=(),
+                teams=(),
+                unique_tournaments=(
+                    UniqueTournamentRecord(
+                        id=649,
+                        slug="cfa-super-league",
+                        name="Chinese Super League",
+                        category_id=99,
+                    ),
+                    UniqueTournamentRecord(
+                        id=650,
+                        slug="league-one",
+                        name="League One",
+                        category_id=99,
+                    ),
+                ),
+                unique_tournament_relations=(),
+                unique_tournament_most_title_teams=(),
+                seasons=(),
+                unique_tournament_seasons=(),
+            ),
+            category_ids=(99,),
+            unique_tournament_ids=(649, 650),
+            active_unique_tournament_ids=(),
+            group_names=("China",),
+        )
+
+        records = records_from_category_tournaments_bundle(
+            bundle,
+            source_slug="sofascore",
+            sport_slug="football",
+            discovery_surface="category_unique_tournaments",
+        )
+
+        self.assertEqual(
+            [(record.unique_tournament_id, record.priority_rank, record.is_active) for record in records],
+            [(649, 1, True), (650, 2, True)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

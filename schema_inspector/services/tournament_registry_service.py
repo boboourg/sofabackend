@@ -29,6 +29,8 @@ def records_from_category_tournaments_bundle(
     normalized_sport = str(sport_slug).strip().lower()
     resolved_surface = str(discovery_surface or bundle.discovery_surface or "category_unique_tournaments").strip().lower()
     active_ids = set(int(item) for item in bundle.active_unique_tournament_ids)
+    if not active_ids:
+        active_ids = set(int(item) for item in bundle.unique_tournament_ids)
     category_ids_by_tournament = {
         int(item.id): int(item.category_id)
         for item in bundle.competition_bundle.unique_tournaments
