@@ -7,11 +7,8 @@ import asyncio
 import sys
 
 from .db import AsyncpgDatabase, load_database_config
-from .event_list_job import EventListIngestJob
-from .event_list_parser import EventListParser
-from .event_list_repository import EventListRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -74,10 +71,11 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = EventListParser(client)
-        repository = EventListRepository()
-        job = EventListIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        job = adapter.build_event_list_job(database)
 
         if args.command == "scheduled":
             result = await job.run_scheduled(args.date, sport_slug=args.sport_slug, timeout=args.timeout)
