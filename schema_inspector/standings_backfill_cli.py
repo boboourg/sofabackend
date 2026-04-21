@@ -8,11 +8,8 @@ import sys
 
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
 from .standings_backfill_job import StandingsBackfillJob
-from .standings_job import StandingsIngestJob
-from .standings_parser import StandingsParser
-from .standings_repository import StandingsRepository
+from .sources import build_source_adapter
 
 
 def main() -> int:
@@ -58,10 +55,11 @@ async def _run(args: argparse.Namespace) -> int:
     scopes = tuple(dict.fromkeys(args.scope or ["total"]))
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-        parser = StandingsParser(client)
-        repository = StandingsRepository()
-        ingest_job = StandingsIngestJob(parser, repository, database)
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
+        )
+        ingest_job = adapter.build_standings_job(database)
         backfill_job = StandingsBackfillJob(ingest_job, database)
         result = await backfill_job.run(
             season_limit=args.season_limit,
