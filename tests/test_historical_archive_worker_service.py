@@ -91,10 +91,12 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
             HISTORICAL_ENRICHMENT_EVENT_DETAIL_LIMIT,
             run_historical_tournament_enrichment,
         )
+        from schema_inspector.services.historical_planner import choose_saturation_budget
 
         fixed_now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
         expected_from = int((fixed_now - timedelta(days=730)).timestamp())
         expected_to = int(fixed_now.timestamp())
+        expected_budget = choose_saturation_budget("football")
 
         with (
             patch(
@@ -152,6 +154,10 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.entities_run_kwargs["unique_tournament_ids"], (17,))
         self.assertEqual(app.entities_run_kwargs["event_timestamp_from"], expected_from)
         self.assertEqual(app.entities_run_kwargs["event_timestamp_to"], expected_to)
+        self.assertEqual(app.entities_run_kwargs["player_limit"], expected_budget.player_limit)
+        self.assertEqual(app.entities_run_kwargs["team_limit"], expected_budget.team_limit)
+        self.assertEqual(app.entities_run_kwargs["player_request_limit"], expected_budget.player_request_limit)
+        self.assertEqual(app.entities_run_kwargs["team_request_limit"], expected_budget.team_request_limit)
         _LAST_FAKE_APP = None
 
 

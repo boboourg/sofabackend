@@ -31,6 +31,31 @@ class HistoricalPlanningTarget:
     priority: int = 50
 
 
+@dataclass(frozen=True)
+class HistoricalSaturationBudget:
+    player_limit: int
+    team_limit: int
+    player_request_limit: int
+    team_request_limit: int
+
+
+def choose_saturation_budget(sport_slug: str) -> HistoricalSaturationBudget:
+    normalized = str(sport_slug).strip().lower()
+    if normalized in {"football", "basketball", "ice-hockey", "baseball"}:
+        return HistoricalSaturationBudget(
+            player_limit=400,
+            team_limit=128,
+            player_request_limit=400,
+            team_request_limit=128,
+        )
+    return HistoricalSaturationBudget(
+        player_limit=120,
+        team_limit=48,
+        player_request_limit=120,
+        team_request_limit=48,
+    )
+
+
 class HistoricalCursorStore:
     def __init__(self, backend, *, hash_key: str = HISTORICAL_CURSOR_HASH) -> None:
         self.backend = backend
