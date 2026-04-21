@@ -153,6 +153,53 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
             [STREAM_HISTORICAL_ENRICHMENT, STREAM_HISTORICAL_ENRICHMENT],
         )
 
+    async def test_planner_daemon_routes_split_historical_scopes_into_historical_streams(self) -> None:
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        delayed_jobs = (
+            DelayedJob(job_id="job-historical-deep", run_at_epoch_ms=1_800_000_000_000),
+            DelayedJob(job_id="job-historical-recent", run_at_epoch_ms=1_800_000_000_000),
+        )
+        deep_discovery = JobEnvelope.create(
+            job_type=JOB_DISCOVER_SPORT_SURFACE,
+            sport_slug="football",
+            entity_type="sport",
+            entity_id=None,
+            scope="historical_deep",
+            params={"date": "2020-04-17"},
+            priority=20,
+            trace_id="trace-hd2",
+        )
+        recent_hydrate = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="football",
+            entity_type="event",
+            entity_id=501,
+            scope="historical_recent_refresh",
+            params={"hydration_mode": "core"},
+            priority=20,
+            trace_id="trace-hr2",
+        )
+        queue = _FakeQueue()
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(delayed_jobs),
+            delayed_job_loader=lambda job_id: {
+                "job-historical-deep": deep_discovery,
+                "job-historical-recent": recent_hydrate,
+            }.get(job_id),
+            live_state_store=_FakeLiveStateStore(),
+            scheduled_targets=(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(
+            [stream for stream, _ in queue.published],
+            [STREAM_HISTORICAL_DISCOVERY, STREAM_HISTORICAL_HYDRATE],
+        )
+
     async def test_planner_daemon_reads_live_lanes_and_emits_refresh_jobs(self) -> None:
         from schema_inspector.services.planner_daemon import PlannerDaemon
 

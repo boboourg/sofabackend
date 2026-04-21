@@ -11,6 +11,7 @@ from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
 from ..sources import build_source_adapter
+from ..storage.planner_cursor_repository import PlannerCursorRepository
 from ..storage.tournament_registry_repository import TournamentRegistryRepository
 from ..queue.streams import (
     GROUP_DISCOVERY,
@@ -58,7 +59,14 @@ from .backpressure_config import (
 from .freshness_policy import FreshnessPolicy
 from .housekeeping import HousekeepingConfig, HousekeepingLoop
 from .live_discovery_planner import LiveDiscoveryPlannerDaemon, LiveDiscoveryPlanningTarget
-from .historical_planner import HistoricalCursorStore, HistoricalPlannerDaemon, HistoricalPlanningTarget
+from .historical_planner import (
+    HistoricalCursorStore,
+    HistoricalPlannerDaemon,
+    HistoricalPlanningTarget,
+    PostgresHistoricalCursorStore,
+    build_historical_planning_targets,
+    compute_historical_horizon,
+)
 from .historical_tournament_planner import (
     HistoricalTournamentCursorStore,
     HistoricalTournamentPlannerDaemon,
@@ -252,24 +260,96 @@ class ServiceApp:
         self,
         *,
         sport_slugs: tuple[str, ...] | None = None,
-        date_from: str,
-        date_to: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
         dates_per_tick: int = 1,
         loop_interval_seconds: float = 5.0,
+        today_factory=None,
     ) -> HistoricalPlannerDaemon:
         normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
-        targets = tuple(
-            HistoricalPlanningTarget(
-                sport_slug=sport_slug,
-                date_from=date_from,
-                date_to=date_to,
+        if bool(date_from) != bool(date_to):
+            raise RuntimeError("Historical planner requires both date_from and date_to together.")
+        database = getattr(self.app, "database", None)
+        connection_factory = getattr(database, "connection", None) if database is not None else None
+        runtime_config = getattr(self.app, "runtime_config", None)
+        today_factory = today_factory or self._today_factory
+        if callable(connection_factory) and runtime_config is not None:
+            cursor_store = PostgresHistoricalCursorStore(
+                repository=PlannerCursorRepository(),
+                connection_factory=connection_factory,
+                default_source_slug=runtime_config.source_slug,
             )
-            for sport_slug in normalized_sports
-        )
+        else:
+            cursor_store = self.historical_cursor_store
+
+        if date_from and date_to:
+            cursor_store = self.historical_cursor_store
+            targets = tuple(
+                HistoricalPlanningTarget(
+                    source_slug=(
+                        str(getattr(runtime_config, "source_slug", "sofascore")).strip().lower()
+                    ),
+                    sport_slug=sport_slug,
+                    date_from=date_from,
+                    date_to=date_to,
+                    scope="historical",
+                )
+                for sport_slug in normalized_sports
+            )
+            target_loader = None
+        else:
+            if callable(connection_factory):
+                repository = TournamentRegistryRepository()
+
+                async def _target_loader():
+                    async with connection_factory() as connection:
+                        policies = await repository.list_historical_planning_policies(
+                            connection,
+                            sport_slugs=normalized_sports,
+                        )
+                    policies_by_sport = {policy.sport_slug: policy for policy in policies}
+                    today = today_factory()
+                    computed_targets: list[HistoricalPlanningTarget] = []
+                    default_source_slug = str(getattr(runtime_config, "source_slug", "sofascore")).strip().lower()
+                    for sport_slug in normalized_sports:
+                        policy = policies_by_sport.get(sport_slug)
+                        horizon = compute_historical_horizon(
+                            today=today,
+                            sport_slug=sport_slug,
+                            start_override=None if policy is None else policy.historical_backfill_start_date,
+                            end_override=None if policy is None else policy.historical_backfill_end_date,
+                            recent_refresh_days=None if policy is None else policy.recent_refresh_days,
+                        )
+                        computed_targets.extend(
+                            build_historical_planning_targets(
+                                source_slug=default_source_slug if policy is None else policy.source_slug,
+                                sport_slug=sport_slug,
+                                horizon=horizon,
+                            )
+                        )
+                    return tuple(computed_targets)
+
+                targets = ()
+                target_loader = _target_loader
+            else:
+                today = today_factory()
+                computed_targets: list[HistoricalPlanningTarget] = []
+                default_source_slug = str(getattr(runtime_config, "source_slug", "sofascore")).strip().lower()
+                for sport_slug in normalized_sports:
+                    computed_targets.extend(
+                        build_historical_planning_targets(
+                            source_slug=default_source_slug,
+                            sport_slug=sport_slug,
+                            horizon=compute_historical_horizon(today=today, sport_slug=sport_slug),
+                        )
+                    )
+                targets = tuple(computed_targets)
+                target_loader = None
         return HistoricalPlannerDaemon(
             queue=self.stream_queue,
-            cursor_store=self.historical_cursor_store,
+            cursor_store=cursor_store,
             targets=targets,
+            target_loader=target_loader,
             dates_per_tick=dates_per_tick,
             loop_interval_s=loop_interval_seconds,
             backpressure=QueueBackpressure(
@@ -727,8 +807,8 @@ class ServiceApp:
         self,
         *,
         sport_slugs: tuple[str, ...] | None = None,
-        date_from: str,
-        date_to: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
         dates_per_tick: int = 1,
         loop_interval_seconds: float = 5.0,
     ) -> None:
@@ -885,6 +965,12 @@ class ServiceApp:
         from datetime import datetime, timezone
 
         return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date().isoformat()
+
+    @staticmethod
+    def _today_factory():
+        from datetime import datetime, timezone
+
+        return datetime.now(tz=timezone.utc).date()
 
     async def _recover_live_state(self) -> None:
         recover = getattr(self.app, "recover_live_state", None)

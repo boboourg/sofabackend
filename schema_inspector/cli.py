@@ -1142,10 +1142,10 @@ def _build_parser() -> argparse.ArgumentParser:
     live_discovery_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
     live_discovery_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
 
-    historical_planner_daemon = subparsers.add_parser("historical-planner-daemon", help="Run the historical date-range planner loop.")
+    historical_planner_daemon = subparsers.add_parser("historical-planner-daemon", help="Run the rolling historical planner loop.")
     historical_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
-    historical_planner_daemon.add_argument("--date-from", required=True, help="Inclusive start date in YYYY-MM-DD format.")
-    historical_planner_daemon.add_argument("--date-to", required=True, help="Inclusive end date in YYYY-MM-DD format.")
+    historical_planner_daemon.add_argument("--date-from", help="Optional inclusive start date in YYYY-MM-DD format for manual override mode.")
+    historical_planner_daemon.add_argument("--date-to", help="Optional inclusive end date in YYYY-MM-DD format for manual override mode.")
     historical_planner_daemon.add_argument("--dates-per-tick", type=int, default=1, help="Maximum archival dates to publish per sport on each planner tick.")
     historical_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
 

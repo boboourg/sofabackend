@@ -50,6 +50,15 @@ class TournamentRegistryTarget:
     recent_refresh_days: int | None = None
 
 
+@dataclass(frozen=True)
+class HistoricalPlanningPolicy:
+    source_slug: str
+    sport_slug: str
+    historical_backfill_start_date: date | None = None
+    historical_backfill_end_date: date | None = None
+    recent_refresh_days: int | None = None
+
+
 class TournamentRegistryRepository:
     """Writes and reads registry-backed managed tournament targets."""
 
@@ -193,3 +202,45 @@ class TournamentRegistryRepository:
             str(sport_slug).strip().lower(),
         )
         return bool(rows)
+
+    async def list_historical_planning_policies(
+        self,
+        executor: SqlFetchExecutor,
+        *,
+        sport_slugs: tuple[str, ...] | None = None,
+    ) -> tuple[HistoricalPlanningPolicy, ...]:
+        normalized_sports = tuple(str(item).strip().lower() for item in (sport_slugs or ()) if str(item).strip())
+        rows = await executor.fetch(
+            """
+            SELECT
+                source_slug,
+                sport_slug,
+                MIN(historical_backfill_start_date) AS historical_backfill_start_date,
+                MAX(historical_backfill_end_date) AS historical_backfill_end_date,
+                MAX(recent_refresh_days) AS recent_refresh_days
+            FROM tournament_registry
+            WHERE is_active = TRUE
+              AND historical_enabled = TRUE
+              AND (
+                cardinality($1::text[]) = 0
+                OR sport_slug = ANY($1::text[])
+              )
+            GROUP BY source_slug, sport_slug
+            ORDER BY sport_slug ASC, source_slug ASC
+            """,
+            list(normalized_sports),
+        )
+        return tuple(
+            HistoricalPlanningPolicy(
+                source_slug=str(row["source_slug"]),
+                sport_slug=str(row["sport_slug"]),
+                historical_backfill_start_date=row["historical_backfill_start_date"],
+                historical_backfill_end_date=row["historical_backfill_end_date"],
+                recent_refresh_days=(
+                    None
+                    if row["recent_refresh_days"] is None
+                    else int(row["recent_refresh_days"])
+                ),
+            )
+            for row in rows
+        )

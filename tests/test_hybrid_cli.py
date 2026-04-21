@@ -298,6 +298,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
                 "2025-01-31",
             ]
         )
+        historical_planner_rolling = parser.parse_args(["historical-planner-daemon"])
         discovery = parser.parse_args(["worker-discovery", "--consumer-name", "discovery-1"])
         historical_discovery = parser.parse_args(
             ["worker-historical-discovery", "--consumer-name", "historical-discovery-1"]
@@ -334,6 +335,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(historical_planner.command, "historical-planner-daemon")
         self.assertEqual(historical_planner.date_from, "2025-01-01")
         self.assertEqual(historical_planner.date_to, "2025-01-31")
+        self.assertIsNone(historical_planner_rolling.date_from)
+        self.assertIsNone(historical_planner_rolling.date_to)
         self.assertEqual(discovery.command, "worker-discovery")
         self.assertEqual(historical_discovery.command, "worker-historical-discovery")
         self.assertEqual(historical_tournament_planner.command, "historical-tournament-planner-daemon")
@@ -2015,8 +2018,8 @@ class _FakeServiceApp:
         self,
         *,
         sport_slugs: tuple[str, ...],
-        date_from: str,
-        date_to: str,
+        date_from: str | None,
+        date_to: str | None,
         dates_per_tick: int,
         loop_interval_seconds: float,
     ) -> None:

@@ -156,7 +156,7 @@ def _stream_for_job(job: JobEnvelope) -> str:
         if str(job.scope or "").strip().lower() == "warm":
             return STREAM_LIVE_WARM
         return STREAM_LIVE_HOT
-    if str(job.scope or "").strip().lower() == "historical":
+    if _is_historical_scope(job.scope):
         if job.job_type == JOB_SYNC_TOURNAMENT_ARCHIVE:
             return STREAM_HISTORICAL_TOURNAMENT
         if job.job_type in {
@@ -171,6 +171,11 @@ def _stream_for_job(job: JobEnvelope) -> str:
     if job.job_type.startswith("discover_") or job.job_type.startswith("sync_"):
         return STREAM_DISCOVERY
     return STREAM_HYDRATE
+
+
+def _is_historical_scope(scope: str | None) -> bool:
+    normalized = str(scope or "").strip().lower()
+    return normalized == "historical" or normalized.startswith("historical_")
 
 
 def _job_to_stream_payload(job: JobEnvelope) -> dict[str, object]:
