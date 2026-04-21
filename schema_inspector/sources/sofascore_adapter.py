@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from ..entities_job import EntitiesIngestJob
+from ..entities_parser import EntitiesParser
+from ..entities_repository import EntitiesRepository
+from ..event_detail_job import EventDetailIngestJob
+from ..event_detail_parser import EventDetailParser
+from ..event_detail_repository import EventDetailRepository
 from ..event_list_job import EventListIngestJob
 from ..event_list_parser import EventListParser
 from ..event_list_repository import EventListRepository
@@ -46,5 +52,19 @@ class SofascoreSourceAdapter(SourceAdapter):
         return EventListIngestJob(
             EventListParser(self.client),
             EventListRepository(),
+            database,
+        )
+
+    def build_event_detail_job(self, database):
+        return EventDetailIngestJob(
+            EventDetailParser(self.client),
+            EventDetailRepository(),
+            database,
+        )
+
+    def build_entities_job(self, database):
+        return EntitiesIngestJob(
+            EntitiesParser(self.client),
+            EntitiesRepository(),
             database,
         )

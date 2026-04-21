@@ -23,6 +23,7 @@ from ..leaderboards_job import LeaderboardsIngestJob
 from ..leaderboards_parser import LeaderboardsParser
 from ..leaderboards_repository import LeaderboardsRepository
 from ..sofascore_client import SofascoreClient
+from ..sources import build_source_adapter
 from .historical_planner import (
     choose_event_detail_budget,
     choose_recent_history_window,
@@ -108,7 +109,11 @@ async def run_historical_tournament_enrichment(
     now_factory=None,
 ) -> dict[str, object]:
     del season_ids
-    client = SofascoreClient(app.runtime_config, transport=app.transport)
+    adapter = build_source_adapter(
+        app.runtime_config.source_slug,
+        runtime_config=app.runtime_config,
+        transport=app.transport,
+    )
     resolved_now = (now_factory or _default_now_utc)()
     recent_window_days = choose_recent_history_window(sport_slug)
     saturation_budget = choose_saturation_budget(sport_slug)
@@ -116,11 +121,11 @@ async def run_historical_tournament_enrichment(
     recent_window_start = int((resolved_now - timedelta(days=recent_window_days)).timestamp())
     recent_window_end = int(resolved_now.timestamp())
     event_detail_backfill_job = EventDetailBackfillJob(
-        EventDetailIngestJob(EventDetailParser(client), EventDetailRepository(), app.database),
+        adapter.build_event_detail_job(app.database),
         app.database,
     )
     entities_backfill_job = EntitiesBackfillJob(
-        EntitiesIngestJob(EntitiesParser(client), EntitiesRepository(), app.database),
+        adapter.build_entities_job(app.database),
         app.database,
     )
     event_detail_result = await event_detail_backfill_job.run(

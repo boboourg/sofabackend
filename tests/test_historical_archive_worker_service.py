@@ -86,7 +86,7 @@ class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_enrichment_uses_recent_history_window_for_backfills(self) -> None:
+    async def test_enrichment_builds_source_adapter_and_uses_adapter_jobs(self) -> None:
         from schema_inspector.services.historical_archive_service import (
             run_historical_tournament_enrichment,
         )
@@ -100,36 +100,14 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         expected_to = int(fixed_now.timestamp())
         expected_budget = choose_saturation_budget("football")
         expected_event_detail_limit = choose_event_detail_budget("football")
+        fake_adapter = _FakeHistoricalSourceAdapter()
 
         with (
             patch(
-                "schema_inspector.services.historical_archive_service.SofascoreClient",
-                return_value=object(),
-            ),
-            patch(
-                "schema_inspector.services.historical_archive_service.EventDetailParser",
-                return_value=object(),
-            ),
-            patch(
-                "schema_inspector.services.historical_archive_service.EventDetailRepository",
-                return_value=object(),
-            ),
-            patch(
-                "schema_inspector.services.historical_archive_service.EventDetailIngestJob",
-                return_value=object(),
-            ),
-            patch(
-                "schema_inspector.services.historical_archive_service.EntitiesParser",
-                return_value=object(),
-            ),
-            patch(
-                "schema_inspector.services.historical_archive_service.EntitiesRepository",
-                return_value=object(),
-            ),
-            patch(
-                "schema_inspector.services.historical_archive_service.EntitiesIngestJob",
-                return_value=object(),
-            ),
+                "schema_inspector.services.historical_archive_service.build_source_adapter",
+                create=True,
+                return_value=fake_adapter,
+            ) as adapter_factory,
             patch(
                 "schema_inspector.services.historical_archive_service.EventDetailBackfillJob",
                 new=_FakeEventDetailBackfillJob,
@@ -150,6 +128,15 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
                 now_factory=lambda: fixed_now,
             )
 
+        adapter_factory.assert_called_once_with(
+            "secondary_source",
+            runtime_config=app.runtime_config,
+            transport=app.transport,
+        )
+        self.assertEqual(fake_adapter.event_detail_build_calls, [app.database])
+        self.assertEqual(fake_adapter.entities_build_calls, [app.database])
+        self.assertIs(app.event_detail_backfill_job, fake_adapter.event_detail_job)
+        self.assertIs(app.entities_backfill_job, fake_adapter.entities_job)
         self.assertEqual(app.event_detail_run_kwargs["unique_tournament_ids"], (17,))
         self.assertEqual(app.event_detail_run_kwargs["start_timestamp_from"], expected_from)
         self.assertEqual(app.event_detail_run_kwargs["start_timestamp_to"], expected_to)
@@ -162,6 +149,27 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.entities_run_kwargs["player_request_limit"], expected_budget.player_request_limit)
         self.assertEqual(app.entities_run_kwargs["team_request_limit"], expected_budget.team_request_limit)
         _LAST_FAKE_APP = None
+
+    async def test_enrichment_surfaces_unsupported_adapter_error(self) -> None:
+        from schema_inspector.services.historical_archive_service import (
+            run_historical_tournament_enrichment,
+        )
+        from schema_inspector.sources import UnsupportedSourceAdapterError
+
+        with patch(
+            "schema_inspector.services.historical_archive_service.build_source_adapter",
+            create=True,
+            return_value=_UnsupportedHistoricalSourceAdapter(),
+        ):
+            with self.assertRaisesRegex(
+                UnsupportedSourceAdapterError,
+                "event-detail enrichment is not wired for source secondary_source",
+            ):
+                await run_historical_tournament_enrichment(
+                    _FakeApp(),
+                    unique_tournament_id=17,
+                    sport_slug="football",
+                )
 
 
 class _FakeArchiveOrchestrator:
@@ -205,16 +213,19 @@ class _FakeQueue:
 
 class _FakeApp:
     def __init__(self) -> None:
-        self.runtime_config = object()
+        self.runtime_config = SimpleNamespace(source_slug="secondary_source")
         self.transport = object()
         self.database = object()
         self.event_detail_run_kwargs: dict[str, object] = {}
         self.entities_run_kwargs: dict[str, object] = {}
+        self.event_detail_backfill_job = None
+        self.entities_backfill_job = None
 
 
 class _FakeEventDetailBackfillJob:
     def __init__(self, detail_job, database) -> None:
-        del detail_job, database
+        del database
+        _LAST_FAKE_APP.event_detail_backfill_job = detail_job
 
     async def run(self, **kwargs):
         _LAST_FAKE_APP.event_detail_run_kwargs = dict(kwargs)
@@ -223,7 +234,8 @@ class _FakeEventDetailBackfillJob:
 
 class _FakeEntitiesBackfillJob:
     def __init__(self, ingest_job, database) -> None:
-        del ingest_job, database
+        del database
+        _LAST_FAKE_APP.entities_backfill_job = ingest_job
 
     async def run(self, **kwargs):
         _LAST_FAKE_APP.entities_run_kwargs = dict(kwargs)
@@ -232,6 +244,36 @@ class _FakeEntitiesBackfillJob:
             team_ids=(2,),
             ingest=SimpleNamespace(written=SimpleNamespace(payload_snapshot_rows=4)),
         )
+
+
+class _FakeHistoricalSourceAdapter:
+    def __init__(self) -> None:
+        self.event_detail_job = object()
+        self.entities_job = object()
+        self.event_detail_build_calls: list[object] = []
+        self.entities_build_calls: list[object] = []
+
+    def build_event_detail_job(self, database):
+        self.event_detail_build_calls.append(database)
+        return self.event_detail_job
+
+    def build_entities_job(self, database):
+        self.entities_build_calls.append(database)
+        return self.entities_job
+
+
+class _UnsupportedHistoricalSourceAdapter:
+    def build_event_detail_job(self, database):
+        del database
+        from schema_inspector.sources import UnsupportedSourceAdapterError
+
+        raise UnsupportedSourceAdapterError(
+            "event-detail enrichment is not wired for source secondary_source"
+        )
+
+    def build_entities_job(self, database):
+        del database
+        return object()
 
 
 _LAST_FAKE_APP = None

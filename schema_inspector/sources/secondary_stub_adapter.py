@@ -20,3 +20,11 @@ class SecondaryStubSourceAdapter(SourceAdapter):
     def build_event_list_job(self, database):
         del database
         raise UnsupportedSourceAdapterError("event-list discovery is not wired for source secondary_source")
+
+    def build_event_detail_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError("event-detail enrichment is not wired for source secondary_source")
+
+    def build_entities_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError("entities enrichment is not wired for source secondary_source")
