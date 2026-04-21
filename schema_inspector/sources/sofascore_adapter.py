@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from ..categories_seed_job import CategoriesSeedIngestJob
+from ..categories_seed_parser import CategoriesSeedParser
+from ..categories_seed_repository import CategoriesSeedRepository
 from ..competition_job import CompetitionIngestJob
 from ..competition_parser import CompetitionParser
 from ..competition_repository import CompetitionRepository
@@ -59,6 +62,13 @@ class SofascoreSourceAdapter(SourceAdapter):
             attempts=response.attempts,
             final_proxy_name=response.final_proxy_name,
             challenge_reason=response.challenge_reason,
+        )
+
+    def build_categories_seed_job(self, database):
+        return CategoriesSeedIngestJob(
+            CategoriesSeedParser(self.client),
+            CategoriesSeedRepository(),
+            database,
         )
 
     def build_default_tournament_list_parser(self):

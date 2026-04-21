@@ -17,6 +17,12 @@ class SecondaryStubSourceAdapter(SourceAdapter):
         del request
         raise DisabledSourceAdapterError("secondary_source adapter is disabled")
 
+    def build_categories_seed_job(self, database):
+        del database
+        raise UnsupportedSourceAdapterError(
+            "categories bootstrap is not wired for source secondary_source"
+        )
+
     def build_default_tournament_list_parser(self):
         raise UnsupportedSourceAdapterError(
             "default tournament list is not wired for source secondary_source"

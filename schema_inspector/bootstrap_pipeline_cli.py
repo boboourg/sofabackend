@@ -11,18 +11,11 @@ from datetime import date as Date
 from datetime import datetime
 from datetime import timedelta
 
-from .categories_seed_job import CategoriesSeedIngestJob
-from .categories_seed_parser import CategoriesSeedParser
-from .categories_seed_repository import CategoriesSeedRepository
 from .competition_job import CompetitionIngestJob
-from .competition_parser import CompetitionParser
-from .competition_repository import CompetitionRepository
 from .db import AsyncpgDatabase, load_database_config
 from .event_list_job import EventListIngestJob
-from .event_list_parser import EventListParser
-from .event_list_repository import EventListRepository
 from .runtime import load_runtime_config
-from .sofascore_client import SofascoreClient
+from .sources import build_source_adapter
 from .timezone_utils import resolve_timezone_offset_seconds
 
 
@@ -120,23 +113,13 @@ async def _run(args: argparse.Namespace) -> int:
     )
 
     async with AsyncpgDatabase(database_config) as database:
-        client = SofascoreClient(runtime_config)
-
-        categories_job = CategoriesSeedIngestJob(
-            CategoriesSeedParser(client),
-            CategoriesSeedRepository(),
-            database,
+        adapter = build_source_adapter(
+            runtime_config.source_slug,
+            runtime_config=runtime_config,
         )
-        competition_job = CompetitionIngestJob(
-            CompetitionParser(client),
-            CompetitionRepository(),
-            database,
-        )
-        event_list_job = EventListIngestJob(
-            EventListParser(client),
-            EventListRepository(),
-            database,
-        )
+        categories_job = adapter.build_categories_seed_job(database)
+        competition_job = adapter.build_competition_job(database)
+        event_list_job = adapter.build_event_list_job(database)
 
         category_results = []
         discovered_unique_tournament_ids: list[int] = []
