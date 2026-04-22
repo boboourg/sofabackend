@@ -59,13 +59,14 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_enrichment_worker_runs_archive_enrichment_for_legacy_job_type(self) -> None:
+    async def test_enrichment_worker_requeues_legacy_job_type_as_split_child_jobs(self) -> None:
         from schema_inspector.workers.historical_archive_worker import HistoricalEnrichmentWorker
 
         orchestrator = _FakeArchiveOrchestrator()
+        queue = _FakeQueue()
         worker = HistoricalEnrichmentWorker(
             orchestrator=orchestrator,
-            queue=_FakeQueue(),
+            queue=queue,
             consumer="worker-historical-enrichment-1",
         )
 
@@ -88,7 +89,18 @@ class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "completed")
-        self.assertEqual(orchestrator.enrichment_calls, [(17, "football", (701, 702))])
+        self.assertEqual(orchestrator.enrichment_calls, [])
+        self.assertEqual(
+            queue.published_streams,
+            [STREAM_HISTORICAL_ENRICHMENT, STREAM_HISTORICAL_ENRICHMENT],
+        )
+        payloads = queue.published_payloads
+        self.assertEqual(payloads[0]["job_type"], "enrich_tournament_event_detail_batch")
+        self.assertEqual(payloads[1]["job_type"], "enrich_tournament_entities_batch")
+        self.assertEqual(int(payloads[0]["entity_id"]), 17)
+        self.assertEqual(int(payloads[1]["entity_id"]), 17)
+        self.assertEqual(json.loads(str(payloads[0]["params_json"])), {"season_ids": [701, 702]})
+        self.assertEqual(json.loads(str(payloads[1]["params_json"])), {"season_ids": [701, 702]})
 
     async def test_enrichment_worker_dispatches_event_detail_batch_job(self) -> None:
         from schema_inspector.workers.historical_archive_worker import HistoricalEnrichmentWorker

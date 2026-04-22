@@ -59,9 +59,10 @@ class LiveDiscoveryPlannerDaemon:
         blocking_reason = _blocking_reason(self.backpressure)
         if blocking_reason is not None:
             logger.info(
-                "Live discovery planner observed backpressure but continued publishing to preserve live snapshot freshness: %s",
+                "Live discovery planner paused publishing because of backpressure: %s",
                 blocking_reason,
             )
+            return 0
         published = 0
         for target in self.targets:
             last_planned = self._last_planned_at_ms.get(target.sport_slug)
