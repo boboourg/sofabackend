@@ -8,6 +8,7 @@ from .base import PARSE_STATUS_SOFT_ERROR, PARSE_STATUS_UNSUPPORTED, ParseResult
 from .classifier import classify_snapshot, is_soft_error_payload
 from .families.entity_profiles import EntityProfilesParser
 from .families.event_best_players import EventBestPlayersParser
+from .families.event_comments import EventCommentsParser
 from .families.event_graph import EventGraphParser
 from .families.event_incidents import EventIncidentsParser
 from .families.event_lineups import EventLineupsParser
@@ -36,6 +37,7 @@ class ParserRegistry:
             EventLineupsParser(),
             EventIncidentsParser(),
             EventBestPlayersParser(),
+            EventCommentsParser(),
             EventGraphParser(),
             EventPlayerStatisticsParser(),
             EntityProfilesParser(),

@@ -158,6 +158,44 @@ class ParserRegistryTests(unittest.TestCase):
         self.assertEqual(result.parser_family, "event_player_statistics")
         self.assertEqual(result.status, "parsed")
 
+    def test_registry_dispatches_event_comments_snapshot(self) -> None:
+        registry = ParserRegistry.default()
+        snapshot = RawSnapshot(
+            snapshot_id=106,
+            endpoint_pattern="/api/v1/event/{event_id}/comments",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14083191/comments",
+            resolved_url="https://www.sofascore.com/api/v1/event/14083191/comments",
+            envelope_key="comments,home,away",
+            http_status=200,
+            payload={
+                "comments": [
+                    {
+                        "id": 37184719,
+                        "isHome": False,
+                        "periodName": "2ND",
+                        "player": {"id": 700, "slug": "saka", "name": "Bukayo Saka"},
+                        "sequence": 0,
+                        "text": "Second Half begins.",
+                        "time": 46,
+                        "type": "matchStarted",
+                    }
+                ],
+                "home": {"playerColor": {"primary": "#ffffff"}},
+                "away": {"playerColor": {"primary": "#0000ff"}},
+            },
+            fetched_at="2026-04-16T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=14083191,
+            context_event_id=14083191,
+        )
+
+        result = registry.parse(snapshot)
+
+        self.assertEqual(result.parser_family, "event_comments")
+        self.assertEqual(result.status, "parsed")
+        self.assertEqual(result.metric_rows["event_comment"][0]["comment_id"], 37184719)
+
 
 if __name__ == "__main__":
     unittest.main()

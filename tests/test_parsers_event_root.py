@@ -72,12 +72,15 @@ class EventRootParserTests(unittest.TestCase):
         self.assertEqual(result.entity_upserts["unique_tournament"][0]["id"], 17)
         self.assertEqual(result.entity_upserts["unique_tournament"][0]["category_id"], 1)
         self.assertEqual(result.entity_upserts["event"][0]["unique_tournament_id"], 17)
+        self.assertEqual(result.entity_upserts["event"][0]["status_code"], 100)
         self.assertEqual(result.entity_upserts["team"][0]["sport_id"], 1)
         self.assertEqual(result.entity_upserts["team"][0]["tournament_id"], 100)
         self.assertEqual(result.entity_upserts["season"][0]["id"], 76986)
         self.assertEqual(result.entity_upserts["venue"][0]["id"], 55)
         self.assertEqual(result.entity_upserts["venue"][0]["country_alpha2"], "EN")
         self.assertEqual({item["id"] for item in result.entity_upserts["manager"]}, {500, 501})
+        self.assertEqual(result.metric_rows["event_status"][0]["code"], 100)
+        self.assertEqual(result.metric_rows["event_status"][0]["type"], "inprogress")
         self.assertEqual(len(result.relation_upserts["event_team"]), 2)
 
 

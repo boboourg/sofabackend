@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from .competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
+from .detail_resource_policy import supports_live_detail_resources
 from .endpoints import (
     EndpointRegistryEntry,
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
@@ -1032,7 +1033,7 @@ class _EventDetailAccumulator:
         status = self.event_statuses.get(status_code)
         if not status:
             return False
-        return status.get("type") in {"inprogress", "finished"}
+        return supports_live_detail_resources(_as_str(status.get("type")))
 
     def event_team_ids(self, event_id: int) -> tuple[int, ...]:
         event = self.events.get(event_id)

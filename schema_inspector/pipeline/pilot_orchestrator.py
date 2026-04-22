@@ -31,6 +31,7 @@ from ..endpoints import (
     unique_tournament_top_players_per_game_endpoint,
     unique_tournament_top_teams_endpoint,
 )
+from ..detail_resource_policy import supports_live_detail_resources
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
@@ -403,7 +404,11 @@ class PilotOrchestrator:
                     if parsed is not None:
                         parse_results.append(parsed)
 
-        for endpoint in _special_endpoints_for_sport(sport_slug, core_only=core_only):
+        for endpoint in _special_endpoints_for_event(
+            sport_slug,
+            status_type=status_type,
+            core_only=core_only,
+        ):
             if (
                 sport_slug == "baseball"
                 and endpoint.pattern == EVENT_COMMENTS_ENDPOINT.pattern
@@ -757,16 +762,35 @@ def _special_endpoints_for_sport(sport_slug: str, *, core_only: bool = False) ->
         "tennis_point_by_point": EVENT_POINT_BY_POINT_ENDPOINT,
         "tennis_power": EVENT_TENNIS_POWER_ENDPOINT,
         "baseball_innings": EVENT_BASEBALL_INNINGS_ENDPOINT,
-        "event_comments": EVENT_COMMENTS_ENDPOINT,
         "shotmap": EVENT_SHOTMAP_ENDPOINT,
         "esports_games": EVENT_ESPORTS_GAMES_ENDPOINT,
     }
-    core_enabled_families = {"baseball_innings", "event_comments", "esports_games"}
+    core_enabled_families = {"baseball_innings", "esports_games"}
     return tuple(
         family_map[family]
         for family in adapter.special_families
         if family in family_map and (not core_only or family in core_enabled_families)
     )
+
+
+def _special_endpoints_for_event(
+    sport_slug: str,
+    *,
+    status_type: str | None,
+    core_only: bool = False,
+) -> tuple[SofascoreEndpoint, ...]:
+    endpoints = list(_special_endpoints_for_sport(sport_slug, core_only=core_only))
+    if supports_live_detail_resources(status_type):
+        endpoints.append(EVENT_COMMENTS_ENDPOINT)
+
+    deduped: list[SofascoreEndpoint] = []
+    seen_patterns: set[str] = set()
+    for endpoint in endpoints:
+        if endpoint.pattern in seen_patterns:
+            continue
+        seen_patterns.add(endpoint.pattern)
+        deduped.append(endpoint)
+    return tuple(deduped)
 
 
 def _endpoint_for_widget_job(params: dict[str, Any]) -> SofascoreEndpoint | None:

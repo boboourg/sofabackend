@@ -79,10 +79,12 @@ class NormalizeRepository:
         inserted = _empty_inserted_tracker()
         if not skip_entity_upserts:
             inserted = await self._upsert_minimal_entities(executor, result.entity_upserts)
+        await self._persist_event_statuses(executor, result.metric_rows.get("event_status", ()))
         await self._confirm_lineup_team_refs(executor, result, inserted)
         await self._persist_lineups(executor, result, inserted)
         await self._persist_event_statistics(executor, result.metric_rows.get("event_statistic", ()))
         await self._persist_event_incidents(executor, result.metric_rows.get("event_incident", ()))
+        await self._persist_event_comments(executor, result.metric_rows)
         await self._persist_event_graph(executor, result.metric_rows)
         await self._persist_best_players(executor, result.metric_rows.get("event_best_player_entry", ()))
         await self._persist_event_player_statistics(executor, result.metric_rows.get("event_player_statistics", ()))
@@ -771,6 +773,7 @@ class NormalizeRepository:
                     home_team_id,
                     away_team_id,
                     venue_id,
+                    _as_int(row.get("status_code")),
                     row.get("start_timestamp"),
                 )
             )
@@ -780,9 +783,9 @@ class NormalizeRepository:
                 """
                 INSERT INTO event (
                     id, slug, tournament_id, unique_tournament_id, season_id,
-                    home_team_id, away_team_id, venue_id, start_timestamp
+                    home_team_id, away_team_id, venue_id, status_code, start_timestamp
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (id) DO UPDATE SET
                     slug = COALESCE(EXCLUDED.slug, event.slug),
                     tournament_id = COALESCE(EXCLUDED.tournament_id, event.tournament_id),
@@ -791,6 +794,7 @@ class NormalizeRepository:
                     home_team_id = COALESCE(EXCLUDED.home_team_id, event.home_team_id),
                     away_team_id = COALESCE(EXCLUDED.away_team_id, event.away_team_id),
                     venue_id = COALESCE(EXCLUDED.venue_id, event.venue_id),
+                    status_code = COALESCE(EXCLUDED.status_code, event.status_code),
                     start_timestamp = EXCLUDED.start_timestamp
                 """,
                 event_rows,
@@ -916,6 +920,26 @@ class NormalizeRepository:
             normalized_rows,
         )
 
+    async def _persist_event_statuses(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
+        normalized_rows = [
+            (_as_int(row.get("code")), _as_scalar_text(row.get("description")), _as_scalar_text(row.get("type")))
+            for row in rows
+            if _as_int(row.get("code")) is not None
+            and _as_scalar_text(row.get("description")) is not None
+            and _as_scalar_text(row.get("type")) is not None
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_status (code, description, type)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (code) DO UPDATE SET
+                description = EXCLUDED.description,
+                type = EXCLUDED.type
+            """,
+            normalized_rows,
+        )
+
     async def _persist_event_incidents(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
         if not rows:
             return
@@ -946,6 +970,71 @@ class NormalizeRepository:
                 for row in rows
             ],
         )
+
+    async def _persist_event_comments(
+        self,
+        executor: SqlExecutor,
+        metric_rows: dict[str, tuple[Mapping[str, object], ...]],
+    ) -> None:
+        feed_rows = metric_rows.get("event_comment_feed", ())
+        comment_rows = metric_rows.get("event_comment", ())
+        if feed_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO event_comment_feed (
+                    event_id, home_player_color, home_goalkeeper_color, away_player_color, away_goalkeeper_color
+                )
+                VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb)
+                ON CONFLICT (event_id) DO UPDATE SET
+                    home_player_color = EXCLUDED.home_player_color,
+                    home_goalkeeper_color = EXCLUDED.home_goalkeeper_color,
+                    away_player_color = EXCLUDED.away_player_color,
+                    away_goalkeeper_color = EXCLUDED.away_goalkeeper_color
+                """,
+                [
+                    (
+                        row.get("event_id"),
+                        _jsonb(row.get("home_player_color")),
+                        _jsonb(row.get("home_goalkeeper_color")),
+                        _jsonb(row.get("away_player_color")),
+                        _jsonb(row.get("away_goalkeeper_color")),
+                    )
+                    for row in feed_rows
+                ],
+            )
+        if comment_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO event_comment (
+                    event_id, comment_id, sequence, period_name, is_home, player_id, text, match_time, comment_type
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (event_id, comment_id) DO UPDATE SET
+                    sequence = EXCLUDED.sequence,
+                    period_name = EXCLUDED.period_name,
+                    is_home = EXCLUDED.is_home,
+                    player_id = EXCLUDED.player_id,
+                    text = EXCLUDED.text,
+                    match_time = EXCLUDED.match_time,
+                    comment_type = EXCLUDED.comment_type
+                """,
+                [
+                    (
+                        row.get("event_id"),
+                        row.get("comment_id"),
+                        row.get("sequence"),
+                        row.get("period_name"),
+                        row.get("is_home"),
+                        row.get("player_id"),
+                        row.get("text"),
+                        _as_float(row.get("match_time")),
+                        row.get("comment_type"),
+                    )
+                    for row in comment_rows
+                ],
+            )
 
     async def _persist_event_graph(
         self,

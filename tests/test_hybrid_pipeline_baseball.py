@@ -80,8 +80,6 @@ class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         lineups_url = "https://www.sofascore.com/api/v1/event/15507996/lineups"
         incidents_url = "https://www.sofascore.com/api/v1/event/15507996/incidents"
         innings_url = "https://www.sofascore.com/api/v1/event/15507996/innings"
-        comments_url = "https://www.sofascore.com/api/v1/event/15507996/comments"
-        pitches_url = "https://www.sofascore.com/api/v1/event/15507996/atbat/981436/pitches"
 
         transport = _FakeTransport(
             {
@@ -108,29 +106,6 @@ class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                 lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
                 incidents_url: _json_result(incidents_url, {"incidents": []}),
                 innings_url: _json_result(innings_url, {"innings": [{"inning": 1, "homeScore": 0, "awayScore": 1}]}),
-                comments_url: _json_result(
-                    comments_url,
-                    {
-                        "comments": [
-                            {"id": 101, "text": "Lead-off single", "atBatId": 981436},
-                            {"id": 102, "text": "Pitching change note", "atBatId": 981436},
-                        ]
-                    },
-                ),
-                pitches_url: _json_result(
-                    pitches_url,
-                    {
-                        "pitches": [
-                            {
-                                "id": 1,
-                                "pitchType": "FF",
-                                "pitchSpeed": 96.1,
-                                "pitcher": {"id": 7001, "name": "Pitcher One"},
-                                "hitter": {"id": 7002, "name": "Hitter One"},
-                            }
-                        ]
-                    },
-                ),
             }
         )
         raw_store = _FakeRawSnapshotStore()
@@ -147,10 +122,8 @@ class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(incidents_url, transport.seen_urls)
         self.assertIn(innings_url, transport.seen_urls)
-        self.assertIn(comments_url, transport.seen_urls)
-        self.assertIn(pitches_url, transport.seen_urls)
-        self.assertEqual(transport.seen_urls.count(pitches_url), 1)
-        self.assertIn("baseball_pitches", {item.parser_family for item in report.parse_results})
+        self.assertNotIn("https://www.sofascore.com/api/v1/event/15507996/comments", transport.seen_urls)
+        self.assertIn("baseball_innings", {item.parser_family for item in report.parse_results})
 
     async def test_baseball_pipeline_uses_regular_season_adapter_and_innings_special(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/15507996"

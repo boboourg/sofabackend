@@ -145,6 +145,55 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO event_graph" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_graph_point" in sql for sql in statements))
 
+    async def test_repository_persists_root_event_status_before_event_row(self) -> None:
+        parser = EventRootParser()
+        snapshot = RawSnapshot(
+            snapshot_id=950,
+            endpoint_pattern="/api/v1/event/{event_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14083191",
+            resolved_url="https://www.sofascore.com/api/v1/event/14083191",
+            envelope_key="event",
+            http_status=200,
+            payload={
+                "event": {
+                    "id": 14083191,
+                    "slug": "arsenal-chelsea",
+                    "tournament": {
+                        "id": 100,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category": {
+                            "id": 1,
+                            "slug": "england",
+                            "name": "England",
+                            "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                        "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                    },
+                    "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                    "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                    "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                    "status": {"code": 100, "description": "2nd half", "type": "inprogress"},
+                    "startTimestamp": 1775779200,
+                }
+            },
+            fetched_at="2026-04-17T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=14083191,
+            context_event_id=14083191,
+        )
+        executor = _FakeExecutor()
+
+        await NormalizeRepository().persist_parse_result(executor, parser.parse(snapshot))
+
+        status_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_status" in sql)
+        self.assertEqual(status_rows[0], (100, "2nd half", "inprogress"))
+
+        event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event (" in sql)
+        self.assertEqual(event_rows[0][8], 100)
+
     async def test_repository_coerces_event_statistic_text_fields_to_strings(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()

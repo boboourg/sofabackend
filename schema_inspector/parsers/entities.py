@@ -160,6 +160,7 @@ def _normalize_entity(
             "venue_id": _as_int(venue.get("id")) if venue is not None else None,
             "home_team_id": _as_int(home_team.get("id")) if home_team is not None else None,
             "away_team_id": _as_int(away_team.get("id")) if away_team is not None else None,
+            "status_code": _as_int(status.get("code")) if status is not None else None,
             "status_type": _as_str(status.get("type")) if status is not None else None,
             "start_timestamp": _as_int(mapping.get("startTimestamp")),
         }

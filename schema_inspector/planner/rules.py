@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from ..detail_resource_policy import supports_live_detail_resources
 from ..jobs.types import (
     JOB_FINALIZE_EVENT,
     JOB_HYDRATE_EVENT_EDGE,
@@ -18,8 +19,7 @@ from ..sport_profiles import resolve_sport_profile
 
 def event_edge_candidates(*, sport_slug: str | None, status_type: str | None) -> tuple[str, ...]:
     adapter = resolve_sport_adapter(str(sport_slug or ""))
-    normalized = str(status_type or "").strip().lower()
-    if normalized in ACTIVE_LIVE_STATUS_TYPES:
+    if supports_live_detail_resources(status_type):
         return adapter.core_event_edges + adapter.live_optional_edges
     return adapter.core_event_edges
 

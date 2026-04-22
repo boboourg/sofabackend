@@ -92,6 +92,84 @@ class _FakeCapabilityRepository:
 
 
 class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_football_live_pipeline_fetches_comments_and_graph_from_live_root_state(self) -> None:
+        event_url = "https://www.sofascore.com/api/v1/event/15868599"
+        statistics_url = "https://www.sofascore.com/api/v1/event/15868599/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/15868599/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/15868599/incidents"
+        comments_url = "https://www.sofascore.com/api/v1/event/15868599/comments"
+        graph_url = "https://www.sofascore.com/api/v1/event/15868599/graph"
+
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": 15868599,
+                            "slug": "team-a-team-b",
+                            "tournament": {
+                                "id": 100,
+                                "slug": "premier-league",
+                                "name": "Premier League",
+                                "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                            },
+                            "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                            "status": {"code": 100, "type": "inprogress", "description": "2nd half"},
+                            "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+                            "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                        }
+                    },
+                ),
+                statistics_url: _json_result(statistics_url, {"statistics": []}),
+                lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+                incidents_url: _json_result(incidents_url, {"incidents": []}),
+                comments_url: _json_result(
+                    comments_url,
+                    {
+                        "comments": [
+                            {
+                                "id": 37184719,
+                                "sequence": 0,
+                                "periodName": "2ND",
+                                "text": "Second Half begins.",
+                                "time": 46,
+                                "type": "matchStarted",
+                            }
+                        ],
+                        "home": {"playerColor": {"primary": "#ffffff"}},
+                        "away": {"playerColor": {"primary": "#0000ff"}},
+                    },
+                ),
+                graph_url: _json_result(
+                    graph_url,
+                    {
+                        "periodTime": 45,
+                        "periodCount": 2,
+                        "graphPoints": [{"minute": 46, "value": 12}],
+                    },
+                ),
+            }
+        )
+        raw_store = _FakeRawSnapshotStore()
+        capability_repository = _FakeCapabilityRepository()
+        fetch_executor = FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object())
+        orchestrator = PilotOrchestrator(
+            fetch_executor=fetch_executor,
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(capability_rollup={}),
+            capability_repository=capability_repository,
+            sql_executor=object(),
+        )
+
+        report = await orchestrator.run_event(event_id=15868599, sport_slug="football", hydration_mode="core")
+
+        self.assertIn(comments_url, transport.seen_urls)
+        self.assertIn(graph_url, transport.seen_urls)
+        self.assertIn("event_comments", {item.parser_family for item in report.parse_results})
+        self.assertIn("event_graph", {item.parser_family for item in report.parse_results})
+
     async def test_football_core_mode_flushes_capabilities_after_fetch_phase(self) -> None:
         action_log: list[str] = []
         event_url = "https://www.sofascore.com/api/v1/event/14083191"
