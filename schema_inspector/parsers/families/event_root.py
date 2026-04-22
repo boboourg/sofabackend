@@ -70,6 +70,21 @@ class EventRootParser:
             if venue_id is not None:
                 relations["event_venue"].append({"event_id": event_id, "venue_id": venue_id})
 
+        metric_rows: dict[str, tuple[Mapping[str, object], ...]] = {}
+        status = _as_mapping(event.get("status"))
+        if status is not None:
+            status_code = _as_int(status.get("code"))
+            status_description = _as_str(status.get("description"))
+            status_type = _as_str(status.get("type"))
+            if status_code is not None and status_description is not None and status_type is not None:
+                metric_rows["event_status"] = (
+                    {
+                        "code": status_code,
+                        "description": status_description,
+                        "type": status_type,
+                    },
+                )
+
         return ParseResult(
             snapshot_id=snapshot.snapshot_id,
             parser_family=self.parser_family,
@@ -77,12 +92,17 @@ class EventRootParser:
             status=PARSE_STATUS_PARSED,
             entity_upserts=extract_entities(snapshot.payload),
             relation_upserts=build_relation_map(relations),
+            metric_rows=metric_rows,
             observed_root_keys=snapshot.observed_root_keys,
         )
 
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
+
+
+def _as_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _as_int(value: object) -> int | None:

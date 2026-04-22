@@ -23,6 +23,8 @@ def classify_snapshot(snapshot: RawSnapshot) -> str:
         return "event_incidents"
     if pattern == "/api/v1/event/{event_id}/statistics":
         return "event_statistics"
+    if pattern == "/api/v1/event/{event_id}/comments":
+        return "event_comments"
     if pattern == "/api/v1/event/{event_id}/graph":
         return "event_graph"
     if pattern == "/api/v1/event/{event_id}/best-players/summary":
