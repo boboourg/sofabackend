@@ -159,52 +159,112 @@ class EventDetailBackfillJob:
         start_timestamp_to: int | None,
     ) -> tuple[int, ...]:
         resolved_limit = normalize_limit(limit)
+        resolved_offset = max(int(offset), 0)
+        page_size = _candidate_page_size(resolved_limit)
+        collected_event_ids: list[int] = []
+        scanned_candidates = 0
+
+        async with self.database.connection() as connection:
+            while True:
+                remaining = None if resolved_limit is None else max(resolved_limit - len(collected_event_ids), 0)
+                if remaining == 0:
+                    break
+
+                fetch_limit = page_size if remaining is None else max(page_size, remaining)
+                candidate_event_ids = await self._load_candidate_event_ids_page(
+                    connection,
+                    limit=fetch_limit,
+                    offset=resolved_offset,
+                    season_ids=season_ids,
+                    unique_tournament_id=unique_tournament_id,
+                    unique_tournament_ids=unique_tournament_ids,
+                    start_timestamp_from=start_timestamp_from,
+                    start_timestamp_to=start_timestamp_to,
+                )
+                if not candidate_event_ids:
+                    break
+
+                scanned_candidates += len(candidate_event_ids)
+                resolved_offset += len(candidate_event_ids)
+                filtered_event_ids = candidate_event_ids
+                if only_missing:
+                    existing_event_ids = await self._load_existing_event_detail_ids(connection, candidate_event_ids)
+                    filtered_event_ids = tuple(
+                        event_id for event_id in candidate_event_ids if event_id not in existing_event_ids
+                    )
+                collected_event_ids.extend(filtered_event_ids)
+
+                if resolved_limit is not None and len(collected_event_ids) >= resolved_limit:
+                    break
+                if len(candidate_event_ids) < fetch_limit:
+                    break
+
+        resolved_event_ids = tuple(
+            collected_event_ids if resolved_limit is None else collected_event_ids[:resolved_limit]
+        )
+        self.logger.info(
+            "Event-detail candidate scan complete: scanned=%s returned=%s only_missing=%s page_size=%s",
+            scanned_candidates,
+            len(resolved_event_ids),
+            only_missing,
+            page_size,
+        )
+        return resolved_event_ids
+
+    async def _load_candidate_event_ids_page(
+        self,
+        connection,
+        *,
+        limit: int | None,
+        offset: int,
+        season_ids: tuple[int, ...] | None,
+        unique_tournament_id: int | None,
+        unique_tournament_ids: tuple[int, ...] | None,
+        start_timestamp_from: int | None,
+        start_timestamp_to: int | None,
+    ) -> tuple[int, ...]:
         sql = """
             SELECT e.id
             FROM event AS e
-            WHERE (
-                $1::boolean = FALSE OR
-                NOT EXISTS (
-                    SELECT 1
-                    FROM api_payload_snapshot AS s
-                    WHERE s.endpoint_pattern = '/api/v1/event/{event_id}'
-                      AND s.context_entity_type = 'event'
-                      AND s.context_entity_id = e.id
-                )
-            )
-              AND ($2::bigint IS NULL OR e.unique_tournament_id = $2)
-              AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
-              AND ($4::bigint[] IS NULL OR e.season_id = ANY($4))
-              AND ($5::bigint IS NULL OR e.start_timestamp >= $5)
-              AND ($6::bigint IS NULL OR e.start_timestamp <= $6)
+            WHERE ($1::bigint IS NULL OR e.unique_tournament_id = $1)
+              AND ($2::bigint[] IS NULL OR e.unique_tournament_id = ANY($2))
+              AND ($3::bigint[] IS NULL OR e.season_id = ANY($3))
+              AND ($4::bigint IS NULL OR e.start_timestamp >= $4)
+              AND ($5::bigint IS NULL OR e.start_timestamp <= $5)
             ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
-            OFFSET $7
+            OFFSET $6
         """
-        async with self.database.connection() as connection:
-            if resolved_limit is None:
-                rows = await connection.fetch(
-                    sql,
-                    only_missing,
-                    unique_tournament_id,
-                    list(unique_tournament_ids) if unique_tournament_ids else None,
-                    list(season_ids) if season_ids else None,
-                    start_timestamp_from,
-                    start_timestamp_to,
-                    offset,
-                )
-            else:
-                rows = await connection.fetch(
-                    f"{sql}\n            LIMIT $8",
-                    only_missing,
-                    unique_tournament_id,
-                    list(unique_tournament_ids) if unique_tournament_ids else None,
-                    list(season_ids) if season_ids else None,
-                    start_timestamp_from,
-                    start_timestamp_to,
-                    offset,
-                    resolved_limit,
-                )
+        args = (
+            unique_tournament_id,
+            list(unique_tournament_ids) if unique_tournament_ids else None,
+            list(season_ids) if season_ids else None,
+            start_timestamp_from,
+            start_timestamp_to,
+            offset,
+        )
+        if limit is None:
+            rows = await connection.fetch(sql, *args)
+        else:
+            rows = await connection.fetch(f"{sql}\n            LIMIT $7", *args, limit)
         return tuple(int(row["id"]) for row in rows if row["id"] is not None)
+
+    async def _load_existing_event_detail_ids(self, connection, event_ids: tuple[int, ...]) -> frozenset[int]:
+        if not event_ids:
+            return frozenset()
+        scope_key_to_event_id = {_event_detail_scope_key(event_id): event_id for event_id in event_ids}
+        rows = await connection.fetch(
+            """
+            SELECT scope_key
+            FROM api_snapshot_head
+            WHERE scope_key = ANY($1::text[])
+            """,
+            list(scope_key_to_event_id),
+        )
+        return frozenset(
+            scope_key_to_event_id[str(row["scope_key"])]
+            for row in rows
+            if row["scope_key"] is not None and str(row["scope_key"]) in scope_key_to_event_id
+        )
 
 
 def _resolve_default_window(
@@ -233,3 +293,13 @@ def _resolve_default_window(
 
 def _default_now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _candidate_page_size(limit: int | None) -> int:
+    if limit is None:
+        return 1000
+    return min(max(int(limit) * 4, 1000), 5000)
+
+
+def _event_detail_scope_key(event_id: int) -> str:
+    return f"event:{int(event_id)}:/api/v1/event/{{event_id}}"
