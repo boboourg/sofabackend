@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -535,6 +537,12 @@ class EventDetailParserError(RuntimeError):
     """Raised when an event-detail payload misses its expected structure."""
 
 
+_ACTIVE_EVENT_DETAIL_PROFILE: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "event_detail_profile",
+    default=None,
+)
+
+
 class EventDetailParser:
     """Fetches and normalizes event-detail endpoints around one event_id."""
 
@@ -548,64 +556,69 @@ class EventDetailParser:
         *,
         provider_ids: Iterable[int] = (1,),
         timeout: float = 20.0,
+        profile: object | None = None,
     ) -> EventDetailBundle:
-        state = _EventDetailAccumulator()
-        await self._fetch_event_root(event_id, state, timeout=timeout)
-        sport_slug = state.event_sport_slug(event_id)
+        token = _ACTIVE_EVENT_DETAIL_PROFILE.set(profile)
+        try:
+            state = _EventDetailAccumulator()
+            await self._fetch_event_root(event_id, state, timeout=timeout)
+            sport_slug = state.event_sport_slug(event_id)
 
-        tasks = [
-            self._fetch_lineups(event_id, state, timeout=timeout),
-            self._fetch_managers(event_id, state, timeout=timeout),
-            self._fetch_h2h(event_id, state, timeout=timeout),
-            self._fetch_pregame_form(event_id, state, timeout=timeout),
-            self._fetch_votes(event_id, state, timeout=timeout),
-        ]
-        if state.supports_match_live_detail_resources(event_id):
-            tasks.append(self._fetch_comments(event_id, state, timeout=timeout))
-            if sport_slug == "tennis":
+            tasks = [
+                self._fetch_lineups(event_id, state, timeout=timeout),
+                self._fetch_managers(event_id, state, timeout=timeout),
+                self._fetch_h2h(event_id, state, timeout=timeout),
+                self._fetch_pregame_form(event_id, state, timeout=timeout),
+                self._fetch_votes(event_id, state, timeout=timeout),
+            ]
+            if state.supports_match_live_detail_resources(event_id):
+                tasks.append(self._fetch_comments(event_id, state, timeout=timeout))
+                if sport_slug == "tennis":
+                    tasks.extend(
+                        (
+                            self._fetch_point_by_point(event_id, state, timeout=timeout),
+                            self._fetch_tennis_power(event_id, state, timeout=timeout),
+                        )
+                    )
+                else:
+                    tasks.append(self._fetch_graph(event_id, state, timeout=timeout))
+                    for team_id in state.event_team_ids(event_id):
+                        tasks.append(self._fetch_team_heatmap(event_id, team_id, state, timeout=timeout))
+            for provider_id in tuple(dict.fromkeys(provider_ids)):
                 tasks.extend(
                     (
-                        self._fetch_point_by_point(event_id, state, timeout=timeout),
-                        self._fetch_tennis_power(event_id, state, timeout=timeout),
+                        self._fetch_odds_all(event_id, provider_id, state, timeout=timeout),
+                        self._fetch_odds_featured(event_id, provider_id, state, timeout=timeout),
+                        self._fetch_winning_odds(event_id, provider_id, state, timeout=timeout),
                     )
                 )
-            else:
-                tasks.append(self._fetch_graph(event_id, state, timeout=timeout))
-                for team_id in state.event_team_ids(event_id):
-                    tasks.append(self._fetch_team_heatmap(event_id, team_id, state, timeout=timeout))
-        for provider_id in tuple(dict.fromkeys(provider_ids)):
-            tasks.extend(
-                (
-                    self._fetch_odds_all(event_id, provider_id, state, timeout=timeout),
-                    self._fetch_odds_featured(event_id, provider_id, state, timeout=timeout),
-                    self._fetch_winning_odds(event_id, provider_id, state, timeout=timeout),
-                )
-            )
 
-        await asyncio.gather(*tasks)
-        analytics_tasks = []
-        if state.supports_event_player_analytics(event_id):
-            analytics_tasks.append(self._fetch_best_players_summary(event_id, state, timeout=timeout))
-            for player_id in state.starting_lineup_player_ids(event_id):
-                analytics_tasks.extend(
-                    (
-                        self._fetch_player_statistics(event_id, player_id, state, timeout=timeout),
-                        self._fetch_player_rating_breakdown(event_id, player_id, state, timeout=timeout),
+            await asyncio.gather(*tasks)
+            analytics_tasks = []
+            if state.supports_event_player_analytics(event_id):
+                analytics_tasks.append(self._fetch_best_players_summary(event_id, state, timeout=timeout))
+                for player_id in state.starting_lineup_player_ids(event_id):
+                    analytics_tasks.extend(
+                        (
+                            self._fetch_player_statistics(event_id, player_id, state, timeout=timeout),
+                            self._fetch_player_rating_breakdown(event_id, player_id, state, timeout=timeout),
+                        )
                     )
-                )
-        if analytics_tasks:
-            await asyncio.gather(*analytics_tasks)
-        self.logger.debug(
-            "Event detail bundle collected: event_id=%s players=%s markets=%s lineups=%s comments=%s heatmaps=%s player_stats=%s",
-            event_id,
-            len(state.players),
-            len(state.event_markets),
-            len(state.event_lineups),
-            len(state.event_comments),
-            len(state.event_team_heatmaps),
-            len(state.event_player_statistics),
-        )
-        return state.to_bundle(sport_slug=sport_slug)
+            if analytics_tasks:
+                await asyncio.gather(*analytics_tasks)
+            self.logger.debug(
+                "Event detail bundle collected: event_id=%s players=%s markets=%s lineups=%s comments=%s heatmaps=%s player_stats=%s",
+                event_id,
+                len(state.players),
+                len(state.event_markets),
+                len(state.event_lineups),
+                len(state.event_comments),
+                len(state.event_team_heatmaps),
+                len(state.event_player_statistics),
+            )
+            return state.to_bundle(sport_slug=sport_slug)
+        finally:
+            _ACTIVE_EVENT_DETAIL_PROFILE.reset(token)
 
     async def _fetch_event_root(
         self,
@@ -616,7 +629,7 @@ class EventDetailParser:
     ) -> None:
         endpoint = EVENT_DETAIL_ENDPOINT
         url = endpoint.build_url(event_id=event_id)
-        response = await self.client.get_json(url, timeout=timeout)
+        response = await self._fetch_json_profiled(url, timeout=timeout)
         payload = _require_root_mapping(response.payload, url)
         envelope = _require_mapping(payload.get("event"), endpoint.envelope_key, url)
         state.add_payload_snapshot(
@@ -923,7 +936,7 @@ class EventDetailParser:
     ) -> Mapping[str, Any] | None:
         url = endpoint.build_url(event_id=event_id, **path_params)
         try:
-            response = await self.client.get_json(url, timeout=timeout)
+            response = await self._fetch_json_profiled(url, timeout=timeout)
         except SofascoreHttpError as exc:
             status_code = exc.transport_result.status_code if exc.transport_result is not None else None
             if status_code == 404:
@@ -947,6 +960,16 @@ class EventDetailParser:
             payload=payload,
         )
         return payload
+
+    async def _fetch_json_profiled(self, url: str, *, timeout: float) -> SofascoreResponse:
+        started = time.perf_counter()
+        try:
+            return await self.client.get_json(url, timeout=timeout)
+        finally:
+            profile = _ACTIVE_EVENT_DETAIL_PROFILE.get()
+            if profile is not None:
+                elapsed_ms = round((time.perf_counter() - started) * 1000)
+                setattr(profile, "upstream_fetch_ms", int(getattr(profile, "upstream_fetch_ms", 0)) + elapsed_ms)
 
 
 class _EventDetailAccumulator:

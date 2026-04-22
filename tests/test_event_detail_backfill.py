@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from schema_inspector.event_detail_backfill_job import EventDetailBackfillJob
-from schema_inspector.event_detail_job import EventDetailIngestResult
+from schema_inspector.event_detail_job import EventDetailIngestProfile, EventDetailIngestResult
 from schema_inspector.event_detail_repository import EventDetailWriteResult
 
 
@@ -43,8 +43,9 @@ class _FakeDatabase:
 
 
 class _FakeDetailJob:
-    def __init__(self, failing_ids=()) -> None:
+    def __init__(self, failing_ids=(), *, profiles_by_event=None) -> None:
         self.failing_ids = set(failing_ids)
+        self.profiles_by_event = dict(profiles_by_event or {})
         self.calls: list[tuple[int, tuple[int, ...], float]] = []
 
     async def run(self, event_id: int, *, provider_ids=(1,), timeout: float = 20.0):
@@ -55,6 +56,14 @@ class _FakeDetailJob:
             event_id=event_id,
             provider_ids=tuple(provider_ids),
             parsed=None,  # type: ignore[arg-type]
+            profile=self.profiles_by_event.get(
+                event_id,
+                EventDetailIngestProfile(
+                    upstream_fetch_ms=0,
+                    parse_ms=0,
+                    db_persist_ms=0,
+                ),
+            ),
             written=EventDetailWriteResult(
                 endpoint_registry_rows=0,
                 payload_snapshot_rows=0,
@@ -242,6 +251,27 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(detail_job.calls, [(14083193, (1,), 20.0)])
         self.assertEqual(result.total_candidates, 1)
+
+    async def test_backfill_job_logs_aggregated_batch_profile_metrics(self) -> None:
+        connection = _FakeConnection(rows=[{"id": 14083191}, {"id": 14083192}])
+        database = _FakeDatabase(connection)
+        detail_job = _FakeDetailJob(
+            profiles_by_event={
+                14083191: EventDetailIngestProfile(upstream_fetch_ms=11, parse_ms=22, db_persist_ms=33),
+                14083192: EventDetailIngestProfile(upstream_fetch_ms=7, parse_ms=8, db_persist_ms=9),
+            }
+        )
+        job = EventDetailBackfillJob(detail_job, database)
+
+        with self.assertLogs("schema_inspector.event_detail_backfill_job", level="INFO") as captured:
+            result = await job.run(limit=2, only_missing=False)
+
+        self.assertEqual(result.upstream_fetch_ms, 18)
+        self.assertEqual(result.parse_ms, 30)
+        self.assertEqual(result.db_persist_ms, 42)
+        self.assertTrue(
+            any("Batch completed. Size: 2. Fetch: 18 ms, Parse: 30 ms, DB Persist: 42 ms." in line for line in captured.output)
+        )
 
 
 if __name__ == "__main__":
