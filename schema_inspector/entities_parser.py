@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -211,9 +212,16 @@ class EntitiesParserError(RuntimeError):
 class EntitiesParser:
     """Fetches and normalizes team/player enrichment endpoints."""
 
-    def __init__(self, client: SofascoreClient, *, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        client: SofascoreClient,
+        *,
+        logger: logging.Logger | None = None,
+        max_concurrency: int = 12,
+    ) -> None:
         self.client = client
         self.logger = logger or logging.getLogger(__name__)
+        self.max_concurrency = max(1, int(max_concurrency))
 
     async def fetch_bundle(
         self,
@@ -251,110 +259,92 @@ class EntitiesParser:
             len(_dedupe_requests(team_performance_graph_requests)),
         )
 
-        for index, player_id in enumerate(resolved_player_ids, start=1):
-            _maybe_log_entities_progress(
-                self.logger,
-                progress_state,
-                stage="players",
-                index=index,
-                total=len(resolved_player_ids),
-                item_label=f"player_id={player_id}",
-            )
-            await self._fetch_player(player_id, state, timeout=timeout)
-            if include_player_statistics:
-                await self._fetch_player_statistics(player_id, state, timeout=timeout)
-            if include_player_statistics_seasons:
-                await self._fetch_player_statistics_seasons(player_id, state, timeout=timeout)
-            if include_player_transfer_history:
-                await self._fetch_player_transfer_history(player_id, state, timeout=timeout)
+        await self._run_stage(
+            resolved_player_ids,
+            stage="players",
+            progress_state=progress_state,
+            item_label=lambda player_id: f"player_id={player_id}",
+            worker=lambda player_id: self._fetch_player_bundle(
+                player_id,
+                state,
+                timeout=timeout,
+                include_player_statistics=include_player_statistics,
+                include_player_statistics_seasons=include_player_statistics_seasons,
+                include_player_transfer_history=include_player_transfer_history,
+            ),
+        )
 
         if include_player_statistics:
-            for index, player_id in enumerate(extra_player_statistics_ids, start=1):
-                _maybe_log_entities_progress(
-                    self.logger,
-                    progress_state,
-                    stage="extra_player_statistics",
-                    index=index,
-                    total=len(extra_player_statistics_ids),
-                    item_label=f"player_id={player_id}",
-                )
-                await self._fetch_player_statistics(player_id, state, timeout=timeout)
+            await self._run_stage(
+                extra_player_statistics_ids,
+                stage="extra_player_statistics",
+                progress_state=progress_state,
+                item_label=lambda player_id: f"player_id={player_id}",
+                worker=lambda player_id: self._fetch_player_statistics(player_id, state, timeout=timeout),
+            )
 
         resolved_team_ids = _dedupe_ints(team_ids)
-        for index, team_id in enumerate(resolved_team_ids, start=1):
-            _maybe_log_entities_progress(
-                self.logger,
-                progress_state,
-                stage="teams",
-                index=index,
-                total=len(resolved_team_ids),
-                item_label=f"team_id={team_id}",
-            )
-            await self._fetch_team(team_id, state, timeout=timeout)
-            if include_team_statistics_seasons:
-                await self._fetch_team_statistics_seasons(team_id, state, timeout=timeout)
-            if include_team_player_statistics_seasons:
-                await self._fetch_team_player_statistics_seasons(team_id, state, timeout=timeout)
+        await self._run_stage(
+            resolved_team_ids,
+            stage="teams",
+            progress_state=progress_state,
+            item_label=lambda team_id: f"team_id={team_id}",
+            worker=lambda team_id: self._fetch_team_bundle(
+                team_id,
+                state,
+                timeout=timeout,
+                include_team_statistics_seasons=include_team_statistics_seasons,
+                include_team_player_statistics_seasons=include_team_player_statistics_seasons,
+            ),
+        )
 
         resolved_player_overall_requests = _dedupe_requests(player_overall_requests)
-        for index, request in enumerate(resolved_player_overall_requests, start=1):
-            _maybe_log_entities_progress(
-                self.logger,
-                progress_state,
-                stage="player_overall",
-                index=index,
-                total=len(resolved_player_overall_requests),
-                item_label=(
-                    f"player_id={request.player_id} "
-                    f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
-                ),
-            )
-            await self._fetch_player_overall(request, state, timeout=timeout)
+        await self._run_stage(
+            resolved_player_overall_requests,
+            stage="player_overall",
+            progress_state=progress_state,
+            item_label=lambda request: (
+                f"player_id={request.player_id} "
+                f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
+            ),
+            worker=lambda request: self._fetch_player_overall(request, state, timeout=timeout),
+        )
 
         resolved_team_overall_requests = _dedupe_requests(team_overall_requests)
-        for index, request in enumerate(resolved_team_overall_requests, start=1):
-            _maybe_log_entities_progress(
-                self.logger,
-                progress_state,
-                stage="team_overall",
-                index=index,
-                total=len(resolved_team_overall_requests),
-                item_label=(
-                    f"team_id={request.team_id} "
-                    f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
-                ),
-            )
-            await self._fetch_team_overall(request, state, timeout=timeout)
+        await self._run_stage(
+            resolved_team_overall_requests,
+            stage="team_overall",
+            progress_state=progress_state,
+            item_label=lambda request: (
+                f"team_id={request.team_id} "
+                f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
+            ),
+            worker=lambda request: self._fetch_team_overall(request, state, timeout=timeout),
+        )
 
         resolved_player_heatmap_requests = _dedupe_requests(player_heatmap_requests)
-        for index, request in enumerate(resolved_player_heatmap_requests, start=1):
-            _maybe_log_entities_progress(
-                self.logger,
-                progress_state,
-                stage="player_heatmaps",
-                index=index,
-                total=len(resolved_player_heatmap_requests),
-                item_label=(
-                    f"player_id={request.player_id} "
-                    f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
-                ),
-            )
-            await self._fetch_player_heatmap(request, state, timeout=timeout)
+        await self._run_stage(
+            resolved_player_heatmap_requests,
+            stage="player_heatmaps",
+            progress_state=progress_state,
+            item_label=lambda request: (
+                f"player_id={request.player_id} "
+                f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
+            ),
+            worker=lambda request: self._fetch_player_heatmap(request, state, timeout=timeout),
+        )
 
         resolved_team_graph_requests = _dedupe_requests(team_performance_graph_requests)
-        for index, request in enumerate(resolved_team_graph_requests, start=1):
-            _maybe_log_entities_progress(
-                self.logger,
-                progress_state,
-                stage="team_graphs",
-                index=index,
-                total=len(resolved_team_graph_requests),
-                item_label=(
-                    f"team_id={request.team_id} "
-                    f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
-                ),
-            )
-            await self._fetch_team_performance_graph(request, state, timeout=timeout)
+        await self._run_stage(
+            resolved_team_graph_requests,
+            stage="team_graphs",
+            progress_state=progress_state,
+            item_label=lambda request: (
+                f"team_id={request.team_id} "
+                f"unique_tournament_id={request.unique_tournament_id} season_id={request.season_id}"
+            ),
+            worker=lambda request: self._fetch_team_performance_graph(request, state, timeout=timeout),
+        )
 
         bundle = state.to_bundle()
         self.logger.debug(
@@ -366,6 +356,67 @@ class EntitiesParser:
             len(bundle.entity_statistics_seasons),
         )
         return bundle
+
+    async def _run_stage(
+        self,
+        values: Sequence[object],
+        *,
+        stage: str,
+        progress_state: dict[str, float],
+        item_label,
+        worker,
+    ) -> None:
+        total = len(values)
+        if total <= 0:
+            return
+        semaphore = asyncio.Semaphore(min(self.max_concurrency, total))
+
+        async def _run_one(index: int, value: object) -> None:
+            async with semaphore:
+                _maybe_log_entities_progress(
+                    self.logger,
+                    progress_state,
+                    stage=stage,
+                    index=index,
+                    total=total,
+                    item_label=str(item_label(value)),
+                )
+                await worker(value)
+
+        await asyncio.gather(*(_run_one(index, value) for index, value in enumerate(values, start=1)))
+
+    async def _fetch_player_bundle(
+        self,
+        player_id: int,
+        state: "_EntitiesAccumulator",
+        *,
+        timeout: float,
+        include_player_statistics: bool,
+        include_player_statistics_seasons: bool,
+        include_player_transfer_history: bool,
+    ) -> None:
+        await self._fetch_player(player_id, state, timeout=timeout)
+        if include_player_statistics:
+            await self._fetch_player_statistics(player_id, state, timeout=timeout)
+        if include_player_statistics_seasons:
+            await self._fetch_player_statistics_seasons(player_id, state, timeout=timeout)
+        if include_player_transfer_history:
+            await self._fetch_player_transfer_history(player_id, state, timeout=timeout)
+
+    async def _fetch_team_bundle(
+        self,
+        team_id: int,
+        state: "_EntitiesAccumulator",
+        *,
+        timeout: float,
+        include_team_statistics_seasons: bool,
+        include_team_player_statistics_seasons: bool,
+    ) -> None:
+        await self._fetch_team(team_id, state, timeout=timeout)
+        if include_team_statistics_seasons:
+            await self._fetch_team_statistics_seasons(team_id, state, timeout=timeout)
+        if include_team_player_statistics_seasons:
+            await self._fetch_team_player_statistics_seasons(team_id, state, timeout=timeout)
 
     async def _fetch_player(self, player_id: int, state: "_EntitiesAccumulator", *, timeout: float) -> None:
         endpoint = PLAYER_ENDPOINT

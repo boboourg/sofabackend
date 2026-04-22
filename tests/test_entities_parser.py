@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
 from schema_inspector.endpoints import (
@@ -509,6 +510,65 @@ class EntitiesParserTests(unittest.IsolatedAsyncioTestCase):
                 PLAYER_TRANSFER_HISTORY_ENDPOINT.build_url(player_id=player_id),
             ],
         )
+
+    async def test_entities_parser_overlaps_independent_player_enrichment_requests(self) -> None:
+        player_ids = (1152, 1153, 1154)
+
+        class _CoordinatedStatsClient(SofascoreClient):
+            def __init__(self) -> None:
+                super().__init__(RuntimeConfig())
+                self.release_statistics = asyncio.Event()
+                self.parallel_statistics_seen = asyncio.Event()
+                self.active_statistics = 0
+                self.max_active_statistics = 0
+
+            async def get_json(self, url: str, *, headers=None, timeout: float = 20.0) -> SofascoreResponse:
+                del headers, timeout
+                if "/statistics" in url:
+                    self.active_statistics += 1
+                    self.max_active_statistics = max(self.max_active_statistics, self.active_statistics)
+                    if self.active_statistics >= 2:
+                        self.parallel_statistics_seen.set()
+                    await self.release_statistics.wait()
+                    self.active_statistics -= 1
+                    player_id = int(url.rstrip("/").split("/")[-2])
+                    payload = _player_statistics_payload(40 + (player_id - player_ids[0]))
+                else:
+                    player_id = int(url.rstrip("/").split("/")[-1])
+                    payload = {"player": _player_payload(player_id)}
+                return SofascoreResponse(
+                    source_url=url,
+                    resolved_url=url,
+                    fetched_at="2026-04-10T10:00:00+00:00",
+                    status_code=200,
+                    headers={"Content-Type": "application/json"},
+                    body_bytes=b"{}",
+                    payload=payload,
+                    attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+                    final_proxy_name="proxy_1",
+                    challenge_reason=None,
+                )
+
+        client = _CoordinatedStatsClient()
+        parser = EntitiesParser(client)
+
+        task = asyncio.create_task(
+            parser.fetch_bundle(
+                player_ids=player_ids,
+                include_player_statistics=True,
+                include_player_statistics_seasons=False,
+                include_player_transfer_history=False,
+                include_team_statistics_seasons=False,
+                include_team_player_statistics_seasons=False,
+            )
+        )
+        try:
+            await asyncio.wait_for(client.parallel_statistics_seen.wait(), timeout=0.2)
+        finally:
+            client.release_statistics.set()
+        await task
+
+        self.assertGreaterEqual(client.max_active_statistics, 2)
 
 
 if __name__ == "__main__":
