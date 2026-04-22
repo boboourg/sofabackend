@@ -117,7 +117,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
             [
                 (
                     connection.fetch_calls[0][0],
-                    (True, None, None, expected_from, expected_to, 5, 2),
+                    (True, None, None, None, expected_from, expected_to, 5, 2),
                 )
             ],
         )
@@ -136,7 +136,10 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(limit=0, offset=7, only_missing=False)
 
-        self.assertEqual(connection.fetch_calls, [(connection.fetch_calls[0][0], (False, None, None, None, None, 7))])
+        self.assertEqual(
+            connection.fetch_calls,
+            [(connection.fetch_calls[0][0], (False, None, None, None, None, None, 7))],
+        )
         self.assertEqual(result.total_candidates, 1)
         self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
 
@@ -148,7 +151,31 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         result = await job.run(limit=3, offset=0, only_missing=False, unique_tournament_id=17)
 
-        self.assertEqual(connection.fetch_calls, [(connection.fetch_calls[0][0], (False, 17, None, None, None, 0, 3))])
+        self.assertEqual(
+            connection.fetch_calls,
+            [(connection.fetch_calls[0][0], (False, 17, None, None, None, None, 0, 3))],
+        )
+        self.assertEqual(result.total_candidates, 1)
+        self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
+
+    async def test_backfill_job_applies_season_filter(self) -> None:
+        connection = _FakeConnection(rows=[{"id": 14083191}])
+        database = _FakeDatabase(connection)
+        detail_job = _FakeDetailJob()
+        job = EventDetailBackfillJob(detail_job, database)
+
+        result = await job.run(
+            limit=3,
+            offset=0,
+            only_missing=False,
+            unique_tournament_id=17,
+            season_ids=(701, 702),
+        )
+
+        self.assertEqual(
+            connection.fetch_calls,
+            [(connection.fetch_calls[0][0], (False, 17, None, [701, 702], None, None, 0, 3))],
+        )
         self.assertEqual(result.total_candidates, 1)
         self.assertEqual(detail_job.calls, [(14083191, (1,), 20.0)])
 
@@ -165,7 +192,7 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             connection.fetch_calls,
-            [(connection.fetch_calls[0][0], (True, None, None, expected_from, expected_to, 0))],
+            [(connection.fetch_calls[0][0], (True, None, None, None, expected_from, expected_to, 0))],
         )
 
 
