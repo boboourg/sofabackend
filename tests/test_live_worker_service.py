@@ -45,6 +45,8 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.stream, STREAM_LIVE_HOT)
         self.assertEqual(worker.runtime.group, "cg:live_hot")
         self.assertEqual(worker.runtime.max_concurrency, 1)
+        self.assertEqual(worker.runtime.prefetch_count, 25)
+        self.assertIsNotNone(worker.runtime.batch_preprocessor)
 
     async def test_live_worker_warm_uses_independent_runtime(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
@@ -66,6 +68,79 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.group, "cg:live_warm")
         self.assertEqual(worker.runtime.consumer, "worker-live-warm-1")
         self.assertEqual(worker.runtime.max_concurrency, 2)
+        self.assertIsNone(worker.runtime.batch_preprocessor)
+
+    async def test_live_worker_hot_coalesces_stale_refreshes_by_event_id(self) -> None:
+        from schema_inspector.services.worker_runtime import BatchDispatchPlan
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = LiveWorkerService(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="hot",
+                consumer="worker-live-hot-1",
+            )
+
+        preprocessor = worker.runtime.batch_preprocessor
+        self.assertIsNotNone(preprocessor)
+
+        plan = preprocessor(
+            (
+                StreamEntry(
+                    stream=STREAM_LIVE_HOT,
+                    message_id="2-1",
+                    values={
+                        "job_id": "job-live-1",
+                        "job_type": "refresh_live_event",
+                        "sport_slug": "football",
+                        "event_id": "7001",
+                        "lane": "hot",
+                        "attempt": "1",
+                    },
+                ),
+                StreamEntry(
+                    stream=STREAM_LIVE_HOT,
+                    message_id="2-2",
+                    values={
+                        "job_id": "job-live-2",
+                        "job_type": "refresh_live_event",
+                        "sport_slug": "football",
+                        "event_id": "7002",
+                        "lane": "hot",
+                        "attempt": "1",
+                    },
+                ),
+                StreamEntry(
+                    stream=STREAM_LIVE_HOT,
+                    message_id="2-3",
+                    values={
+                        "job_id": "job-live-3",
+                        "job_type": "refresh_live_event",
+                        "sport_slug": "football",
+                        "event_id": "7001",
+                        "lane": "hot",
+                        "attempt": "1",
+                    },
+                ),
+            )
+        )
+
+        self.assertIsInstance(plan, BatchDispatchPlan)
+        self.assertEqual(
+            [entry.message_id for entry in plan.entries_to_process],
+            ["2-2", "2-3"],
+        )
+        self.assertEqual(
+            [entry.message_id for entry in plan.stale_entries_to_ack],
+            ["2-1"],
+        )
+        self.assertEqual(plan.coalesced_counts, (("7001", 1),))
 
     async def test_live_worker_schedules_retry_for_lock_errors(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
