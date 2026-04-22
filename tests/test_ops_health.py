@@ -191,6 +191,47 @@ class OpsHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'", normalized)
         self.assertIn("aps.source_url LIKE '%/api/v1/sport/%/events/live%'", normalized)
 
+    async def test_live_drift_summary_ignores_short_lag_within_discovery_window(self) -> None:
+        from schema_inspector.ops.health import _fetch_drift_summary
+
+        summary = await _fetch_drift_summary(
+            _RowsSqlExecutor(
+                [
+                    {
+                        "sport_slug": "football",
+                        "surface": "sport_live_events",
+                        "reason": "snapshot_older_than_terminal_state",
+                        "latest_fetched_at": datetime(2026, 4, 22, 1, 1, 25, tzinfo=timezone.utc),
+                        "latest_finalized_at": datetime(2026, 4, 22, 1, 2, 42, tzinfo=timezone.utc),
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual(summary.flag_count, 0)
+        self.assertEqual(summary.flags, ())
+
+    async def test_live_drift_summary_flags_lag_beyond_discovery_window(self) -> None:
+        from schema_inspector.ops.health import _fetch_drift_summary
+
+        summary = await _fetch_drift_summary(
+            _RowsSqlExecutor(
+                [
+                    {
+                        "sport_slug": "football",
+                        "surface": "sport_live_events",
+                        "reason": "snapshot_older_than_terminal_state",
+                        "latest_fetched_at": datetime(2026, 4, 22, 1, 0, 0, tzinfo=timezone.utc),
+                        "latest_finalized_at": datetime(2026, 4, 22, 1, 3, 0, tzinfo=timezone.utc),
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual(summary.flag_count, 1)
+        self.assertEqual(summary.flags[0].sport_slug, "football")
+        self.assertEqual(summary.flags[0].reason, "snapshot_older_than_terminal_state")
+
     async def test_historical_retry_share_query_excludes_admission_deferrals(self) -> None:
         from schema_inspector.ops.health import _fetch_historical_retry_share
 
@@ -210,6 +251,15 @@ class _CapturingSqlExecutor:
     async def fetch(self, query: str):
         self.last_query = query
         return []
+
+
+class _RowsSqlExecutor:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = list(rows)
+
+    async def fetch(self, query: str):
+        del query
+        return list(self.rows)
 
 
 class _FakeSqlExecutor:

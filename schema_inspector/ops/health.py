@@ -22,6 +22,7 @@ from ..services.backpressure_config import (
     STRUCTURE_SYNC_MAX_LAG,
 )
 from ..services.housekeeping import HousekeepingConfig
+from ..sport_profiles import resolve_sport_profile
 from ..source_priority import SOURCE_PRIORITY
 from .queue_summary import QueueSummary, collect_queue_summary
 
@@ -124,6 +125,7 @@ class HealthReport:
 _SNAPSHOT_FRESHNESS_MAX_AGE_SECONDS = 300
 _HISTORICAL_ENRICHMENT_GO_LIVE_MAX_LAG = 1000
 _HISTORICAL_RETRY_SHARE_MAX = 0.01
+_LIVE_SNAPSHOT_TERMINAL_GRACE_SECONDS = 30
 
 
 async def collect_health_report(
@@ -258,7 +260,9 @@ async def _fetch_drift_summary(sql_executor) -> DriftSummary:
         SELECT
             'sport_live_events' AS surface,
             terminal_state.sport_slug AS sport_slug,
-            'snapshot_older_than_terminal_state' AS reason
+            'snapshot_older_than_terminal_state' AS reason,
+            live_snapshot.latest_fetched_at AS latest_fetched_at,
+            terminal_state.latest_finalized_at AS latest_finalized_at
         FROM latest_terminal_state AS terminal_state
         JOIN latest_live_snapshot AS live_snapshot
             ON live_snapshot.sport_slug = terminal_state.sport_slug
@@ -267,15 +271,24 @@ async def _fetch_drift_summary(sql_executor) -> DriftSummary:
         ORDER BY terminal_state.sport_slug
         """
     )
-    flags = tuple(
-        DriftFlag(
-            surface=str(row["surface"]),
-            sport_slug=str(row["sport_slug"]),
-            reason=str(row["reason"]),
+    flags: list[DriftFlag] = []
+    for row in rows:
+        sport_slug = str(row["sport_slug"])
+        latest_fetched_at = row.get("latest_fetched_at")
+        latest_finalized_at = row.get("latest_finalized_at")
+        if isinstance(latest_fetched_at, datetime) and isinstance(latest_finalized_at, datetime):
+            lag_seconds = max(0, int((latest_finalized_at - latest_fetched_at).total_seconds()))
+            allowed_lag_seconds = int(resolve_sport_profile(sport_slug).live_discovery_interval_seconds) + _LIVE_SNAPSHOT_TERMINAL_GRACE_SECONDS
+            if lag_seconds <= allowed_lag_seconds:
+                continue
+        flags.append(
+            DriftFlag(
+                surface=str(row["surface"]),
+                sport_slug=sport_slug,
+                reason=str(row["reason"]),
+            )
         )
-        for row in rows
-    )
-    return DriftSummary(flag_count=len(flags), flags=flags)
+    return DriftSummary(flag_count=len(flags), flags=tuple(flags))
 
 
 async def _fetch_coverage_summary(sql_executor) -> CoverageSummary:
