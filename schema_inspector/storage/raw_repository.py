@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
+import weakref
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
+from ..db import register_post_commit_hook
 from ..endpoints import EndpointRegistryEntry
 from ..parsers.base import RawSnapshot
 from ._temporal import coerce_timestamptz
@@ -93,6 +96,11 @@ class RawRepository:
 
     _SERVING_SOURCE_SLUG = "sofascore"
 
+    def __init__(self) -> None:
+        self._registry_sync_cache: set[tuple[tuple[str | None, ...], ...]] = set()
+        self._registry_sync_cache_lock = threading.Lock()
+        _RAW_REPOSITORY_INSTANCES.add(self)
+
     async def upsert_endpoint_registry_entries(
         self,
         executor: SqlExecutor,
@@ -111,8 +119,19 @@ class RawRepository:
             )
             for item in entries
         ]
+        rows = _normalize_registry_rows(rows)
         if not rows:
             return
+        registry_signature = tuple(rows)
+        cache_enabled = getattr(
+            executor,
+            "_enable_registry_sync_cache",
+            executor.__class__.__module__.startswith("asyncpg"),
+        )
+        if cache_enabled:
+            with self._registry_sync_cache_lock:
+                if registry_signature in self._registry_sync_cache:
+                    return
         contract_query = """
             INSERT INTO endpoint_contract_registry (
                 pattern,
@@ -132,6 +151,12 @@ class RawRepository:
                 target_table = EXCLUDED.target_table,
                 notes = EXCLUDED.notes,
                 contract_version = EXCLUDED.contract_version
+            WHERE endpoint_contract_registry.path_template IS DISTINCT FROM EXCLUDED.path_template
+               OR endpoint_contract_registry.query_template IS DISTINCT FROM EXCLUDED.query_template
+               OR endpoint_contract_registry.envelope_key IS DISTINCT FROM EXCLUDED.envelope_key
+               OR endpoint_contract_registry.target_table IS DISTINCT FROM EXCLUDED.target_table
+               OR endpoint_contract_registry.notes IS DISTINCT FROM EXCLUDED.notes
+               OR endpoint_contract_registry.contract_version IS DISTINCT FROM EXCLUDED.contract_version
         """
         serving_rows = [row for row in rows if row[6] == self._SERVING_SOURCE_SLUG]
         serving_query = """
@@ -154,17 +179,40 @@ class RawRepository:
                 notes = EXCLUDED.notes,
                 source_slug = EXCLUDED.source_slug,
                 contract_version = EXCLUDED.contract_version
+            WHERE endpoint_registry.path_template IS DISTINCT FROM EXCLUDED.path_template
+               OR endpoint_registry.query_template IS DISTINCT FROM EXCLUDED.query_template
+               OR endpoint_registry.envelope_key IS DISTINCT FROM EXCLUDED.envelope_key
+               OR endpoint_registry.target_table IS DISTINCT FROM EXCLUDED.target_table
+               OR endpoint_registry.notes IS DISTINCT FROM EXCLUDED.notes
+               OR endpoint_registry.source_slug IS DISTINCT FROM EXCLUDED.source_slug
+               OR endpoint_registry.contract_version IS DISTINCT FROM EXCLUDED.contract_version
         """
         executemany = getattr(executor, "executemany", None)
         if callable(executemany):
             await executemany(contract_query, rows)
             if serving_rows:
                 await executemany(serving_query, serving_rows)
+            if cache_enabled:
+                self._register_registry_signature(registry_signature)
             return
         for row in rows:
             await executor.execute(contract_query, *row)
         for row in serving_rows:
             await executor.execute(serving_query, *row)
+        if cache_enabled:
+            self._register_registry_signature(registry_signature)
+
+    def reset_registry_sync_cache(self) -> None:
+        with self._registry_sync_cache_lock:
+            self._registry_sync_cache.clear()
+
+    def _register_registry_signature(self, registry_signature: tuple[tuple[str | None, ...], ...]) -> None:
+        def _commit_cache_entry() -> None:
+            with self._registry_sync_cache_lock:
+                self._registry_sync_cache.add(registry_signature)
+
+        if not register_post_commit_hook(_commit_cache_entry):
+            _commit_cache_entry()
 
     async def insert_request_log(self, executor: SqlExecutor, record: ApiRequestLogRecord) -> None:
         # Intentionally append-only: retries must remain visible as separate transport
@@ -450,6 +498,24 @@ def _jsonb(value: object) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+_RAW_REPOSITORY_INSTANCES: weakref.WeakSet[RawRepository] = weakref.WeakSet()
+
+
+def reset_all_registry_sync_caches() -> None:
+    for repository in list(_RAW_REPOSITORY_INSTANCES):
+        repository.reset_registry_sync_cache()
+
+
+def _normalize_registry_rows(
+    rows: Iterable[tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]]
+) -> list[tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]]:
+    unique_rows = dict.fromkeys(rows)
+    return sorted(
+        unique_rows,
+        key=lambda row: tuple("" if value is None else value for value in row),
+    )
 
 
 def _maybe_int(value: object) -> int | None:

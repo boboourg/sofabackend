@@ -16,6 +16,7 @@ from .event_detail_repository import EventDetailRepository, EventDetailWriteResu
 class EventDetailIngestProfile:
     upstream_fetch_ms: int = 0
     parse_ms: int = 0
+    registry_sync_ms: int = 0
     db_persist_ms: int = 0
 
 
@@ -65,7 +66,7 @@ class EventDetailIngestJob:
         persist_started = time.perf_counter()
         async with self.database.transaction() as connection:
             try:
-                write_result = await self.repository.upsert_bundle(connection, bundle)
+                write_result = await self.repository.upsert_bundle(connection, bundle, profile=profile)
             except Exception as exc:
                 if _is_undefined_table_error(exc):
                     raise RuntimeError(

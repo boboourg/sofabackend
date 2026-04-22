@@ -61,6 +61,7 @@ class _FakeDetailJob:
                 EventDetailIngestProfile(
                     upstream_fetch_ms=0,
                     parse_ms=0,
+                    registry_sync_ms=0,
                     db_persist_ms=0,
                 ),
             ),
@@ -257,8 +258,8 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
         database = _FakeDatabase(connection)
         detail_job = _FakeDetailJob(
             profiles_by_event={
-                14083191: EventDetailIngestProfile(upstream_fetch_ms=11, parse_ms=22, db_persist_ms=33),
-                14083192: EventDetailIngestProfile(upstream_fetch_ms=7, parse_ms=8, db_persist_ms=9),
+                14083191: EventDetailIngestProfile(upstream_fetch_ms=11, parse_ms=22, registry_sync_ms=3, db_persist_ms=33),
+                14083192: EventDetailIngestProfile(upstream_fetch_ms=7, parse_ms=8, registry_sync_ms=4, db_persist_ms=9),
             }
         )
         job = EventDetailBackfillJob(detail_job, database)
@@ -268,9 +269,14 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.upstream_fetch_ms, 18)
         self.assertEqual(result.parse_ms, 30)
+        self.assertEqual(result.registry_sync_ms, 7)
         self.assertEqual(result.db_persist_ms, 42)
         self.assertTrue(
-            any("Batch completed. Size: 2. Fetch: 18 ms, Parse: 30 ms, DB Persist: 42 ms." in line for line in captured.output)
+            any(
+                "Batch completed. Size: 2. Fetch: 18 ms, Parse: 30 ms, Registry Sync: 7 ms, DB Persist: 42 ms."
+                in line
+                for line in captured.output
+            )
         )
 
 

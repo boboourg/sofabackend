@@ -4,9 +4,32 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Any
+from typing import AsyncIterator, Any, Callable
+
+
+_POST_COMMIT_HOOKS: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+    "_POST_COMMIT_HOOKS",
+    default=None,
+)
+
+
+def register_post_commit_hook(callback: Callable[[], None]) -> bool:
+    hooks = _POST_COMMIT_HOOKS.get()
+    if hooks is None:
+        return False
+    hooks.append(callback)
+    return True
+
+
+def _reset_registry_sync_caches() -> None:
+    try:
+        from .storage.raw_repository import reset_all_registry_sync_caches
+    except ImportError:
+        return
+    reset_all_registry_sync_caches()
 
 
 @dataclass(frozen=True)
@@ -43,11 +66,13 @@ class AsyncpgDatabase:
             max_size=self.config.max_size,
             command_timeout=self.config.command_timeout,
         )
+        _reset_registry_sync_caches()
 
     async def close(self) -> None:
         if self._pool is None:
             return
         await self._pool.close()
+        _reset_registry_sync_caches()
         self._pool = None
 
     @asynccontextmanager
@@ -64,6 +89,8 @@ class AsyncpgDatabase:
     async def transaction(self) -> AsyncIterator[Any]:
         async with self.connection() as connection:
             transaction = connection.transaction()
+            post_commit_hooks: list[Callable[[], None]] = []
+            hooks_token = _POST_COMMIT_HOOKS.set(post_commit_hooks)
             await transaction.start()
             try:
                 yield connection
@@ -72,6 +99,10 @@ class AsyncpgDatabase:
                 raise
             else:
                 await transaction.commit()
+                for hook in post_commit_hooks:
+                    hook()
+            finally:
+                _POST_COMMIT_HOOKS.reset(hooks_token)
 
     async def __aenter__(self) -> "AsyncpgDatabase":
         await self.connect()

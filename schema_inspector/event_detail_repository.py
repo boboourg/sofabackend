@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,8 +65,17 @@ class EventDetailWriteResult:
 class EventDetailRepository(EventListRepository):
     """Writes normalized event-detail data into PostgreSQL."""
 
-    async def upsert_bundle(self, executor: SqlExecutor, bundle: EventDetailBundle) -> EventDetailWriteResult:
+    async def upsert_bundle(
+        self,
+        executor: SqlExecutor,
+        bundle: EventDetailBundle,
+        *,
+        profile: Any | None = None,
+    ) -> EventDetailWriteResult:
+        registry_sync_started = time.perf_counter()
         await self._upsert_endpoint_registry(executor, bundle)
+        if profile is not None:
+            profile.registry_sync_ms = round((time.perf_counter() - registry_sync_started) * 1000)
         await self._upsert_sports(executor, bundle)
         await self._upsert_countries(executor, bundle)
         await self._upsert_categories(executor, bundle)

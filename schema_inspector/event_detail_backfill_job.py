@@ -29,6 +29,7 @@ class EventDetailBackfillResult:
     failed: int
     upstream_fetch_ms: int
     parse_ms: int
+    registry_sync_ms: int
     db_persist_ms: int
     items: tuple[EventDetailBackfillItem, ...]
 
@@ -145,6 +146,11 @@ class EventDetailBackfillJob:
             for item in items
             if item.result is not None
         )
+        registry_sync_ms = sum(
+            item.result.profile.registry_sync_ms
+            for item in items
+            if item.result is not None
+        )
         db_persist_ms = sum(
             item.result.profile.db_persist_ms
             for item in items
@@ -157,10 +163,11 @@ class EventDetailBackfillJob:
             failed,
         )
         self.logger.info(
-            "Batch completed. Size: %s. Fetch: %s ms, Parse: %s ms, DB Persist: %s ms.",
+            "Batch completed. Size: %s. Fetch: %s ms, Parse: %s ms, Registry Sync: %s ms, DB Persist: %s ms.",
             len(items),
             upstream_fetch_ms,
             parse_ms,
+            registry_sync_ms,
             db_persist_ms,
         )
         return EventDetailBackfillResult(
@@ -170,6 +177,7 @@ class EventDetailBackfillJob:
             failed=failed,
             upstream_fetch_ms=upstream_fetch_ms,
             parse_ms=parse_ms,
+            registry_sync_ms=registry_sync_ms,
             db_persist_ms=db_persist_ms,
             items=items,
         )
