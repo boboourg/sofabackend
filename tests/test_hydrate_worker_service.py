@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from contextlib import contextmanager
 
 from schema_inspector.queue.streams import STREAM_HISTORICAL_HYDRATE, STREAM_HYDRATE, StreamEntry
 
@@ -12,12 +13,17 @@ class HydrateWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
 
         orchestrator = _FakeOrchestrator()
         scheduler = _FakeDelayedScheduler()
-        worker = HydrateWorker(
-            orchestrator=orchestrator,
-            delayed_scheduler=scheduler,
-            queue=_FakeQueue(),
-            consumer="worker-hydrate-1",
-        )
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = HydrateWorker(
+                orchestrator=orchestrator,
+                delayed_scheduler=scheduler,
+                queue=_FakeQueue(),
+                consumer="worker-hydrate-1",
+            )
 
         result = await worker.handle(
             StreamEntry(
@@ -47,13 +53,18 @@ class HydrateWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_hydrate_worker_schedules_retry_for_lock_errors(self) -> None:
         from schema_inspector.workers.hydrate_worker import HydrateWorker
 
-        worker = HydrateWorker(
-            orchestrator=_FakeOrchestrator(),
-            delayed_scheduler=_FakeDelayedScheduler(),
-            queue=_FakeQueue(),
-            consumer="worker-hydrate-1",
-            now_ms_factory=lambda: 1_800_000_000_000,
-        )
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = HydrateWorker(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                consumer="worker-hydrate-1",
+                now_ms_factory=lambda: 1_800_000_000_000,
+            )
         entry = StreamEntry(
             stream=STREAM_HYDRATE,
             message_id="1-9",
@@ -150,6 +161,21 @@ class _FakeQueue:
     def ack(self, *args, **kwargs):
         del args, kwargs
         return 0
+
+
+@contextmanager
+def _cleared_env(*names: str):
+    previous = {name: os.environ.get(name) for name in names}
+    try:
+        for name in names:
+            os.environ.pop(name, None)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 if __name__ == "__main__":

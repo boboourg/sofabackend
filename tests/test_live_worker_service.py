@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from contextlib import contextmanager
 
 from schema_inspector.queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
 
@@ -11,13 +12,18 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         from schema_inspector.workers.live_worker_service import LiveWorkerService
 
         orchestrator = _FakeOrchestrator()
-        worker = LiveWorkerService(
-            orchestrator=orchestrator,
-            delayed_scheduler=_FakeDelayedScheduler(),
-            queue=_FakeQueue(),
-            lane="hot",
-            consumer="worker-live-hot-1",
-        )
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = LiveWorkerService(
+                orchestrator=orchestrator,
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="hot",
+                consumer="worker-live-hot-1",
+            )
 
         result = await worker.handle(
             StreamEntry(
@@ -43,13 +49,18 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_worker_warm_uses_independent_runtime(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
 
-        worker = LiveWorkerService(
-            orchestrator=_FakeOrchestrator(),
-            delayed_scheduler=_FakeDelayedScheduler(),
-            queue=_FakeQueue(),
-            lane="warm",
-            consumer="worker-live-warm-1",
-        )
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = LiveWorkerService(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="warm",
+                consumer="worker-live-warm-1",
+            )
 
         self.assertEqual(worker.runtime.stream, STREAM_LIVE_WARM)
         self.assertEqual(worker.runtime.group, "cg:live_warm")
@@ -59,14 +70,19 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_worker_schedules_retry_for_lock_errors(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
 
-        worker = LiveWorkerService(
-            orchestrator=_FakeOrchestrator(),
-            delayed_scheduler=_FakeDelayedScheduler(),
-            queue=_FakeQueue(),
-            lane="hot",
-            consumer="worker-live-hot-1",
-            now_ms_factory=lambda: 1_800_000_000_000,
-        )
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = LiveWorkerService(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="hot",
+                consumer="worker-live-hot-1",
+                now_ms_factory=lambda: 1_800_000_000_000,
+            )
 
         await worker.retry_later(
             StreamEntry(
@@ -158,6 +174,21 @@ class _FakeQueue:
     def ack(self, *args, **kwargs):
         del args, kwargs
         return 0
+
+
+@contextmanager
+def _cleared_env(*names: str):
+    previous = {name: os.environ.get(name) for name in names}
+    try:
+        for name in names:
+            os.environ.pop(name, None)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 if __name__ == "__main__":
