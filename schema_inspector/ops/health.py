@@ -291,6 +291,91 @@ async def _fetch_drift_summary(sql_executor) -> DriftSummary:
     return DriftSummary(flag_count=len(flags), flags=tuple(flags))
 
 
+async def fetch_live_snapshot_repair_reasons(
+    sql_executor,
+    *,
+    sport_slugs: tuple[str, ...],
+    now: datetime | None = None,
+) -> dict[str, str]:
+    if not sport_slugs:
+        return {}
+    now_utc = now or datetime.now(timezone.utc)
+    values_sql = ", ".join(f"('{_sql_literal(sport_slug)}')" for sport_slug in sport_slugs)
+    rows = await sql_executor.fetch(
+        f"""
+        WITH target_sports(sport_slug) AS (
+            VALUES {values_sql}
+        ),
+        latest_live_snapshot AS (
+            SELECT
+                COALESCE(
+                    NULLIF(aps.sport_slug, ''),
+                    CASE
+                        WHEN aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
+                            THEN split_part(aps.endpoint_pattern, '/', 5)
+                        WHEN aps.source_url LIKE '%/api/v1/sport/%/events/live%'
+                            THEN split_part(split_part(aps.source_url, '/api/v1/sport/', 2), '/', 1)
+                        ELSE NULL
+                    END
+                ) AS sport_slug,
+                MAX(aps.fetched_at) AS latest_fetched_at
+            FROM api_payload_snapshot AS aps
+            WHERE (
+                aps.endpoint_pattern = '/api/v1/sport/{{sport_slug}}/events/live'
+                OR aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
+                OR aps.source_url LIKE '%/api/v1/sport/%/events/live%'
+            )
+            GROUP BY 1
+        ),
+        latest_terminal_state AS (
+            SELECT
+                s.slug AS sport_slug,
+                MAX(ets.finalized_at) AS latest_finalized_at
+            FROM event_terminal_state AS ets
+            JOIN event AS e ON e.id = ets.event_id
+            JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
+            JOIN category AS c ON c.id = ut.category_id
+            JOIN sport AS s ON s.id = c.sport_id
+            WHERE ets.finalized_at IS NOT NULL
+            GROUP BY s.slug
+        )
+        SELECT
+            target_sports.sport_slug AS sport_slug,
+            live_snapshot.latest_fetched_at AS latest_fetched_at,
+            terminal_state.latest_finalized_at AS latest_finalized_at
+        FROM target_sports
+        LEFT JOIN latest_live_snapshot AS live_snapshot
+            ON live_snapshot.sport_slug = target_sports.sport_slug
+        LEFT JOIN latest_terminal_state AS terminal_state
+            ON terminal_state.sport_slug = target_sports.sport_slug
+        ORDER BY target_sports.sport_slug
+        """
+    )
+    repair_reasons: dict[str, str] = {}
+    for row in rows:
+        sport_slug = str(row["sport_slug"])
+        latest_fetched_at = row.get("latest_fetched_at")
+        latest_finalized_at = row.get("latest_finalized_at")
+        allowed_lag_seconds = int(resolve_sport_profile(sport_slug).live_discovery_interval_seconds) + _LIVE_SNAPSHOT_TERMINAL_GRACE_SECONDS
+        if not isinstance(latest_fetched_at, datetime):
+            repair_reasons[sport_slug] = "snapshot_missing"
+            continue
+        snapshot_age_seconds = max(0, int((now_utc - latest_fetched_at).total_seconds()))
+        terminal_lag_seconds = None
+        if isinstance(latest_finalized_at, datetime):
+            terminal_lag_seconds = max(0, int((latest_finalized_at - latest_fetched_at).total_seconds()))
+        if terminal_lag_seconds is not None and latest_fetched_at < latest_finalized_at and terminal_lag_seconds > allowed_lag_seconds:
+            repair_reasons[sport_slug] = "snapshot_older_than_terminal_state"
+            continue
+        if snapshot_age_seconds > allowed_lag_seconds:
+            repair_reasons[sport_slug] = "snapshot_stale"
+    return repair_reasons
+
+
+def _sql_literal(value: str) -> str:
+    return str(value).replace("'", "''")
+
+
 async def _fetch_coverage_summary(sql_executor) -> CoverageSummary:
     rows = await sql_executor.fetch(
         """

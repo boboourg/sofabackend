@@ -43,6 +43,7 @@ from ..queue.streams import (
     StreamEntry,
 )
 from ..sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
+from ..ops.health import fetch_live_snapshot_repair_reasons
 from .backpressure import BackpressureLimit, QueueBackpressure
 from .backpressure_config import (
     HISTORICAL_DISCOVERY_MAX_LAG,
@@ -242,6 +243,19 @@ class ServiceApp:
             )
             for sport_slug in normalized_sports
         )
+        database = getattr(self.app, "database", None)
+        connection_factory = getattr(database, "connection", None) if database is not None else None
+        drifted_sports_loader = None
+        if callable(connection_factory):
+            async def _load_drifted_sports(*, now_ms: int) -> dict[str, str]:
+                async with connection_factory() as connection:
+                    return await fetch_live_snapshot_repair_reasons(
+                        connection,
+                        sport_slugs=normalized_sports,
+                        now=self._datetime_from_epoch_ms(now_ms),
+                    )
+
+            drifted_sports_loader = _load_drifted_sports
         return LiveDiscoveryPlannerDaemon(
             queue=self.stream_queue,
             targets=targets,
@@ -254,6 +268,7 @@ class ServiceApp:
                     BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=LIVE_WARM_MAX_LAG),
                 ),
             ),
+            drifted_sports_loader=drifted_sports_loader,
         )
 
     def build_historical_planner_daemon(
@@ -971,6 +986,12 @@ class ServiceApp:
         from datetime import datetime, timezone
 
         return datetime.now(tz=timezone.utc).date()
+
+    @staticmethod
+    def _datetime_from_epoch_ms(now_ms: int):
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
 
     async def _recover_live_state(self) -> None:
         recover = getattr(self.app, "recover_live_state", None)
