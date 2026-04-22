@@ -395,6 +395,18 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
         sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
         self.assertEqual(len(sport_statements), 1)
 
+    async def test_event_list_repository_skips_redundant_country_writes_after_first_upsert(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+
+        await repository._upsert_countries(executor, bundle)
+        await repository._upsert_countries(executor, bundle)
+
+        country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
+        self.assertEqual(len(country_statements), 1)
+        self.assertIn("IS DISTINCT FROM", country_statements[0])
+
     async def test_event_list_repository_category_upsert_uses_distinct_guard(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()

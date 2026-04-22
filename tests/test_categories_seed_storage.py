@@ -148,6 +148,18 @@ def _build_bundle() -> CategoriesSeedBundle:
 
 
 class CategoriesSeedStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_categories_seed_repository_skips_redundant_country_writes(self) -> None:
+        repository = CategoriesSeedRepository()
+        executor = _FakeExecutor()
+        bundle = _build_bundle()
+
+        await repository.upsert_bundle(executor, bundle)
+        await repository.upsert_bundle(executor, bundle)
+
+        country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
+        self.assertEqual(len(country_statements), 1)
+        self.assertIn("IS DISTINCT FROM", country_statements[0])
+
     async def test_categories_seed_repository_upserts_expected_tables(self) -> None:
         repository = CategoriesSeedRepository()
         executor = _FakeExecutor()

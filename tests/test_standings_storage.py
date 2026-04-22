@@ -180,6 +180,9 @@ class StandingsStorageTests(unittest.IsolatedAsyncioTestCase):
 
         sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
         self.assertEqual(len(sport_statements), 1)
+        country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
+        self.assertEqual(len(country_statements), 1)
+        self.assertIn("IS DISTINCT FROM", country_statements[0])
 
         category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
         unique_tournament_sql = next(
