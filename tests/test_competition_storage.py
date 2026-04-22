@@ -188,6 +188,26 @@ def _build_bundle() -> CompetitionBundle:
 
 
 class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_competition_repository_skips_redundant_topology_updates(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = CompetitionRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+        await repository.upsert_bundle(executor, bundle)
+
+        sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
+        self.assertEqual(len(sport_statements), 1)
+
+        category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
+        unique_tournament_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament " in sql
+        )
+        season_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql)
+        self.assertIn("IS DISTINCT FROM", category_sql)
+        self.assertIn("IS DISTINCT FROM", unique_tournament_sql)
+        self.assertIn("IS DISTINCT FROM", season_sql)
+
     def test_load_database_config_uses_higher_pool_defaults(self) -> None:
         config = load_database_config(
             env={

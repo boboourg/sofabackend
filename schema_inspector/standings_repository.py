@@ -32,6 +32,9 @@ class StandingsWriteResult:
 class StandingsRepository:
     """Writes normalized standings data into PostgreSQL."""
 
+    def __init__(self) -> None:
+        self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+
     async def upsert_bundle(self, executor: SqlExecutor, bundle: StandingsBundle) -> StandingsWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
         await self._upsert_sports(executor, bundle)
@@ -65,7 +68,15 @@ class StandingsRepository:
         await _RAW_REPOSITORY.upsert_endpoint_registry_entries(executor, bundle.registry_entries)
 
     async def _upsert_sports(self, executor: SqlExecutor, bundle: StandingsBundle) -> None:
-        rows = [(item.id, item.slug, item.name) for item in bundle.sports]
+        rows_by_id = {
+            int(item.id): (item.id, item.slug, item.name)
+            for item in bundle.sports
+        }
+        rows = [
+            row
+            for sport_id, row in rows_by_id.items()
+            if self._sport_cache.get(sport_id) != (row[1], row[2])
+        ]
         await _executemany(
             executor,
             """
@@ -77,6 +88,8 @@ class StandingsRepository:
             """,
             rows,
         )
+        for sport_id, row in rows_by_id.items():
+            self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: StandingsBundle) -> None:
         rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
@@ -124,6 +137,14 @@ class StandingsRepository:
                 sport_id = EXCLUDED.sport_id,
                 country_alpha2 = COALESCE(EXCLUDED.country_alpha2, category.country_alpha2),
                 field_translations = COALESCE(EXCLUDED.field_translations, category.field_translations)
+            WHERE category.slug IS DISTINCT FROM EXCLUDED.slug
+               OR category.name IS DISTINCT FROM EXCLUDED.name
+               OR category.flag IS DISTINCT FROM COALESCE(EXCLUDED.flag, category.flag)
+               OR category.alpha2 IS DISTINCT FROM COALESCE(EXCLUDED.alpha2, category.alpha2)
+               OR category.priority IS DISTINCT FROM COALESCE(EXCLUDED.priority, category.priority)
+               OR category.sport_id IS DISTINCT FROM EXCLUDED.sport_id
+               OR category.country_alpha2 IS DISTINCT FROM COALESCE(EXCLUDED.country_alpha2, category.country_alpha2)
+               OR category.field_translations IS DISTINCT FROM COALESCE(EXCLUDED.field_translations, category.field_translations)
             """,
             rows,
         )
@@ -175,6 +196,30 @@ class StandingsRepository:
                 ),
                 field_translations = COALESCE(EXCLUDED.field_translations, unique_tournament.field_translations),
                 period_length = COALESCE(EXCLUDED.period_length, unique_tournament.period_length)
+            WHERE unique_tournament.slug IS DISTINCT FROM EXCLUDED.slug
+               OR unique_tournament.name IS DISTINCT FROM EXCLUDED.name
+               OR unique_tournament.category_id IS DISTINCT FROM EXCLUDED.category_id
+               OR unique_tournament.country_alpha2 IS DISTINCT FROM COALESCE(EXCLUDED.country_alpha2, unique_tournament.country_alpha2)
+               OR unique_tournament.gender IS DISTINCT FROM COALESCE(EXCLUDED.gender, unique_tournament.gender)
+               OR unique_tournament.primary_color_hex IS DISTINCT FROM COALESCE(EXCLUDED.primary_color_hex, unique_tournament.primary_color_hex)
+               OR unique_tournament.secondary_color_hex IS DISTINCT FROM COALESCE(EXCLUDED.secondary_color_hex, unique_tournament.secondary_color_hex)
+               OR unique_tournament.user_count IS DISTINCT FROM COALESCE(EXCLUDED.user_count, unique_tournament.user_count)
+               OR unique_tournament.has_performance_graph_feature IS DISTINCT FROM COALESCE(
+                    EXCLUDED.has_performance_graph_feature,
+                    unique_tournament.has_performance_graph_feature
+                )
+               OR unique_tournament.display_inverse_home_away_teams IS DISTINCT FROM COALESCE(
+                    EXCLUDED.display_inverse_home_away_teams,
+                    unique_tournament.display_inverse_home_away_teams
+                )
+               OR unique_tournament.field_translations IS DISTINCT FROM COALESCE(
+                    EXCLUDED.field_translations,
+                    unique_tournament.field_translations
+                )
+               OR unique_tournament.period_length IS DISTINCT FROM COALESCE(
+                    EXCLUDED.period_length,
+                    unique_tournament.period_length
+                )
             """,
             rows,
         )

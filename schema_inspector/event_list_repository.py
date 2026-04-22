@@ -45,6 +45,9 @@ class EventListWriteResult:
 class EventListRepository:
     """Writes normalized event-list data into PostgreSQL."""
 
+    def __init__(self) -> None:
+        self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+
     async def load_surface_states(self, executor: SqlExecutor, event_ids: Iterable[int]) -> dict[int, SurfaceEventState]:
         resolved_event_ids = tuple(sorted({int(item) for item in event_ids}))
         if not resolved_event_ids:
@@ -342,7 +345,15 @@ class EventListRepository:
         await _RAW_REPOSITORY.upsert_endpoint_registry_entries(executor, bundle.registry_entries)
 
     async def _upsert_sports(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
-        rows = [(item.id, item.slug, item.name) for item in bundle.sports]
+        rows_by_id = {
+            int(item.id): (item.id, item.slug, item.name)
+            for item in bundle.sports
+        }
+        rows = [
+            row
+            for sport_id, row in rows_by_id.items()
+            if self._sport_cache.get(sport_id) != (row[1], row[2])
+        ]
         await _executemany(
             executor,
             """
@@ -352,6 +363,8 @@ class EventListRepository:
             """,
             rows,
         )
+        for sport_id, row in rows_by_id.items():
+            self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
@@ -399,6 +412,14 @@ class EventListRepository:
                 sport_id = EXCLUDED.sport_id,
                 country_alpha2 = EXCLUDED.country_alpha2,
                 field_translations = EXCLUDED.field_translations
+            WHERE category.slug IS DISTINCT FROM EXCLUDED.slug
+               OR category.name IS DISTINCT FROM EXCLUDED.name
+               OR category.flag IS DISTINCT FROM EXCLUDED.flag
+               OR category.alpha2 IS DISTINCT FROM EXCLUDED.alpha2
+               OR category.priority IS DISTINCT FROM EXCLUDED.priority
+               OR category.sport_id IS DISTINCT FROM EXCLUDED.sport_id
+               OR category.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR category.field_translations IS DISTINCT FROM EXCLUDED.field_translations
             """,
             rows,
         )
@@ -444,6 +465,18 @@ class EventListRepository:
                 display_inverse_home_away_teams = EXCLUDED.display_inverse_home_away_teams,
                 field_translations = EXCLUDED.field_translations,
                 period_length = EXCLUDED.period_length
+            WHERE unique_tournament.slug IS DISTINCT FROM EXCLUDED.slug
+               OR unique_tournament.name IS DISTINCT FROM EXCLUDED.name
+               OR unique_tournament.category_id IS DISTINCT FROM EXCLUDED.category_id
+               OR unique_tournament.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR unique_tournament.gender IS DISTINCT FROM EXCLUDED.gender
+               OR unique_tournament.primary_color_hex IS DISTINCT FROM EXCLUDED.primary_color_hex
+               OR unique_tournament.secondary_color_hex IS DISTINCT FROM EXCLUDED.secondary_color_hex
+               OR unique_tournament.user_count IS DISTINCT FROM EXCLUDED.user_count
+               OR unique_tournament.has_event_player_statistics IS DISTINCT FROM EXCLUDED.has_event_player_statistics
+               OR unique_tournament.display_inverse_home_away_teams IS DISTINCT FROM EXCLUDED.display_inverse_home_away_teams
+               OR unique_tournament.field_translations IS DISTINCT FROM EXCLUDED.field_translations
+               OR unique_tournament.period_length IS DISTINCT FROM EXCLUDED.period_length
             """,
             rows,
         )
@@ -463,6 +496,10 @@ class EventListRepository:
                 year = EXCLUDED.year,
                 editor = EXCLUDED.editor,
                 season_coverage_info = EXCLUDED.season_coverage_info
+            WHERE season.name IS DISTINCT FROM EXCLUDED.name
+               OR season.year IS DISTINCT FROM EXCLUDED.year
+               OR season.editor IS DISTINCT FROM EXCLUDED.editor
+               OR season.season_coverage_info IS DISTINCT FROM EXCLUDED.season_coverage_info
             """,
             rows,
         )

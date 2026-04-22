@@ -37,6 +37,9 @@ class StatisticsWriteResult:
 class StatisticsRepository:
     """Writes normalized season-statistics data into PostgreSQL."""
 
+    def __init__(self) -> None:
+        self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+
     async def upsert_bundle(self, executor: SqlExecutor, bundle: StatisticsBundle) -> StatisticsWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
         await self._upsert_sports(executor, bundle)
@@ -67,7 +70,15 @@ class StatisticsRepository:
         await _RAW_REPOSITORY.upsert_endpoint_registry_entries(executor, bundle.registry_entries)
 
     async def _upsert_sports(self, executor: SqlExecutor, bundle: StatisticsBundle) -> None:
-        rows = [(item.id, item.slug, item.name) for item in bundle.sports]
+        rows_by_id = {
+            int(item.id): (item.id, item.slug, item.name)
+            for item in bundle.sports
+        }
+        rows = [
+            row
+            for sport_id, row in rows_by_id.items()
+            if self._sport_cache.get(sport_id) != (row[1], row[2])
+        ]
         await _executemany(
             executor,
             """
@@ -79,6 +90,8 @@ class StatisticsRepository:
             """,
             rows,
         )
+        for sport_id, row in rows_by_id.items():
+            self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_teams(self, executor: SqlExecutor, bundle: StatisticsBundle) -> None:
         rows = [

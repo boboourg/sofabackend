@@ -384,6 +384,46 @@ def _build_bundle() -> EventListBundle:
 
 
 class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_event_list_repository_skips_redundant_sport_writes_after_first_upsert(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+
+        await repository._upsert_sports(executor, bundle)
+        await repository._upsert_sports(executor, bundle)
+
+        sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
+        self.assertEqual(len(sport_statements), 1)
+
+    async def test_event_list_repository_category_upsert_uses_distinct_guard(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+
+        await EventListRepository()._upsert_categories(executor, bundle)
+
+        category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
+        self.assertIn("IS DISTINCT FROM", category_sql)
+
+    async def test_event_list_repository_unique_tournament_upsert_uses_distinct_guard(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+
+        await EventListRepository()._upsert_unique_tournaments(executor, bundle)
+
+        unique_tournament_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament" in sql
+        )
+        self.assertIn("IS DISTINCT FROM", unique_tournament_sql)
+
+    async def test_event_list_repository_season_upsert_uses_distinct_guard(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+
+        await EventListRepository()._upsert_seasons(executor, bundle)
+
+        season_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql)
+        self.assertIn("IS DISTINCT FROM", season_sql)
+
     async def test_event_list_repository_matches_previous_surface_state_by_custom_id(self) -> None:
         bundle = _build_bundle()
         incoming_event = bundle.events[0]
