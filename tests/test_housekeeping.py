@@ -13,6 +13,27 @@ from schema_inspector.queue.live_state import (
 )
 
 
+class HousekeepingConfigParsingTests(unittest.TestCase):
+    def test_housekeeping_config_accepts_operational_env_aliases(self) -> None:
+        from schema_inspector.services.housekeeping import HousekeepingConfig
+
+        config = HousekeepingConfig.from_env(
+            {
+                "SOFASCORE_HOUSEKEEPING_ENABLED": "true",
+                "SOFASCORE_HOUSEKEEPING_DRY_RUN": "true",
+                "SOFASCORE_HOUSEKEEPING_INTERVAL_SECONDS": "60",
+                "SOFASCORE_HOUSEKEEPING_BATCH_SIZE": "20000",
+                "SOFASCORE_HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES": "120",
+            }
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertTrue(config.dry_run)
+        self.assertEqual(config.interval_s, 60.0)
+        self.assertEqual(config.batch_size, 20_000)
+        self.assertEqual(config.zombie_max_age_minutes, 120)
+
+
 class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_housekeeping_loop_reports_dry_run_counts_and_zombies_without_mutation(self) -> None:
         from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop

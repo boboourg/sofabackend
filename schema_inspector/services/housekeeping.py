@@ -17,7 +17,10 @@ well-defined set of janitor tasks in sequence:
      via a DO-NOTHING insert (so a real finalization, if any, wins).
 
 Every numeric knob is driven by environment variables so deployments can
-tune retention windows without code changes.
+tune retention windows without code changes. The canonical env names stay
+the source of truth, but ``HousekeepingConfig.from_env()`` also accepts the
+operational aliases currently used in deployed ``.env`` files for interval,
+batch size, and zombie max age so rollout is backward-compatible.
 
 Dry-run mode (``SOFASCORE_HOUSEKEEPING_DRY_RUN=true``) runs the count-only
 queries for the retention tasks and logs the counts without touching data.
@@ -56,13 +59,16 @@ _ENV_PREFIX = "SOFASCORE_"
 _ENV_ENABLED = _ENV_PREFIX + "HOUSEKEEPING_ENABLED"
 _ENV_DRY_RUN = _ENV_PREFIX + "HOUSEKEEPING_DRY_RUN"
 _ENV_INTERVAL_S = _ENV_PREFIX + "HOUSEKEEPING_INTERVAL_S"
+_ENV_INTERVAL_ALIASES = (_ENV_PREFIX + "HOUSEKEEPING_INTERVAL_SECONDS",)
 _ENV_BATCH_SIZE = _ENV_PREFIX + "RETENTION_DELETE_BATCH_SIZE"
+_ENV_BATCH_SIZE_ALIASES = (_ENV_PREFIX + "HOUSEKEEPING_BATCH_SIZE",)
 _ENV_MAX_BATCHES = _ENV_PREFIX + "RETENTION_MAX_BATCHES_PER_TICK"
 _ENV_BATCH_SLEEP_MS = _ENV_PREFIX + "RETENTION_BATCH_SLEEP_MS"
 _ENV_REQUEST_LOG_HOURS = _ENV_PREFIX + "RETENTION_REQUEST_LOG_HOURS"
 _ENV_SNAPSHOT_DAYS = _ENV_PREFIX + "RETENTION_PAYLOAD_SNAPSHOT_DAYS"
 _ENV_LIVE_HISTORY_DAYS = _ENV_PREFIX + "RETENTION_LIVE_HISTORY_DAYS"
 _ENV_ZOMBIE_MAX_AGE_MIN = _ENV_PREFIX + "SWEEPER_ZOMBIE_MAX_AGE_MINUTES"
+_ENV_ZOMBIE_MAX_AGE_ALIASES = (_ENV_PREFIX + "HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES",)
 
 
 @dataclass(frozen=True)
@@ -91,14 +97,19 @@ class HousekeepingConfig:
         return cls(
             enabled=_env_bool(env, _ENV_ENABLED, False),
             dry_run=_env_bool(env, _ENV_DRY_RUN, False),
-            interval_s=_env_float(env, _ENV_INTERVAL_S, 300.0),
-            batch_size=_env_int(env, _ENV_BATCH_SIZE, 5_000, minimum=1),
+            interval_s=_env_float_any(env, (_ENV_INTERVAL_S, *_ENV_INTERVAL_ALIASES), 300.0),
+            batch_size=_env_int_any(env, (_ENV_BATCH_SIZE, *_ENV_BATCH_SIZE_ALIASES), 5_000, minimum=1),
             max_batches_per_tick=_env_int(env, _ENV_MAX_BATCHES, 20, minimum=1),
             batch_sleep_ms=_env_int(env, _ENV_BATCH_SLEEP_MS, 100, minimum=0),
             request_log_retention_hours=_env_int(env, _ENV_REQUEST_LOG_HOURS, 48, minimum=1),
             payload_snapshot_retention_days=_env_int(env, _ENV_SNAPSHOT_DAYS, 7, minimum=1),
             live_state_history_retention_days=_env_int(env, _ENV_LIVE_HISTORY_DAYS, 30, minimum=1),
-            zombie_max_age_minutes=_env_int(env, _ENV_ZOMBIE_MAX_AGE_MIN, 120, minimum=1),
+            zombie_max_age_minutes=_env_int_any(
+                env,
+                (_ENV_ZOMBIE_MAX_AGE_MIN, *_ENV_ZOMBIE_MAX_AGE_ALIASES),
+                120,
+                minimum=1,
+            ),
         )
 
 
@@ -416,6 +427,14 @@ def report_to_log(report: HousekeepingTickReport) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _env_first(env: dict[str, str], names: tuple[str, ...]) -> tuple[str, str] | None:
+    for name in names:
+        raw = env.get(name)
+        if raw is not None:
+            return name, raw
+    return None
+
+
 def _env_bool(env: dict[str, str], name: str, default: bool) -> bool:
     raw = env.get(name)
     if raw is None:
@@ -438,9 +457,41 @@ def _env_int(env: dict[str, str], name: str, default: int, *, minimum: int = 0) 
     return value
 
 
+def _env_int_any(env: dict[str, str], names: tuple[str, ...], default: int, *, minimum: int = 0) -> int:
+    selected = _env_first(env, names)
+    if selected is None:
+        return default
+    name, raw = selected
+    if raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s must be >= %d; using default %d", name, minimum, default)
+        return default
+    return value
+
+
 def _env_float(env: dict[str, str], name: str, default: float) -> float:
     raw = env.get(name)
     if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.3f", name, raw, default)
+        return default
+
+
+def _env_float_any(env: dict[str, str], names: tuple[str, ...], default: float) -> float:
+    selected = _env_first(env, names)
+    if selected is None:
+        return default
+    name, raw = selected
+    if raw == "":
         return default
     try:
         return float(raw)
