@@ -54,6 +54,7 @@ class PlannerDaemon:
         scheduled_targets: tuple[ScheduledPlanningTarget, ...] = (),
         now_ms_factory=None,
         loop_interval_s: float = 5.0,
+        live_dispatch_lease_ms: int = 90_000,
         scheduled_backpressure=None,
         live_backpressure=None,
     ) -> None:
@@ -64,6 +65,7 @@ class PlannerDaemon:
         self.scheduled_targets = tuple(scheduled_targets)
         self.now_ms_factory = now_ms_factory or _default_now_ms
         self.loop_interval_s = float(loop_interval_s)
+        self.live_dispatch_lease_ms = max(int(live_dispatch_lease_ms), 1)
         self.scheduled_backpressure = scheduled_backpressure
         self.live_backpressure = live_backpressure
         self.shutdown_requested = False
@@ -126,6 +128,13 @@ class PlannerDaemon:
                 state = self.live_state_store.fetch(int(event_id))
                 if state is None or state.is_finalized:
                     continue
+                claim_dispatch = getattr(self.live_state_store, "claim_dispatch", None)
+                if callable(claim_dispatch) and not claim_dispatch(
+                    int(event_id),
+                    now_ms=now_ms,
+                    lease_ms=self.live_dispatch_lease_ms,
+                ):
+                    continue
                 job = JobEnvelope.create(
                     job_type=JOB_REFRESH_LIVE_EVENT,
                     sport_slug=state.sport_slug,
@@ -139,7 +148,13 @@ class PlannerDaemon:
                     priority=priority,
                     trace_id=None,
                 )
-                self._publish_job(stream, job)
+                try:
+                    self._publish_job(stream, job)
+                except Exception:
+                    clear_claim = getattr(self.live_state_store, "clear_dispatch_claim", None)
+                    if callable(clear_claim):
+                        clear_claim(int(event_id))
+                    raise
 
     def _scheduled_target_due(self, target: ScheduledPlanningTarget, now_ms: int) -> bool:
         last_planned = self._last_planned_at_ms.get(target.sport_slug)
