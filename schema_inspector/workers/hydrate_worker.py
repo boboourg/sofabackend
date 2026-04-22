@@ -25,6 +25,7 @@ class HydrateWorker:
         now_ms_factory=None,
         default_sport_slug: str = "football",
         job_audit_logger=None,
+        max_concurrency: int = 2,
     ) -> None:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
@@ -47,6 +48,7 @@ class HydrateWorker:
             block_ms=block_ms,
             now_ms_factory=self.now_ms_factory,
             job_audit_logger=job_audit_logger,
+            max_concurrency=max(1, int(max_concurrency)),
         )
 
     async def handle(self, entry: StreamEntry) -> str:

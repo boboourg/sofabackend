@@ -37,6 +37,7 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orchestrator.calls, [(7001, "football", "full")])
         self.assertEqual(worker.runtime.stream, STREAM_LIVE_HOT)
         self.assertEqual(worker.runtime.group, "cg:live_hot")
+        self.assertEqual(worker.runtime.max_concurrency, 1)
 
     async def test_live_worker_warm_uses_independent_runtime(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
@@ -52,6 +53,7 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.stream, STREAM_LIVE_WARM)
         self.assertEqual(worker.runtime.group, "cg:live_warm")
         self.assertEqual(worker.runtime.consumer, "worker-live-warm-1")
+        self.assertEqual(worker.runtime.max_concurrency, 2)
 
     async def test_live_worker_schedules_retry_for_lock_errors(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService

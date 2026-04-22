@@ -40,6 +40,7 @@ class HydrateWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.stream, STREAM_HYDRATE)
         self.assertEqual(worker.runtime.group, "cg:hydrate")
         self.assertEqual(worker.runtime.consumer, "worker-hydrate-1")
+        self.assertEqual(worker.runtime.max_concurrency, 2)
         self.assertEqual(scheduler.calls, [])
 
     async def test_hydrate_worker_schedules_retry_for_lock_errors(self) -> None:

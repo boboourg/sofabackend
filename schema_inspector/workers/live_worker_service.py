@@ -24,6 +24,7 @@ class LiveWorkerService:
         now_ms_factory=None,
         default_sport_slug: str = "football",
         job_audit_logger=None,
+        max_concurrency: int | None = None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
         if normalized_lane not in {"hot", "warm"}:
@@ -37,6 +38,9 @@ class LiveWorkerService:
         self.default_sport_slug = default_sport_slug
         stream = STREAM_LIVE_HOT if normalized_lane == "hot" else STREAM_LIVE_WARM
         group = GROUP_LIVE_HOT if normalized_lane == "hot" else GROUP_LIVE_WARM
+        resolved_max_concurrency = 1 if normalized_lane == "hot" else 2
+        if max_concurrency is not None:
+            resolved_max_concurrency = max(1, int(max_concurrency))
         self.runtime = WorkerRuntime(
             name=f"live-{normalized_lane}-worker",
             queue=queue,
@@ -49,6 +53,7 @@ class LiveWorkerService:
             block_ms=block_ms,
             now_ms_factory=self.now_ms_factory,
             job_audit_logger=job_audit_logger,
+            max_concurrency=resolved_max_concurrency,
         )
 
     async def handle(self, entry: StreamEntry) -> str:
