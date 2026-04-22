@@ -43,6 +43,10 @@ class CompetitionRepository:
     def __init__(self) -> None:
         self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
         self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
+        self._category_cache: dict[
+            int,
+            tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
+        ] = {}
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CompetitionBundle) -> CompetitionWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -148,8 +152,8 @@ class CompetitionRepository:
                 _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
-        rows = [
-            (
+        rows_by_id = {
+            int(item.id): (
                 item.id,
                 item.slug,
                 item.name,
@@ -161,6 +165,11 @@ class CompetitionRepository:
                 _jsonb(item.field_translations),
             )
             for item in bundle.categories
+        }
+        rows = [
+            row
+            for category_id, row in rows_by_id.items()
+            if self._category_cache.get(category_id) != row[1:]
         ]
         await _executemany(
             executor,
@@ -197,6 +206,13 @@ class CompetitionRepository:
             """,
             rows,
         )
+        if rows_by_id:
+            def _commit_category_cache() -> None:
+                for category_id, row in rows_by_id.items():
+                    self._category_cache[category_id] = row[1:]
+
+            if not register_post_commit_hook(_commit_category_cache):
+                _commit_category_cache()
 
     async def _upsert_teams(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
         rows = [

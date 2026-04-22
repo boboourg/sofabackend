@@ -36,6 +36,10 @@ class CategoriesSeedRepository:
 
     def __init__(self) -> None:
         self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
+        self._category_cache: dict[
+            int,
+            tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
+        ] = {}
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> CategoriesSeedWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -108,8 +112,8 @@ class CategoriesSeedRepository:
                 _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> None:
-        rows = [
-            (
+        rows_by_id = {
+            int(item.id): (
                 item.id,
                 item.slug,
                 item.name,
@@ -121,6 +125,11 @@ class CategoriesSeedRepository:
                 _jsonb(item.field_translations),
             )
             for item in bundle.categories
+        }
+        rows = [
+            row
+            for category_id, row in rows_by_id.items()
+            if self._category_cache.get(category_id) != row[1:]
         ]
         await _executemany(
             executor,
@@ -138,9 +147,24 @@ class CategoriesSeedRepository:
                 sport_id = EXCLUDED.sport_id,
                 country_alpha2 = EXCLUDED.country_alpha2,
                 field_translations = EXCLUDED.field_translations
+            WHERE category.slug IS DISTINCT FROM EXCLUDED.slug
+               OR category.name IS DISTINCT FROM EXCLUDED.name
+               OR category.flag IS DISTINCT FROM EXCLUDED.flag
+               OR category.alpha2 IS DISTINCT FROM EXCLUDED.alpha2
+               OR category.priority IS DISTINCT FROM EXCLUDED.priority
+               OR category.sport_id IS DISTINCT FROM EXCLUDED.sport_id
+               OR category.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR category.field_translations IS DISTINCT FROM EXCLUDED.field_translations
             """,
             rows,
         )
+        if rows_by_id:
+            def _commit_category_cache() -> None:
+                for category_id, row in rows_by_id.items():
+                    self._category_cache[category_id] = row[1:]
+
+            if not register_post_commit_hook(_commit_category_cache):
+                _commit_category_cache()
 
     async def _upsert_daily_summaries(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> None:
         rows = [
