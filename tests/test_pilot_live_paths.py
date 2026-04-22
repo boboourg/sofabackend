@@ -9,7 +9,7 @@ from schema_inspector.parsers.registry import ParserRegistry
 from schema_inspector.pipeline.pilot_orchestrator import PilotOrchestrator
 from schema_inspector.planner.planner import Planner
 from schema_inspector.queue.live_state import LIVE_COLD_ZSET, LIVE_HOT_ZSET, LIVE_WARM_ZSET, LiveEventStateStore
-from schema_inspector.queue.streams import RedisStreamQueue, STREAM_LIVE_HOT, STREAM_LIVE_WARM
+from schema_inspector.queue.streams import RedisStreamQueue
 from schema_inspector.runtime import TransportAttempt, TransportResult
 from schema_inspector.workers.live_worker import LiveWorker
 
@@ -162,8 +162,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["poll_profile"], "hot")
         self.assertEqual(state["is_finalized"], 0)
         self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921219"], float(now_ms + 15_000))
-        self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["job_type"], "refresh_live_event")
-        self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["event_id"], "15921219")
+        self.assertEqual(stream_backend.streams, {})
 
     async def test_starting_soon_event_is_enqueued_on_warm_lane(self) -> None:
         now_ms = 1_800_000_000_000
@@ -181,7 +180,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         state = live_backend.hashes["live:event:15921220"]
         self.assertEqual(state["poll_profile"], "warm")
         self.assertEqual(live_backend.zsets[LIVE_WARM_ZSET]["15921220"], float(now_ms + 600_000))
-        self.assertEqual(stream_backend.streams[STREAM_LIVE_WARM][0][1]["job_type"], "refresh_live_event")
+        self.assertEqual(stream_backend.streams, {})
 
     async def test_halftime_event_stays_on_hot_lane(self) -> None:
         now_ms = 1_800_000_000_000
@@ -205,7 +204,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         state = live_backend.hashes["live:event:15921222"]
         self.assertEqual(state["poll_profile"], "hot")
         self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921222"], float(now_ms + 120_000))
-        self.assertEqual(stream_backend.streams[STREAM_LIVE_HOT][0][1]["job_type"], "refresh_live_event")
+        self.assertEqual(stream_backend.streams, {})
 
     async def test_finished_event_runs_final_sweep_and_marks_terminal_state(self) -> None:
         now_ms = 1_800_000_000_000
@@ -240,6 +239,35 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("15921221", live_backend.zsets.get(LIVE_HOT_ZSET, {}))
         self.assertNotIn("15921221", live_backend.zsets.get(LIVE_WARM_ZSET, {}))
         self.assertNotIn("15921221", live_backend.zsets.get(LIVE_COLD_ZSET, {}))
+        self.assertEqual(stream_backend.streams, {})
+
+    async def test_canceled_event_marks_terminal_state(self) -> None:
+        now_ms = 1_800_000_000_000
+        live_backend = _FakeLiveBackend()
+        stream_backend = _FakeStreamBackend()
+        transport = _FakeTransport(
+            _tennis_responses(
+                event_id=15921224,
+                status_type="canceled",
+                start_timestamp=(now_ms // 1000) - 7200,
+            )
+        )
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(live_backend),
+            stream_queue=RedisStreamQueue(stream_backend),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        report = await orchestrator.run_event(event_id=15921224, sport_slug="tennis")
+
+        self.assertTrue(report.finalized)
+        state = live_backend.hashes["live:event:15921224"]
+        self.assertEqual(state["status_type"], "canceled")
+        self.assertEqual(state["is_finalized"], 1)
+        self.assertNotIn("15921224", live_backend.zsets.get(LIVE_HOT_ZSET, {}))
+        self.assertNotIn("15921224", live_backend.zsets.get(LIVE_WARM_ZSET, {}))
+        self.assertNotIn("15921224", live_backend.zsets.get(LIVE_COLD_ZSET, {}))
         self.assertEqual(stream_backend.streams, {})
 
     async def test_repeated_root_not_found_retires_previously_seen_live_event(self) -> None:

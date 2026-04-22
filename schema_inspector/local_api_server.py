@@ -1372,6 +1372,7 @@ def _fallback_terminal_status_payload(
         "finished": {"code": 100, "type": "finished", "description": "Ended"},
         "afterextra": {"type": "afterextra", "description": "After extra time"},
         "afterpen": {"type": "afterpen", "description": "After penalties"},
+        "canceled": {"type": "canceled", "description": "Canceled"},
         "cancelled": {"type": "cancelled", "description": "Cancelled"},
         "postponed": {"type": "postponed", "description": "Postponed"},
     }

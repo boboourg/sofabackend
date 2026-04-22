@@ -10,6 +10,7 @@ from schema_inspector.local_api_server import (
     _compile_path_template,
     _decode_snapshot_payload,
     _extract_event_id_from_entity_root_path,
+    _fallback_terminal_status_payload,
     _normalized_query_map,
     _parse_context_value,
     _synthesize_event_root_payload,
@@ -77,6 +78,17 @@ class LocalApiServerTests(unittest.TestCase):
         assert result is not None
         route, params = result
         self.assertEqual(_parse_context_value(route, params), 14083182)
+
+    def test_fallback_terminal_status_payload_accepts_canceled_alias(self) -> None:
+        payload = _fallback_terminal_status_payload("canceled", None)
+
+        self.assertEqual(
+            payload,
+            {
+                "type": "canceled",
+                "description": "Canceled",
+            },
+        )
 
     def test_team_performance_graph_route_uses_team_context(self) -> None:
         routes = build_route_specs()

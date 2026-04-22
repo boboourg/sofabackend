@@ -32,7 +32,7 @@ BREAK_STATUS_TYPES = frozenset(
 )
 
 TERMINAL_STATUS_TYPES = frozenset(
-    {"finished", "afterextra", "afterpen", "cancelled", "postponed"}
+    {"finished", "afterextra", "afterpen", "cancelled", "canceled", "postponed"}
 )
 
 

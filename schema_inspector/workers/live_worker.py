@@ -1,12 +1,10 @@
-"""Live tracking helpers for queueing refresh jobs and terminal finalization."""
+"""Live tracking helpers for live polling state and terminal finalization."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 
-from ..jobs.envelope import JobEnvelope
-from ..jobs.types import JOB_REFRESH_LIVE_EVENT
 from ..queue.live_state import LiveEventState
 from ..queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM
 from ..planner.live import classify_live_polling
@@ -17,7 +15,7 @@ class LiveTrackResult:
     decision: object
     next_poll_at: int | None
     stream: str | None
-    job: JobEnvelope | None
+    job: object | None
 
 
 class LiveWorker:
@@ -75,32 +73,13 @@ class LiveWorker:
                 ),
                 lane=decision.lane if decision.lane in {"hot", "warm", "cold"} else None,
             )
+            clear_claim = getattr(live_state_store, "clear_dispatch_claim", None)
+            if callable(clear_claim):
+                clear_claim(event_id)
 
         stream = _stream_for_lane(decision.lane)
+        del stream_queue, trace_id
         job = None
-        if stream is not None and next_poll_at is not None and stream_queue is not None:
-            job = JobEnvelope.create(
-                job_type=JOB_REFRESH_LIVE_EVENT,
-                sport_slug=sport_slug,
-                entity_type="event",
-                entity_id=event_id,
-                scope=decision.lane,
-                params={"status_type": status_type, "next_poll_at": next_poll_at},
-                priority=0 if decision.lane == "hot" else 1,
-                trace_id=trace_id,
-            )
-            stream_queue.publish(
-                stream,
-                {
-                    "job_id": job.job_id,
-                    "job_type": job.job_type,
-                    "sport_slug": sport_slug,
-                    "event_id": event_id,
-                    "lane": decision.lane,
-                    "next_poll_at": next_poll_at,
-                    "trace_id": trace_id or "",
-                },
-            )
 
         return LiveTrackResult(
             decision=decision,
@@ -143,6 +122,9 @@ class LiveWorker:
         live_state_store.backend.zrem(live_state_store.hot_zset_key, member)
         live_state_store.backend.zrem(live_state_store.warm_zset_key, member)
         live_state_store.backend.zrem(live_state_store.cold_zset_key, member)
+        clear_claim = getattr(live_state_store, "clear_dispatch_claim", None)
+        if callable(clear_claim):
+            clear_claim(event_id)
 
 
 def _stream_for_lane(lane: str | None) -> str | None:

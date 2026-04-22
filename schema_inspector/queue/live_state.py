@@ -8,6 +8,7 @@ from typing import Any
 LIVE_HOT_ZSET = "zset:live:hot"
 LIVE_WARM_ZSET = "zset:live:warm"
 LIVE_COLD_ZSET = "zset:live:cold"
+LIVE_DISPATCH_CLAIM_PREFIX = "live:dispatch_claim"
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,36 @@ class LiveEventStateStore:
             is_finalized=_as_bool(payload.get("is_finalized")),
         )
 
+    def claim_dispatch(self, event_id: int, *, now_ms: int, lease_ms: int) -> bool:
+        key = self._claim_key(event_id)
+        ttl_ms = max(int(lease_ms), 1)
+        setter = getattr(self.backend, "set", None)
+        if callable(setter):
+            try:
+                return bool(setter(key, str(now_ms + ttl_ms), nx=True, px=ttl_ms))
+            except TypeError:
+                return bool(setter(key, str(now_ms + ttl_ms), nx=True))
+
+        claims = _fallback_claims(self.backend)
+        existing_expiry = claims.get(key)
+        if existing_expiry is not None:
+            try:
+                if int(existing_expiry) > int(now_ms):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        claims[key] = int(now_ms) + ttl_ms
+        return True
+
+    def clear_dispatch_claim(self, event_id: int) -> None:
+        key = self._claim_key(event_id)
+        delete = getattr(self.backend, "delete", None)
+        if callable(delete):
+            delete(key)
+            return
+        claims = _fallback_claims(self.backend)
+        claims.pop(key, None)
+
     def _lane_key(self, lane: str) -> str:
         normalized = lane.strip().lower()
         if normalized == "hot":
@@ -108,6 +139,10 @@ class LiveEventStateStore:
     @staticmethod
     def _key(event_id: int) -> str:
         return f"live:event:{event_id}"
+
+    @staticmethod
+    def _claim_key(event_id: int) -> str:
+        return f"{LIVE_DISPATCH_CLAIM_PREFIX}:{event_id}"
 
 
 def _as_text(value: object) -> str | None:
@@ -144,3 +179,12 @@ def _hset_mapping(backend: Any, name: str, mapping: dict[str, object]) -> None:
 
 def _compact_mapping(mapping: dict[str, object | None]) -> dict[str, object]:
     return {str(key): value for key, value in mapping.items() if value is not None}
+
+
+def _fallback_claims(backend: Any) -> dict[str, int]:
+    claims = getattr(backend, "_live_dispatch_claims", None)
+    if isinstance(claims, dict):
+        return claims
+    claims = {}
+    setattr(backend, "_live_dispatch_claims", claims)
+    return claims

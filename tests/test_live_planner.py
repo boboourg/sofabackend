@@ -58,6 +58,14 @@ class LivePlannerTests(unittest.TestCase):
             LivePollingDecision(lane="terminal", next_poll_seconds=None, terminal=True),
         )
 
+    def test_canceled_events_are_terminal(self) -> None:
+        decision = classify_live_polling(status_type="canceled", minutes_to_start=None)
+
+        self.assertEqual(
+            decision,
+            LivePollingDecision(lane="terminal", next_poll_seconds=None, terminal=True),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

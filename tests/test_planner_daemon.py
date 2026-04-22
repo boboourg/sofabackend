@@ -12,7 +12,7 @@ from schema_inspector.jobs.types import (
     JOB_REFRESH_LIVE_EVENT,
 )
 from schema_inspector.queue.delayed import DelayedJob
-from schema_inspector.queue.live_state import LiveEventState
+from schema_inspector.queue.live_state import LiveEventState, LiveEventStateStore
 from schema_inspector.queue.streams import (
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
@@ -258,6 +258,45 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.published[0][1]["sport_slug"], "football")
         self.assertEqual(queue.published[1][1]["sport_slug"], "basketball")
 
+    async def test_planner_daemon_claims_due_live_events_until_worker_clears_them(self) -> None:
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        queue = _FakeQueue()
+        backend = _ClaimingRedisBackend()
+        live_state_store = LiveEventStateStore(backend)
+        live_state_store.upsert(
+            LiveEventState(
+                event_id=7002,
+                sport_slug="basketball",
+                status_type="inprogress",
+                poll_profile="warm",
+                last_seen_at=1,
+                last_ingested_at=1,
+                last_changed_at=1,
+                next_poll_at=1_800_000_000_000,
+                hot_until=None,
+                home_score=88,
+                away_score=80,
+                version_hint=None,
+                is_finalized=False,
+            ),
+            lane="warm",
+        )
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(()),
+            delayed_job_loader=lambda job_id: None,
+            live_state_store=live_state_store,
+            scheduled_targets=(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+        await daemon.tick(now_ms=1_800_000_005_000)
+
+        self.assertEqual(len(queue.published), 1)
+        self.assertIn("live:dispatch_claim:7002", backend.claims)
+
     async def test_planner_daemon_runs_scheduled_planning_per_sport_interval(self) -> None:
         from schema_inspector.services.planner_daemon import PlannerDaemon, ScheduledPlanningTarget
 
@@ -474,6 +513,65 @@ class _FakeLiveStateStore:
 
     def fetch(self, event_id: int) -> LiveEventState | None:
         return self.states_by_event.get(event_id)
+
+
+class _ClaimingRedisBackend:
+    def __init__(self) -> None:
+        self.hashes: dict[str, dict[str, object]] = {}
+        self.zsets: dict[str, dict[str, float]] = {}
+        self.claims: dict[str, object] = {}
+
+    def hset(self, name: str, key: str | None = None, value: object | None = None, mapping: dict[str, object] | None = None):
+        del key, value
+        if mapping is None:
+            raise TypeError("mapping keyword is required")
+        self.hashes.setdefault(name, {}).update(dict(mapping))
+        return len(mapping)
+
+    def hgetall(self, key: str) -> dict[str, object]:
+        return dict(self.hashes.get(key, {}))
+
+    def zadd(self, key: str, mapping: dict[str, float]) -> int:
+        bucket = self.zsets.setdefault(key, {})
+        for member, score in mapping.items():
+            bucket[str(member)] = float(score)
+        return len(mapping)
+
+    def zrem(self, key: str, *members: str) -> int:
+        bucket = self.zsets.setdefault(key, {})
+        removed = 0
+        for member in members:
+            if member in bucket:
+                del bucket[member]
+                removed += 1
+        return removed
+
+    def zrangebyscore(self, key: str, min_score: float, max_score: float):
+        return [
+            member
+            for member, score in sorted(self.zsets.get(key, {}).items(), key=lambda item: (item[1], item[0]))
+            if min_score <= score <= max_score
+        ]
+
+    def set(
+        self,
+        key: str,
+        value: object,
+        *,
+        nx: bool | None = None,
+        px: int | None = None,
+    ) -> bool:
+        del px
+        if nx and key in self.claims:
+            return False
+        self.claims[key] = value
+        return True
+
+    def delete(self, key: str) -> int:
+        if key in self.claims:
+            del self.claims[key]
+            return 1
+        return 0
 
 
 if __name__ == "__main__":
