@@ -88,10 +88,12 @@ class _FakeRepository:
     def __init__(self, result: EventDetailWriteResult | None, *, error: Exception | None = None) -> None:
         self.result = result
         self.error = error
-        self.calls: list[tuple[object, EventDetailBundle]] = []
+        self.calls: list[tuple[object, EventDetailBundle, object | None]] = []
 
-    async def upsert_bundle(self, executor, bundle: EventDetailBundle) -> EventDetailWriteResult:
-        self.calls.append((executor, bundle))
+    async def upsert_bundle(self, executor, bundle: EventDetailBundle, *, profile=None) -> EventDetailWriteResult:
+        self.calls.append((executor, bundle, profile))
+        if profile is not None:
+            object.__setattr__(profile, "registry_sync_ms", 5)
         if self.error is not None:
             raise self.error
         if self.result is None:
@@ -515,7 +517,10 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         result = await job.run(14083191, provider_ids=(1, 2, 1), timeout=12.5)
 
         self.assertEqual(parser.calls, [(14083191, (1, 2), 12.5)])
-        self.assertEqual(repository.calls, [(connection, bundle)])
+        self.assertEqual(len(repository.calls), 1)
+        self.assertIs(repository.calls[0][0], connection)
+        self.assertIs(repository.calls[0][1], bundle)
+        self.assertIsNotNone(repository.calls[0][2])
         self.assertEqual(database.transaction_calls, 1)
         self.assertEqual(result.event_id, 14083191)
         self.assertEqual(result.provider_ids, (1, 2))
@@ -600,6 +605,7 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.profile.upstream_fetch_ms, 17)
         self.assertEqual(result.profile.parse_ms, 33)
+        self.assertEqual(result.profile.registry_sync_ms, 5)
         self.assertEqual(result.profile.db_persist_ms, 40)
 
 
