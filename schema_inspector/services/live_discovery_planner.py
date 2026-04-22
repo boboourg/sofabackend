@@ -58,8 +58,10 @@ class LiveDiscoveryPlannerDaemon:
         observed_now = int(now_ms if now_ms is not None else self.now_ms_factory())
         blocking_reason = _blocking_reason(self.backpressure)
         if blocking_reason is not None:
-            logger.info("Live discovery planner paused by backpressure: %s", blocking_reason)
-            return 0
+            logger.info(
+                "Live discovery planner observed backpressure but continued publishing to preserve live snapshot freshness: %s",
+                blocking_reason,
+            )
         published = 0
         for target in self.targets:
             last_planned = self._last_planned_at_ms.get(target.sport_slug)

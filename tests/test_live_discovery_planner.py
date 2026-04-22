@@ -34,7 +34,7 @@ class LiveDiscoveryPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([payload["scope"] for _, payload in queue.published], ["live", "live", "live"])
         self.assertEqual(json.loads(queue.published[0][1]["params_json"]), {})
 
-    async def test_live_discovery_planner_pauses_when_operational_backpressure_blocks(self) -> None:
+    async def test_live_discovery_planner_keeps_publishing_live_targets_under_operational_backpressure(self) -> None:
         from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
         from schema_inspector.services.live_discovery_planner import (
             LiveDiscoveryPlannerDaemon,
@@ -63,8 +63,10 @@ class LiveDiscoveryPlannerTests(unittest.IsolatedAsyncioTestCase):
 
         published = await daemon.tick(now_ms=1_800_000_000_000)
 
-        self.assertEqual(published, 0)
-        self.assertEqual(queue.published, [])
+        self.assertEqual(published, 1)
+        self.assertEqual([stream for stream, _ in queue.published], [STREAM_LIVE_DISCOVERY])
+        self.assertEqual([payload["sport_slug"] for _, payload in queue.published], ["football"])
+        self.assertEqual([payload["scope"] for _, payload in queue.published], ["live"])
 
 
 class _FakeQueue:
