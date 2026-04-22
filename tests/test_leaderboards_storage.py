@@ -222,6 +222,26 @@ def _build_bundle() -> LeaderboardsBundle:
 
 
 class LeaderboardsStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_leaderboards_repository_inherits_guarded_topology_writes(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = LeaderboardsRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+        await repository.upsert_bundle(executor, bundle)
+
+        sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
+        self.assertEqual(len(sport_statements), 1)
+
+        category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
+        unique_tournament_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament" in sql
+        )
+        season_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql)
+        self.assertIn("IS DISTINCT FROM", category_sql)
+        self.assertIn("IS DISTINCT FROM", unique_tournament_sql)
+        self.assertIn("IS DISTINCT FROM", season_sql)
+
     async def test_leaderboards_repository_writes_expected_tables(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()

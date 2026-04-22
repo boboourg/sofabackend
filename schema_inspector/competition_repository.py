@@ -39,6 +39,9 @@ class CompetitionWriteResult:
 class CompetitionRepository:
     """Writes normalized competition data into PostgreSQL."""
 
+    def __init__(self) -> None:
+        self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CompetitionBundle) -> CompetitionWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
         await self._upsert_image_assets(executor, bundle)
@@ -85,7 +88,15 @@ class CompetitionRepository:
         )
 
     async def _upsert_sports(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
-        rows = [(item.id, item.slug, item.name) for item in bundle.sports]
+        rows_by_id = {
+            int(item.id): (item.id, item.slug, item.name)
+            for item in bundle.sports
+        }
+        rows = [
+            row
+            for sport_id, row in rows_by_id.items()
+            if self._sport_cache.get(sport_id) != (row[1], row[2])
+        ]
         await _executemany(
             executor,
             """
@@ -97,6 +108,8 @@ class CompetitionRepository:
             """,
             rows,
         )
+        for sport_id, row in rows_by_id.items():
+            self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
         rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
@@ -152,6 +165,14 @@ class CompetitionRepository:
                 sport_id = EXCLUDED.sport_id,
                 country_alpha2 = EXCLUDED.country_alpha2,
                 field_translations = EXCLUDED.field_translations
+            WHERE category.slug IS DISTINCT FROM EXCLUDED.slug
+               OR category.name IS DISTINCT FROM EXCLUDED.name
+               OR category.flag IS DISTINCT FROM EXCLUDED.flag
+               OR category.alpha2 IS DISTINCT FROM EXCLUDED.alpha2
+               OR category.priority IS DISTINCT FROM EXCLUDED.priority
+               OR category.sport_id IS DISTINCT FROM EXCLUDED.sport_id
+               OR category.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR category.field_translations IS DISTINCT FROM EXCLUDED.field_translations
             """,
             rows,
         )
@@ -308,6 +329,31 @@ class CompetitionRepository:
                 display_inverse_home_away_teams = EXCLUDED.display_inverse_home_away_teams,
                 field_translations = EXCLUDED.field_translations,
                 period_length = EXCLUDED.period_length
+            WHERE unique_tournament.slug IS DISTINCT FROM EXCLUDED.slug
+               OR unique_tournament.name IS DISTINCT FROM EXCLUDED.name
+               OR unique_tournament.category_id IS DISTINCT FROM EXCLUDED.category_id
+               OR unique_tournament.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR unique_tournament.logo_asset_id IS DISTINCT FROM EXCLUDED.logo_asset_id
+               OR unique_tournament.dark_logo_asset_id IS DISTINCT FROM EXCLUDED.dark_logo_asset_id
+               OR unique_tournament.title_holder_team_id IS DISTINCT FROM EXCLUDED.title_holder_team_id
+               OR unique_tournament.title_holder_titles IS DISTINCT FROM EXCLUDED.title_holder_titles
+               OR unique_tournament.most_titles IS DISTINCT FROM EXCLUDED.most_titles
+               OR unique_tournament.gender IS DISTINCT FROM EXCLUDED.gender
+               OR unique_tournament.primary_color_hex IS DISTINCT FROM EXCLUDED.primary_color_hex
+               OR unique_tournament.secondary_color_hex IS DISTINCT FROM EXCLUDED.secondary_color_hex
+               OR unique_tournament.start_date_timestamp IS DISTINCT FROM EXCLUDED.start_date_timestamp
+               OR unique_tournament.end_date_timestamp IS DISTINCT FROM EXCLUDED.end_date_timestamp
+               OR unique_tournament.tier IS DISTINCT FROM EXCLUDED.tier
+               OR unique_tournament.user_count IS DISTINCT FROM EXCLUDED.user_count
+               OR unique_tournament.has_rounds IS DISTINCT FROM EXCLUDED.has_rounds
+               OR unique_tournament.has_groups IS DISTINCT FROM EXCLUDED.has_groups
+               OR unique_tournament.has_event_player_statistics IS DISTINCT FROM EXCLUDED.has_event_player_statistics
+               OR unique_tournament.has_performance_graph_feature IS DISTINCT FROM EXCLUDED.has_performance_graph_feature
+               OR unique_tournament.has_playoff_series IS DISTINCT FROM EXCLUDED.has_playoff_series
+               OR unique_tournament.disabled_home_away_standings IS DISTINCT FROM EXCLUDED.disabled_home_away_standings
+               OR unique_tournament.display_inverse_home_away_teams IS DISTINCT FROM EXCLUDED.display_inverse_home_away_teams
+               OR unique_tournament.field_translations IS DISTINCT FROM EXCLUDED.field_translations
+               OR unique_tournament.period_length IS DISTINCT FROM EXCLUDED.period_length
             """,
             rows,
         )
@@ -323,6 +369,9 @@ class CompetitionRepository:
                 name = EXCLUDED.name,
                 year = EXCLUDED.year,
                 editor = EXCLUDED.editor
+            WHERE season.name IS DISTINCT FROM EXCLUDED.name
+               OR season.year IS DISTINCT FROM EXCLUDED.year
+               OR season.editor IS DISTINCT FROM EXCLUDED.editor
             """,
             rows,
         )

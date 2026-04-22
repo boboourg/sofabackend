@@ -179,6 +179,17 @@ def _build_bundle() -> StatisticsBundle:
 
 
 class StatisticsStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_statistics_repository_skips_redundant_sport_writes(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = StatisticsRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+        await repository.upsert_bundle(executor, bundle)
+
+        sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
+        self.assertEqual(len(sport_statements), 1)
+
     async def test_statistics_repository_writes_expected_tables(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()
