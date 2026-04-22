@@ -196,7 +196,9 @@ class EntitiesStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(country_statements), 1)
         self.assertIn("IS DISTINCT FROM", country_statements[0])
 
-        category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 1)
+        category_sql = category_statements[0]
         unique_tournament_sql = next(
             sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament" in sql
         )

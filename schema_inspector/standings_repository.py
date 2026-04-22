@@ -36,6 +36,10 @@ class StandingsRepository:
     def __init__(self) -> None:
         self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
         self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
+        self._category_cache: dict[
+            int,
+            tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
+        ] = {}
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: StandingsBundle) -> StandingsWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -128,8 +132,8 @@ class StandingsRepository:
                 _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: StandingsBundle) -> None:
-        rows = [
-            (
+        rows_by_id = {
+            int(item.id): (
                 item.id,
                 item.slug,
                 item.name,
@@ -141,6 +145,18 @@ class StandingsRepository:
                 _jsonb(item.field_translations),
             )
             for item in bundle.categories
+        }
+        effective_rows_by_id = {
+            category_id: self._effective_category_cache_entry(
+                rows_by_id[category_id],
+                self._category_cache.get(category_id),
+            )
+            for category_id in rows_by_id
+        }
+        rows = [
+            row
+            for category_id, row in rows_by_id.items()
+            if self._category_cache.get(category_id) != effective_rows_by_id[category_id]
         ]
         await _executemany(
             executor,
@@ -168,6 +184,30 @@ class StandingsRepository:
                OR category.field_translations IS DISTINCT FROM COALESCE(EXCLUDED.field_translations, category.field_translations)
             """,
             rows,
+        )
+        if rows_by_id:
+            def _commit_category_cache() -> None:
+                for category_id, effective_row in effective_rows_by_id.items():
+                    self._category_cache[category_id] = effective_row
+
+            if not register_post_commit_hook(_commit_category_cache):
+                _commit_category_cache()
+
+    @staticmethod
+    def _effective_category_cache_entry(
+        row: tuple[object, ...],
+        previous: tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None]
+        | None,
+    ) -> tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None]:
+        return (
+            row[1],
+            row[2],
+            row[3] if row[3] is not None else (previous[2] if previous is not None else None),
+            row[4] if row[4] is not None else (previous[3] if previous is not None else None),
+            row[5] if row[5] is not None else (previous[4] if previous is not None else None),
+            row[6],
+            row[7] if row[7] is not None else (previous[6] if previous is not None else None),
+            row[8] if row[8] is not None else (previous[7] if previous is not None else None),
         )
 
     async def _upsert_unique_tournaments(self, executor: SqlExecutor, bundle: StandingsBundle) -> None:

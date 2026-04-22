@@ -188,6 +188,45 @@ class CategoriesSeedStorageTests(unittest.IsolatedAsyncioTestCase):
         country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
         self.assertEqual(len(country_statements), 2)
 
+    async def test_categories_seed_repository_skips_redundant_category_writes(self) -> None:
+        repository = CategoriesSeedRepository()
+        executor = _FakeExecutor()
+        bundle = _build_bundle()
+
+        await repository.upsert_bundle(executor, bundle)
+        await repository.upsert_bundle(executor, bundle)
+
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 1)
+        self.assertIn("IS DISTINCT FROM", category_statements[0])
+
+    async def test_categories_seed_repository_only_caches_category_rows_after_post_commit(self) -> None:
+        repository = CategoriesSeedRepository()
+        executor = _FakeExecutor()
+        bundle = _build_bundle()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.categories_seed_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_categories(executor, bundle)
+            await repository._upsert_categories(executor, bundle)
+
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository._upsert_categories(executor, bundle)
+
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 2)
+
     async def test_categories_seed_repository_upserts_expected_tables(self) -> None:
         repository = CategoriesSeedRepository()
         executor = _FakeExecutor()

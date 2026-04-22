@@ -185,7 +185,7 @@ class StandingsStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(country_statements), 1)
         self.assertIn("IS DISTINCT FROM", country_statements[0])
 
-        category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
+        category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql)
         unique_tournament_sql = next(
             sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament " in sql
         )
@@ -218,6 +218,62 @@ class StandingsStorageTests(unittest.IsolatedAsyncioTestCase):
 
         country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
         self.assertEqual(len(country_statements), 2)
+
+    async def test_standings_repository_only_caches_category_rows_after_post_commit(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = StandingsRepository()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.standings_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_categories(executor, bundle)
+            await repository._upsert_categories(executor, bundle)
+
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository._upsert_categories(executor, bundle)
+
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 2)
+
+    async def test_standings_repository_preserves_effective_category_state_for_sparse_updates(self) -> None:
+        rich_bundle = _build_bundle()
+        sparse_bundle = StandingsBundle(
+            **{
+                **rich_bundle.__dict__,
+                "categories": (
+                    CategoryRecord(
+                        id=1,
+                        slug="england",
+                        name="England",
+                        flag=None,
+                        alpha2=None,
+                        priority=None,
+                        sport_id=1,
+                        country_alpha2=None,
+                        field_translations=None,
+                    ),
+                ),
+            }
+        )
+        executor = _FakeExecutor()
+        repository = StandingsRepository()
+
+        await repository._upsert_categories(executor, rich_bundle)
+        await repository._upsert_categories(executor, sparse_bundle)
+
+        category_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO category (" in sql]
+        self.assertEqual(len(category_statements), 1)
 
     async def test_standings_repository_writes_expected_tables(self) -> None:
         bundle = _build_bundle()
