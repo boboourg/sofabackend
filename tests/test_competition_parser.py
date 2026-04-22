@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from schema_inspector.competition_parser import CompetitionParser, CompetitionParserError
 from schema_inspector.endpoints import (
@@ -9,7 +10,7 @@ from schema_inspector.endpoints import (
     UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
 )
 from schema_inspector.runtime import RuntimeConfig, TransportAttempt
-from schema_inspector.sofascore_client import SofascoreClient, SofascoreResponse
+from schema_inspector.sofascore_client import SofascoreClient, SofascoreHttpError, SofascoreResponse
 
 
 class _FakeSofascoreClient(SofascoreClient):
@@ -22,6 +23,8 @@ class _FakeSofascoreClient(SofascoreClient):
         del headers, timeout
         self.seen_urls.append(url)
         payload = self.responses[url]
+        if isinstance(payload, Exception):
+            raise payload
         return SofascoreResponse(
             source_url=url,
             resolved_url=url,
@@ -227,6 +230,92 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(CompetitionParserError):
             await parser.fetch_bundle(17, include_seasons=False, include_season_info=False)
+
+    async def test_competition_parser_skips_optional_seasons_404(self) -> None:
+        tournament_url = UNIQUE_TOURNAMENT_ENDPOINT.build_url(unique_tournament_id=17)
+        seasons_url = UNIQUE_TOURNAMENT_SEASONS_ENDPOINT.build_url(unique_tournament_id=17)
+        fake_client = _FakeSofascoreClient(
+            {
+                tournament_url: {
+                    "uniqueTournament": {
+                        "id": 17,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category": {
+                            "id": 1,
+                            "slug": "england",
+                            "name": "England",
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                    }
+                },
+                seasons_url: SofascoreHttpError(
+                    "not found",
+                    transport_result=SimpleNamespace(status_code=404),
+                ),
+            }
+        )
+
+        bundle = await CompetitionParser(fake_client).fetch_bundle(
+            17,
+            include_season_info=False,
+        )
+
+        self.assertEqual(fake_client.seen_urls, [tournament_url, seasons_url])
+        self.assertEqual({item.id for item in bundle.unique_tournaments}, {17})
+        self.assertEqual(bundle.seasons, ())
+        self.assertEqual(bundle.unique_tournament_seasons, ())
+
+    async def test_competition_parser_skips_optional_season_info_404(self) -> None:
+        tournament_url = UNIQUE_TOURNAMENT_ENDPOINT.build_url(unique_tournament_id=17)
+        seasons_url = UNIQUE_TOURNAMENT_SEASONS_ENDPOINT.build_url(unique_tournament_id=17)
+        info_url = UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT.build_url(unique_tournament_id=17, season_id=76986)
+        fake_client = _FakeSofascoreClient(
+            {
+                tournament_url: {
+                    "uniqueTournament": {
+                        "id": 17,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category": {
+                            "id": 1,
+                            "slug": "england",
+                            "name": "England",
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                    }
+                },
+                seasons_url: {"seasons": [{"id": 76986, "name": "Premier League 25/26", "year": "25/26"}]},
+                info_url: SofascoreHttpError(
+                    "not found",
+                    transport_result=SimpleNamespace(status_code=404),
+                ),
+            }
+        )
+
+        bundle = await CompetitionParser(fake_client).fetch_bundle(17, season_id=76986)
+
+        self.assertEqual(fake_client.seen_urls, [tournament_url, seasons_url, info_url])
+        self.assertEqual({item.id for item in bundle.unique_tournaments}, {17})
+        self.assertEqual({item.id for item in bundle.seasons}, {76986})
+        self.assertEqual(
+            {(item.unique_tournament_id, item.season_id) for item in bundle.unique_tournament_seasons},
+            {(17, 76986)},
+        )
+
+    async def test_competition_parser_still_raises_on_root_tournament_404(self) -> None:
+        tournament_url = UNIQUE_TOURNAMENT_ENDPOINT.build_url(unique_tournament_id=17)
+        fake_client = _FakeSofascoreClient(
+            {
+                tournament_url: SofascoreHttpError(
+                    "not found",
+                    transport_result=SimpleNamespace(status_code=404),
+                )
+            }
+        )
+
+        with self.assertRaises(SofascoreHttpError):
+            await CompetitionParser(fake_client).fetch_bundle(17, include_season_info=False)
 
 
 if __name__ == "__main__":

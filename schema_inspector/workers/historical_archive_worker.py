@@ -164,11 +164,19 @@ class HistoricalEnrichmentWorker:
                 season_ids=season_ids,
             )
             return "completed"
-        await self.orchestrator.run_historical_tournament_enrichment(
-            unique_tournament_id=int(job.entity_id),
-            sport_slug=sport_slug,
-            season_ids=season_ids,
-        )
+        for child_job_type in (
+            JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+            JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+        ):
+            child_job = job.spawn_child(
+                job_type=child_job_type,
+                entity_type="unique_tournament",
+                entity_id=int(job.entity_id),
+                scope="historical",
+                params={"season_ids": list(season_ids)},
+                priority=job.priority,
+            )
+            self.queue.publish(self.stream, encode_stream_job(child_job))
         return "completed"
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:

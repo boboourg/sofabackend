@@ -13,7 +13,7 @@ from .endpoints import (
     UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
     competition_registry_entries,
 )
-from .sofascore_client import SofascoreClient, SofascoreResponse
+from .sofascore_client import SofascoreClient, SofascoreHttpError, SofascoreResponse
 
 
 @dataclass(frozen=True)
@@ -226,7 +226,19 @@ class CompetitionParser:
     ) -> None:
         endpoint = UNIQUE_TOURNAMENT_SEASONS_ENDPOINT
         url = endpoint.build_url(unique_tournament_id=unique_tournament_id)
-        response = await self.client.get_json(url, timeout=timeout)
+        try:
+            response = await self.client.get_json(url, timeout=timeout)
+        except SofascoreHttpError as exc:
+            status_code = exc.transport_result.status_code if exc.transport_result is not None else None
+            if status_code == 404:
+                self.logger.info(
+                    "Competition optional 404: context=unique_tournament:%s endpoint=%s url=%s",
+                    unique_tournament_id,
+                    endpoint.pattern,
+                    url,
+                )
+                return
+            raise
         seasons = _require_sequence(response.payload, endpoint.envelope_key, url)
 
         state.add_payload_snapshot(
@@ -251,7 +263,20 @@ class CompetitionParser:
     ) -> None:
         endpoint = UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT
         url = endpoint.build_url(unique_tournament_id=unique_tournament_id, season_id=season_id)
-        response = await self.client.get_json(url, timeout=timeout)
+        try:
+            response = await self.client.get_json(url, timeout=timeout)
+        except SofascoreHttpError as exc:
+            status_code = exc.transport_result.status_code if exc.transport_result is not None else None
+            if status_code == 404:
+                self.logger.info(
+                    "Competition optional 404: context=unique_tournament:%s season:%s endpoint=%s url=%s",
+                    unique_tournament_id,
+                    season_id,
+                    endpoint.pattern,
+                    url,
+                )
+                return
+            raise
         envelope = _require_mapping(response.payload, endpoint.envelope_key, url)
 
         state.add_payload_snapshot(
