@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from schema_inspector.endpoints import standings_registry_entries
 from schema_inspector.event_list_parser import EventTeamRecord, TournamentRecord
@@ -190,6 +191,33 @@ class StandingsStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("IS DISTINCT FROM", category_sql)
         self.assertIn("IS DISTINCT FROM", unique_tournament_sql)
+
+    async def test_standings_repository_only_caches_country_rows_after_post_commit(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = StandingsRepository()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.standings_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_countries(executor, bundle)
+            await repository._upsert_countries(executor, bundle)
+
+        country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
+        self.assertEqual(len(country_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository._upsert_countries(executor, bundle)
+
+        country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
+        self.assertEqual(len(country_statements), 2)
 
     async def test_standings_repository_writes_expected_tables(self) -> None:
         bundle = _build_bundle()

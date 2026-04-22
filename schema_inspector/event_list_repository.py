@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
 
+from .db import register_post_commit_hook
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
 from .storage.raw_repository import RawRepository
@@ -393,8 +394,13 @@ class EventListRepository:
             """,
             rows,
         )
-        for alpha2, row in rows_by_alpha2.items():
-            self._country_cache[alpha2] = (row[1], row[2], row[3])
+        if rows_by_alpha2:
+            def _commit_country_cache() -> None:
+                for alpha2, row in rows_by_alpha2.items():
+                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+
+            if not register_post_commit_hook(_commit_country_cache):
+                _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [
