@@ -10,6 +10,7 @@ import signal
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -29,6 +30,16 @@ logger = logging.getLogger(__name__)
 _ENV_MAX_CONCURRENCY = "SOFASCORE_WORKER_MAX_CONCURRENCY"
 _ENV_COMPLETION_TTL_MS = "SOFASCORE_WORKER_COMPLETION_TTL_MS"
 _DEFAULT_COMPLETION_TTL_MS = 3_600_000  # 1 hour; was 24h — see Fix #3 (Apr 2026).
+
+
+@dataclass(frozen=True)
+class BatchDispatchPlan:
+    entries_to_process: tuple[StreamEntry, ...]
+    stale_entries_to_ack: tuple[StreamEntry, ...] = ()
+    coalesced_counts: tuple[tuple[str, int], ...] = ()
+
+
+BatchPreprocessor = Callable[[tuple[StreamEntry, ...]], BatchDispatchPlan | Awaitable[BatchDispatchPlan]]
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -96,6 +107,8 @@ class WorkerRuntime:
         idle_sleep_s: float = 0.05,
         job_audit_logger=None,
         max_concurrency: int | None = None,
+        prefetch_count: int | None = None,
+        batch_preprocessor: BatchPreprocessor | None = None,
     ) -> None:
         self.name = name
         self.queue = queue
@@ -122,11 +135,15 @@ class WorkerRuntime:
         if max_concurrency is None:
             max_concurrency = _env_positive_int(_ENV_MAX_CONCURRENCY, 1)
         self.max_concurrency = int(max_concurrency)
+        resolved_prefetch = self.max_concurrency if prefetch_count is None else int(prefetch_count)
+        self.prefetch_count = max(self.max_concurrency, resolved_prefetch)
+        self.batch_preprocessor = batch_preprocessor
         self.shutdown_requested = False
         self.accepting_new_work = True
         self._signal_handlers_installed = False
         self._inflight: set[asyncio.Task[Any]] = set()
         self._fatal_exc: BaseException | None = None
+        self._buffered_entries: list[StreamEntry] = []
 
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
@@ -161,13 +178,7 @@ class WorkerRuntime:
                     continue
 
                 # 2) Read as many entries as we can dispatch in parallel.
-                entries = self.queue.read_group(
-                    self.stream,
-                    self.group,
-                    self.consumer,
-                    count=slots,
-                    block_ms=self.block_ms,
-                )
+                entries = await self._next_entries(slots)
                 if not entries:
                     await asyncio.sleep(self.idle_sleep_s)
                     continue
@@ -212,6 +223,47 @@ class WorkerRuntime:
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         task.add_done_callback(self._on_task_done)
+
+    async def _next_entries(self, slots: int) -> tuple[StreamEntry, ...]:
+        if len(self._buffered_entries) < slots:
+            read_count = max(1, self.prefetch_count - len(self._buffered_entries))
+            new_entries = self.queue.read_group(
+                self.stream,
+                self.group,
+                self.consumer,
+                count=read_count,
+                block_ms=self.block_ms,
+            )
+            if new_entries:
+                combined_entries = tuple(self._buffered_entries) + tuple(new_entries)
+                plan = await self._prepare_dispatch_plan(combined_entries)
+                self._ack_stale_entries(plan.stale_entries_to_ack)
+                for entity_id, stale_count in plan.coalesced_counts:
+                    logger.info("Coalesced %s stale messages for entity %s", stale_count, entity_id)
+                self._buffered_entries = list(plan.entries_to_process)
+        if not self._buffered_entries:
+            return ()
+        take = min(slots, len(self._buffered_entries))
+        entries = tuple(self._buffered_entries[:take])
+        del self._buffered_entries[:take]
+        return entries
+
+    async def _prepare_dispatch_plan(self, entries: tuple[StreamEntry, ...]) -> BatchDispatchPlan:
+        if self.batch_preprocessor is None:
+            return BatchDispatchPlan(entries_to_process=entries)
+        plan = await _await_maybe(self.batch_preprocessor(entries))
+        if not isinstance(plan, BatchDispatchPlan):
+            raise TypeError(f"Batch preprocessor must return BatchDispatchPlan, got {type(plan)!r}")
+        return plan
+
+    def _ack_stale_entries(self, entries: tuple[StreamEntry, ...]) -> None:
+        if not entries:
+            return
+        message_ids_by_stream: dict[str, list[str]] = {}
+        for entry in entries:
+            message_ids_by_stream.setdefault(entry.stream, []).append(entry.message_id)
+        for stream, message_ids in message_ids_by_stream.items():
+            self.queue.ack(stream, self.group, tuple(message_ids))
 
     def _on_task_done(self, task: asyncio.Task[Any]) -> None:
         # Preserve crash-on-unknown-error semantics from the original

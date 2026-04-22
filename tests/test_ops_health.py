@@ -232,6 +232,38 @@ class OpsHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.flags[0].sport_slug, "football")
         self.assertEqual(summary.flags[0].reason, "snapshot_older_than_terminal_state")
 
+    async def test_live_snapshot_repair_reasons_flags_terminal_drift_and_stale_snapshots(self) -> None:
+        from schema_inspector.ops.health import fetch_live_snapshot_repair_reasons
+
+        now = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+        reasons = await fetch_live_snapshot_repair_reasons(
+            _RowsSqlExecutor(
+                [
+                    {
+                        "sport_slug": "football",
+                        "latest_fetched_at": datetime(2026, 4, 22, 11, 56, 0, tzinfo=timezone.utc),
+                        "latest_finalized_at": datetime(2026, 4, 22, 11, 59, 0, tzinfo=timezone.utc),
+                    },
+                    {
+                        "sport_slug": "tennis",
+                        "latest_fetched_at": datetime(2026, 4, 22, 11, 51, 0, tzinfo=timezone.utc),
+                        "latest_finalized_at": None,
+                    },
+                    {
+                        "sport_slug": "basketball",
+                        "latest_fetched_at": None,
+                        "latest_finalized_at": None,
+                    },
+                ]
+            ),
+            sport_slugs=("football", "tennis", "basketball"),
+            now=now,
+        )
+
+        self.assertEqual(reasons["football"], "snapshot_older_than_terminal_state")
+        self.assertEqual(reasons["tennis"], "snapshot_stale")
+        self.assertEqual(reasons["basketball"], "snapshot_missing")
+
     async def test_historical_retry_share_query_excludes_admission_deferrals(self) -> None:
         from schema_inspector.ops.health import _fetch_historical_retry_share
 

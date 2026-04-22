@@ -7,6 +7,57 @@ from schema_inspector.queue.streams import STREAM_HYDRATE, StreamEntry
 
 
 class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_runtime_prefetches_and_acks_stale_entries_from_batch_preprocessor(self) -> None:
+        from schema_inspector.queue.streams import STREAM_LIVE_HOT
+        from schema_inspector.services.worker_runtime import BatchDispatchPlan, WorkerRuntime
+
+        queue = _FakeQueue(
+            entries=(
+                StreamEntry(stream=STREAM_LIVE_HOT, message_id="hot-1", values={"event_id": "7001"}),
+                StreamEntry(stream=STREAM_LIVE_HOT, message_id="hot-2", values={"event_id": "7002"}),
+                StreamEntry(stream=STREAM_LIVE_HOT, message_id="hot-3", values={"event_id": "7001"}),
+            )
+        )
+        seen: list[str] = []
+        runtime: WorkerRuntime | None = None
+
+        def preprocess(entries: tuple[StreamEntry, ...]) -> BatchDispatchPlan:
+            return BatchDispatchPlan(
+                entries_to_process=(entries[1], entries[2]),
+                stale_entries_to_ack=(entries[0],),
+                coalesced_counts=(("7001", 1),),
+            )
+
+        async def handler(entry: StreamEntry) -> str:
+            seen.append(entry.message_id)
+            assert runtime is not None
+            if len(seen) >= 2:
+                runtime.request_shutdown()
+            return "ok"
+
+        runtime = WorkerRuntime(
+            name="live-hot",
+            queue=queue,
+            stream=STREAM_LIVE_HOT,
+            group="cg:live_hot",
+            consumer="live-hot-1",
+            handler=handler,
+            block_ms=0,
+            max_concurrency=1,
+            prefetch_count=3,
+            batch_preprocessor=preprocess,
+        )
+
+        with self.assertLogs("schema_inspector.services.worker_runtime", level="INFO") as captured:
+            await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(seen, ["hot-2", "hot-3"])
+        self.assertEqual(queue.read_counts, [3])
+        self.assertIn((STREAM_LIVE_HOT, "cg:live_hot", ("hot-1",)), queue.acked)
+        self.assertTrue(
+            any("Coalesced 1 stale messages for entity 7001" in line for line in captured.output)
+        )
+
     async def test_worker_runtime_exposes_execution_context_and_reuses_job_run_id_for_audit(self) -> None:
         from schema_inspector.services.job_execution_context import current_job_execution_context
         from schema_inspector.services.worker_runtime import WorkerRuntime

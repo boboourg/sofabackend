@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import time
 
+from ..jobs.types import JOB_REFRESH_LIVE_EVENT
 from ..queue.streams import GROUP_LIVE_HOT, GROUP_LIVE_WARM, STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
-from ..services.worker_runtime import WorkerRuntime, resolve_worker_max_concurrency
+from ..services.worker_runtime import BatchDispatchPlan, WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
+
+_HOT_PREFETCH_COUNT = 25
 
 
 class LiveWorkerService:
@@ -47,6 +50,8 @@ class LiveWorkerService:
                 else ("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",)
             ),
         )
+        batch_preprocessor = _coalesce_live_refresh_batch if normalized_lane == "hot" else None
+        prefetch_count = _HOT_PREFETCH_COUNT if normalized_lane == "hot" else resolved_max_concurrency
         self.runtime = WorkerRuntime(
             name=f"live-{normalized_lane}-worker",
             queue=queue,
@@ -60,6 +65,8 @@ class LiveWorkerService:
             now_ms_factory=self.now_ms_factory,
             job_audit_logger=job_audit_logger,
             max_concurrency=resolved_max_concurrency,
+            prefetch_count=prefetch_count,
+            batch_preprocessor=batch_preprocessor,
         )
 
     async def handle(self, entry: StreamEntry) -> str:
@@ -89,3 +96,34 @@ class LiveWorkerService:
 
     def request_shutdown(self) -> None:
         self.runtime.request_shutdown()
+
+
+def _coalesce_live_refresh_batch(entries: tuple[StreamEntry, ...]) -> BatchDispatchPlan:
+    decoded_jobs = tuple(decode_stream_job(entry) for entry in entries)
+    latest_index_by_event_id: dict[int, int] = {}
+    for index, job in enumerate(decoded_jobs):
+        if job.job_type != JOB_REFRESH_LIVE_EVENT or job.entity_id is None:
+            continue
+        latest_index_by_event_id[int(job.entity_id)] = index
+
+    kept_entries: list[StreamEntry] = []
+    stale_entries: list[StreamEntry] = []
+    coalesced_counts: dict[str, int] = {}
+    for index, (entry, job) in enumerate(zip(entries, decoded_jobs, strict=False)):
+        event_id = job.entity_id
+        if (
+            job.job_type == JOB_REFRESH_LIVE_EVENT
+            and event_id is not None
+            and latest_index_by_event_id.get(int(event_id)) != index
+        ):
+            stale_entries.append(entry)
+            event_key = str(int(event_id))
+            coalesced_counts[event_key] = coalesced_counts.get(event_key, 0) + 1
+            continue
+        kept_entries.append(entry)
+
+    return BatchDispatchPlan(
+        entries_to_process=tuple(kept_entries),
+        stale_entries_to_ack=tuple(stale_entries),
+        coalesced_counts=tuple(sorted(coalesced_counts.items())),
+    )
