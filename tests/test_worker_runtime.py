@@ -262,6 +262,41 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retries, [("1-6", 30_000)])
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-6",))])
 
+    async def test_worker_runtime_records_backpressure_deferrals_separately_from_retries(self) -> None:
+        from schema_inspector.services.retry_policy import AdmissionDeferredError
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(entries=(StreamEntry(stream=STREAM_HYDRATE, message_id="1-6b", values={"job_id": "job-6b"}),))
+        audit = _FakeAuditLogger()
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            del entry
+            raise AdmissionDeferredError("hydrate backlog", delay_ms=30_000)
+
+        async def on_retry(entry: StreamEntry, exc: Exception, *, delay_ms: int) -> None:
+            del entry, exc, delay_ms
+            assert runtime is not None
+            runtime.request_shutdown()
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            retry_handler=on_retry,
+            job_audit_logger=audit,
+            block_ms=0,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(len(audit.calls), 1)
+        self.assertEqual(audit.calls[0]["status"], "deferred_backpressure")
+        self.assertIsNotNone(audit.calls[0]["retry_scheduled_for"])
+
     async def test_worker_runtime_max_concurrency_defaults_to_serial(self) -> None:
         # Fix #2: default behaviour must stay strictly serial so that
         # untouched deployments keep identical semantics to the old

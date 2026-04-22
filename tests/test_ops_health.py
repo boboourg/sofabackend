@@ -191,6 +191,17 @@ class OpsHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'", normalized)
         self.assertIn("aps.source_url LIKE '%/api/v1/sport/%/events/live%'", normalized)
 
+    async def test_historical_retry_share_query_excludes_admission_deferrals(self) -> None:
+        from schema_inspector.ops.health import _fetch_historical_retry_share
+
+        executor = _CapturingSqlExecutor()
+        await _fetch_historical_retry_share(executor)
+
+        self.assertIsNotNone(executor.last_query)
+        normalized = " ".join(str(executor.last_query).split())
+        self.assertIn("status = 'retry_scheduled'", normalized)
+        self.assertIn("COALESCE(error_class, '') <> 'AdmissionDeferredError'", normalized)
+
 
 class _CapturingSqlExecutor:
     def __init__(self) -> None:

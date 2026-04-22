@@ -362,6 +362,7 @@ async def _fetch_historical_retry_share(sql_executor) -> float:
             COUNT(*) FILTER (
                 WHERE scope LIKE 'historical%'
                   AND status = 'retry_scheduled'
+                  AND COALESCE(error_class, '') <> 'AdmissionDeferredError'
             )::bigint AS retry_scheduled_runs
         FROM etl_job_run
         WHERE started_at >= now() - interval '2 hours'

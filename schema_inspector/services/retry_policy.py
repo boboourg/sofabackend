@@ -4,13 +4,23 @@ from __future__ import annotations
 
 
 class RetryableJobError(RuntimeError):
-    def __init__(self, message: str, *, delay_ms: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        delay_ms: int | None = None,
+        audit_status: str = "retry_scheduled",
+    ) -> None:
         super().__init__(message)
         self.delay_ms = None if delay_ms is None else int(delay_ms)
+        self.audit_status = str(audit_status or "retry_scheduled").strip().lower() or "retry_scheduled"
 
 
 class AdmissionDeferredError(RetryableJobError):
     """Signals that a job should be retried later because downstream capacity is saturated."""
+
+    def __init__(self, message: str, *, delay_ms: int | None = None) -> None:
+        super().__init__(message, delay_ms=delay_ms, audit_status="deferred_backpressure")
 
 
 _RETRYABLE_SQLSTATES = {
@@ -39,6 +49,11 @@ def is_retryable_db_error(exc: Exception) -> bool:
 
     rendered = f"{exc.__class__.__name__} {exc}".lower()
     return any(marker in rendered for marker in _RETRYABLE_MARKERS)
+
+
+def retry_audit_status(exc: Exception) -> str:
+    status = str(getattr(exc, "audit_status", "") or "").strip().lower()
+    return status or "retry_scheduled"
 
 
 def retry_delay_ms(
