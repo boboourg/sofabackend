@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
 
+from .db import register_post_commit_hook
 from .categories_seed_parser import CategoriesSeedBundle
 from .storage.raw_repository import RawRepository
 
@@ -32,6 +33,9 @@ class CategoriesSeedWriteResult:
 
 class CategoriesSeedRepository:
     """Writes categories discovery data into PostgreSQL."""
+
+    def __init__(self) -> None:
+        self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> CategoriesSeedWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -70,7 +74,16 @@ class CategoriesSeedRepository:
         )
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> None:
-        rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
+        rows_by_alpha2 = {
+            str(item.alpha2): (item.alpha2, item.alpha3, item.slug, item.name)
+            for item in bundle.countries
+            if item.alpha2 is not None
+        }
+        rows = [
+            row
+            for alpha2, row in rows_by_alpha2.items()
+            if self._country_cache.get(alpha2) != (row[1], row[2], row[3])
+        ]
         await _executemany(
             executor,
             """
@@ -80,9 +93,19 @@ class CategoriesSeedRepository:
                 alpha3 = EXCLUDED.alpha3,
                 slug = EXCLUDED.slug,
                 name = EXCLUDED.name
+            WHERE country.alpha3 IS DISTINCT FROM EXCLUDED.alpha3
+               OR country.slug IS DISTINCT FROM EXCLUDED.slug
+               OR country.name IS DISTINCT FROM EXCLUDED.name
             """,
             rows,
         )
+        if rows_by_alpha2:
+            def _commit_country_cache() -> None:
+                for alpha2, row in rows_by_alpha2.items():
+                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+
+            if not register_post_commit_hook(_commit_country_cache):
+                _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> None:
         rows = [

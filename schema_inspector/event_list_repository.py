@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
 
+from .db import register_post_commit_hook
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
 from .storage.raw_repository import RawRepository
@@ -47,6 +48,7 @@ class EventListRepository:
 
     def __init__(self) -> None:
         self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+        self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
 
     async def load_surface_states(self, executor: SqlExecutor, event_ids: Iterable[int]) -> dict[int, SurfaceEventState]:
         resolved_event_ids = tuple(sorted({int(item) for item in event_ids}))
@@ -367,7 +369,16 @@ class EventListRepository:
             self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
-        rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
+        rows_by_alpha2 = {
+            str(item.alpha2): (item.alpha2, item.alpha3, item.slug, item.name)
+            for item in bundle.countries
+            if item.alpha2 is not None
+        }
+        rows = [
+            row
+            for alpha2, row in rows_by_alpha2.items()
+            if self._country_cache.get(alpha2) != (row[1], row[2], row[3])
+        ]
         await _executemany(
             executor,
             """
@@ -377,9 +388,19 @@ class EventListRepository:
                 alpha3 = EXCLUDED.alpha3,
                 slug = EXCLUDED.slug,
                 name = EXCLUDED.name
+            WHERE country.alpha3 IS DISTINCT FROM EXCLUDED.alpha3
+               OR country.slug IS DISTINCT FROM EXCLUDED.slug
+               OR country.name IS DISTINCT FROM EXCLUDED.name
             """,
             rows,
         )
+        if rows_by_alpha2:
+            def _commit_country_cache() -> None:
+                for alpha2, row in rows_by_alpha2.items():
+                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+
+            if not register_post_commit_hook(_commit_country_cache):
+                _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [

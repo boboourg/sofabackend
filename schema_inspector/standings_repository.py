@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .db import register_post_commit_hook
 from .event_list_repository import SqlExecutor, _executemany, _jsonb, _timestamp
 from .standings_parser import StandingsBundle
 from .storage.raw_repository import RawRepository
@@ -34,6 +35,7 @@ class StandingsRepository:
 
     def __init__(self) -> None:
         self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+        self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: StandingsBundle) -> StandingsWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -92,7 +94,16 @@ class StandingsRepository:
             self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: StandingsBundle) -> None:
-        rows = [(item.alpha2, item.alpha3, item.slug, item.name) for item in bundle.countries]
+        rows_by_alpha2 = {
+            str(item.alpha2): (item.alpha2, item.alpha3, item.slug, item.name)
+            for item in bundle.countries
+            if item.alpha2 is not None
+        }
+        rows = [
+            row
+            for alpha2, row in rows_by_alpha2.items()
+            if self._country_cache.get(alpha2) != (row[1], row[2], row[3])
+        ]
         await _executemany(
             executor,
             """
@@ -102,9 +113,19 @@ class StandingsRepository:
                 alpha3 = COALESCE(EXCLUDED.alpha3, country.alpha3),
                 slug = COALESCE(EXCLUDED.slug, country.slug),
                 name = EXCLUDED.name
+            WHERE country.alpha3 IS DISTINCT FROM COALESCE(EXCLUDED.alpha3, country.alpha3)
+               OR country.slug IS DISTINCT FROM COALESCE(EXCLUDED.slug, country.slug)
+               OR country.name IS DISTINCT FROM EXCLUDED.name
             """,
             rows,
         )
+        if rows_by_alpha2:
+            def _commit_country_cache() -> None:
+                for alpha2, row in rows_by_alpha2.items():
+                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+
+            if not register_post_commit_hook(_commit_country_cache):
+                _commit_country_cache()
 
     async def _upsert_categories(self, executor: SqlExecutor, bundle: StandingsBundle) -> None:
         rows = [

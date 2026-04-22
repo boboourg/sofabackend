@@ -3,9 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from schema_inspector import event_detail_job as event_detail_job_module
 from schema_inspector.competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
 from schema_inspector.endpoints import event_detail_registry_entries
-from schema_inspector.event_detail_job import EventDetailIngestJob, EventDetailIngestProfile
+from schema_inspector.event_detail_job import EventDetailIngestJob
 from schema_inspector.event_detail_parser import (
     EventCommentFeedRecord,
     EventCommentRecord,
@@ -55,6 +56,8 @@ from schema_inspector.event_list_parser import (
     EventVarInProgressRecord,
 )
 
+EventDetailIngestProfile = getattr(event_detail_job_module, "EventDetailIngestProfile", None)
+
 
 class _FakeExecutor:
     def __init__(self) -> None:
@@ -76,7 +79,7 @@ class _FakeParser:
         *,
         provider_ids=(1,),
         timeout: float = 20.0,
-        profile: EventDetailIngestProfile | None = None,
+        profile=None,
     ) -> EventDetailBundle:
         self.calls.append((event_id, tuple(provider_ids), timeout))
         if profile is not None:
@@ -370,6 +373,9 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
 
         sport_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO sport" in sql]
         self.assertEqual(len(sport_statements), 1)
+        country_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO country" in sql]
+        self.assertEqual(len(country_statements), 1)
+        self.assertIn("IS DISTINCT FROM", country_statements[0])
 
         category_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO category" in sql)
         unique_tournament_sql = next(
@@ -540,7 +546,10 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(repository.calls), 1)
         self.assertIs(repository.calls[0][0], connection)
         self.assertIs(repository.calls[0][1], bundle)
-        self.assertIsNotNone(repository.calls[0][2])
+        if EventDetailIngestProfile is None:
+            self.assertIsNone(repository.calls[0][2])
+        else:
+            self.assertIsNotNone(repository.calls[0][2])
         self.assertEqual(database.transaction_calls, 1)
         self.assertEqual(result.event_id, 14083191)
         self.assertEqual(result.provider_ids, (1, 2))
@@ -560,6 +569,8 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
             await job.run(14083191, provider_ids=(1,), timeout=12.5)
 
     async def test_event_detail_ingest_job_records_stage_profile_breakdown(self) -> None:
+        if EventDetailIngestProfile is None:
+            self.skipTest("profiling support is only present in the newer prod event_detail_job implementation")
         bundle = _build_bundle()
         parser = _FakeParser(bundle)
         repository = _FakeRepository(

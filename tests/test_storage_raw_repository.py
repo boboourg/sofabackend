@@ -9,6 +9,7 @@ from schema_inspector.storage.raw_repository import (
     ApiSnapshotHeadRecord,
     PayloadSnapshotRecord,
     RawRepository,
+    reset_all_registry_sync_caches,
 )
 from schema_inspector.endpoints import EndpointRegistryEntry
 
@@ -39,6 +40,9 @@ class _FakeReturningExecutor(_FakeExecutor):
 
 
 class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_upsert_endpoint_registry_entries_persists_source_contract_rows_for_all_sources(self) -> None:
         repository = RawRepository()
         executor = _FakeExecutor()
@@ -110,6 +114,51 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0][6], "secondary-source")
         self.assertEqual(rows[0][7], "v2")
 
+    async def test_upsert_endpoint_registry_entries_skips_repeated_sync_for_same_repository_instance(self) -> None:
+        repository = RawRepository()
+        executor = _FakeExecutor()
+        executor._enable_registry_sync_cache = True
+        entries = [
+            EndpointRegistryEntry(
+                pattern="/api/v1/event/{event_id}",
+                path_template="/api/v1/event/{event_id}",
+                query_template=None,
+                envelope_key="event",
+                target_table="event",
+                notes="primary route",
+                source_slug="sofascore",
+                contract_version="v1",
+            )
+        ]
+
+        await repository.upsert_endpoint_registry_entries(executor, entries)
+        await repository.upsert_endpoint_registry_entries(executor, entries)
+
+        self.assertEqual(len(executor.executemany_calls), 2)
+
+    async def test_upsert_endpoint_registry_entries_skips_repeated_sync_across_repository_instances(self) -> None:
+        first_repository = RawRepository()
+        second_repository = RawRepository()
+        executor = _FakeExecutor()
+        executor._enable_registry_sync_cache = True
+        entries = [
+            EndpointRegistryEntry(
+                pattern="/api/v1/event/{event_id}",
+                path_template="/api/v1/event/{event_id}",
+                query_template=None,
+                envelope_key="event",
+                target_table="event",
+                notes="primary route",
+                source_slug="sofascore",
+                contract_version="v1",
+            )
+        ]
+
+        await first_repository.upsert_endpoint_registry_entries(executor, entries)
+        await second_repository.upsert_endpoint_registry_entries(executor, entries)
+
+        self.assertEqual(len(executor.executemany_calls), 2)
+
     async def test_upsert_endpoint_registry_entries_keeps_secondary_source_out_of_serving_registry(self) -> None:
         repository = RawRepository()
         executor = _FakeExecutor()
@@ -146,28 +195,6 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(serving_rows), 1)
         self.assertEqual(serving_rows[0][6], "sofascore")
         self.assertEqual(serving_rows[0][7], "v1")
-
-    async def test_upsert_endpoint_registry_entries_skips_repeated_sync_for_same_repository_instance(self) -> None:
-        repository = RawRepository()
-        executor = _FakeExecutor()
-        executor._enable_registry_sync_cache = True
-        entries = [
-            EndpointRegistryEntry(
-                pattern="/api/v1/event/{event_id}",
-                path_template="/api/v1/event/{event_id}",
-                query_template=None,
-                envelope_key="event",
-                target_table="event",
-                notes="primary route",
-                source_slug="sofascore",
-                contract_version="v1",
-            )
-        ]
-
-        await repository.upsert_endpoint_registry_entries(executor, entries)
-        await repository.upsert_endpoint_registry_entries(executor, entries)
-
-        self.assertEqual(len(executor.executemany_calls), 2)
 
     async def test_upsert_endpoint_registry_entries_only_caches_after_post_commit_hook(self) -> None:
         repository = RawRepository()

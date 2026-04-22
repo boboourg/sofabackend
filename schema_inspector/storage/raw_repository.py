@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import threading
-import weakref
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -96,11 +95,6 @@ class RawRepository:
 
     _SERVING_SOURCE_SLUG = "sofascore"
 
-    def __init__(self) -> None:
-        self._registry_sync_cache: set[tuple[tuple[str | None, ...], ...]] = set()
-        self._registry_sync_cache_lock = threading.Lock()
-        _RAW_REPOSITORY_INSTANCES.add(self)
-
     async def upsert_endpoint_registry_entries(
         self,
         executor: SqlExecutor,
@@ -129,8 +123,8 @@ class RawRepository:
             executor.__class__.__module__.startswith("asyncpg"),
         )
         if cache_enabled:
-            with self._registry_sync_cache_lock:
-                if registry_signature in self._registry_sync_cache:
+            with _REGISTRY_SYNC_CACHE_LOCK:
+                if registry_signature in _REGISTRY_SYNC_CACHE:
                     return
         contract_query = """
             INSERT INTO endpoint_contract_registry (
@@ -202,14 +196,10 @@ class RawRepository:
         if cache_enabled:
             self._register_registry_signature(registry_signature)
 
-    def reset_registry_sync_cache(self) -> None:
-        with self._registry_sync_cache_lock:
-            self._registry_sync_cache.clear()
-
     def _register_registry_signature(self, registry_signature: tuple[tuple[str | None, ...], ...]) -> None:
         def _commit_cache_entry() -> None:
-            with self._registry_sync_cache_lock:
-                self._registry_sync_cache.add(registry_signature)
+            with _REGISTRY_SYNC_CACHE_LOCK:
+                _REGISTRY_SYNC_CACHE.add(registry_signature)
 
         if not register_post_commit_hook(_commit_cache_entry):
             _commit_cache_entry()
@@ -500,12 +490,13 @@ def _jsonb(value: object) -> str | None:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-_RAW_REPOSITORY_INSTANCES: weakref.WeakSet[RawRepository] = weakref.WeakSet()
+_REGISTRY_SYNC_CACHE: set[tuple[tuple[str | None, ...], ...]] = set()
+_REGISTRY_SYNC_CACHE_LOCK = threading.Lock()
 
 
 def reset_all_registry_sync_caches() -> None:
-    for repository in list(_RAW_REPOSITORY_INSTANCES):
-        repository.reset_registry_sync_cache()
+    with _REGISTRY_SYNC_CACHE_LOCK:
+        _REGISTRY_SYNC_CACHE.clear()
 
 
 def _normalize_registry_rows(
