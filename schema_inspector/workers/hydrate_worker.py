@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 
-from ..queue.streams import GROUP_HYDRATE, STREAM_HYDRATE, StreamEntry
-from ..services.worker_runtime import WorkerRuntime
+from ..queue.streams import GROUP_HYDRATE, STREAM_HISTORICAL_HYDRATE, STREAM_HYDRATE, StreamEntry
+from ..services.worker_runtime import WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
 
 
@@ -25,7 +25,7 @@ class HydrateWorker:
         now_ms_factory=None,
         default_sport_slug: str = "football",
         job_audit_logger=None,
-        max_concurrency: int = 2,
+        max_concurrency: int | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
@@ -36,6 +36,9 @@ class HydrateWorker:
         self.stream = stream
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
+        env_names = ("SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY",)
+        if stream == STREAM_HISTORICAL_HYDRATE:
+            env_names = ("SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY", *env_names)
         self.runtime = WorkerRuntime(
             name="hydrate-worker",
             queue=queue,
@@ -48,7 +51,11 @@ class HydrateWorker:
             block_ms=block_ms,
             now_ms_factory=self.now_ms_factory,
             job_audit_logger=job_audit_logger,
-            max_concurrency=max(1, int(max_concurrency)),
+            max_concurrency=resolve_worker_max_concurrency(
+                default=2,
+                explicit=max_concurrency,
+                env_names=env_names,
+            ),
         )
 
     async def handle(self, entry: StreamEntry) -> str:

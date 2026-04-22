@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 
 from schema_inspector.queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
@@ -78,6 +79,58 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(worker.delayed_scheduler.calls, [("job-live-9", 1_800_000_005_000)])
+
+    async def test_live_worker_warm_honours_lane_specific_concurrency_env(self) -> None:
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        previous_specific = os.environ.get("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY")
+        previous_global = os.environ.get("SOFASCORE_WORKER_MAX_CONCURRENCY")
+        os.environ["SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY"] = "4"
+        os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = "9"
+        try:
+            worker = LiveWorkerService(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="warm",
+                consumer="worker-live-warm-1",
+            )
+            self.assertEqual(worker.runtime.max_concurrency, 4)
+        finally:
+            if previous_specific is None:
+                os.environ.pop("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY"] = previous_specific
+            if previous_global is None:
+                os.environ.pop("SOFASCORE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = previous_global
+
+    async def test_live_worker_hot_falls_back_to_global_concurrency_env(self) -> None:
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        previous_specific = os.environ.get("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY")
+        previous_global = os.environ.get("SOFASCORE_WORKER_MAX_CONCURRENCY")
+        os.environ.pop("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY", None)
+        os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = "3"
+        try:
+            worker = LiveWorkerService(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="hot",
+                consumer="worker-live-hot-1",
+            )
+            self.assertEqual(worker.runtime.max_concurrency, 3)
+        finally:
+            if previous_specific is None:
+                os.environ.pop("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY"] = previous_specific
+            if previous_global is None:
+                os.environ.pop("SOFASCORE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = previous_global
 
 
 class _FakeOrchestrator:

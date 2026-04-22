@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 import unittest
 
-from schema_inspector.queue.streams import STREAM_HYDRATE, StreamEntry
+from schema_inspector.queue.streams import STREAM_HISTORICAL_HYDRATE, STREAM_HYDRATE, StreamEntry
 
 
 class HydrateWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -70,6 +71,58 @@ class HydrateWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         await worker.retry_later(entry, RuntimeError("deadlock detected"), delay_ms=20_000)
 
         self.assertEqual(worker.delayed_scheduler.calls, [("job-9", 1_800_000_020_000)])
+
+    async def test_hydrate_worker_honours_worker_specific_concurrency_env(self) -> None:
+        from schema_inspector.workers.hydrate_worker import HydrateWorker
+
+        previous_specific = os.environ.get("SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY")
+        previous_global = os.environ.get("SOFASCORE_WORKER_MAX_CONCURRENCY")
+        os.environ["SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY"] = "4"
+        os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = "9"
+        try:
+            worker = HydrateWorker(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                consumer="worker-historical-hydrate-1",
+                stream=STREAM_HISTORICAL_HYDRATE,
+                group="cg:historical_hydrate",
+            )
+            self.assertEqual(worker.runtime.max_concurrency, 4)
+        finally:
+            if previous_specific is None:
+                os.environ.pop("SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY"] = previous_specific
+            if previous_global is None:
+                os.environ.pop("SOFASCORE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = previous_global
+
+    async def test_hydrate_worker_falls_back_to_global_concurrency_env(self) -> None:
+        from schema_inspector.workers.hydrate_worker import HydrateWorker
+
+        previous_global = os.environ.get("SOFASCORE_WORKER_MAX_CONCURRENCY")
+        previous_specific = os.environ.get("SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY")
+        os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = "5"
+        os.environ.pop("SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY", None)
+        try:
+            worker = HydrateWorker(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                consumer="worker-hydrate-1",
+            )
+            self.assertEqual(worker.runtime.max_concurrency, 5)
+        finally:
+            if previous_global is None:
+                os.environ.pop("SOFASCORE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_WORKER_MAX_CONCURRENCY"] = previous_global
+            if previous_specific is None:
+                os.environ.pop("SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY", None)
+            else:
+                os.environ["SOFASCORE_HYDRATE_WORKER_MAX_CONCURRENCY"] = previous_specific
 
 
 class _FakeOrchestrator:

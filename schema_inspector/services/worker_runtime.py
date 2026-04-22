@@ -46,6 +46,36 @@ def _env_positive_int(name: str, default: int) -> int:
     return value
 
 
+def _env_optional_positive_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; ignoring worker-specific override", name, raw)
+        return None
+    if value < 1:
+        logger.warning("%s must be >= 1 (got %d); ignoring worker-specific override", name, value)
+        return None
+    return value
+
+
+def resolve_worker_max_concurrency(
+    *,
+    default: int,
+    explicit: int | None = None,
+    env_names: tuple[str, ...] = (),
+) -> int:
+    if explicit is not None:
+        return max(1, int(explicit))
+    for name in env_names:
+        value = _env_optional_positive_int(name)
+        if value is not None:
+            return value
+    return _env_positive_int(_ENV_MAX_CONCURRENCY, default)
+
+
 class WorkerRuntime:
     """Runs a single consumer loop with graceful shutdown and delayed requeue hooks."""
 

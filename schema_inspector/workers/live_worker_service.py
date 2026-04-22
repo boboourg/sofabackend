@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from ..queue.streams import GROUP_LIVE_HOT, GROUP_LIVE_WARM, STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
-from ..services.worker_runtime import WorkerRuntime
+from ..services.worker_runtime import WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
 
 
@@ -38,9 +38,15 @@ class LiveWorkerService:
         self.default_sport_slug = default_sport_slug
         stream = STREAM_LIVE_HOT if normalized_lane == "hot" else STREAM_LIVE_WARM
         group = GROUP_LIVE_HOT if normalized_lane == "hot" else GROUP_LIVE_WARM
-        resolved_max_concurrency = 1 if normalized_lane == "hot" else 2
-        if max_concurrency is not None:
-            resolved_max_concurrency = max(1, int(max_concurrency))
+        resolved_max_concurrency = resolve_worker_max_concurrency(
+            default=1 if normalized_lane == "hot" else 2,
+            explicit=max_concurrency,
+            env_names=(
+                ("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",)
+                if normalized_lane == "hot"
+                else ("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",)
+            ),
+        )
         self.runtime = WorkerRuntime(
             name=f"live-{normalized_lane}-worker",
             queue=queue,
