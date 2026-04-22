@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -11,11 +12,19 @@ from .event_detail_parser import EventDetailBundle, EventDetailParser
 from .event_detail_repository import EventDetailRepository, EventDetailWriteResult
 
 
+@dataclass
+class EventDetailIngestProfile:
+    upstream_fetch_ms: int = 0
+    parse_ms: int = 0
+    db_persist_ms: int = 0
+
+
 @dataclass(frozen=True)
 class EventDetailIngestResult:
     event_id: int
     provider_ids: tuple[int, ...]
     parsed: EventDetailBundle
+    profile: EventDetailIngestProfile
     written: EventDetailWriteResult
 
 
@@ -43,7 +52,17 @@ class EventDetailIngestJob:
         timeout: float = 20.0,
     ) -> EventDetailIngestResult:
         resolved_provider_ids = tuple(dict.fromkeys(provider_ids))
-        bundle = await self.parser.fetch_bundle(event_id, provider_ids=resolved_provider_ids, timeout=timeout)
+        profile = EventDetailIngestProfile()
+        parse_started = time.perf_counter()
+        bundle = await self.parser.fetch_bundle(
+            event_id,
+            provider_ids=resolved_provider_ids,
+            timeout=timeout,
+            profile=profile,
+        )
+        parse_elapsed_ms = round((time.perf_counter() - parse_started) * 1000)
+        profile.parse_ms = max(parse_elapsed_ms - profile.upstream_fetch_ms, 0)
+        persist_started = time.perf_counter()
         async with self.database.transaction() as connection:
             try:
                 write_result = await self.repository.upsert_bundle(connection, bundle)
@@ -56,6 +75,7 @@ class EventDetailIngestJob:
                         "`2026-04-17_event_player_analytics.sql`."
                     ) from exc
                 raise
+        profile.db_persist_ms = round((time.perf_counter() - persist_started) * 1000)
         self.logger.info(
             "Event-detail ingest completed: event_id=%s players=%s markets=%s",
             event_id,
@@ -66,6 +86,7 @@ class EventDetailIngestJob:
             event_id=event_id,
             provider_ids=resolved_provider_ids,
             parsed=bundle,
+            profile=profile,
             written=write_result,
         )
 

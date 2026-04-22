@@ -27,6 +27,9 @@ class EventDetailBackfillResult:
     processed: int
     succeeded: int
     failed: int
+    upstream_fetch_ms: int
+    parse_ms: int
+    db_persist_ms: int
     items: tuple[EventDetailBackfillItem, ...]
 
 
@@ -132,17 +135,42 @@ class EventDetailBackfillJob:
         items = tuple(await asyncio.gather(*(_run_one(event_id) for event_id in event_ids)))
         succeeded = sum(1 for item in items if item.success)
         failed = len(items) - succeeded
+        upstream_fetch_ms = sum(
+            item.result.profile.upstream_fetch_ms
+            for item in items
+            if item.result is not None
+        )
+        parse_ms = sum(
+            item.result.profile.parse_ms
+            for item in items
+            if item.result is not None
+        )
+        db_persist_ms = sum(
+            item.result.profile.db_persist_ms
+            for item in items
+            if item.result is not None
+        )
         self.logger.info(
             "Event-detail backfill completed: candidates=%s succeeded=%s failed=%s",
             len(event_ids),
             succeeded,
             failed,
         )
+        self.logger.info(
+            "Batch completed. Size: %s. Fetch: %s ms, Parse: %s ms, DB Persist: %s ms.",
+            len(items),
+            upstream_fetch_ms,
+            parse_ms,
+            db_persist_ms,
+        )
         return EventDetailBackfillResult(
             total_candidates=len(event_ids),
             processed=len(items),
             succeeded=succeeded,
             failed=failed,
+            upstream_fetch_ms=upstream_fetch_ms,
+            parse_ms=parse_ms,
+            db_persist_ms=db_persist_ms,
             items=items,
         )
 

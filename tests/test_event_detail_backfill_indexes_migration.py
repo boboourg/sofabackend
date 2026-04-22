@@ -49,6 +49,26 @@ class EventDetailBackfillIndexesMigrationTests(unittest.TestCase):
         self.assertNotIn("BEGIN;", sql)
         self.assertNotIn("COMMIT;", sql)
 
+    def test_api_payload_snapshot_lookup_index_drop_migration_exists(self) -> None:
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "migrations"
+            / "2026-04-24_drop_api_payload_snapshot_event_detail_lookup_idx.sql"
+        )
+        self.assertTrue(path.exists(), str(path))
+
+    def test_api_payload_snapshot_lookup_index_drop_migration_declares_concurrent_drop(self) -> None:
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "migrations"
+            / "2026-04-24_drop_api_payload_snapshot_event_detail_lookup_idx.sql"
+        )
+        sql = path.read_text(encoding="utf-8")
+
+        self.assertIn("DROP INDEX CONCURRENTLY IF EXISTS idx_api_payload_snapshot_event_detail_lookup", sql)
+        self.assertNotIn("BEGIN;", sql)
+        self.assertNotIn("COMMIT;", sql)
+
 
 if __name__ == "__main__":
     unittest.main()

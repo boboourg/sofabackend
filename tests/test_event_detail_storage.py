@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from schema_inspector.competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
 from schema_inspector.endpoints import event_detail_registry_entries
-from schema_inspector.event_detail_job import EventDetailIngestJob
+from schema_inspector.event_detail_job import EventDetailIngestJob, EventDetailIngestProfile
 from schema_inspector.event_detail_parser import (
     EventCommentFeedRecord,
     EventCommentRecord,
@@ -69,8 +70,17 @@ class _FakeParser:
         self.bundle = bundle
         self.calls: list[tuple[int, tuple[int, ...], float]] = []
 
-    async def fetch_bundle(self, event_id: int, *, provider_ids=(1,), timeout: float = 20.0) -> EventDetailBundle:
+    async def fetch_bundle(
+        self,
+        event_id: int,
+        *,
+        provider_ids=(1,),
+        timeout: float = 20.0,
+        profile: EventDetailIngestProfile | None = None,
+    ) -> EventDetailBundle:
         self.calls.append((event_id, tuple(provider_ids), timeout))
+        if profile is not None:
+            object.__setattr__(profile, "upstream_fetch_ms", 17)
         return self.bundle
 
 
@@ -523,6 +533,74 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "db_setup_cli"):
             await job.run(14083191, provider_ids=(1,), timeout=12.5)
+
+    async def test_event_detail_ingest_job_records_stage_profile_breakdown(self) -> None:
+        bundle = _build_bundle()
+        parser = _FakeParser(bundle)
+        repository = _FakeRepository(
+            EventDetailWriteResult(
+                endpoint_registry_rows=1,
+                payload_snapshot_rows=1,
+                sport_rows=1,
+                country_rows=1,
+                category_rows=1,
+                unique_tournament_rows=1,
+                season_rows=1,
+                tournament_rows=1,
+                team_rows=1,
+                venue_rows=1,
+                referee_rows=1,
+                manager_rows=1,
+                manager_performance_rows=1,
+                manager_team_membership_rows=1,
+                player_rows=1,
+                event_status_rows=1,
+                event_rows=1,
+                event_round_info_rows=1,
+                event_status_time_rows=1,
+                event_time_rows=1,
+                event_var_in_progress_rows=1,
+                event_score_rows=1,
+                event_filter_value_rows=1,
+                event_change_item_rows=1,
+                event_manager_assignment_rows=1,
+                event_duel_rows=1,
+                event_pregame_form_rows=1,
+                event_pregame_form_side_rows=1,
+                event_pregame_form_item_rows=1,
+                event_vote_option_rows=1,
+                event_comment_feed_rows=1,
+                event_comment_rows=1,
+                event_graph_rows=1,
+                event_graph_point_rows=1,
+                event_team_heatmap_rows=1,
+                event_team_heatmap_point_rows=1,
+                provider_rows=1,
+                provider_configuration_rows=1,
+                event_market_rows=1,
+                event_market_choice_rows=1,
+                event_winning_odds_rows=1,
+                event_lineup_rows=1,
+                event_lineup_player_rows=1,
+                event_lineup_missing_player_rows=1,
+                event_best_player_entry_rows=1,
+                event_player_statistics_rows=1,
+                event_player_stat_value_rows=1,
+                event_player_rating_breakdown_action_rows=1,
+            )
+        )
+        database = _FakeDatabase(object())
+        job = EventDetailIngestJob(parser, repository, database)
+
+        with patch(
+            "schema_inspector.event_detail_job.time.perf_counter",
+            side_effect=[0.0, 0.050, 0.050, 0.090],
+        ):
+            result = await job.run(14083191)
+
+        self.assertEqual(result.profile.upstream_fetch_ms, 17)
+        self.assertEqual(result.profile.parse_ms, 33)
+        self.assertEqual(result.profile.db_persist_ms, 40)
 
 
 if __name__ == "__main__":
