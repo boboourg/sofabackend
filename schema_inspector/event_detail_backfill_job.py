@@ -52,6 +52,7 @@ class EventDetailBackfillJob:
         limit: int | None = None,
         offset: int = 0,
         only_missing: bool = True,
+        season_ids: Iterable[int] | None = None,
         unique_tournament_ids: Iterable[int] | None = None,
         unique_tournament_id: int | None = None,
         start_timestamp_from: int | None = None,
@@ -60,6 +61,7 @@ class EventDetailBackfillJob:
         concurrency: int = 3,
         timeout: float = 20.0,
     ) -> EventDetailBackfillResult:
+        resolved_season_ids = tuple(dict.fromkeys(int(item) for item in (season_ids or ()) if item is not None))
         resolved_unique_tournament_ids = tuple(
             dict.fromkeys(int(item) for item in (unique_tournament_ids or ()) if item is not None)
         )
@@ -75,6 +77,7 @@ class EventDetailBackfillJob:
             limit=limit,
             offset=offset,
             only_missing=only_missing,
+            season_ids=resolved_season_ids or None,
             unique_tournament_id=unique_tournament_id,
             unique_tournament_ids=resolved_unique_tournament_ids or None,
             start_timestamp_from=start_timestamp_from,
@@ -87,11 +90,12 @@ class EventDetailBackfillJob:
         progress = {"processed": 0, "succeeded": 0, "failed": 0}
 
         self.logger.info(
-            "Event-detail backfill loaded candidates=%s only_missing=%s unique_tournament_id=%s unique_tournament_ids=%s concurrency=%s",
+            "Event-detail backfill loaded candidates=%s only_missing=%s unique_tournament_id=%s unique_tournament_ids=%s season_ids=%s concurrency=%s",
             total_candidates,
             only_missing,
             unique_tournament_id,
             len(resolved_unique_tournament_ids),
+            len(resolved_season_ids),
             max(concurrency, 1),
         )
 
@@ -148,6 +152,7 @@ class EventDetailBackfillJob:
         limit: int | None,
         offset: int,
         only_missing: bool,
+        season_ids: tuple[int, ...] | None,
         unique_tournament_id: int | None,
         unique_tournament_ids: tuple[int, ...] | None,
         start_timestamp_from: int | None,
@@ -169,10 +174,11 @@ class EventDetailBackfillJob:
             )
               AND ($2::bigint IS NULL OR e.unique_tournament_id = $2)
               AND ($3::bigint[] IS NULL OR e.unique_tournament_id = ANY($3))
-              AND ($4::bigint IS NULL OR e.start_timestamp >= $4)
-              AND ($5::bigint IS NULL OR e.start_timestamp <= $5)
+              AND ($4::bigint[] IS NULL OR e.season_id = ANY($4))
+              AND ($5::bigint IS NULL OR e.start_timestamp >= $5)
+              AND ($6::bigint IS NULL OR e.start_timestamp <= $6)
             ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
-            OFFSET $6
+            OFFSET $7
         """
         async with self.database.connection() as connection:
             if resolved_limit is None:
@@ -181,16 +187,18 @@ class EventDetailBackfillJob:
                     only_missing,
                     unique_tournament_id,
                     list(unique_tournament_ids) if unique_tournament_ids else None,
+                    list(season_ids) if season_ids else None,
                     start_timestamp_from,
                     start_timestamp_to,
                     offset,
                 )
             else:
                 rows = await connection.fetch(
-                    f"{sql}\n            LIMIT $7",
+                    f"{sql}\n            LIMIT $8",
                     only_missing,
                     unique_tournament_id,
                     list(unique_tournament_ids) if unique_tournament_ids else None,
+                    list(season_ids) if season_ids else None,
                     start_timestamp_from,
                     start_timestamp_to,
                     offset,

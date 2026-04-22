@@ -225,6 +225,7 @@ async def _run_historical_tournament_event_detail_batch(
         event_detail_result = await event_detail_backfill_job.run(
             limit=event_detail_limit,
             only_missing=True,
+            season_ids=season_ids,
             unique_tournament_ids=(int(unique_tournament_id),),
             start_timestamp_from=recent_window_start,
             start_timestamp_to=recent_window_end,
