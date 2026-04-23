@@ -28,6 +28,8 @@ from .endpoints import (
     EVENT_TENNIS_POWER_ENDPOINT,
     LEADERBOARDS_ENDPOINTS,
     LOCAL_API_SUPPORTED_SPORTS,
+    UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT,
     STANDINGS_ENDPOINTS,
     STATISTICS_ENDPOINTS,
     UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
@@ -97,6 +99,11 @@ _SUPPORTED_TABLES = (
     "player_transfer_history",
     "season",
     "season_group",
+    "season_round",
+    "season_cup_tree",
+    "season_cup_tree_round",
+    "season_cup_tree_block",
+    "season_cup_tree_participant",
     "season_player_of_the_season",
     "season_statistics_config",
     "season_statistics_snapshot",
@@ -567,6 +574,51 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             ],
             source_tables=["api_payload_snapshot"],
         ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds",
+            tag="Competition",
+            operation_id="getUniqueTournamentSeasonRounds",
+            summary_text="Tournament season rounds",
+            description="Season round registry for one unique tournament season, including the current round marker.",
+            response_schema=_ref("SeasonRoundsEnvelope"),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+            ],
+            source_tables=["season_round", "api_payload_snapshot"],
+        ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees",
+            tag="Competition",
+            operation_id="getUniqueTournamentSeasonCupTrees",
+            summary_text="Tournament season cup trees",
+            description="Cup tree / playoff structure for one unique tournament season.",
+            response_schema=_ref("SeasonCupTreesEnvelope"),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+            ],
+            source_tables=[
+                "season_cup_tree",
+                "season_cup_tree_round",
+                "season_cup_tree_block",
+                "season_cup_tree_participant",
+                "api_payload_snapshot",
+            ],
+        ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/brackets": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/brackets",
+            tag="Competition",
+            operation_id="getUniqueTournamentSeasonBrackets",
+            summary_text="Tournament season brackets snapshot",
+            description="Latest stored raw brackets payload for the requested unique tournament season.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+            ],
+            source_tables=["api_payload_snapshot"],
+        ),
         "/api/v1/category/{category_id}/unique-tournaments": op(
             path_template="/api/v1/category/{category_id}/unique-tournaments",
             tag="Categories",
@@ -624,6 +676,16 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
             source_tables=["event", "event_score", "event_round_info", "event_status_time", "event_time"],
         ),
+        "/api/v1/event/{event_id}/statistics": op(
+            path_template="/api/v1/event/{event_id}/statistics",
+            tag="Event Detail",
+            operation_id="getEventStatistics",
+            summary_text="Event statistics",
+            description="Stored event statistics rows for one event.",
+            response_schema=_envelope("statistics", _array(_ref("FreeFormObject"))),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["event_statistic"],
+        ),
         "/api/v1/event/{event_id}/lineups": op(
             path_template="/api/v1/event/{event_id}/lineups",
             tag="Event Detail",
@@ -636,6 +698,16 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             },
             parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
             source_tables=["event_lineup", "event_lineup_player", "event_lineup_missing_player"],
+        ),
+        "/api/v1/event/{event_id}/incidents": op(
+            path_template="/api/v1/event/{event_id}/incidents",
+            tag="Event Detail",
+            operation_id="getEventIncidents",
+            summary_text="Event incidents",
+            description="Stored incident timeline rows for one event.",
+            response_schema=_envelope("incidents", _array(_ref("FreeFormObject"))),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["event_incident"],
         ),
         "/api/v1/event/{event_id}/managers": op(
             path_template="/api/v1/event/{event_id}/managers",
@@ -758,6 +830,52 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             ],
             source_tables=["event_winning_odds"],
         ),
+        "/api/v1/event/{event_id}/best-players/summary": op(
+            path_template="/api/v1/event/{event_id}/best-players/summary",
+            tag="Event Detail",
+            operation_id="getEventBestPlayersSummary",
+            summary_text="Event best players summary",
+            description="Stored best-player summary, including player of the match, for one event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["event_best_player_entry", "player"],
+        ),
+        "/api/v1/event/{event_id}/player/{player_id}/statistics": op(
+            path_template="/api/v1/event/{event_id}/player/{player_id}/statistics",
+            tag="Event Detail",
+            operation_id="getEventPlayerStatistics",
+            summary_text="Event player statistics",
+            description="Per-player event statistics projection for one event/player pair.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[
+                _path_param("event_id", "integer", "Sofascore event ID."),
+                _path_param("player_id", "integer", "Sofascore player ID."),
+            ],
+            source_tables=["event_player_statistics", "event_player_stat_value", "player", "team"],
+        ),
+        "/api/v1/event/{event_id}/player/{player_id}/rating-breakdown": op(
+            path_template="/api/v1/event/{event_id}/player/{player_id}/rating-breakdown",
+            tag="Event Detail",
+            operation_id="getEventPlayerRatingBreakdown",
+            summary_text="Event player rating breakdown",
+            description="Per-player rating-breakdown action feed for one event/player pair.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[
+                _path_param("event_id", "integer", "Sofascore event ID."),
+                _path_param("player_id", "integer", "Sofascore player ID."),
+            ],
+            source_tables=["event_player_rating_breakdown_action"],
+        ),
+        "/api/v1/event/{event_id}/graph/sequence": op(
+            path_template="/api/v1/event/{event_id}/graph/sequence",
+            tag="Special Routes",
+            operation_id="getEventGraphSequence",
+            summary_text="Graph sequence snapshot",
+            description="Latest stored raw graph-sequence payload for one event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot"],
+        ),
         "/api/v1/event/{event_id}/point-by-point": op(
             path_template="/api/v1/event/{event_id}/point-by-point",
             tag="Special Routes",
@@ -810,6 +928,16 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
             response_schema=_ref("FreeFormObject"),
             parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
             source_tables=["api_payload_snapshot", "shotmap_point"],
+        ),
+        "/api/v1/event/{event_id}/weather": op(
+            path_template="/api/v1/event/{event_id}/weather",
+            tag="Special Routes",
+            operation_id="getEventWeather",
+            summary_text="Event weather snapshot",
+            description="Latest stored raw weather payload for one event.",
+            response_schema=_ref("FreeFormObject"),
+            parameters=[_path_param("event_id", "integer", "Sofascore event ID.")],
+            source_tables=["api_payload_snapshot"],
         ),
         EVENT_ESPORTS_GAMES_ENDPOINT.path_template: op(
             path_template=EVENT_ESPORTS_GAMES_ENDPOINT.path_template,
@@ -907,6 +1035,16 @@ def _build_statistics_and_entities_paths(summary: SwaggerDataSummary) -> dict[st
             response_schema=_envelope("player", _ref("Player")),
             parameters=[_path_param("player_id", "integer", "Sofascore player ID.")],
             source_tables=["player"],
+        ),
+        "/api/v1/manager/{manager_id}": op(
+            path_template="/api/v1/manager/{manager_id}",
+            tag="Entities",
+            operation_id="getManager",
+            summary_text="Manager entity",
+            description="Normalized manager entity.",
+            response_schema=_envelope("manager", _ref("Manager")),
+            parameters=[_path_param("manager_id", "integer", "Sofascore manager ID.")],
+            source_tables=["manager"],
         ),
         "/api/v1/player/{player_id}/statistics": op(
             path_template="/api/v1/player/{player_id}/statistics",
@@ -1841,6 +1979,67 @@ def _build_schemas() -> dict[str, Any]:
                     "seasonId": _int64(),
                     "tournamentId": _int64(),
                     "groupName": {"type": "string"},
+                }
+            ),
+            "SeasonRound": _obj(
+                {
+                    "round": _int32(),
+                    "name": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "isCurrent": {"type": "boolean"},
+                }
+            ),
+            "SeasonRoundsEnvelope": _obj(
+                {
+                    "currentRound": _ref("SeasonRound"),
+                    "rounds": _array(_ref("SeasonRound")),
+                }
+            ),
+            "SeasonCupTreeParticipant": _obj(
+                {
+                    "id": _int64(),
+                    "order": _int32(),
+                    "winner": {"type": "boolean"},
+                    "team": _ref("Team"),
+                }
+            ),
+            "SeasonCupTreeBlock": _obj(
+                {
+                    "id": _int64(),
+                    "blockId": _int64(),
+                    "order": _int32(),
+                    "finished": {"type": "boolean"},
+                    "matchesInRound": _int32(),
+                    "result": {"type": "string"},
+                    "homeTeamScore": {"type": "string"},
+                    "awayTeamScore": {"type": "string"},
+                    "participants": _array(_ref("SeasonCupTreeParticipant")),
+                    "hasNextRoundLink": {"type": "boolean"},
+                    "events": {"type": "array", "items": _int64()},
+                    "seriesStartDateTimestamp": _int64(),
+                    "automaticProgression": {"type": "boolean"},
+                }
+            ),
+            "SeasonCupTreeRound": _obj(
+                {
+                    "order": _int32(),
+                    "type": _int32(),
+                    "description": {"type": "string"},
+                    "blocks": _array(_ref("SeasonCupTreeBlock")),
+                }
+            ),
+            "SeasonCupTree": _obj(
+                {
+                    "id": _int64(),
+                    "name": {"type": "string"},
+                    "tournament": _ref("Tournament"),
+                    "currentRound": _int32(),
+                    "rounds": _array(_ref("SeasonCupTreeRound")),
+                }
+            ),
+            "SeasonCupTreesEnvelope": _obj(
+                {
+                    "cupTrees": _array(_ref("SeasonCupTree")),
                 }
             ),
             "PlayerOfTheSeasonEnvelope": _obj(

@@ -27,6 +27,23 @@ def classify_snapshot(snapshot: RawSnapshot) -> str:
         return "event_comments"
     if pattern == "/api/v1/event/{event_id}/graph":
         return "event_graph"
+    if pattern == "/api/v1/event/{event_id}/managers":
+        return "event_managers"
+    if pattern == "/api/v1/event/{event_id}/h2h":
+        return "event_h2h"
+    if pattern == "/api/v1/event/{event_id}/pregame-form":
+        return "event_pregame_form"
+    if pattern == "/api/v1/event/{event_id}/votes":
+        return "event_votes"
+    if pattern == "/api/v1/event/{event_id}/heatmap/{team_id}":
+        return "event_team_heatmap"
+    if pattern in {
+        "/api/v1/event/{event_id}/odds/{provider_id}/all",
+        "/api/v1/event/{event_id}/odds/{provider_id}/featured",
+    }:
+        return "event_odds"
+    if pattern == "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds":
+        return "event_winning_odds"
     if pattern == "/api/v1/event/{event_id}/best-players/summary":
         return "event_best_players"
     if pattern == "/api/v1/event/{event_id}/player/{player_id}/statistics":
@@ -51,6 +68,10 @@ def classify_snapshot(snapshot: RawSnapshot) -> str:
         return "tennis_point_by_point"
     if pattern == "/api/v1/event/{event_id}/tennis-power":
         return "tennis_power"
+    if pattern.endswith("/season/{season_id}/rounds"):
+        return "season_rounds"
+    if pattern.endswith("/season/{season_id}/cuptrees"):
+        return "season_cuptrees"
     if pattern.endswith("/statistics/info"):
         return "season_info"
     if pattern.endswith("/standings/{scope}"):

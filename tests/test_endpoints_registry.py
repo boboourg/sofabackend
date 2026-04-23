@@ -7,6 +7,7 @@ from schema_inspector.endpoints import (
     calendar_months_with_events_endpoint,
     event_detail_endpoints,
     leaderboards_registry_entries_for_sport,
+    season_cuptrees_endpoint,
     season_last_events_endpoint,
     season_next_events_endpoint,
     season_rounds_endpoint,
@@ -36,6 +37,10 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(
             season_rounds_endpoint().path_template,
             "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds",
+        )
+        self.assertEqual(
+            season_cuptrees_endpoint().path_template,
+            "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees",
         )
         self.assertEqual(
             season_last_events_endpoint().path_template,

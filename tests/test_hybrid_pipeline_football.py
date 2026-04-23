@@ -92,6 +92,194 @@ class _FakeCapabilityRepository:
 
 
 class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_football_full_pipeline_fetches_extended_event_detail_routes(self) -> None:
+        event_url = "https://www.sofascore.com/api/v1/event/15868599"
+        statistics_url = "https://www.sofascore.com/api/v1/event/15868599/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/15868599/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/15868599/incidents"
+        managers_url = "https://www.sofascore.com/api/v1/event/15868599/managers"
+        h2h_url = "https://www.sofascore.com/api/v1/event/15868599/h2h"
+        pregame_form_url = "https://www.sofascore.com/api/v1/event/15868599/pregame-form"
+        votes_url = "https://www.sofascore.com/api/v1/event/15868599/votes"
+        comments_url = "https://www.sofascore.com/api/v1/event/15868599/comments"
+        graph_url = "https://www.sofascore.com/api/v1/event/15868599/graph"
+        shotmap_url = "https://www.sofascore.com/api/v1/event/15868599/shotmap"
+        heatmap_home_url = "https://www.sofascore.com/api/v1/event/15868599/heatmap/3002"
+        heatmap_away_url = "https://www.sofascore.com/api/v1/event/15868599/heatmap/3001"
+        odds_all_url = "https://www.sofascore.com/api/v1/event/15868599/odds/1/all"
+        odds_featured_url = "https://www.sofascore.com/api/v1/event/15868599/odds/1/featured"
+        winning_odds_url = "https://www.sofascore.com/api/v1/event/15868599/provider/1/winning-odds"
+
+        transport = _FakeTransport(
+            {
+                event_url: _json_result(
+                    event_url,
+                    {
+                        "event": {
+                            "id": 15868599,
+                            "slug": "fc-porto-sporting-cp",
+                            "tournament": {
+                                "id": 100,
+                                "slug": "primeira-liga",
+                                "name": "Primeira Liga",
+                                "uniqueTournament": {"id": 17, "slug": "primeira-liga", "name": "Primeira Liga"},
+                            },
+                            "season": {"id": 76986, "name": "Primeira Liga 25/26", "year": "25/26"},
+                            "status": {"code": 100, "type": "inprogress", "description": "2nd half"},
+                            "homeTeam": {"id": 3002, "slug": "porto", "name": "FC Porto"},
+                            "awayTeam": {"id": 3001, "slug": "sporting", "name": "Sporting CP"},
+                            "hasEventPlayerHeatMap": True,
+                            "hasXg": True,
+                        }
+                    },
+                ),
+                statistics_url: _json_result(statistics_url, {"statistics": []}),
+                lineups_url: _json_result(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+                incidents_url: _json_result(incidents_url, {"incidents": []}),
+                managers_url: _json_result(
+                    managers_url,
+                    {
+                        "homeManager": {"id": 500, "slug": "martin", "name": "Manager Home"},
+                        "awayManager": {"id": 501, "slug": "borges", "name": "Manager Away"},
+                    },
+                ),
+                h2h_url: _json_result(h2h_url, {"teamDuel": {"homeWins": 1, "awayWins": 2, "draws": 3}}),
+                pregame_form_url: _not_found_result(pregame_form_url),
+                votes_url: _json_result(votes_url, {"vote": {"home": 12, "away": 8}}),
+                comments_url: _json_result(comments_url, {"comments": [], "home": {}, "away": {}}),
+                graph_url: _json_result(graph_url, {"graphPoints": [{"minute": 46, "value": 12}]}),
+                shotmap_url: _json_result(
+                    shotmap_url,
+                    {
+                        "shotmap": [
+                            {
+                                "player": {"id": 701, "slug": "player-a", "name": "Player A"},
+                                "shotType": "goal",
+                                "x": 0.2,
+                                "y": 0.8,
+                            }
+                        ]
+                    },
+                ),
+                heatmap_home_url: _json_result(
+                    heatmap_home_url,
+                    {"playerPoints": [{"x": 0.1, "y": 0.2}], "goalkeeperPoints": []},
+                ),
+                heatmap_away_url: _json_result(
+                    heatmap_away_url,
+                    {"playerPoints": [{"x": 0.3, "y": 0.4}], "goalkeeperPoints": []},
+                ),
+                odds_all_url: _json_result(
+                    odds_all_url,
+                    {
+                        "provider": {"id": 1, "name": "Provider One"},
+                        "providerConfiguration": {"id": 77, "providerId": 1, "type": "main"},
+                        "markets": [
+                            {
+                                "id": 900,
+                                "fid": 44,
+                                "sourceId": 555,
+                                "marketId": 2,
+                                "marketGroup": "Match",
+                                "marketName": "1X2",
+                                "marketPeriod": "ALL",
+                                "structureType": 1,
+                                "isLive": True,
+                                "suspended": False,
+                                "choices": [
+                                    {
+                                        "sourceId": 6001,
+                                        "name": "Home",
+                                        "change": 0,
+                                        "fractionalValue": "2/1",
+                                        "initialFractionalValue": "2/1",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ),
+                odds_featured_url: _json_result(
+                    odds_featured_url,
+                    {
+                        "featured": {
+                            "main": {
+                                "id": 901,
+                                "fid": 45,
+                                "sourceId": 556,
+                                "marketId": 3,
+                                "marketGroup": "Match",
+                                "marketName": "Winner",
+                                "marketPeriod": "ALL",
+                                "structureType": 1,
+                                "isLive": True,
+                                "suspended": False,
+                                "choices": [
+                                    {
+                                        "sourceId": 6002,
+                                        "name": "Away",
+                                        "change": 0,
+                                        "fractionalValue": "3/1",
+                                        "initialFractionalValue": "3/1",
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                ),
+                winning_odds_url: _json_result(
+                    winning_odds_url,
+                    {
+                        "home": {"id": 10, "actual": 52, "expected": 48, "fractionalValue": "1/2"},
+                        "away": {"id": 11, "actual": 48, "expected": 52, "fractionalValue": "7/4"},
+                    },
+                ),
+            }
+        )
+        raw_store = _FakeRawSnapshotStore()
+        capability_repository = _FakeCapabilityRepository()
+        fetch_executor = FetchExecutor(transport=transport, raw_repository=raw_store, sql_executor=object())
+        orchestrator = PilotOrchestrator(
+            fetch_executor=fetch_executor,
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(capability_rollup={}),
+            capability_repository=capability_repository,
+            sql_executor=object(),
+        )
+
+        report = await orchestrator.run_event(event_id=15868599, sport_slug="football", hydration_mode="full")
+
+        for expected_url in (
+            managers_url,
+            h2h_url,
+            pregame_form_url,
+            votes_url,
+            comments_url,
+            graph_url,
+            shotmap_url,
+            heatmap_home_url,
+            heatmap_away_url,
+            odds_all_url,
+            odds_featured_url,
+            winning_odds_url,
+        ):
+            self.assertIn(expected_url, transport.seen_urls)
+
+        self.assertTrue(
+            {
+                "event_managers",
+                "event_h2h",
+                "event_votes",
+                "event_comments",
+                "event_graph",
+                "event_team_heatmap",
+                "event_odds",
+                "event_winning_odds",
+                "shotmap",
+            }.issubset({item.parser_family for item in report.parse_results})
+        )
+
     async def test_football_live_pipeline_fetches_comments_and_graph_from_live_root_state(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/15868599"
         statistics_url = "https://www.sofascore.com/api/v1/event/15868599/statistics"
@@ -697,6 +885,18 @@ def _json_result(url: str, payload: object, *, status_code: int = 200) -> Transp
         headers={"Content-Type": "application/json"},
         body_bytes=json.dumps(payload).encode("utf-8"),
         attempts=(TransportAttempt(1, "proxy_1", status_code, None, None),),
+        final_proxy_name="proxy_1",
+        challenge_reason=None,
+    )
+
+
+def _not_found_result(url: str) -> TransportResult:
+    return TransportResult(
+        resolved_url=url,
+        status_code=404,
+        headers={"Content-Type": "application/json"},
+        body_bytes=json.dumps({"error": {"code": 404, "message": "Not found"}}).encode("utf-8"),
+        attempts=(TransportAttempt(1, "proxy_1", 404, None, None),),
         final_proxy_name="proxy_1",
         challenge_reason=None,
     )

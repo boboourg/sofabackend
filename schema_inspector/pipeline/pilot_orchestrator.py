@@ -12,16 +12,11 @@ from ..endpoints import (
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
-    EVENT_ESPORTS_GAMES_ENDPOINT,
-    EVENT_GRAPH_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
     EVENT_PLAYER_STATISTICS_ENDPOINT,
-    EVENT_POINT_BY_POINT_ENDPOINT,
-    EVENT_SHOTMAP_ENDPOINT,
     EVENT_STATISTICS_ENDPOINT,
-    EVENT_TENNIS_POWER_ENDPOINT,
     MANAGER_ENDPOINT,
     PLAYER_ENDPOINT,
     SofascoreEndpoint,
@@ -31,7 +26,7 @@ from ..endpoints import (
     unique_tournament_top_players_per_game_endpoint,
     unique_tournament_top_teams_endpoint,
 )
-from ..detail_resource_policy import supports_live_detail_resources
+from ..detail_resource_policy import build_event_detail_request_specs
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
@@ -215,13 +210,22 @@ class PilotOrchestrator:
         season_id = None
         unique_tournament_id = None
         start_timestamp = None
+        home_team_id = None
+        away_team_id = None
+        has_event_player_heat_map = None
+        has_xg = None
         if root_parse is not None:
             event_rows = root_parse.entity_upserts.get("event", ())
             season_rows = root_parse.entity_upserts.get("season", ())
             unique_tournament_rows = root_parse.entity_upserts.get("unique_tournament", ())
             if event_rows:
-                status_type = event_rows[0].get("status_type")
-                start_timestamp = event_rows[0].get("start_timestamp")
+                event_row = event_rows[0]
+                status_type = event_row.get("status_type")
+                start_timestamp = event_row.get("start_timestamp")
+                home_team_id = _as_int(event_row.get("home_team_id"))
+                away_team_id = _as_int(event_row.get("away_team_id"))
+                has_event_player_heat_map = event_row.get("has_event_player_heat_map")
+                has_xg = event_row.get("has_xg")
             if season_rows:
                 season_id = season_rows[0].get("id")
             if unique_tournament_rows:
@@ -404,21 +408,26 @@ class PilotOrchestrator:
                     if parsed is not None:
                         parse_results.append(parsed)
 
-        for endpoint in _special_endpoints_for_event(
-            sport_slug,
+        for request_spec in build_event_detail_request_specs(
+            sport_slug=sport_slug,
             status_type=status_type,
+            team_ids=tuple(team_id for team_id in (home_team_id, away_team_id) if isinstance(team_id, int)),
+            provider_ids=(1,),
+            has_event_player_heat_map=has_event_player_heat_map,
+            has_xg=has_xg,
             core_only=core_only,
         ):
+            endpoint = request_spec.endpoint
             if (
                 sport_slug == "baseball"
-                and endpoint.pattern == EVENT_COMMENTS_ENDPOINT.pattern
+                and endpoint.pattern == "/api/v1/event/{event_id}/comments"
                 and baseball_seen_at_bats
             ):
                 continue
             outcome, parsed = await self._fetch_and_parse(
                 endpoint=endpoint,
                 sport_slug=sport_slug,
-                path_params={"event_id": event_id},
+                path_params=request_spec.resolved_path_params(event_id=event_id),
                 context_entity_type="event",
                 context_entity_id=event_id,
                 context_event_id=event_id,
@@ -742,7 +751,7 @@ def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
         "statistics": EVENT_STATISTICS_ENDPOINT,
         "lineups": EVENT_LINEUPS_ENDPOINT,
         "incidents": EVENT_INCIDENTS_ENDPOINT,
-        "graph": EVENT_GRAPH_ENDPOINT,
+        "graph": None,
     }
     return mapping.get(edge_kind)
 
@@ -754,43 +763,6 @@ def _endpoint_for_special_kind(special_kind: str) -> SofascoreEndpoint | None:
         "event_player_rating_breakdown": EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
     }
     return mapping.get(special_kind)
-
-
-def _special_endpoints_for_sport(sport_slug: str, *, core_only: bool = False) -> tuple[SofascoreEndpoint, ...]:
-    adapter = resolve_sport_adapter(sport_slug)
-    family_map = {
-        "tennis_point_by_point": EVENT_POINT_BY_POINT_ENDPOINT,
-        "tennis_power": EVENT_TENNIS_POWER_ENDPOINT,
-        "baseball_innings": EVENT_BASEBALL_INNINGS_ENDPOINT,
-        "shotmap": EVENT_SHOTMAP_ENDPOINT,
-        "esports_games": EVENT_ESPORTS_GAMES_ENDPOINT,
-    }
-    core_enabled_families = {"baseball_innings", "esports_games"}
-    return tuple(
-        family_map[family]
-        for family in adapter.special_families
-        if family in family_map and (not core_only or family in core_enabled_families)
-    )
-
-
-def _special_endpoints_for_event(
-    sport_slug: str,
-    *,
-    status_type: str | None,
-    core_only: bool = False,
-) -> tuple[SofascoreEndpoint, ...]:
-    endpoints = list(_special_endpoints_for_sport(sport_slug, core_only=core_only))
-    if supports_live_detail_resources(status_type):
-        endpoints.append(EVENT_COMMENTS_ENDPOINT)
-
-    deduped: list[SofascoreEndpoint] = []
-    seen_patterns: set[str] = set()
-    for endpoint in endpoints:
-        if endpoint.pattern in seen_patterns:
-            continue
-        seen_patterns.add(endpoint.pattern)
-        deduped.append(endpoint)
-    return tuple(deduped)
 
 
 def _endpoint_for_widget_job(params: dict[str, Any]) -> SofascoreEndpoint | None:

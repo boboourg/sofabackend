@@ -163,6 +163,8 @@ def _normalize_entity(
             "status_code": _as_int(status.get("code")) if status is not None else None,
             "status_type": _as_str(status.get("type")) if status is not None else None,
             "start_timestamp": _as_int(mapping.get("startTimestamp")),
+            "has_event_player_heat_map": _as_bool(mapping.get("hasEventPlayerHeatMap")),
+            "has_xg": _as_bool(mapping.get("hasXg")),
         }
     if entity_type == "team":
         entity_id = _as_int(mapping.get("id"))

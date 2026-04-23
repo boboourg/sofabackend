@@ -100,12 +100,6 @@ UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT = SofascoreEndpoint(
     notes="Hydrates season metadata and newcomer teams; raw payload should also be snapshotted.",
 )
 
-COMPETITION_ENDPOINTS = (
-    UNIQUE_TOURNAMENT_ENDPOINT,
-    UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
-    UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
-)
-
 def sport_date_categories_endpoint(sport_slug: str = "football") -> SofascoreEndpoint:
     normalized_sport_slug = _normalize_sport_slug(sport_slug)
     return SofascoreEndpoint(
@@ -271,8 +265,31 @@ def season_rounds_endpoint() -> SofascoreEndpoint:
     return SofascoreEndpoint(
         path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds",
         envelope_key="rounds",
-        target_table="api_payload_snapshot",
+        target_table="season_round",
     )
+
+
+def season_cuptrees_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees",
+        envelope_key="cupTrees",
+        target_table="season_cup_tree",
+        notes="Cup tree / playoff structure payload with nested rounds, blocks and participants.",
+    )
+
+
+UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT = season_rounds_endpoint()
+
+UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT = season_cuptrees_endpoint()
+
+
+COMPETITION_ENDPOINTS = (
+    UNIQUE_TOURNAMENT_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT,
+)
 
 
 def season_last_events_endpoint() -> SofascoreEndpoint:

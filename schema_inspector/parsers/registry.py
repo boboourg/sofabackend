@@ -10,11 +10,20 @@ from .families.entity_profiles import EntityProfilesParser
 from .families.event_best_players import EventBestPlayersParser
 from .families.event_comments import EventCommentsParser
 from .families.event_graph import EventGraphParser
+from .families.event_h2h import EventH2HParser
 from .families.event_incidents import EventIncidentsParser
 from .families.event_lineups import EventLineupsParser
+from .families.event_managers import EventManagersParser
+from .families.event_odds import EventOddsParser
 from .families.event_player_statistics import EventPlayerStatisticsParser
+from .families.event_pregame_form import EventPregameFormParser
 from .families.event_root import EventRootParser
 from .families.event_statistics import EventStatisticsParser
+from .families.event_team_heatmap import EventTeamHeatmapParser
+from .families.event_votes import EventVotesParser
+from .families.event_winning_odds import EventWinningOddsParser
+from .families.season_cuptrees import SeasonCupTreesParser
+from .families.season_rounds import SeasonRoundsParser
 from .special.baseball_innings import BaseballInningsParser
 from .special.baseball_pitches import BaseballPitchesParser
 from .special.event_player_rating_breakdown import EventPlayerRatingBreakdownParser
@@ -39,7 +48,16 @@ class ParserRegistry:
             EventBestPlayersParser(),
             EventCommentsParser(),
             EventGraphParser(),
+            EventManagersParser(),
+            EventH2HParser(),
+            EventPregameFormParser(),
+            EventVotesParser(),
+            EventTeamHeatmapParser(),
+            EventOddsParser(),
+            EventWinningOddsParser(),
             EventPlayerStatisticsParser(),
+            SeasonRoundsParser(),
+            SeasonCupTreesParser(),
             EntityProfilesParser(),
             BaseballInningsParser(),
             BaseballPitchesParser(),

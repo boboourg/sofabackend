@@ -77,15 +77,28 @@ class NormalizeRepository:
         skip_entity_upserts: bool = False,
     ) -> None:
         inserted = _empty_inserted_tracker()
+        await self._persist_event_statuses(executor, result.metric_rows.get("event_status", ()))
         if not skip_entity_upserts:
             inserted = await self._upsert_minimal_entities(executor, result.entity_upserts)
-        await self._persist_event_statuses(executor, result.metric_rows.get("event_status", ()))
+        await self._persist_season_rounds(executor, result.metric_rows.get("season_round", ()))
+        await self._persist_season_cup_trees(executor, result.metric_rows)
         await self._confirm_lineup_team_refs(executor, result, inserted)
         await self._persist_lineups(executor, result, inserted)
         await self._persist_event_statistics(executor, result.metric_rows.get("event_statistic", ()))
         await self._persist_event_incidents(executor, result.metric_rows.get("event_incident", ()))
+        await self._persist_manager_performances(executor, result.metric_rows.get("manager_performance", ()))
+        await self._persist_event_manager_assignments(executor, result.metric_rows.get("event_manager_assignment", ()))
+        await self._persist_event_duels(executor, result.metric_rows.get("event_duel", ()))
+        await self._persist_event_pregame_forms(executor, result.metric_rows)
+        await self._persist_event_vote_options(executor, result.metric_rows.get("event_vote_option", ()))
         await self._persist_event_comments(executor, result.metric_rows)
+        await self._persist_event_team_heatmaps(executor, result.metric_rows)
         await self._persist_event_graph(executor, result.metric_rows)
+        await self._persist_providers(executor, result.metric_rows.get("provider", ()))
+        await self._persist_provider_configurations(executor, result.metric_rows.get("provider_configuration", ()))
+        await self._persist_event_markets(executor, result.metric_rows.get("event_market", ()))
+        await self._persist_event_market_choices(executor, result.metric_rows.get("event_market_choice", ()))
+        await self._persist_event_winning_odds(executor, result.metric_rows.get("event_winning_odds", ()))
         await self._persist_best_players(executor, result.metric_rows.get("event_best_player_entry", ()))
         await self._persist_event_player_statistics(executor, result.metric_rows.get("event_player_statistics", ()))
         await self._persist_event_player_stat_values(executor, result.metric_rows.get("event_player_stat_value", ()))
@@ -906,6 +919,7 @@ class NormalizeRepository:
                     _as_scalar_text(row.get("statistics_type")),
                 )
             )
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_text(row[2]), _sort_text(row[3])))
         await _executemany(
             executor,
             """
@@ -928,6 +942,7 @@ class NormalizeRepository:
             and _as_scalar_text(row.get("description")) is not None
             and _as_scalar_text(row.get("type")) is not None
         ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_text(row[2])))
         await _executemany(
             executor,
             """
@@ -947,6 +962,20 @@ class NormalizeRepository:
         if event_id is None:
             return
         await executor.execute("DELETE FROM event_incident WHERE event_id = $1", event_id)
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("ordinal"),
+                row.get("incident_id"),
+                row.get("incident_type"),
+                row.get("time"),
+                _as_scalar_text(row.get("home_score")),
+                _as_scalar_text(row.get("away_score")),
+                row.get("text"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_int(row[2])))
         await _executemany(
             executor,
             """
@@ -956,19 +985,167 @@ class NormalizeRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("ordinal"),
-                    row.get("incident_id"),
-                    row.get("incident_type"),
-                    row.get("time"),
-                    _as_scalar_text(row.get("home_score")),
-                    _as_scalar_text(row.get("away_score")),
-                    row.get("text"),
-                )
-                for row in rows
-            ],
+            normalized_rows,
+        )
+
+    async def _persist_manager_performances(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
+        normalized_rows = [
+            (
+                row.get("manager_id"),
+                row.get("total"),
+                row.get("wins"),
+                row.get("draws"),
+                row.get("losses"),
+                row.get("goals_scored"),
+                row.get("goals_conceded"),
+                row.get("total_points"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]),))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO manager_performance (
+                manager_id, total, wins, draws, losses, goals_scored, goals_conceded, total_points
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (manager_id) DO UPDATE SET
+                total = EXCLUDED.total,
+                wins = EXCLUDED.wins,
+                draws = EXCLUDED.draws,
+                losses = EXCLUDED.losses,
+                goals_scored = EXCLUDED.goals_scored,
+                goals_conceded = EXCLUDED.goals_conceded,
+                total_points = EXCLUDED.total_points
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_event_manager_assignments(
+        self,
+        executor: SqlExecutor,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        normalized_rows = [(row.get("event_id"), row.get("side"), row.get("manager_id")) for row in rows]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_int(row[2])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_manager_assignment (event_id, side, manager_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (event_id, side) DO UPDATE SET
+                manager_id = EXCLUDED.manager_id
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_event_duels(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("duel_type"),
+                row.get("home_wins"),
+                row.get("away_wins"),
+                row.get("draws"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_duel (event_id, duel_type, home_wins, away_wins, draws)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (event_id, duel_type) DO UPDATE SET
+                home_wins = EXCLUDED.home_wins,
+                away_wins = EXCLUDED.away_wins,
+                draws = EXCLUDED.draws
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_event_pregame_forms(
+        self,
+        executor: SqlExecutor,
+        metric_rows: dict[str, tuple[Mapping[str, object], ...]],
+    ) -> None:
+        form_rows = [(row.get("event_id"), row.get("label")) for row in metric_rows.get("event_pregame_form", ())]
+        form_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_pregame_form (event_id, label)
+            VALUES ($1, $2)
+            ON CONFLICT (event_id) DO UPDATE SET
+                label = EXCLUDED.label
+            """,
+            form_rows,
+        )
+        side_rows = [
+            (
+                row.get("event_id"),
+                row.get("side"),
+                row.get("avg_rating"),
+                row.get("position"),
+                row.get("value"),
+            )
+            for row in metric_rows.get("event_pregame_form_side", ())
+        ]
+        side_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_pregame_form_side (event_id, side, avg_rating, position, value)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (event_id, side) DO UPDATE SET
+                avg_rating = EXCLUDED.avg_rating,
+                position = EXCLUDED.position,
+                value = EXCLUDED.value
+            """,
+            side_rows,
+        )
+        item_rows = [
+            (
+                row.get("event_id"),
+                row.get("side"),
+                row.get("ordinal"),
+                row.get("form_value"),
+            )
+            for row in metric_rows.get("event_pregame_form_item", ())
+        ]
+        item_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_int(row[2])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_pregame_form_item (event_id, side, ordinal, form_value)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (event_id, side, ordinal) DO UPDATE SET
+                form_value = EXCLUDED.form_value
+            """,
+            item_rows,
+        )
+
+    async def _persist_event_vote_options(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("vote_type"),
+                row.get("option_name"),
+                row.get("vote_count"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_text(row[2])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_vote_option (event_id, vote_type, option_name, vote_count)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (event_id, vote_type, option_name) DO UPDATE SET
+                vote_count = EXCLUDED.vote_count
+            """,
+            normalized_rows,
         )
 
     async def _persist_event_comments(
@@ -979,6 +1156,17 @@ class NormalizeRepository:
         feed_rows = metric_rows.get("event_comment_feed", ())
         comment_rows = metric_rows.get("event_comment", ())
         if feed_rows:
+            normalized_feed_rows = [
+                (
+                    row.get("event_id"),
+                    _jsonb(row.get("home_player_color")),
+                    _jsonb(row.get("home_goalkeeper_color")),
+                    _jsonb(row.get("away_player_color")),
+                    _jsonb(row.get("away_goalkeeper_color")),
+                )
+                for row in feed_rows
+            ]
+            normalized_feed_rows.sort(key=lambda row: (_sort_int(row[0]),))
             await _executemany(
                 executor,
                 """
@@ -992,18 +1180,24 @@ class NormalizeRepository:
                     away_player_color = EXCLUDED.away_player_color,
                     away_goalkeeper_color = EXCLUDED.away_goalkeeper_color
                 """,
-                [
-                    (
-                        row.get("event_id"),
-                        _jsonb(row.get("home_player_color")),
-                        _jsonb(row.get("home_goalkeeper_color")),
-                        _jsonb(row.get("away_player_color")),
-                        _jsonb(row.get("away_goalkeeper_color")),
-                    )
-                    for row in feed_rows
-                ],
+                normalized_feed_rows,
             )
         if comment_rows:
+            normalized_comment_rows = [
+                (
+                    row.get("event_id"),
+                    row.get("comment_id"),
+                    row.get("sequence"),
+                    row.get("period_name"),
+                    row.get("is_home"),
+                    row.get("player_id"),
+                    row.get("text"),
+                    _as_float(row.get("match_time")),
+                    row.get("comment_type"),
+                )
+                for row in comment_rows
+            ]
+            normalized_comment_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_int(row[2])))
             await _executemany(
                 executor,
                 """
@@ -1020,21 +1214,48 @@ class NormalizeRepository:
                     match_time = EXCLUDED.match_time,
                     comment_type = EXCLUDED.comment_type
                 """,
-                [
-                    (
-                        row.get("event_id"),
-                        row.get("comment_id"),
-                        row.get("sequence"),
-                        row.get("period_name"),
-                        row.get("is_home"),
-                        row.get("player_id"),
-                        row.get("text"),
-                        _as_float(row.get("match_time")),
-                        row.get("comment_type"),
-                    )
-                    for row in comment_rows
-                ],
+                normalized_comment_rows,
             )
+
+    async def _persist_event_team_heatmaps(
+        self,
+        executor: SqlExecutor,
+        metric_rows: dict[str, tuple[Mapping[str, object], ...]],
+    ) -> None:
+        heatmap_rows = [(row.get("event_id"), row.get("team_id")) for row in metric_rows.get("event_team_heatmap", ())]
+        heatmap_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_team_heatmap (event_id, team_id)
+            VALUES ($1, $2)
+            ON CONFLICT (event_id, team_id) DO NOTHING
+            """,
+            heatmap_rows,
+        )
+        heatmap_point_rows = [
+            (
+                row.get("event_id"),
+                row.get("team_id"),
+                row.get("point_type"),
+                row.get("ordinal"),
+                row.get("x"),
+                row.get("y"),
+            )
+            for row in metric_rows.get("event_team_heatmap_point", ())
+        ]
+        heatmap_point_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_text(row[2]), _sort_int(row[3])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_team_heatmap_point (event_id, team_id, point_type, ordinal, x, y)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (event_id, team_id, point_type, ordinal) DO UPDATE SET
+                x = EXCLUDED.x,
+                y = EXCLUDED.y
+            """,
+            heatmap_point_rows,
+        )
 
     async def _persist_event_graph(
         self,
@@ -1065,14 +1286,405 @@ class NormalizeRepository:
                 row.get("overtime_length"),
             )
         await executor.execute("DELETE FROM event_graph_point WHERE event_id = $1", event_id)
+        point_rows_sorted = [
+            (row.get("event_id"), row.get("ordinal"), row.get("minute"), row.get("value")) for row in point_rows
+        ]
+        point_rows_sorted.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1])))
         await _executemany(
             executor,
             """
             INSERT INTO event_graph_point (event_id, ordinal, minute, value)
             VALUES ($1, $2, $3, $4)
             """,
-            [(row.get("event_id"), row.get("ordinal"), row.get("minute"), row.get("value")) for row in point_rows],
+            point_rows_sorted,
         )
+
+    async def _persist_providers(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
+        normalized_rows = [
+            (
+                row.get("id"),
+                row.get("slug"),
+                row.get("name"),
+                row.get("country"),
+                row.get("default_bet_slip_link"),
+                _jsonb(row.get("colors")),
+                row.get("odds_from_provider_id"),
+                row.get("live_odds_from_provider_id"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]),))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO provider (
+                id, slug, name, country, default_bet_slip_link, colors,
+                odds_from_provider_id, live_odds_from_provider_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+            ON CONFLICT (id) DO UPDATE SET
+                slug = COALESCE(EXCLUDED.slug, provider.slug),
+                name = COALESCE(EXCLUDED.name, provider.name),
+                country = COALESCE(EXCLUDED.country, provider.country),
+                default_bet_slip_link = COALESCE(EXCLUDED.default_bet_slip_link, provider.default_bet_slip_link),
+                colors = COALESCE(EXCLUDED.colors, provider.colors),
+                odds_from_provider_id = COALESCE(EXCLUDED.odds_from_provider_id, provider.odds_from_provider_id),
+                live_odds_from_provider_id = COALESCE(
+                    EXCLUDED.live_odds_from_provider_id,
+                    provider.live_odds_from_provider_id
+                )
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_provider_configurations(
+        self,
+        executor: SqlExecutor,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        normalized_rows = [
+            (
+                row.get("id"),
+                row.get("campaign_id"),
+                row.get("provider_id"),
+                row.get("fallback_provider_id"),
+                row.get("type"),
+                row.get("weight"),
+                row.get("branded"),
+                row.get("featured_odds_type"),
+                row.get("bet_slip_link"),
+                row.get("default_bet_slip_link"),
+                row.get("impression_cost_encrypted"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]),))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO provider_configuration (
+                id, campaign_id, provider_id, fallback_provider_id, type, weight,
+                branded, featured_odds_type, bet_slip_link, default_bet_slip_link,
+                impression_cost_encrypted
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (id) DO UPDATE SET
+                campaign_id = EXCLUDED.campaign_id,
+                provider_id = EXCLUDED.provider_id,
+                fallback_provider_id = EXCLUDED.fallback_provider_id,
+                type = EXCLUDED.type,
+                weight = EXCLUDED.weight,
+                branded = EXCLUDED.branded,
+                featured_odds_type = EXCLUDED.featured_odds_type,
+                bet_slip_link = EXCLUDED.bet_slip_link,
+                default_bet_slip_link = EXCLUDED.default_bet_slip_link,
+                impression_cost_encrypted = EXCLUDED.impression_cost_encrypted
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_event_markets(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
+        normalized_rows = [
+            (
+                row.get("id"),
+                row.get("event_id"),
+                row.get("provider_id"),
+                row.get("fid"),
+                row.get("market_id"),
+                row.get("source_id"),
+                row.get("market_group"),
+                row.get("market_name"),
+                row.get("market_period"),
+                row.get("structure_type"),
+                row.get("choice_group"),
+                row.get("is_live"),
+                row.get("suspended"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]),))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_market (
+                id, event_id, provider_id, fid, market_id, source_id,
+                market_group, market_name, market_period, structure_type,
+                choice_group, is_live, suspended
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (id) DO UPDATE SET
+                event_id = EXCLUDED.event_id,
+                provider_id = EXCLUDED.provider_id,
+                fid = EXCLUDED.fid,
+                market_id = EXCLUDED.market_id,
+                source_id = EXCLUDED.source_id,
+                market_group = EXCLUDED.market_group,
+                market_name = EXCLUDED.market_name,
+                market_period = EXCLUDED.market_period,
+                structure_type = EXCLUDED.structure_type,
+                choice_group = EXCLUDED.choice_group,
+                is_live = EXCLUDED.is_live,
+                suspended = EXCLUDED.suspended
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_event_market_choices(
+        self,
+        executor: SqlExecutor,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        normalized_rows = [
+            (
+                row.get("source_id"),
+                row.get("event_market_id"),
+                row.get("name"),
+                row.get("change_value"),
+                row.get("fractional_value"),
+                row.get("initial_fractional_value"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]),))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_market_choice (
+                source_id, event_market_id, name, change_value, fractional_value, initial_fractional_value
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (source_id) DO UPDATE SET
+                event_market_id = EXCLUDED.event_market_id,
+                name = EXCLUDED.name,
+                change_value = EXCLUDED.change_value,
+                fractional_value = EXCLUDED.fractional_value,
+                initial_fractional_value = EXCLUDED.initial_fractional_value
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_event_winning_odds(
+        self,
+        executor: SqlExecutor,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("provider_id"),
+                row.get("side"),
+                row.get("odds_id"),
+                row.get("actual"),
+                row.get("expected"),
+                row.get("fractional_value"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_text(row[2])))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO event_winning_odds (
+                event_id, provider_id, side, odds_id, actual, expected, fractional_value
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (event_id, provider_id, side) DO UPDATE SET
+                odds_id = EXCLUDED.odds_id,
+                actual = EXCLUDED.actual,
+                expected = EXCLUDED.expected,
+                fractional_value = EXCLUDED.fractional_value
+            """,
+            normalized_rows,
+        )
+
+    async def _persist_season_rounds(
+        self,
+        executor: SqlExecutor,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        if not rows:
+            return
+        scopes = sorted(
+            {
+                (_as_int(row.get("unique_tournament_id")), _as_int(row.get("season_id")))
+                for row in rows
+                if _as_int(row.get("unique_tournament_id")) is not None and _as_int(row.get("season_id")) is not None
+            }
+        )
+        for unique_tournament_id, season_id in scopes:
+            await executor.execute(
+                """
+                DELETE FROM season_round
+                WHERE unique_tournament_id = $1 AND season_id = $2
+                """,
+                unique_tournament_id,
+                season_id,
+            )
+        await _executemany(
+            executor,
+            """
+            INSERT INTO season_round (
+                unique_tournament_id, season_id, round_number, round_name, round_slug, is_current
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            [
+                (
+                    row.get("unique_tournament_id"),
+                    row.get("season_id"),
+                    row.get("round_number"),
+                    row.get("round_name"),
+                    row.get("round_slug"),
+                    row.get("is_current"),
+                )
+                for row in sorted(
+                    rows,
+                    key=lambda row: (
+                        _as_int(row.get("unique_tournament_id")) or 0,
+                        _as_int(row.get("season_id")) or 0,
+                        _as_int(row.get("round_number")) or 0,
+                    ),
+                )
+            ],
+        )
+
+    async def _persist_season_cup_trees(
+        self,
+        executor: SqlExecutor,
+        metric_rows: dict[str, tuple[Mapping[str, object], ...]],
+    ) -> None:
+        cup_tree_rows = metric_rows.get("season_cup_tree", ())
+        if not cup_tree_rows:
+            return
+        scopes = sorted(
+            {
+                (_as_int(row.get("unique_tournament_id")), _as_int(row.get("season_id")))
+                for row in cup_tree_rows
+                if _as_int(row.get("unique_tournament_id")) is not None and _as_int(row.get("season_id")) is not None
+            }
+        )
+        for unique_tournament_id, season_id in scopes:
+            await executor.execute(
+                """
+                DELETE FROM season_cup_tree
+                WHERE unique_tournament_id = $1 AND season_id = $2
+                """,
+                unique_tournament_id,
+                season_id,
+            )
+
+        await _executemany(
+            executor,
+            """
+            INSERT INTO season_cup_tree (
+                cup_tree_id, unique_tournament_id, season_id, tournament_id, name, current_round
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            [
+                (
+                    row.get("cup_tree_id"),
+                    row.get("unique_tournament_id"),
+                    row.get("season_id"),
+                    row.get("tournament_id"),
+                    row.get("name"),
+                    row.get("current_round"),
+                )
+                for row in sorted(
+                    cup_tree_rows,
+                    key=lambda row: (_as_int(row.get("season_id")) or 0, _as_int(row.get("cup_tree_id")) or 0),
+                )
+            ],
+        )
+
+        round_rows = metric_rows.get("season_cup_tree_round", ())
+        if round_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO season_cup_tree_round (
+                    cup_tree_id, round_order, round_type, description
+                )
+                VALUES ($1, $2, $3, $4)
+                """,
+                [
+                    (
+                        row.get("cup_tree_id"),
+                        row.get("round_order"),
+                        row.get("round_type"),
+                        row.get("description"),
+                    )
+                    for row in sorted(
+                        round_rows,
+                        key=lambda row: (_as_int(row.get("cup_tree_id")) or 0, _as_int(row.get("round_order")) or 0),
+                    )
+                ],
+            )
+
+        block_rows = metric_rows.get("season_cup_tree_block", ())
+        if block_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO season_cup_tree_block (
+                    entry_id, cup_tree_id, round_order, block_id, block_order, finished,
+                    matches_in_round, result, home_team_score, away_team_score,
+                    has_next_round_link, series_start_date_timestamp, automatic_progression, event_ids_json
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+                """,
+                [
+                    (
+                        row.get("entry_id"),
+                        row.get("cup_tree_id"),
+                        row.get("round_order"),
+                        row.get("block_id"),
+                        row.get("block_order"),
+                        row.get("finished"),
+                        row.get("matches_in_round"),
+                        row.get("result"),
+                        row.get("home_team_score"),
+                        row.get("away_team_score"),
+                        row.get("has_next_round_link"),
+                        row.get("series_start_date_timestamp"),
+                        row.get("automatic_progression"),
+                        _jsonb(row.get("event_ids_json")),
+                    )
+                    for row in sorted(
+                        block_rows,
+                        key=lambda row: (
+                            _as_int(row.get("cup_tree_id")) or 0,
+                            _as_int(row.get("round_order")) or 0,
+                            _as_int(row.get("entry_id")) or 0,
+                        ),
+                    )
+                ],
+            )
+
+        participant_rows = metric_rows.get("season_cup_tree_participant", ())
+        if participant_rows:
+            await _executemany(
+                executor,
+                """
+                INSERT INTO season_cup_tree_participant (
+                    participant_id, entry_id, team_id, order_value, winner
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                [
+                    (
+                        row.get("participant_id"),
+                        row.get("entry_id"),
+                        row.get("team_id"),
+                        row.get("order_value"),
+                        row.get("winner"),
+                    )
+                    for row in sorted(
+                        participant_rows,
+                        key=lambda row: (_as_int(row.get("entry_id")) or 0, _as_int(row.get("participant_id")) or 0),
+                    )
+                ],
+            )
 
     async def _persist_best_players(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
         if not rows:
@@ -1081,6 +1693,20 @@ class NormalizeRepository:
         if event_id is None:
             return
         await executor.execute("DELETE FROM event_best_player_entry WHERE event_id = $1", event_id)
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("bucket"),
+                row.get("ordinal"),
+                row.get("player_id"),
+                row.get("label"),
+                row.get("value_text"),
+                row.get("value_numeric"),
+                row.get("is_player_of_the_match"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_int(row[2]), _sort_int(row[3])))
         await _executemany(
             executor,
             """
@@ -1089,19 +1715,7 @@ class NormalizeRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("bucket"),
-                    row.get("ordinal"),
-                    row.get("player_id"),
-                    row.get("label"),
-                    row.get("value_text"),
-                    row.get("value_numeric"),
-                    row.get("is_player_of_the_match"),
-                )
-                for row in rows
-            ],
+            normalized_rows,
         )
 
     async def _persist_event_player_statistics(
@@ -1111,6 +1725,22 @@ class NormalizeRepository:
     ) -> None:
         if not rows:
             return
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("player_id"),
+                row.get("team_id"),
+                row.get("position"),
+                row.get("rating"),
+                row.get("rating_original"),
+                row.get("rating_alternative"),
+                row.get("statistics_type"),
+                row.get("sport_slug"),
+                _jsonb(row.get("extra_json")),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1])))
         await _executemany(
             executor,
             """
@@ -1129,21 +1759,7 @@ class NormalizeRepository:
                 sport_slug = EXCLUDED.sport_slug,
                 extra_json = EXCLUDED.extra_json
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("player_id"),
-                    row.get("team_id"),
-                    row.get("position"),
-                    row.get("rating"),
-                    row.get("rating_original"),
-                    row.get("rating_alternative"),
-                    row.get("statistics_type"),
-                    row.get("sport_slug"),
-                    _jsonb(row.get("extra_json")),
-                )
-                for row in rows
-            ],
+            normalized_rows,
         )
 
     async def _persist_event_player_stat_values(
@@ -1166,6 +1782,18 @@ class NormalizeRepository:
                 event_id,
                 player_id,
             )
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("player_id"),
+                row.get("stat_name"),
+                row.get("stat_value_numeric"),
+                row.get("stat_value_text"),
+                _jsonb(row.get("stat_value_json")),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_text(row[2])))
         await _executemany(
             executor,
             """
@@ -1174,17 +1802,7 @@ class NormalizeRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6::jsonb)
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("player_id"),
-                    row.get("stat_name"),
-                    row.get("stat_value_numeric"),
-                    row.get("stat_value_text"),
-                    _jsonb(row.get("stat_value_json")),
-                )
-                for row in rows
-            ],
+            normalized_rows,
         )
 
     async def _persist_event_player_rating_breakdown(
@@ -1207,6 +1825,24 @@ class NormalizeRepository:
                 event_id,
                 player_id,
             )
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("player_id"),
+                row.get("action_group"),
+                row.get("ordinal"),
+                row.get("event_action_type"),
+                row.get("is_home"),
+                row.get("keypass"),
+                row.get("outcome"),
+                row.get("start_x"),
+                row.get("start_y"),
+                row.get("end_x"),
+                row.get("end_y"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_text(row[2]), _sort_int(row[3])))
         await _executemany(
             executor,
             """
@@ -1216,23 +1852,7 @@ class NormalizeRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("player_id"),
-                    row.get("action_group"),
-                    row.get("ordinal"),
-                    row.get("event_action_type"),
-                    row.get("is_home"),
-                    row.get("keypass"),
-                    row.get("outcome"),
-                    row.get("start_x"),
-                    row.get("start_y"),
-                    row.get("end_x"),
-                    row.get("end_y"),
-                )
-                for row in rows
-            ],
+            normalized_rows,
         )
 
     async def _persist_baseball_pitches(
@@ -1255,6 +1875,26 @@ class NormalizeRepository:
                 event_id,
                 at_bat_id,
             )
+        normalized_rows = [
+            (
+                row.get("event_id"),
+                row.get("at_bat_id"),
+                row.get("ordinal"),
+                row.get("pitch_id"),
+                _as_float(row.get("pitch_speed")),
+                _as_scalar_text(row.get("pitch_type")),
+                _as_scalar_text(row.get("pitch_zone")),
+                _as_float(row.get("pitch_x")),
+                _as_float(row.get("pitch_y")),
+                _as_float(row.get("mlb_x")),
+                _as_float(row.get("mlb_y")),
+                _as_scalar_text(row.get("outcome")),
+                row.get("pitcher_id"),
+                row.get("hitter_id"),
+            )
+            for row in rows
+        ]
+        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_int(row[1]), _sort_int(row[2]), _sort_int(row[3])))
         await _executemany(
             executor,
             """
@@ -1264,25 +1904,7 @@ class NormalizeRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             """,
-            [
-                (
-                    row.get("event_id"),
-                    row.get("at_bat_id"),
-                    row.get("ordinal"),
-                    row.get("pitch_id"),
-                    _as_float(row.get("pitch_speed")),
-                    _as_scalar_text(row.get("pitch_type")),
-                    _as_scalar_text(row.get("pitch_zone")),
-                    _as_float(row.get("pitch_x")),
-                    _as_float(row.get("pitch_y")),
-                    _as_float(row.get("mlb_x")),
-                    _as_float(row.get("mlb_y")),
-                    _as_scalar_text(row.get("outcome")),
-                    row.get("pitcher_id"),
-                    row.get("hitter_id"),
-                )
-                for row in rows
-            ],
+            normalized_rows,
         )
 
     async def _replace_event_rows(
@@ -1394,6 +2016,15 @@ def _as_scalar_text(value: object) -> str | None:
     if value is None or isinstance(value, (dict, Mapping, list, tuple)):
         return None
     return str(value)
+
+
+def _sort_int(value: object) -> int:
+    return _as_int(value) if _as_int(value) is not None else -1
+
+
+def _sort_text(value: object) -> str:
+    text = _as_scalar_text(value)
+    return text if text is not None else ""
 
 
 def _empty_inserted_tracker() -> dict[str, set[int]]:
