@@ -333,7 +333,15 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/incidents", transport.seen_urls)
 
 
-def _build_orchestrator(*, transport, live_state_store, stream_queue, now_ms_factory, sql_executor=None):
+def _build_orchestrator(
+    *,
+    transport,
+    live_state_store,
+    stream_queue,
+    now_ms_factory,
+    sql_executor=None,
+    live_bootstrap_coordinator=None,
+):
     raw_store = _FakeRawSnapshotStore()
     sql_executor = sql_executor or object()
     return PilotOrchestrator(
@@ -352,6 +360,7 @@ def _build_orchestrator(*, transport, live_state_store, stream_queue, now_ms_fac
         live_state_store=live_state_store,
         stream_queue=stream_queue,
         now_ms_factory=now_ms_factory,
+        live_bootstrap_coordinator=live_bootstrap_coordinator,
     )
 
 

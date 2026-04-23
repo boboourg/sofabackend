@@ -17,6 +17,7 @@ from .db import AsyncpgDatabase, load_database_config
 from .coverage_policy import lineup_recheck_window_open
 from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
+from .live_bootstrap import LiveBootstrapCoordinator
 from .normalizers.sink import DurableNormalizeSink
 from .normalizers.worker import NormalizeWorker
 from .ops.db_audit import collect_db_audit, persist_audit_coverage
@@ -24,7 +25,7 @@ from .ops.health import collect_health_report
 from .ops.recovery import rebuild_live_state_from_postgres
 from .parsers.base import RawSnapshot
 from .parsers.registry import ParserRegistry
-from .pipeline.pilot_orchestrator import PilotOrchestrator
+from .pipeline.pilot_orchestrator import PilotOrchestrator, PilotRunReport
 from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue
@@ -206,6 +207,11 @@ class HybridApp:
         self.stage_audit_logger = StageAuditLogger(database=database)
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
+        self.live_bootstrap_coordinator = (
+            LiveBootstrapCoordinator(redis_backend=redis_backend, worker_id="hybrid-app")
+            if redis_backend is not None
+            else None
+        )
         self.capability_rollup: dict[str, str] = {}
         self._seeded_endpoint_registry_sports: set[str] = set()
         # Structural sync contour uses a separate non-residential proxy pool.
@@ -256,18 +262,40 @@ class HybridApp:
     ):
         resolved_sport_slug = sport_slug or await self.resolve_event_sport_slug(event_id)
         await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
+        requested_hydration_mode = str(hydration_mode or "full").strip().lower()
+        effective_hydration_mode = requested_hydration_mode
+        should_mark_live_bootstrap = False
+        if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
+            async with self.database.connection() as connection:
+                is_bootstrapped = await self.live_bootstrap_coordinator.is_bootstrapped(connection, event_id=event_id)
+            if not is_bootstrapped:
+                if not self.live_bootstrap_coordinator.acquire_hydrate_lock(event_id=event_id):
+                    return PilotRunReport(
+                        sport_slug=str(resolved_sport_slug or "football"),
+                        event_id=int(event_id),
+                        fetch_outcomes=(),
+                        parse_results=(),
+                    )
+                effective_hydration_mode = "full"
+                should_mark_live_bootstrap = True
         prefetched_run = await self._prefetch_event_run(
             event_id=event_id,
             sport_slug=str(resolved_sport_slug or "football"),
-            hydration_mode=hydration_mode,
+            hydration_mode=effective_hydration_mode,
         )
         self._warn_if_prefetched_run_large(prefetched_run)
         committed_run = await self._commit_prefetched_run(prefetched_run)
-        return await self._persist_prefetched_run(
+        result = await self._persist_prefetched_run(
             committed_run,
-            hydration_mode=hydration_mode,
+            hydration_mode=effective_hydration_mode,
         )
-
+        if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
+            async with self.database.transaction() as connection:
+                if getattr(result, "finalized", False):
+                    await self.live_bootstrap_coordinator.reset_bootstrap(connection, event_id=event_id)
+                elif should_mark_live_bootstrap:
+                    await self.live_bootstrap_coordinator.mark_bootstrapped(connection, event_id=event_id)
+        return result
     async def _prefetch_event_run(
         self,
         *,

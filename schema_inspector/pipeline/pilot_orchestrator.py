@@ -125,6 +125,7 @@ class PilotOrchestrator:
         stream_queue=None,
         now_ms_factory=None,
         season_widget_gate=None,
+        live_bootstrap_coordinator=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -140,6 +141,7 @@ class PilotOrchestrator:
         self.live_state_repository = live_state_repository
         self.stream_queue = stream_queue
         self.season_widget_gate = season_widget_gate
+        self.live_bootstrap_coordinator = live_bootstrap_coordinator
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
@@ -154,7 +156,21 @@ class PilotOrchestrator:
         if self.fetch_executor is None:
             raise RuntimeError("fetch_executor is required for run_event")
 
-        effective_hydration_mode = str(hydration_mode or "full").strip().lower()
+        requested_hydration_mode = str(hydration_mode or "full").strip().lower()
+        effective_hydration_mode = requested_hydration_mode
+        should_mark_live_bootstrap = False
+        if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
+            is_bootstrapped = await self.live_bootstrap_coordinator.is_bootstrapped(self.sql_executor, event_id=event_id)
+            if not is_bootstrapped:
+                if not self.live_bootstrap_coordinator.acquire_hydrate_lock(event_id=event_id):
+                    return PilotRunReport(
+                        sport_slug=sport_slug,
+                        event_id=event_id,
+                        fetch_outcomes=(),
+                        parse_results=(),
+                    )
+                effective_hydration_mode = "full"
+                should_mark_live_bootstrap = True
         core_only = effective_hydration_mode == "core"
         lightweight_only = effective_hydration_mode in {"core", "live_delta"}
         fetch_outcomes: list[FetchOutcomeEnvelope] = []
@@ -335,6 +351,8 @@ class PilotOrchestrator:
                     finalized_at=_latest_fetched_at(final_outcomes) or root_outcome.fetched_at,
                     final_snapshot_id=final_snapshot_id,
                 )
+                if self.live_bootstrap_coordinator is not None:
+                    await self.live_bootstrap_coordinator.reset_bootstrap(self.sql_executor, event_id=event_id)
                 finalized = True
 
         if (
@@ -483,6 +501,9 @@ class PilotOrchestrator:
             )
             fetch_outcomes.extend(child_outcomes)
             parse_results.extend(child_parses)
+
+        if should_mark_live_bootstrap and not finalized and root_outcome.classification in {"success_json", "success_empty_json"}:
+            await self.live_bootstrap_coordinator.mark_bootstrapped(self.sql_executor, event_id=event_id)
 
         await self._flush_capabilities()
 
