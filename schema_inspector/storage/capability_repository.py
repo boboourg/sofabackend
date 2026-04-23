@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Protocol
+
+import orjson
 
 from ._temporal import coerce_timestamptz
 
@@ -155,7 +156,7 @@ class CapabilityRepository:
 def _jsonb(value: object) -> str | None:
     if value is None:
         return None
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
 
 def _merge_rollup_record(existing: Mapping[str, Any], incoming: CapabilityRollupRecord) -> CapabilityRollupRecord:

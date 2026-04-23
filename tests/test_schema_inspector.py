@@ -475,6 +475,53 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_proxy_name, "proxy_1")
         self.assertEqual(result.status_code, 200)
 
+    async def test_sofascore_client_offloads_large_odds_payload_decode(self) -> None:
+        config = RuntimeConfig()
+        mocked_transport_result = TransportResult(
+            resolved_url="https://example.test/api/v1/event/1/odds/1/all",
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            body_bytes=b'{"markets": [{"id": 1}]}',
+            attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+            final_proxy_name="proxy_1",
+            challenge_reason=None,
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            del kwargs
+            return func(*args)
+
+        with patch("schema_inspector.sofascore_client.InspectorTransport.fetch", return_value=mocked_transport_result), patch(
+            "schema_inspector.sofascore_client.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ) as to_thread:
+            client = SofascoreClient(config)
+            result = await client.get_json("https://example.test/api/v1/event/1/odds/1/all")
+
+        self.assertEqual(result.payload, {"markets": [{"id": 1}]})
+        to_thread.assert_called_once()
+
+    async def test_sofascore_client_decodes_small_payload_inline(self) -> None:
+        config = RuntimeConfig()
+        mocked_transport_result = TransportResult(
+            resolved_url="https://example.test/api/v1/event/1",
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            body_bytes=b'{"event": {"id": 1}}',
+            attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+            final_proxy_name="proxy_1",
+            challenge_reason=None,
+        )
+
+        with patch("schema_inspector.sofascore_client.InspectorTransport.fetch", return_value=mocked_transport_result), patch(
+            "schema_inspector.sofascore_client.asyncio.to_thread",
+            side_effect=AssertionError("small payload should not offload"),
+        ):
+            client = SofascoreClient(config)
+            result = await client.get_json("https://example.test/api/v1/event/1")
+
+        self.assertEqual(result.payload, {"event": {"id": 1}})
+
     async def test_sofascore_client_raises_rate_limit_error_on_429(self) -> None:
         config = RuntimeConfig()
         mocked_transport_result = TransportResult(

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
+
+import orjson
 
 from .db import register_post_commit_hook
 from .categories_seed_parser import CategoriesSeedBundle
@@ -291,7 +292,7 @@ async def _executemany(executor: SqlExecutor, command: str, rows: list[tuple[Any
 
 
 def _jsonb(value: object) -> str:
-    return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
 
 def _parse_timestamptz(value: str | None) -> datetime | None:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
+
+import orjson
 
 from .runtime import RuntimeConfig, TransportAttempt, TransportResult
 from .transport import InspectorTransport
@@ -96,8 +98,11 @@ class SofascoreClient:
             raise SofascoreHttpError(message, transport_result=transport_result)
 
         try:
-            payload = json.loads(transport_result.body_bytes.decode("utf-8"))
-        except json.JSONDecodeError as exc:
+            if _should_offload_json_decode(url, transport_result.body_bytes):
+                payload = await asyncio.to_thread(orjson.loads, transport_result.body_bytes)
+            else:
+                payload = orjson.loads(transport_result.body_bytes)
+        except orjson.JSONDecodeError as exc:
             message = f"Response is not valid JSON for {url}: {exc}"
             self.logger.error(message)
             raise SofascoreJsonDecodeError(message, transport_result=transport_result) from exc
@@ -149,3 +154,10 @@ class SofascoreClient:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _should_offload_json_decode(url: str, body_bytes: bytes) -> bool:
+    normalized = url.lower()
+    if any(token in normalized for token in ("/odds/", "/cuptrees", "/heatmap/")):
+        return True
+    return len(body_bytes) >= 262_144

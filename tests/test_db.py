@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from unittest.mock import patch
 import unittest
 
-from schema_inspector.db import AsyncpgDatabase, DatabaseConfig, register_post_commit_hook
+from schema_inspector.db import (
+    AsyncpgDatabase,
+    DatabaseConfig,
+    load_database_config,
+    register_post_commit_hook,
+)
 
 
 class _FakeTransaction:
@@ -74,3 +80,39 @@ class AsyncpgDatabaseTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(connection.transaction_handle.started)
         self.assertFalse(connection.transaction_handle.committed)
         self.assertTrue(connection.transaction_handle.rolled_back)
+
+
+class DatabaseConfigTests(unittest.TestCase):
+    def test_load_database_config_derives_application_name_from_argv(self) -> None:
+        with patch(
+            "schema_inspector.db.sys.argv",
+            ["python", "-m", "schema_inspector.cli", "worker-live-hot", "--consumer-name", "live-hot-1"],
+        ):
+            config = load_database_config(env={"SOFASCORE_DATABASE_URL": "postgresql://localhost/example"})
+
+        self.assertEqual(config.application_name, "schema_inspector.cli-worker-live-hot")
+
+    def test_connect_kwargs_prefer_unix_socket_for_local_linux_dsn(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/sofascore_schema_inspector",
+            application_name="worker-live-hot",
+        )
+
+        kwargs = config.connect_kwargs(platform="linux", socket_dir="/var/run/postgresql")
+
+        self.assertEqual(kwargs["dsn"], config.dsn)
+        self.assertEqual(kwargs["host"], "/var/run/postgresql")
+        self.assertEqual(kwargs["port"], 5432)
+        self.assertEqual(kwargs["server_settings"], {"application_name": "worker-live-hot"})
+
+    def test_connect_kwargs_keep_tcp_on_windows(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/sofascore_schema_inspector",
+            application_name="local_api",
+        )
+
+        kwargs = config.connect_kwargs(platform="win32", socket_dir="/var/run/postgresql")
+
+        self.assertEqual(kwargs["dsn"], config.dsn)
+        self.assertNotIn("host", kwargs)
+        self.assertEqual(kwargs["server_settings"], {"application_name": "local_api"})

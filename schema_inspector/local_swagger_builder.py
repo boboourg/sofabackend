@@ -206,7 +206,7 @@ async def _load_summary(database_url: str | None) -> SwaggerDataSummary:
         return SwaggerDataSummary(generated_at=generated_at, table_counts={}, snapshot_counts={})
 
     database_config = load_database_config(dsn=database_url)
-    connection = await asyncpg.connect(database_config.dsn, command_timeout=database_config.command_timeout)
+    connection = await asyncpg.connect(**database_config.connect_kwargs())
     try:
         table_counts: dict[str, int] = {}
         for table_name in _SUPPORTED_TABLES:

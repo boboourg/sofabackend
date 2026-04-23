@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Mapping, Protocol
+
+import orjson
 
 from ..parsers.base import ParseResult
 from ..services.retry_policy import RetryableJobError
@@ -1978,7 +1979,7 @@ async def _executemany(executor: SqlExecutor, sql: str, rows: list[tuple[object,
 def _jsonb(value: Any) -> str | None:
     if value is None:
         return None
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
 
 def _as_mapping(value: object) -> Mapping[str, object] | None:

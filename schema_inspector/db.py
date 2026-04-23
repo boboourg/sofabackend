@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
+import sys
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Any, Callable
+from urllib.parse import parse_qs, urlsplit
 
 
 _POST_COMMIT_HOOKS: ContextVar[list[Callable[[], None]] | None] = ContextVar(
@@ -40,6 +43,40 @@ class DatabaseConfig:
     min_size: int = 20
     max_size: int = 50
     command_timeout: float = 60.0
+    application_name: str | None = None
+    unix_socket_dir: str | None = None
+
+    def connect_kwargs(
+        self,
+        *,
+        platform: str | None = None,
+        socket_dir: str | None = None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "dsn": self.dsn,
+            "command_timeout": self.command_timeout,
+        }
+        resolved_socket_dir = socket_dir if socket_dir is not None else self.unix_socket_dir
+        socket_host = _resolve_unix_socket_host(self.dsn, platform=platform, socket_dir=resolved_socket_dir)
+        if socket_host is not None:
+            kwargs["host"] = socket_host
+            parsed = urlsplit(self.dsn)
+            if parsed.port is not None:
+                kwargs["port"] = parsed.port
+        if self.application_name:
+            kwargs["server_settings"] = {"application_name": self.application_name}
+        return kwargs
+
+    def pool_kwargs(
+        self,
+        *,
+        platform: str | None = None,
+        socket_dir: str | None = None,
+    ) -> dict[str, Any]:
+        kwargs = self.connect_kwargs(platform=platform, socket_dir=socket_dir)
+        kwargs["min_size"] = self.min_size
+        kwargs["max_size"] = self.max_size
+        return kwargs
 
 
 class AsyncpgDatabase:
@@ -60,12 +97,7 @@ class AsyncpgDatabase:
                 "asyncpg is required for PostgreSQL ingestion. Add it to the environment before running ETL jobs."
             ) from exc
 
-        self._pool = await asyncpg.create_pool(
-            dsn=self.config.dsn,
-            min_size=self.config.min_size,
-            max_size=self.config.max_size,
-            command_timeout=self.config.command_timeout,
-        )
+        self._pool = await asyncpg.create_pool(**self.config.pool_kwargs())
         _reset_registry_sync_caches()
 
     async def close(self) -> None:
@@ -120,6 +152,8 @@ def load_database_config(
     min_size: int | None = None,
     max_size: int | None = None,
     command_timeout: float | None = None,
+    application_name: str | None = None,
+    unix_socket_dir: str | None = None,
 ) -> DatabaseConfig:
     """Build database config from arguments and environment."""
 
@@ -133,7 +167,51 @@ def load_database_config(
         min_size=min_size or _env_int(env, "SOFASCORE_PG_MIN_SIZE", 20),
         max_size=max_size or _env_int(env, "SOFASCORE_PG_MAX_SIZE", 50),
         command_timeout=command_timeout or _env_float(env, "SOFASCORE_PG_COMMAND_TIMEOUT", 60.0),
+        application_name=application_name
+        or env.get("SOFASCORE_PG_APPLICATION_NAME")
+        or _default_application_name(),
+        unix_socket_dir=unix_socket_dir or env.get("SOFASCORE_PG_SOCKET_DIR") or "/var/run/postgresql",
     )
+
+
+def _default_application_name(argv: list[str] | None = None) -> str:
+    raw_argv = list(sys.argv if argv is None else argv)
+    if len(raw_argv) <= 1:
+        return "schema-inspector"
+    remaining = raw_argv[1:]
+    if remaining and remaining[0] == "-m":
+        remaining = remaining[1:]
+    parts: list[str] = []
+    for token in remaining:
+        if token.startswith("-"):
+            break
+        parts.append(token)
+        if len(parts) == 2:
+            break
+    candidate = "-".join(parts) if parts else (Path(raw_argv[0]).stem or "schema-inspector")
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "-", candidate).strip("-")
+    return sanitized or "schema-inspector"
+
+
+def _resolve_unix_socket_host(
+    dsn: str,
+    *,
+    platform: str | None = None,
+    socket_dir: str | None = None,
+) -> str | None:
+    normalized_platform = (platform or sys.platform).lower()
+    if normalized_platform.startswith("win"):
+        return None
+    if not socket_dir:
+        return None
+    parsed = urlsplit(dsn)
+    query = parse_qs(parsed.query)
+    if any(str(value).startswith("/") for value in query.get("host", ())):
+        return None
+    hostname = (parsed.hostname or "").strip().lower()
+    if hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    return socket_dir
 
 
 def _load_project_env() -> dict[str, str]:

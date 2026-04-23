@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
+
+import orjson
 
 from .db import register_post_commit_hook
 from .competition_parser import CompetitionBundle
@@ -496,7 +497,7 @@ async def _executemany(executor: SqlExecutor, sql: str, rows: list[tuple[Any, ..
 def _jsonb(value: Any) -> str | None:
     if value is None:
         return None
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
 
 def _timestamp(value: str | datetime | None) -> datetime | None:

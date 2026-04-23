@@ -109,7 +109,7 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"[db] database `{target_database}` already exists", flush=True)
 
     print(f"[db] connecting to `{target_database}`", flush=True)
-    connection = await asyncpg.connect(target_dsn, command_timeout=database_config.command_timeout)
+    connection = await asyncpg.connect(**database_config.connect_kwargs())
     try:
         existing_tables = await _list_user_tables(connection)
         schema_initialized = False

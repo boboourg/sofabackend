@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
+
+import orjson
 
 from ..db import register_post_commit_hook
 from ..endpoints import EndpointRegistryEntry
@@ -487,7 +488,7 @@ class RawRepository:
 def _jsonb(value: object) -> str | None:
     if value is None:
         return None
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
 
 _REGISTRY_SYNC_CACHE: set[tuple[tuple[str | None, ...], ...]] = set()

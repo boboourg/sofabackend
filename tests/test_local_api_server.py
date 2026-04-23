@@ -320,6 +320,93 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["reconcile_policy_summary"]["sources"][0]["source_slug"], "sofascore")
 
 
+class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_uses_pool_lease_and_releases_on_close(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        pool = _FakePoolConnectionBackend()
+        application._db_pool = pool
+
+        lease = await application._connect()
+        self.assertEqual(pool.acquire_calls, 1)
+        self.assertEqual(pool.release_calls, 0)
+
+        await lease.close()
+
+        self.assertEqual(pool.release_calls, 1)
+
+    async def test_handle_api_get_http_response_caches_live_bytes_for_two_seconds(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        application._response_cache = {}
+        application._response_cache_lock = None
+        current_time = [1000.0]
+        application._cache_now = lambda: current_time[0]
+        calls: list[tuple[str, str]] = []
+
+        async def fake_handle_api_get(path: str, raw_query: str) -> ApiResponse:
+            calls.append((path, raw_query))
+            return ApiResponse(status_code=200, payload={"events": [{"id": 1, "status": {"type": "inprogress"}}]})
+
+        application.handle_api_get = fake_handle_api_get
+
+        first = await application.handle_api_get_http_response("/api/v1/sport/football/events/live", "")
+        second = await application.handle_api_get_http_response("/api/v1/sport/football/events/live", "")
+        current_time[0] += 2.1
+        third = await application.handle_api_get_http_response("/api/v1/sport/football/events/live", "")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.cache_control, "public, max-age=2")
+        self.assertEqual(first.body, second.body)
+        self.assertEqual(
+            calls,
+            [
+                ("/api/v1/sport/football/events/live", ""),
+                ("/api/v1/sport/football/events/live", ""),
+            ],
+        )
+        self.assertEqual(third.cache_control, "public, max-age=2")
+
+    async def test_handle_api_get_http_response_uses_static_ttl_for_non_live_payloads(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        application._response_cache = {}
+        application._response_cache_lock = None
+        application._cache_now = lambda: 1000.0
+
+        async def fake_handle_api_get(path: str, raw_query: str) -> ApiResponse:
+            del path, raw_query
+            return ApiResponse(status_code=200, payload={"rounds": [{"round": 1}]})
+
+        application.handle_api_get = fake_handle_api_get
+
+        response = await application.handle_api_get_http_response(
+            "/api/v1/unique-tournament/17/season/76986/rounds",
+            "",
+        )
+
+        self.assertEqual(response.cache_control, "public, max-age=30")
+
+    async def test_handle_api_get_http_response_uses_static_ttl_for_finished_event_root(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        application._response_cache = {}
+        application._response_cache_lock = None
+        application._cache_now = lambda: 1000.0
+
+        async def fake_handle_api_get(path: str, raw_query: str) -> ApiResponse:
+            del path, raw_query
+            return ApiResponse(
+                status_code=200,
+                payload={"event": {"id": 15868599, "status": {"type": "finished", "description": "Ended"}}},
+            )
+
+        application.handle_api_get = fake_handle_api_get
+
+        response = await application.handle_api_get_http_response("/api/v1/event/15868599", "")
+
+        self.assertEqual(response.cache_control, "public, max-age=30")
+
+
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_api_get_uses_normalized_category_fallback_when_snapshot_missing(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -1046,6 +1133,21 @@ class _FakeSnapshotConnection:
 
     async def close(self):
         self.closed = True
+
+
+class _FakePoolConnectionBackend:
+    def __init__(self) -> None:
+        self.connection = _FakeCoverageConnection([])
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    async def acquire(self):
+        self.acquire_calls += 1
+        return self.connection
+
+    async def release(self, connection):
+        self.asserted_connection = connection
+        self.release_calls += 1
 
 
 async def _passthrough_reconcile(executor, route, payload):

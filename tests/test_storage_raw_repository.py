@@ -330,7 +330,7 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         head_args = executor.execute_calls[2][1]
         self.assertIsInstance(request_args[13], datetime)
         self.assertIsInstance(request_args[14], datetime)
-        self.assertEqual(request_args[16], '[{"attempt_number": 1, "proxy_name": "proxy_1", "status_code": 200}]')
+        self.assertEqual(request_args[16], '[{"attempt_number":1,"proxy_name":"proxy_1","status_code":200}]')
         self.assertEqual(request_args[17], 18)
         self.assertIsInstance(snapshot_args[10], datetime)
         self.assertIsInstance(head_args[6], datetime)

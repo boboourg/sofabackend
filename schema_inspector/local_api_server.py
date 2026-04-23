@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
-import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+import orjson
 
 from .db import DatabaseConfig, load_database_config
 from .endpoints import SofascoreEndpoint, local_api_endpoints
@@ -71,6 +73,35 @@ class ApiResponse:
     payload: Any
 
 
+@dataclass(frozen=True)
+class SerializedApiResponse:
+    status_code: int
+    body: bytes
+    cache_control: str
+
+
+@dataclass(frozen=True)
+class _CachedSerializedResponse:
+    response: SerializedApiResponse
+    expires_at: float
+
+
+class _PooledConnectionLease:
+    def __init__(self, pool: Any, connection: Any) -> None:
+        self._pool = pool
+        self._connection = connection
+        self._released = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    async def close(self) -> None:
+        if self._released:
+            return
+        await self._pool.release(self._connection)
+        self._released = True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -112,6 +143,7 @@ def main() -> int:
         ),
         redis_backend=_load_optional_redis_backend(args.redis_url),
     )
+    asyncio.run(application.startup())
     server = LocalApiHttpServer((args.host, args.port), LocalApiRequestHandler, application)
     print(f"Serving local multi-sport API on {base_url}", flush=True)
     print(f"Swagger UI: {base_url}/", flush=True)
@@ -122,6 +154,7 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        asyncio.run(application.shutdown())
     return 0
 
 
@@ -143,14 +176,13 @@ class LocalApiApplication:
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.routes = build_route_specs()
+        self._db_pool: Any | None = None
+        self._response_cache: dict[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _CachedSerializedResponse] = {}
+        self._response_cache_lock: threading.Lock | None = threading.Lock()
+        self._cache_now = time.monotonic
         self.swagger_html = _build_viewer_html("openapi.json")
         self.openapi_document = asyncio.run(self._build_openapi_document())
-        self.openapi_json = json.dumps(
-            self.openapi_document,
-            ensure_ascii=False,
-            indent=2,
-            default=_json_default,
-        ).encode("utf-8")
+        self.openapi_json = _json_dumps_bytes(self.openapi_document)
 
     async def _build_openapi_document(self) -> dict[str, Any]:
         try:
@@ -158,6 +190,21 @@ class LocalApiApplication:
         except Exception:
             summary = _empty_summary()
         return build_openapi_document(summary, base_urls=self.openapi_base_urls)
+
+    async def startup(self) -> None:
+        if self._db_pool is not None:
+            return
+        try:
+            import asyncpg
+        except ImportError as exc:
+            raise RuntimeError("asyncpg is required to serve the local multi-sport API.") from exc
+        self._db_pool = await asyncpg.create_pool(**self.database_config.pool_kwargs())
+
+    async def shutdown(self) -> None:
+        if self._db_pool is None:
+            return
+        await self._db_pool.close()
+        self._db_pool = None
 
     async def handle_api_get(self, path: str, raw_query: str) -> ApiResponse:
         route_match = match_route(path, self.routes)
@@ -183,6 +230,25 @@ class LocalApiApplication:
             )
 
         return ApiResponse(status_code=HTTPStatus.OK, payload=payload)
+
+    async def handle_api_get_http_response(self, path: str, raw_query: str) -> SerializedApiResponse:
+        route_match = match_route(path, self.routes)
+        route = route_match[0] if route_match is not None else None
+        cache_key = _response_cache_key(path, raw_query)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        response = await self.handle_api_get(path, raw_query)
+        cache_control = _cache_control_for_response(route, response.payload)
+        serialized = SerializedApiResponse(
+            status_code=response.status_code,
+            body=_json_dumps_bytes(response.payload),
+            cache_control=cache_control,
+        )
+        ttl_seconds = _response_ttl_seconds(route, response.payload) if response.status_code == HTTPStatus.OK else 0.0
+        if ttl_seconds > 0:
+            self._cache_put(cache_key, serialized, ttl_seconds)
+        return serialized
 
     async def handle_ops_get(self, path: str, raw_query: str) -> ApiResponse:
         if path == "/ops/health":
@@ -897,14 +963,44 @@ class LocalApiApplication:
         }
 
     async def _connect(self):
-        try:
-            import asyncpg
-        except ImportError as exc:
-            raise RuntimeError("asyncpg is required to serve the local multi-sport API.") from exc
-        return await asyncpg.connect(
-            self.database_config.dsn,
-            command_timeout=self.database_config.command_timeout,
-        )
+        if self._db_pool is None:
+            await self.startup()
+        assert self._db_pool is not None
+        connection = await self._db_pool.acquire()
+        return _PooledConnectionLease(self._db_pool, connection)
+
+    def _cache_get(
+        self,
+        key: tuple[str, tuple[tuple[str, tuple[str, ...]], ...]],
+    ) -> SerializedApiResponse | None:
+        now = self._cache_now()
+        lock = self._response_cache_lock
+        if lock is None:
+            entry = self._response_cache.get(key)
+            if entry is None or entry.expires_at <= now:
+                self._response_cache.pop(key, None)
+                return None
+            return entry.response
+        with lock:
+            entry = self._response_cache.get(key)
+            if entry is None or entry.expires_at <= now:
+                self._response_cache.pop(key, None)
+                return None
+            return entry.response
+
+    def _cache_put(
+        self,
+        key: tuple[str, tuple[tuple[str, tuple[str, ...]], ...]],
+        response: SerializedApiResponse,
+        ttl_seconds: float,
+    ) -> None:
+        entry = _CachedSerializedResponse(response=response, expires_at=self._cache_now() + ttl_seconds)
+        lock = self._response_cache_lock
+        if lock is None:
+            self._response_cache[key] = entry
+            return
+        with lock:
+            self._response_cache[key] = entry
 
 
 class LocalApiHttpServer(ThreadingHTTPServer):
@@ -927,28 +1023,39 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
             self._send_html(HTTPStatus.OK, self.server.application.swagger_html)
             return
         if path == "/openapi.json":
-            self._send_bytes(HTTPStatus.OK, self.server.application.openapi_json, "application/json; charset=utf-8")
+            self._send_bytes(
+                HTTPStatus.OK,
+                self.server.application.openapi_json,
+                "application/json; charset=utf-8",
+                cache_control="public, max-age=300",
+            )
             return
         if path == "/healthz":
             payload = {"ok": True, "service": "local-multisport-api"}
-            self._send_json(HTTPStatus.OK, payload)
+            self._send_json(HTTPStatus.OK, payload, cache_control="no-cache")
             return
         if path.startswith("/ops/"):
             response = asyncio.run(self.server.application.handle_ops_get(path, split.query))
-            self._send_json(response.status_code, response.payload)
+            self._send_json(response.status_code, response.payload, cache_control="no-cache")
             return
         if path.startswith("/api/"):
-            response = asyncio.run(self.server.application.handle_api_get(path, split.query))
-            self._send_json(response.status_code, response.payload)
+            response = asyncio.run(self.server.application.handle_api_get_http_response(path, split.query))
+            self._send_bytes(
+                response.status_code,
+                response.body,
+                "application/json; charset=utf-8",
+                cache_control=response.cache_control,
+            )
             return
         self._send_json(
             HTTPStatus.NOT_FOUND,
             {"error": "Unknown route.", "path": path},
+            cache_control="no-cache",
         )
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)
-        self._send_common_headers("application/json; charset=utf-8")
+        self._send_common_headers("application/json; charset=utf-8", cache_control="no-cache")
         self.end_headers()
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -956,25 +1063,30 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
         print(message, flush=True)
 
     def _send_html(self, status_code: int, payload: str) -> None:
-        self._send_bytes(status_code, payload.encode("utf-8"), "text/html; charset=utf-8")
+        self._send_bytes(
+            status_code,
+            payload.encode("utf-8"),
+            "text/html; charset=utf-8",
+            cache_control="public, max-age=300",
+        )
 
-    def _send_json(self, status_code: int, payload: Any) -> None:
-        body = json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8")
-        self._send_bytes(status_code, body, "application/json; charset=utf-8")
+    def _send_json(self, status_code: int, payload: Any, *, cache_control: str) -> None:
+        body = _json_dumps_bytes(payload)
+        self._send_bytes(status_code, body, "application/json; charset=utf-8", cache_control=cache_control)
 
-    def _send_bytes(self, status_code: int, body: bytes, content_type: str) -> None:
+    def _send_bytes(self, status_code: int, body: bytes, content_type: str, *, cache_control: str) -> None:
         self.send_response(status_code)
-        self._send_common_headers(content_type)
+        self._send_common_headers(content_type, cache_control=cache_control)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_common_headers(self, content_type: str) -> None:
+    def _send_common_headers(self, content_type: str, *, cache_control: str) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
 
 
 def build_route_specs() -> tuple[RouteSpec, ...]:
@@ -1064,10 +1176,65 @@ def _decode_snapshot_payload(payload: Any) -> Any:
         stripped = payload.strip()
         if stripped.startswith("{") or stripped.startswith("["):
             try:
-                return json.loads(stripped)
-            except json.JSONDecodeError:
+                return orjson.loads(stripped)
+            except orjson.JSONDecodeError:
                 return payload
     return payload
+
+
+def _json_dumps_bytes(payload: Any) -> bytes:
+    return orjson.dumps(payload, default=_json_default)
+
+
+def _response_cache_key(raw_path: str, raw_query: str) -> tuple[str, tuple[tuple[str, tuple[str, ...]], ...]]:
+    normalized_query = tuple(sorted((key, tuple(values)) for key, values in _normalized_query_map(raw_query).items()))
+    return raw_path, normalized_query
+
+
+def _cache_control_for_response(route: RouteSpec | None, payload: Any) -> str:
+    ttl = _response_ttl_seconds(route, payload)
+    if ttl <= 0:
+        return "no-cache"
+    return f"public, max-age={int(ttl)}"
+
+
+def _response_ttl_seconds(route: RouteSpec | None, payload: Any) -> float:
+    if route is None:
+        return 0.0
+    path_template = route.endpoint.path_template
+    if "/events/live" in path_template:
+        return 2.0
+    status_type = _payload_status_type(payload)
+    if status_type is not None:
+        normalized = status_type.strip().lower()
+        if normalized and normalized not in _NATURAL_TERMINAL_STATUSES and normalized not in {"notstarted"}:
+            return 2.0
+        return 30.0
+    if path_template.startswith("/api/v1/event/"):
+        return 2.0
+    return 30.0
+
+
+def _payload_status_type(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        event_payload = payload.get("event")
+        if isinstance(event_payload, dict):
+            status_payload = event_payload.get("status")
+            if isinstance(status_payload, dict) and isinstance(status_payload.get("type"), str):
+                return str(status_payload["type"])
+        status_payload = payload.get("status")
+        if isinstance(status_payload, dict) and isinstance(status_payload.get("type"), str):
+            return str(status_payload["type"])
+        for envelope_key in ("events", "featuredEvents"):
+            items = payload.get(envelope_key)
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    status = item.get("status")
+                    if isinstance(status, dict) and isinstance(status.get("type"), str):
+                        return str(status["type"])
+    return None
 
 
 def _query_maps_equal(left_raw: str, right_raw: str) -> bool:
