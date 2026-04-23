@@ -124,6 +124,7 @@ class PilotOrchestrator:
         live_state_repository=None,
         stream_queue=None,
         now_ms_factory=None,
+        season_widget_gate=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -138,6 +139,7 @@ class PilotOrchestrator:
         self.live_state_store = live_state_store
         self.live_state_repository = live_state_repository
         self.stream_queue = stream_queue
+        self.season_widget_gate = season_widget_gate
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
@@ -383,14 +385,41 @@ class PilotOrchestrator:
                         parse_results.append(parsed)
 
             if unique_tournament_id is not None and season_id is not None:
-                for widget_job in self.planner.plan_season_widgets(
+                blocked_widget_patterns: tuple[str, ...] = ()
+                if self.season_widget_gate is not None:
+                    candidate_patterns = self.planner.plan_season_widget_patterns(
+                        sport_slug,
+                        unique_tournament_id=int(unique_tournament_id),
+                        season_id=int(season_id),
+                    )
+                    blocked_widget_patterns = await self.season_widget_gate.blocked_endpoint_patterns(
+                        sport_slug=sport_slug,
+                        unique_tournament_id=int(unique_tournament_id),
+                        season_id=int(season_id),
+                        endpoint_patterns=candidate_patterns,
+                    )
+                widget_jobs = self.planner.plan_season_widgets(
                     sport_slug,
                     unique_tournament_id=int(unique_tournament_id),
                     season_id=int(season_id),
-                ):
+                    blocked_endpoint_patterns=blocked_widget_patterns,
+                )
+                for widget_job in widget_jobs:
                     endpoint = _endpoint_for_widget_job(widget_job.params)
                     if endpoint is None:
                         continue
+                    endpoint_pattern = endpoint.pattern
+                    decision = None
+                    if self.season_widget_gate is not None:
+                        decision = await self.season_widget_gate.decide_widget_probe(
+                            sport_slug=sport_slug,
+                            unique_tournament_id=int(unique_tournament_id),
+                            season_id=int(season_id),
+                            widget_job=widget_job,
+                            endpoint_pattern=endpoint_pattern,
+                        )
+                        if not getattr(decision, "should_fetch", True):
+                            continue
                     outcome, parsed = await self._fetch_and_parse(
                         endpoint=endpoint,
                         sport_slug=sport_slug,
@@ -404,6 +433,12 @@ class PilotOrchestrator:
                         context_season_id=int(season_id),
                         fetch_reason=widget_job.job_type,
                     )
+                    if self.season_widget_gate is not None and decision is not None:
+                        await self.season_widget_gate.record_widget_outcome(
+                            decision=decision,
+                            endpoint_pattern=endpoint_pattern,
+                            outcome=outcome,
+                        )
                     fetch_outcomes.append(outcome)
                     if parsed is not None:
                         parse_results.append(parsed)

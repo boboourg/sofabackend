@@ -846,7 +846,7 @@ CREATE TABLE event_comment_feed (
 CREATE TABLE event_comment (
     event_id BIGINT NOT NULL REFERENCES event(id) ON DELETE CASCADE,
     comment_id BIGINT NOT NULL,
-    sequence INTEGER,
+    sequence BIGINT,
     period_name TEXT,
     is_home BOOLEAN,
     player_id BIGINT REFERENCES player(id),
@@ -1213,6 +1213,55 @@ ALTER TABLE top_player_entry
     ADD CONSTRAINT top_player_entry_event_fk
     FOREIGN KEY (event_id) REFERENCES event(id);
 
+CREATE TABLE endpoint_negative_cache_state (
+    cache_key TEXT PRIMARY KEY,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('tournament', 'season')),
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT REFERENCES season(id),
+    endpoint_pattern TEXT NOT NULL REFERENCES endpoint_registry(pattern),
+    classification TEXT NOT NULL CHECK (
+        classification IN ('c_probation', 'b_structural', 'mixed_by_season', 'supported_season')
+    ),
+    first_404_at TIMESTAMPTZ,
+    last_404_at TIMESTAMPTZ,
+    first_200_at TIMESTAMPTZ,
+    last_200_at TIMESTAMPTZ,
+    seen_404_season_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    seen_200_season_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    suppressed_hits_total BIGINT NOT NULL DEFAULT 0,
+    actual_probe_total BIGINT NOT NULL DEFAULT 0,
+    recheck_iteration INTEGER NOT NULL DEFAULT 0,
+    next_probe_after TIMESTAMPTZ,
+    probe_lease_until TIMESTAMPTZ,
+    probe_lease_owner TEXT,
+    last_http_status INTEGER,
+    last_job_type TEXT,
+    last_trace_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE endpoint_availability_log (
+    id BIGSERIAL PRIMARY KEY,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT REFERENCES season(id),
+    endpoint_pattern TEXT NOT NULL REFERENCES endpoint_registry(pattern),
+    job_type TEXT NOT NULL,
+    trace_id TEXT,
+    worker_id TEXT,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('tournament', 'season')),
+    decision TEXT NOT NULL CHECK (decision IN ('probe', 'bypass_probe', 'state_transition', 'lease_blocked', 'shadow_suppress')),
+    http_status INTEGER,
+    probe_latency_ms INTEGER,
+    classification_before TEXT,
+    classification_after TEXT,
+    next_probe_after TIMESTAMPTZ,
+    proxy_id TEXT,
+    source_url TEXT,
+    note TEXT
+);
+
 CREATE INDEX idx_api_payload_snapshot_pattern ON api_payload_snapshot(endpoint_pattern);
 CREATE INDEX idx_category_slug ON category(slug);
 CREATE INDEX idx_category_sport_id ON category(sport_id);
@@ -1259,5 +1308,17 @@ CREATE INDEX idx_season_cup_tree_round_cup_tree ON season_cup_tree_round(cup_tre
 CREATE INDEX idx_season_cup_tree_block_cup_tree ON season_cup_tree_block(cup_tree_id, round_order, block_order);
 CREATE INDEX idx_season_cup_tree_participant_entry ON season_cup_tree_participant(entry_id);
 CREATE INDEX idx_tournament_team_event_snapshot_ut_season ON tournament_team_event_snapshot(unique_tournament_id, season_id);
+CREATE UNIQUE INDEX uq_endpoint_negative_cache_tournament
+    ON endpoint_negative_cache_state(unique_tournament_id, endpoint_pattern)
+    WHERE scope_kind = 'tournament' AND season_id IS NULL;
+CREATE UNIQUE INDEX uq_endpoint_negative_cache_season
+    ON endpoint_negative_cache_state(unique_tournament_id, season_id, endpoint_pattern)
+    WHERE scope_kind = 'season' AND season_id IS NOT NULL;
+CREATE INDEX idx_endpoint_negative_cache_next_probe
+    ON endpoint_negative_cache_state(next_probe_after, classification);
+CREATE INDEX idx_endpoint_availability_log_time
+    ON endpoint_availability_log(observed_at DESC);
+CREATE INDEX idx_endpoint_availability_log_key
+    ON endpoint_availability_log(unique_tournament_id, endpoint_pattern, season_id);
 
 COMMIT;

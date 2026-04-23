@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Iterable
 
 from ..detail_resource_policy import supports_live_detail_resources
+from ..endpoints import (
+    UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT,
+    unique_tournament_top_players_endpoint,
+    unique_tournament_top_players_per_game_endpoint,
+    unique_tournament_top_teams_endpoint,
+)
 from ..jobs.types import (
     JOB_FINALIZE_EVENT,
     JOB_HYDRATE_EVENT_EDGE,
@@ -15,6 +21,7 @@ from ..jobs.types import (
 from .live import ACTIVE_LIVE_STATUS_TYPES, TERMINAL_STATUS_TYPES
 from ..parsers.sports import resolve_sport_adapter
 from ..sport_profiles import resolve_sport_profile
+from ..season_widget_negative_cache import widget_endpoint_pattern_from_params
 
 
 def event_edge_candidates(*, sport_slug: str | None, status_type: str | None) -> tuple[str, ...]:
@@ -78,7 +85,13 @@ def edge_jobs_for_event(job, capability_rollup: dict[str, str] | None) -> tuple[
     return tuple(planned)
 
 
-def season_widget_jobs(*, sport_slug: str, unique_tournament_id: int, season_id: int) -> tuple[object, ...]:
+def season_widget_jobs(
+    *,
+    sport_slug: str,
+    unique_tournament_id: int,
+    season_id: int,
+    blocked_endpoint_patterns: tuple[str, ...] = (),
+) -> tuple[object, ...]:
     from ..jobs.envelope import JobEnvelope
 
     profile = resolve_sport_profile(sport_slug)
@@ -103,71 +116,107 @@ def season_widget_jobs(*, sport_slug: str, unique_tournament_id: int, season_id:
         trace_id=None,
     )
 
+    blocked = {str(item) for item in blocked_endpoint_patterns}
     planned = []
     if profile.top_players_suffix:
-        planned.append(
-            seed.spawn_child(
-                job_type=JOB_SYNC_SEASON_WIDGET,
-                entity_type="season",
-                entity_id=season_id,
-                scope="season",
-                params={
-                    "widget_kind": "top_players",
-                    "suffix": profile.top_players_suffix,
-                    "unique_tournament_id": unique_tournament_id,
-                    "season_id": season_id,
-                },
-                priority=2,
+        params = {
+            "widget_kind": "top_players",
+            "suffix": profile.top_players_suffix,
+            "unique_tournament_id": unique_tournament_id,
+            "season_id": season_id,
+        }
+        pattern = widget_endpoint_pattern_from_params(params)
+        if pattern and pattern not in blocked:
+            planned.append(
+                seed.spawn_child(
+                    job_type=JOB_SYNC_SEASON_WIDGET,
+                    entity_type="season",
+                    entity_id=season_id,
+                    scope="season",
+                    params={**params, "_endpoint_pattern": pattern},
+                    priority=2,
+                )
             )
-        )
     if profile.top_players_per_game_suffix:
-        planned.append(
-            seed.spawn_child(
-                job_type=JOB_SYNC_SEASON_WIDGET,
-                entity_type="season",
-                entity_id=season_id,
-                scope="season",
-                params={
-                    "widget_kind": "top_players_per_game",
-                    "suffix": profile.top_players_per_game_suffix,
-                    "unique_tournament_id": unique_tournament_id,
-                    "season_id": season_id,
-                },
-                priority=2,
+        params = {
+            "widget_kind": "top_players_per_game",
+            "suffix": profile.top_players_per_game_suffix,
+            "unique_tournament_id": unique_tournament_id,
+            "season_id": season_id,
+        }
+        pattern = widget_endpoint_pattern_from_params(params)
+        if pattern and pattern not in blocked:
+            planned.append(
+                seed.spawn_child(
+                    job_type=JOB_SYNC_SEASON_WIDGET,
+                    entity_type="season",
+                    entity_id=season_id,
+                    scope="season",
+                    params={**params, "_endpoint_pattern": pattern},
+                    priority=2,
+                )
             )
-        )
     if profile.top_teams_suffix:
-        planned.append(
-            seed.spawn_child(
-                job_type=JOB_SYNC_SEASON_WIDGET,
-                entity_type="season",
-                entity_id=season_id,
-                scope="season",
-                params={
-                    "widget_kind": "top_teams",
-                    "suffix": profile.top_teams_suffix,
-                    "unique_tournament_id": unique_tournament_id,
-                    "season_id": season_id,
-                },
-                priority=2,
+        params = {
+            "widget_kind": "top_teams",
+            "suffix": profile.top_teams_suffix,
+            "unique_tournament_id": unique_tournament_id,
+            "season_id": season_id,
+        }
+        pattern = widget_endpoint_pattern_from_params(params)
+        if pattern and pattern not in blocked:
+            planned.append(
+                seed.spawn_child(
+                    job_type=JOB_SYNC_SEASON_WIDGET,
+                    entity_type="season",
+                    entity_id=season_id,
+                    scope="season",
+                    params={**params, "_endpoint_pattern": pattern},
+                    priority=2,
+                )
             )
-        )
     if profile.include_player_of_the_season:
-        planned.append(
-            seed.spawn_child(
-                job_type=JOB_SYNC_SEASON_WIDGET,
-                entity_type="season",
-                entity_id=season_id,
-                scope="season",
-                params={
-                    "widget_kind": "player_of_the_season",
-                    "unique_tournament_id": unique_tournament_id,
-                    "season_id": season_id,
-                },
-                priority=2,
+        params = {
+            "widget_kind": "player_of_the_season",
+            "unique_tournament_id": unique_tournament_id,
+            "season_id": season_id,
+        }
+        pattern = widget_endpoint_pattern_from_params(params)
+        if pattern and pattern not in blocked:
+            planned.append(
+                seed.spawn_child(
+                    job_type=JOB_SYNC_SEASON_WIDGET,
+                    entity_type="season",
+                    entity_id=season_id,
+                    scope="season",
+                    params={**params, "_endpoint_pattern": pattern},
+                    priority=2,
+                )
             )
-        )
     return tuple(planned)
+
+
+def season_widget_endpoint_patterns(
+    *,
+    sport_slug: str,
+    unique_tournament_id: int,
+    season_id: int,
+) -> tuple[str, ...]:
+    del unique_tournament_id, season_id
+    profile = resolve_sport_profile(sport_slug)
+    patterns: list[str] = []
+    if profile.top_players_suffix:
+        pattern = unique_tournament_top_players_endpoint(str(profile.top_players_suffix)).pattern
+        patterns.append(pattern)
+    if profile.top_players_per_game_suffix:
+        pattern = unique_tournament_top_players_per_game_endpoint(str(profile.top_players_per_game_suffix)).pattern
+        patterns.append(pattern)
+    if profile.top_teams_suffix:
+        pattern = unique_tournament_top_teams_endpoint(str(profile.top_teams_suffix)).pattern
+        patterns.append(pattern)
+    if profile.include_player_of_the_season:
+        patterns.append(UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT.pattern)
+    return tuple(patterns)
 
 
 def lineup_followup_jobs(job, parse_result, capability_rollup: dict[str, str] | None) -> tuple[object, ...]:

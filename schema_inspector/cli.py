@@ -29,6 +29,7 @@ from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue
 from .runtime import load_runtime_config, load_structure_runtime_config
+from .season_widget_negative_cache import SeasonWidgetNegativeCache, load_negative_cache_settings
 from .services.historical_archive_service import (
     run_historical_tournament_archive as run_historical_tournament_archive_service,
 )
@@ -50,6 +51,7 @@ from .sofascore_client import SofascoreClient
 from .sources import build_source_adapter
 from .storage.capability_repository import CapabilityRepository
 from .storage.coverage_repository import CoverageRepository
+from .storage.endpoint_negative_cache_repository import EndpointNegativeCacheRepository
 from .storage.live_state_repository import LiveStateRepository
 from .storage.normalize_repository import NormalizeRepository
 from .storage.raw_repository import RawRepository
@@ -79,6 +81,8 @@ class PrefetchedRun:
     fetch_records: tuple[PrefetchedFetchRecord, ...]
     snapshot_store: "HybridSnapshotStore"
     initial_capability_rollup: dict[str, str]
+    widget_negative_cache_events: tuple[object, ...] = ()
+    replay_widget_gate: object | None = None
 
     @property
     def total_payload_size_bytes(self) -> int:
@@ -197,6 +201,8 @@ class HybridApp:
         self.capability_repository = CapabilityRepository()
         self.live_state_repository = LiveStateRepository()
         self.normalize_repository = NormalizeRepository()
+        self.endpoint_negative_cache_repository = EndpointNegativeCacheRepository()
+        self.negative_cache_settings = load_negative_cache_settings()
         self.stage_audit_logger = StageAuditLogger(database=database)
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
@@ -278,28 +284,39 @@ class HybridApp:
             snapshot_store=snapshot_store,
             write_mode="deferred",
         )
-        orchestrator = PilotOrchestrator(
-            fetch_executor=prefetch_executor,
-            snapshot_store=snapshot_store,
-            normalize_worker=NormalizeWorker(ParserRegistry.default(), result_sink=None),
-            planner=Planner(capability_rollup=dict(initial_capability_rollup)),
-            capability_repository=None,
-            sql_executor=None,
-            live_state_store=None,
-            live_state_repository=None,
-            stream_queue=None,
-        )
-        await orchestrator.run_event(
-            event_id=event_id,
-            sport_slug=sport_slug,
-            hydration_mode=hydration_mode,
-        )
+        season_widget_gate = None
+        async with self.database.connection() as read_connection:
+            if self.negative_cache_settings.enabled:
+                season_widget_gate = SeasonWidgetNegativeCache(
+                    repository=self.endpoint_negative_cache_repository,
+                    sql_executor=read_connection,
+                    settings=self.negative_cache_settings,
+                )
+            orchestrator = PilotOrchestrator(
+                fetch_executor=prefetch_executor,
+                snapshot_store=snapshot_store,
+                normalize_worker=NormalizeWorker(ParserRegistry.default(), result_sink=None),
+                planner=Planner(capability_rollup=dict(initial_capability_rollup)),
+                capability_repository=None,
+                sql_executor=None,
+                live_state_store=None,
+                live_state_repository=None,
+                stream_queue=None,
+                season_widget_gate=season_widget_gate,
+            )
+            await orchestrator.run_event(
+                event_id=event_id,
+                sport_slug=sport_slug,
+                hydration_mode=hydration_mode,
+            )
         return PrefetchedRun(
             event_id=event_id,
             sport_slug=sport_slug,
             fetch_records=prefetch_executor.prefetched_records,
             snapshot_store=snapshot_store,
             initial_capability_rollup=initial_capability_rollup,
+            widget_negative_cache_events=season_widget_gate.events if season_widget_gate is not None else (),
+            replay_widget_gate=season_widget_gate.build_replay_gate() if season_widget_gate is not None else None,
         )
 
     async def _commit_prefetched_run(self, prefetched_run: PrefetchedRun) -> PrefetchedRun:
@@ -358,12 +375,18 @@ class HybridApp:
                 live_state_store=self.live_state_store,
                 live_state_repository=self.live_state_repository,
                 stream_queue=self.stream_queue,
+                season_widget_gate=prefetched_run.replay_widget_gate,
             )
             result = await orchestrator.run_event(
                 event_id=prefetched_run.event_id,
                 sport_slug=prefetched_run.sport_slug,
                 hydration_mode=hydration_mode,
             )
+            if self.negative_cache_settings.enabled and prefetched_run.widget_negative_cache_events:
+                await self.endpoint_negative_cache_repository.apply_events(
+                    connection,
+                    prefetched_run.widget_negative_cache_events,
+                )
         self.capability_rollup.update(planner.capability_rollup)
         return result
 

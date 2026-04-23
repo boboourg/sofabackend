@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.jobs.envelope import JobEnvelope
+from schema_inspector.endpoints import unique_tournament_top_players_endpoint
 from schema_inspector.jobs.types import (
     JOB_FINALIZE_EVENT,
     JOB_HYDRATE_EVENT_EDGE,
@@ -140,6 +141,23 @@ class PlannerTests(unittest.TestCase):
         self.assertIn(("top_teams", "regularSeason"), basketball_pairs)
         self.assertIn(("player_of_the_season", None), basketball_pairs)
         self.assertEqual(tennis, ())
+
+    def test_season_widgets_support_coarse_suppression_by_endpoint_pattern(self) -> None:
+        planner = Planner()
+        blocked_pattern = unique_tournament_top_players_endpoint("regularSeason").pattern
+
+        basketball = planner.plan_season_widgets(
+            "basketball",
+            unique_tournament_id=132,
+            season_id=84695,
+            blocked_endpoint_patterns=(blocked_pattern,),
+        )
+
+        basketball_pairs = {(item.params["widget_kind"], item.params.get("suffix")) for item in basketball}
+
+        self.assertNotIn(("top_players", "regularSeason"), basketball_pairs)
+        self.assertIn(("top_players_per_game", "all/regularSeason"), basketball_pairs)
+        self.assertIn(("top_teams", "regularSeason"), basketball_pairs)
 
     def test_lineups_schedule_player_analytics_followups_for_football_starters(self) -> None:
         planner = Planner()
