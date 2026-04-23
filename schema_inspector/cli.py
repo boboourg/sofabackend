@@ -17,6 +17,7 @@ from .db import AsyncpgDatabase, load_database_config
 from .coverage_policy import lineup_recheck_window_open
 from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
+from .final_sweep_gate import FinalSweepGate
 from .live_bootstrap import LiveBootstrapCoordinator
 from .normalizers.sink import DurableNormalizeSink
 from .normalizers.worker import NormalizeWorker
@@ -212,6 +213,7 @@ class HybridApp:
             if redis_backend is not None
             else None
         )
+        self.final_sweep_gate = FinalSweepGate()
         self.capability_rollup: dict[str, str] = {}
         self._seeded_endpoint_registry_sports: set[str] = set()
         # Structural sync contour uses a separate non-residential proxy pool.
@@ -331,6 +333,7 @@ class HybridApp:
                 live_state_repository=None,
                 stream_queue=None,
                 season_widget_gate=season_widget_gate,
+                final_sweep_gate=self.final_sweep_gate,
             )
             await orchestrator.run_event(
                 event_id=event_id,

@@ -210,6 +210,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         now_ms = 1_800_000_000_000
         live_backend = _FakeLiveBackend()
         stream_backend = _FakeStreamBackend()
+        final_sweep_gate = _FakeFinalSweepGate()
         transport = _FakeTransport(
             _tennis_responses(
                 event_id=15921221,
@@ -222,6 +223,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
             live_state_store=LiveEventStateStore(live_backend),
             stream_queue=RedisStreamQueue(stream_backend),
             now_ms_factory=lambda: now_ms,
+            final_sweep_gate=final_sweep_gate,
         )
 
         report = await orchestrator.run_event(event_id=15921221, sport_slug="tennis")
@@ -233,6 +235,7 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.seen_urls.count(lineups_url), 2)
         self.assertEqual(transport.seen_urls.count(incidents_url), 2)
         self.assertTrue(report.finalized)
+        self.assertEqual(final_sweep_gate.calls, 1)
         state = live_backend.hashes["live:event:15921221"]
         self.assertEqual(state["status_type"], "finished")
         self.assertEqual(state["is_finalized"], 1)
@@ -341,6 +344,7 @@ def _build_orchestrator(
     now_ms_factory,
     sql_executor=None,
     live_bootstrap_coordinator=None,
+    final_sweep_gate=None,
 ):
     raw_store = _FakeRawSnapshotStore()
     sql_executor = sql_executor or object()
@@ -361,7 +365,17 @@ def _build_orchestrator(
         stream_queue=stream_queue,
         now_ms_factory=now_ms_factory,
         live_bootstrap_coordinator=live_bootstrap_coordinator,
+        final_sweep_gate=final_sweep_gate,
     )
+
+
+class _FakeFinalSweepGate:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, func):
+        self.calls += 1
+        return await func()
 
 
 def _tennis_responses(*, event_id: int, status_type: str, start_timestamp: int) -> dict[str, TransportResult]:

@@ -126,6 +126,7 @@ class PilotOrchestrator:
         now_ms_factory=None,
         season_widget_gate=None,
         live_bootstrap_coordinator=None,
+        final_sweep_gate=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -142,6 +143,7 @@ class PilotOrchestrator:
         self.stream_queue = stream_queue
         self.season_widget_gate = season_widget_gate
         self.live_bootstrap_coordinator = live_bootstrap_coordinator
+        self.final_sweep_gate = final_sweep_gate
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
@@ -326,10 +328,16 @@ class PilotOrchestrator:
                     observed_at=root_outcome.fetched_at,
                 )
             if planned_job.job_type == JOB_FINALIZE_EVENT:
-                final_outcomes, final_parses = await self._run_final_sweep(
-                    event_id=event_id,
-                    sport_slug=sport_slug,
-                )
+                async def run_sweep():
+                    return await self._run_final_sweep(
+                        event_id=event_id,
+                        sport_slug=sport_slug,
+                    )
+
+                if self.final_sweep_gate is None:
+                    final_outcomes, final_parses = await run_sweep()
+                else:
+                    final_outcomes, final_parses = await self.final_sweep_gate.run(run_sweep)
                 fetch_outcomes.extend(final_outcomes)
                 parse_results.extend(final_parses)
                 self.live_worker.finalize_event(
