@@ -19,6 +19,20 @@ class ProxyEndpoint:
 
 
 @dataclass(frozen=True)
+class FingerprintProfile:
+    """A lightweight browser fingerprint template for one outbound request."""
+
+    name: str
+    impersonate: str
+    user_agent: str
+    accept_language: str
+    sec_ch_ua: str
+    sec_ch_ua_mobile: str
+    sec_ch_ua_platform: str
+    referer: str
+
+
+@dataclass(frozen=True)
 class RetryPolicy:
     """Retry and backoff configuration."""
 
@@ -50,6 +64,9 @@ class RuntimeConfig:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     tls_policy: TlsPolicy = field(default_factory=TlsPolicy)
     proxy_endpoints: tuple[ProxyEndpoint, ...] = ()
+    proxy_request_cooldown_seconds: float = 1.5
+    proxy_request_jitter_seconds: float = 1.0
+    fingerprint_profiles: tuple[FingerprintProfile, ...] = ()
     challenge_markers: tuple[str, ...] = (
         "captcha",
         "g-recaptcha",
@@ -107,6 +124,12 @@ def load_runtime_config(
         for index, url in enumerate(configured_proxy_urls)
         if url.strip()
     )
+    impersonate = env.get("SCHEMA_INSPECTOR_TLS_IMPERSONATE", "chrome110").strip() or "chrome110"
+    resolved_user_agent = user_agent or env.get("SCHEMA_INSPECTOR_USER_AGENT", "schema-inspector/1.0")
+    fingerprint_profiles = _build_fingerprint_profiles(
+        default_impersonate=impersonate,
+        default_user_agent=resolved_user_agent,
+    )
 
     headers = {
         "Accept": "application/json, text/plain, */*",
@@ -121,12 +144,15 @@ def load_runtime_config(
 
     return RuntimeConfig(
         source_slug=source_slug,
-        user_agent=user_agent or env.get("SCHEMA_INSPECTOR_USER_AGENT", "schema-inspector/1.0"),
+        user_agent=resolved_user_agent,
         require_proxy=_env_bool(env, "SCHEMA_INSPECTOR_REQUIRE_PROXY", True),
         default_headers=headers,
         retry_policy=RetryPolicy(
             max_attempts=max_attempts or _env_int(env, "SCHEMA_INSPECTOR_MAX_ATTEMPTS", 3),
-            challenge_max_attempts=_env_int(env, "SCHEMA_INSPECTOR_CHALLENGE_MAX_ATTEMPTS", 5),
+            challenge_max_attempts=max(
+                _env_int(env, "SCHEMA_INSPECTOR_CHALLENGE_MAX_ATTEMPTS", 5),
+                len(endpoints) or 1,
+            ),
             network_error_max_attempts=_env_int(env, "SCHEMA_INSPECTOR_NETWORK_ERROR_MAX_ATTEMPTS", 4),
             backoff_seconds=_env_float(env, "SCHEMA_INSPECTOR_BACKOFF_SECONDS", 1.0),
         ),
@@ -134,9 +160,12 @@ def load_runtime_config(
             minimum_version=_env_tls(env.get("SCHEMA_INSPECTOR_TLS_MIN_VERSION"), ssl.TLSVersion.TLSv1_2),
             maximum_version=_env_tls(env.get("SCHEMA_INSPECTOR_TLS_MAX_VERSION"), ssl.TLSVersion.TLSv1_3),
             check_hostname=_env_bool(env, "SCHEMA_INSPECTOR_TLS_CHECK_HOSTNAME", True),
-            impersonate=env.get("SCHEMA_INSPECTOR_TLS_IMPERSONATE", "chrome110").strip() or "chrome110",
+            impersonate=impersonate,
         ),
         proxy_endpoints=endpoints,
+        proxy_request_cooldown_seconds=_env_float(env, "SCHEMA_INSPECTOR_PROXY_REQUEST_COOLDOWN_SECONDS", 1.5),
+        proxy_request_jitter_seconds=_env_float(env, "SCHEMA_INSPECTOR_PROXY_REQUEST_JITTER_SECONDS", 1.0),
+        fingerprint_profiles=fingerprint_profiles,
     )
 
 
@@ -259,3 +288,80 @@ def _env_tls(value: str | None, default: ssl.TLSVersion | None) -> ssl.TLSVersio
         "1.3": ssl.TLSVersion.TLSv1_3,
     }
     return mapping.get(normalized, default)
+
+
+def _build_fingerprint_profiles(
+    *,
+    default_impersonate: str,
+    default_user_agent: str,
+) -> tuple[FingerprintProfile, ...]:
+    profiles = (
+        FingerprintProfile(
+            name="chrome-win-120",
+            impersonate="chrome120",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            accept_language="en-US,en;q=0.9,uk;q=0.8",
+            sec_ch_ua='"Chromium";v="120", "Google Chrome";v="120", "Not A(Brand";v="99"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Windows"',
+            referer="https://www.sofascore.com/",
+        ),
+        FingerprintProfile(
+            name="chrome-win-110",
+            impersonate=default_impersonate,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+            ),
+            accept_language="en-US,en;q=0.9",
+            sec_ch_ua='"Chromium";v="110", "Google Chrome";v="110", "Not A(Brand";v="24"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Windows"',
+            referer="https://www.sofascore.com/football",
+        ),
+        FingerprintProfile(
+            name="edge-win-101",
+            impersonate="edge101",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.67 "
+                "Safari/537.36 Edg/101.0.1210.53"
+            ),
+            accept_language="en-GB,en;q=0.9",
+            sec_ch_ua='"Microsoft Edge";v="101", "Chromium";v="101", "Not:A-Brand";v="99"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Windows"',
+            referer="https://www.sofascore.com/basketball",
+        ),
+        FingerprintProfile(
+            name="chrome-linux-120",
+            impersonate="chrome120",
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            accept_language="en-US,en;q=0.9,fr;q=0.7",
+            sec_ch_ua='"Chromium";v="120", "Google Chrome";v="120", "Not A(Brand";v="99"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Linux"',
+            referer="https://www.sofascore.com/tennis",
+        ),
+    )
+    if default_user_agent and default_user_agent != "schema-inspector/1.0":
+        return (
+            FingerprintProfile(
+                name="configured-primary",
+                impersonate=default_impersonate,
+                user_agent=default_user_agent,
+                accept_language="en-US,en;q=0.9",
+                sec_ch_ua='"Chromium";v="110", "Google Chrome";v="110", "Not A(Brand";v="24"',
+                sec_ch_ua_mobile="?0",
+                sec_ch_ua_platform='"Windows"',
+                referer="https://www.sofascore.com/",
+            ),
+            *profiles,
+        )
+    return profiles

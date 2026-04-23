@@ -17,7 +17,7 @@ from curl_cffi.requests import AsyncSession, RequestsError
 
 from .challenge import detect_challenge
 from .proxy import ProxyPool
-from .runtime import RuntimeConfig, TransportAttempt, TransportResult
+from .runtime import FingerprintProfile, RuntimeConfig, TransportAttempt, TransportResult
 
 
 if sys.platform == "win32":
@@ -45,9 +45,16 @@ class InspectorTransport:
         self.runtime_config = runtime_config
         self.sleeper = sleeper or asyncio.sleep
         self.clock = clock or time.monotonic
-        self.proxy_pool = ProxyPool(runtime_config.proxy_endpoints, clock=self.clock)
+        self.proxy_pool = ProxyPool(
+            runtime_config.proxy_endpoints,
+            clock=self.clock,
+            default_success_cooldown_seconds=runtime_config.proxy_request_cooldown_seconds,
+            jitter_seconds=runtime_config.proxy_request_jitter_seconds,
+        )
         self._session_cache: dict[str, AsyncSession] = {}
         self._session_lock = asyncio.Lock()
+        self._fingerprint_lock = asyncio.Lock()
+        self._fingerprint_cursor = 0
         # ETag cache: url -> (etag_value, last_body_bytes).
         # Populated on 200 responses that carry an ETag header.
         # Used to send If-None-Match on subsequent requests; on 304 we return
@@ -64,8 +71,6 @@ class InspectorTransport:
         parsed = urlparse(url)
         proxy_required = parsed.scheme in {"http", "https"}
         request_headers = dict(self.runtime_config.default_headers)
-        if self.runtime_config.user_agent:
-            request_headers["User-Agent"] = self.runtime_config.user_agent
 
         if headers:
             request_headers.update(headers)
@@ -82,17 +87,17 @@ class InspectorTransport:
             int(self.runtime_config.retry_policy.network_error_max_attempts),
         )
         for attempt_number in range(1, max_attempt_budget + 1):
-            proxy = self.proxy_pool.acquire()
-            while proxy_required and proxy is None and self.runtime_config.proxy_endpoints:
+            lease = await self.proxy_pool.acquire()
+            while proxy_required and lease is None and self.runtime_config.proxy_endpoints:
                 wait_seconds = max(
                     self.proxy_pool.next_available_delay() or 0.0,
                     self.runtime_config.retry_policy.backoff_seconds,
                 )
                 await self._sleep(wait_seconds)
-                proxy = self.proxy_pool.acquire()
+                lease = await self.proxy_pool.acquire()
 
-            proxy_name = proxy.name if proxy is not None else None
-            proxy_url = proxy.url if proxy is not None else None
+            proxy_name = lease.endpoint.name if lease is not None else None
+            proxy_url = lease.endpoint.url if lease is not None else None
             if proxy_required and proxy_url is None:
                 error_msg = self._proxy_required_message()
                 attempts.append(
@@ -106,14 +111,24 @@ class InspectorTransport:
                 )
                 raise ProxyRequiredError(error_msg)
 
+            fingerprint_profile = await self._next_fingerprint_profile()
             try:
-                raw = await self._execute_once(url, request_headers, timeout, proxy_url)
+                attempt_headers = self._apply_fingerprint_headers(request_headers, fingerprint_profile)
+                if lease is not None and lease.pre_request_delay > 0.0:
+                    await self._sleep(lease.pre_request_delay)
+                raw = await self._execute_once(
+                    url,
+                    attempt_headers,
+                    timeout,
+                    proxy_url,
+                    fingerprint_profile=fingerprint_profile,
+                )
 
                 # 304 Not Modified — data hasn't changed, return cached body.
                 # Proxy transferred only request headers, no response body.
                 if raw.status_code == 304 and cached_etag_entry is not None:
-                    if proxy_name is not None:
-                        self.proxy_pool.record_success(proxy_name)
+                    if lease is not None:
+                        await lease.release(success=True)
                     attempts.append(
                         TransportAttempt(
                             attempt_number=attempt_number,
@@ -160,16 +175,16 @@ class InspectorTransport:
                     )
                 )
                 if should_retry:
-                    if proxy_name is not None:
-                        self.proxy_pool.record_failure(proxy_name)
+                    if lease is not None:
+                        await lease.release(success=False)
                     await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
 
-                if proxy_name is not None:
+                if lease is not None:
                     if self._should_cooldown_proxy(raw.status_code, challenge_reason):
-                        self.proxy_pool.record_failure(proxy_name)
+                        await lease.release(success=False)
                     else:
-                        self.proxy_pool.record_success(proxy_name)
+                        await lease.release(success=True)
 
                 # Store ETag from a successful 200 response for future requests.
                 if raw.status_code == 200 and raw.body_bytes:
@@ -189,7 +204,7 @@ class InspectorTransport:
 
             except (URLError, RequestsError) as exc:
                 error_msg = str(getattr(exc, "reason", exc))
-                await self._discard_session(proxy_url)
+                await self._discard_session(proxy_url, fingerprint_profile=fingerprint_profile)
                 attempts.append(
                     TransportAttempt(
                         attempt_number=attempt_number,
@@ -199,11 +214,15 @@ class InspectorTransport:
                         challenge_reason=None,
                     )
                 )
-                if proxy_name is not None:
-                    self.proxy_pool.record_failure(proxy_name)
+                if lease is not None:
+                    await lease.release(success=False)
                 if attempt_number < self._network_attempt_budget():
                     await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
+                raise
+            except Exception:
+                if lease is not None:
+                    await lease.release(success=False)
                 raise
 
         raise RuntimeError("Transport exhausted without a final response.")
@@ -239,6 +258,8 @@ class InspectorTransport:
         headers: Mapping[str, str],
         timeout: float,
         proxy_url: str | None,
+        *,
+        fingerprint_profile: FingerprintProfile | None = None,
     ) -> _RawResponse:
         parsed = urlparse(url)
 
@@ -247,7 +268,7 @@ class InspectorTransport:
             return await asyncio.to_thread(self._execute_local_file_once, url, headers, timeout)
 
         # 2. STEALTH MODE for HTTP/HTTPS
-        session = await self._get_session(proxy_url)
+        session = await self._get_session(proxy_url, fingerprint_profile=fingerprint_profile)
         response = await session.get(
             url,
             headers=dict(headers),
@@ -273,8 +294,13 @@ class InspectorTransport:
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
 
-    async def _get_session(self, proxy_url: str | None) -> AsyncSession:
-        session_key = self._session_key(proxy_url)
+    async def _get_session(
+        self,
+        proxy_url: str | None,
+        *,
+        fingerprint_profile: FingerprintProfile | None = None,
+    ) -> AsyncSession:
+        session_key = self._session_key(proxy_url, fingerprint_profile=fingerprint_profile)
         cached = self._session_cache.get(session_key)
         if cached is not None:
             return cached
@@ -283,12 +309,17 @@ class InspectorTransport:
             cached = self._session_cache.get(session_key)
             if cached is not None:
                 return cached
-            session = AsyncSession(**self._session_kwargs(proxy_url))
+            session = AsyncSession(**self._session_kwargs(proxy_url, fingerprint_profile=fingerprint_profile))
             self._session_cache[session_key] = session
             return session
 
-    async def _discard_session(self, proxy_url: str | None) -> None:
-        session_key = self._session_key(proxy_url)
+    async def _discard_session(
+        self,
+        proxy_url: str | None,
+        *,
+        fingerprint_profile: FingerprintProfile | None = None,
+    ) -> None:
+        session_key = self._session_key(proxy_url, fingerprint_profile=fingerprint_profile)
         async with self._session_lock:
             session = self._session_cache.pop(session_key, None)
         if session is not None:
@@ -302,12 +333,54 @@ class InspectorTransport:
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
 
-    def _session_key(self, proxy_url: str | None) -> str:
-        return proxy_url or "__direct__"
+    async def _next_fingerprint_profile(self) -> FingerprintProfile | None:
+        profiles = self.runtime_config.fingerprint_profiles
+        if not profiles:
+            return None
+        async with self._fingerprint_lock:
+            profile = profiles[self._fingerprint_cursor % len(profiles)]
+            self._fingerprint_cursor += 1
+            return profile
 
-    def _session_kwargs(self, proxy_url: str | None) -> dict[str, object]:
+    def _apply_fingerprint_headers(
+        self,
+        headers: Mapping[str, str],
+        fingerprint_profile: FingerprintProfile | None,
+    ) -> dict[str, str]:
+        request_headers = dict(headers)
+        if fingerprint_profile is None:
+            if self.runtime_config.user_agent:
+                request_headers.setdefault("User-Agent", self.runtime_config.user_agent)
+            return request_headers
+        request_headers.setdefault("User-Agent", fingerprint_profile.user_agent)
+        request_headers.setdefault("Accept-Language", fingerprint_profile.accept_language)
+        request_headers.setdefault("Sec-Ch-Ua", fingerprint_profile.sec_ch_ua)
+        request_headers.setdefault("Sec-Ch-Ua-Mobile", fingerprint_profile.sec_ch_ua_mobile)
+        request_headers.setdefault("Sec-Ch-Ua-Platform", fingerprint_profile.sec_ch_ua_platform)
+        request_headers.setdefault("Referer", fingerprint_profile.referer)
+        return request_headers
+
+    def _session_key(
+        self,
+        proxy_url: str | None,
+        *,
+        fingerprint_profile: FingerprintProfile | None = None,
+    ) -> str:
+        profile_key = fingerprint_profile.impersonate if fingerprint_profile is not None else "__default__"
+        return f"{proxy_url or '__direct__'}|{profile_key}"
+
+    def _session_kwargs(
+        self,
+        proxy_url: str | None,
+        *,
+        fingerprint_profile: FingerprintProfile | None = None,
+    ) -> dict[str, object]:
         tls_policy = getattr(self.runtime_config, "tls_policy", None)
-        impersonate_profile = getattr(tls_policy, "impersonate", "chrome120")
+        impersonate_profile = (
+            fingerprint_profile.impersonate
+            if fingerprint_profile is not None
+            else getattr(tls_policy, "impersonate", "chrome120")
+        )
         proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         kwargs: dict[str, object] = {
             "max_clients": max(20, len(self.runtime_config.proxy_endpoints) or 1),
