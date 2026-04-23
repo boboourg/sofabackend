@@ -494,6 +494,37 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("IS DISTINCT FROM", unique_tournament_sql)
 
+    async def test_event_list_repository_only_caches_unique_tournament_rows_after_post_commit(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.event_list_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_unique_tournaments(executor, bundle)
+            await repository._upsert_unique_tournaments(executor, bundle)
+
+        unique_tournament_statements = [
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament" in sql
+        ]
+        self.assertEqual(len(unique_tournament_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository._upsert_unique_tournaments(executor, bundle)
+
+        unique_tournament_statements = [
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament" in sql
+        ]
+        self.assertEqual(len(unique_tournament_statements), 2)
+
     async def test_event_list_repository_season_upsert_uses_distinct_guard(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()
@@ -502,6 +533,51 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
 
         season_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql)
         self.assertIn("IS DISTINCT FROM", season_sql)
+
+    async def test_event_list_repository_only_caches_event_status_rows_after_post_commit(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.event_list_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_event_statuses(executor, bundle)
+            await repository._upsert_event_statuses(executor, bundle)
+
+        event_status_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO event_status" in sql]
+        self.assertEqual(len(event_status_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository._upsert_event_statuses(executor, bundle)
+
+        event_status_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO event_status" in sql]
+        self.assertEqual(len(event_status_statements), 2)
+
+    async def test_event_list_repository_sorts_event_status_rows_before_upsert(self) -> None:
+        bundle = EventListBundle(
+            **{
+                **_build_bundle().__dict__,
+                "event_statuses": (
+                    EventStatusRecord(code=300, description="AET", type="inprogress"),
+                    EventStatusRecord(code=100, description="1st half", type="inprogress"),
+                    EventStatusRecord(code=200, description="Halftime", type="inprogress"),
+                ),
+            }
+        )
+        executor = _FakeExecutor()
+
+        await EventListRepository()._upsert_event_statuses(executor, bundle)
+
+        event_status_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_status" in sql)
+        self.assertEqual([row[0] for row in event_status_rows], [100, 200, 300])
 
     async def test_event_list_repository_matches_previous_surface_state_by_custom_id(self) -> None:
         bundle = _build_bundle()

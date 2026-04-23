@@ -7,8 +7,10 @@ from typing import Any, Mapping, Protocol
 
 import orjson
 
+from ..db import register_post_commit_hook
 from ..parsers.base import ParseResult
 from ..services.retry_policy import RetryableJobError
+from ..write_avoidance_cache import ExpiringValueCache
 
 _EXECUTEMANY_BATCH_SIZE = 100
 _CACHEABLE_MINIMAL_ENTITY_KINDS = (
@@ -69,6 +71,7 @@ class NormalizeRepository:
         self._known_minimal_entities: dict[str, set[object]] = {
             entity_kind: set() for entity_kind in _CACHEABLE_MINIMAL_ENTITY_KINDS
         }
+        self._event_status_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
 
     async def persist_parse_result(
         self,
@@ -936,14 +939,18 @@ class NormalizeRepository:
         )
 
     async def _persist_event_statuses(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
-        normalized_rows = [
-            (_as_int(row.get("code")), _as_scalar_text(row.get("description")), _as_scalar_text(row.get("type")))
+        rows_by_code = {
+            int(code): (code, description, status_type)
             for row in rows
-            if _as_int(row.get("code")) is not None
-            and _as_scalar_text(row.get("description")) is not None
-            and _as_scalar_text(row.get("type")) is not None
+            if (code := _as_int(row.get("code"))) is not None
+            and (description := _as_scalar_text(row.get("description"))) is not None
+            and (status_type := _as_scalar_text(row.get("type"))) is not None
+        }
+        normalized_rows = [
+            row
+            for code, row in sorted(rows_by_code.items())
+            if self._event_status_cache.get(code) != row[1:]
         ]
-        normalized_rows.sort(key=lambda row: (_sort_int(row[0]), _sort_text(row[1]), _sort_text(row[2])))
         await _executemany(
             executor,
             """
@@ -952,9 +959,18 @@ class NormalizeRepository:
             ON CONFLICT (code) DO UPDATE SET
                 description = EXCLUDED.description,
                 type = EXCLUDED.type
+            WHERE event_status.description IS DISTINCT FROM EXCLUDED.description
+               OR event_status.type IS DISTINCT FROM EXCLUDED.type
             """,
             normalized_rows,
         )
+        if rows_by_code:
+            def _commit_event_status_cache() -> None:
+                for code, row in rows_by_code.items():
+                    self._event_status_cache.set(code, row[1:])
+
+            if not register_post_commit_hook(_commit_event_status_cache):
+                _commit_event_status_cache()
 
     async def _persist_event_incidents(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
         if not rows:

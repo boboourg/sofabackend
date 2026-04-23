@@ -257,6 +257,64 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             [(100, 3001, "player", 1), (100, 3001, "player", 2)],
         )
 
+    async def test_repository_only_caches_event_status_rows_after_post_commit(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=954,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={},
+            metric_rows={
+                "event_status": (
+                    {"code": 100, "description": "1st half", "type": "inprogress"},
+                )
+            },
+        )
+
+        registered_hooks: list[object] = []
+
+        with unittest.mock.patch(
+            "schema_inspector.storage.normalize_repository.register_post_commit_hook",
+            side_effect=lambda callback: registered_hooks.append(callback) or True,
+        ):
+            await repository.persist_parse_result(executor, result)
+            await repository.persist_parse_result(executor, result)
+
+        event_status_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO event_status" in sql]
+        self.assertEqual(len(event_status_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository.persist_parse_result(executor, result)
+
+        event_status_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO event_status" in sql]
+        self.assertEqual(len(event_status_statements), 2)
+
+    async def test_repository_sorts_event_status_rows_before_upsert(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=955,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={},
+            metric_rows={
+                "event_status": (
+                    {"code": 300, "description": "AET", "type": "inprogress"},
+                    {"code": 100, "description": "1st half", "type": "inprogress"},
+                    {"code": 200, "description": "Halftime", "type": "inprogress"},
+                )
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        event_status_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_status" in sql)
+        self.assertEqual([row[0] for row in event_status_rows], [100, 200, 300])
+
     async def test_repository_persists_extended_event_detail_metric_rows(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()

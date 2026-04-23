@@ -12,6 +12,7 @@ from .db import register_post_commit_hook
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
 from .storage.raw_repository import RawRepository
+from .write_avoidance_cache import ExpiringValueCache
 
 
 _RAW_REPOSITORY = RawRepository()
@@ -48,12 +49,14 @@ class EventListRepository:
     """Writes normalized event-list data into PostgreSQL."""
 
     def __init__(self) -> None:
-        self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
-        self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
-        self._category_cache: dict[
+        self._sport_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
+        self._country_cache = ExpiringValueCache[str, tuple[str | None, str | None, str | None]]()
+        self._category_cache = ExpiringValueCache[
             int,
             tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
-        ] = {}
+        ]()
+        self._unique_tournament_cache = ExpiringValueCache[int, tuple[object, ...]]()
+        self._event_status_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
 
     async def load_surface_states(self, executor: SqlExecutor, event_ids: Iterable[int]) -> dict[int, SurfaceEventState]:
         resolved_event_ids = tuple(sorted({int(item) for item in event_ids}))
@@ -371,7 +374,7 @@ class EventListRepository:
             rows,
         )
         for sport_id, row in rows_by_id.items():
-            self._sport_cache[sport_id] = (row[1], row[2])
+            self._sport_cache.set(sport_id, (row[1], row[2]))
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows_by_alpha2 = {
@@ -402,7 +405,7 @@ class EventListRepository:
         if rows_by_alpha2:
             def _commit_country_cache() -> None:
                 for alpha2, row in rows_by_alpha2.items():
-                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+                    self._country_cache.set(alpha2, (row[1], row[2], row[3]))
 
             if not register_post_commit_hook(_commit_country_cache):
                 _commit_country_cache()
@@ -457,14 +460,14 @@ class EventListRepository:
         if rows_by_id:
             def _commit_category_cache() -> None:
                 for category_id, row in rows_by_id.items():
-                    self._category_cache[category_id] = row[1:]
+                    self._category_cache.set(category_id, row[1:])
 
             if not register_post_commit_hook(_commit_category_cache):
                 _commit_category_cache()
 
     async def _upsert_unique_tournaments(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
-        rows = [
-            (
+        rows_by_id = {
+            int(item.id): (
                 item.id,
                 item.slug,
                 item.name,
@@ -480,6 +483,12 @@ class EventListRepository:
                 _jsonb(item.period_length),
             )
             for item in bundle.unique_tournaments
+            if item.id is not None
+        }
+        rows = [
+            row
+            for unique_tournament_id, row in sorted(rows_by_id.items())
+            if self._unique_tournament_cache.get(unique_tournament_id) != row[1:]
         ]
         await _executemany(
             executor,
@@ -518,6 +527,13 @@ class EventListRepository:
             """,
             rows,
         )
+        if rows_by_id:
+            def _commit_unique_tournament_cache() -> None:
+                for unique_tournament_id, row in rows_by_id.items():
+                    self._unique_tournament_cache.set(unique_tournament_id, row[1:])
+
+            if not register_post_commit_hook(_commit_unique_tournament_cache):
+                _commit_unique_tournament_cache()
 
     async def _upsert_seasons(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [
@@ -633,7 +649,16 @@ class EventListRepository:
         )
 
     async def _upsert_event_statuses(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
-        rows = [(item.code, item.description, item.type) for item in bundle.event_statuses]
+        rows_by_code = {
+            int(item.code): (item.code, item.description, item.type)
+            for item in bundle.event_statuses
+            if item.code is not None
+        }
+        rows = [
+            row
+            for code, row in sorted(rows_by_code.items())
+            if self._event_status_cache.get(code) != row[1:]
+        ]
         await _executemany(
             executor,
             """
@@ -642,9 +667,18 @@ class EventListRepository:
             ON CONFLICT (code) DO UPDATE SET
                 description = EXCLUDED.description,
                 type = EXCLUDED.type
+            WHERE event_status.description IS DISTINCT FROM EXCLUDED.description
+               OR event_status.type IS DISTINCT FROM EXCLUDED.type
             """,
             rows,
         )
+        if rows_by_code:
+            def _commit_event_status_cache() -> None:
+                for code, row in rows_by_code.items():
+                    self._event_status_cache.set(code, row[1:])
+
+            if not register_post_commit_hook(_commit_event_status_cache):
+                _commit_event_status_cache()
 
     async def _upsert_events(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [

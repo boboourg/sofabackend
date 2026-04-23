@@ -11,6 +11,7 @@ import orjson
 from .db import register_post_commit_hook
 from .competition_parser import CompetitionBundle
 from .storage.raw_repository import RawRepository
+from .write_avoidance_cache import ExpiringValueCache
 
 
 _RAW_REPOSITORY = RawRepository()
@@ -42,12 +43,13 @@ class CompetitionRepository:
     """Writes normalized competition data into PostgreSQL."""
 
     def __init__(self) -> None:
-        self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
-        self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
-        self._category_cache: dict[
+        self._sport_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
+        self._country_cache = ExpiringValueCache[str, tuple[str | None, str | None, str | None]]()
+        self._category_cache = ExpiringValueCache[
             int,
             tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
-        ] = {}
+        ]()
+        self._unique_tournament_cache = ExpiringValueCache[int, tuple[object, ...]]()
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CompetitionBundle) -> CompetitionWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -116,7 +118,7 @@ class CompetitionRepository:
             rows,
         )
         for sport_id, row in rows_by_id.items():
-            self._sport_cache[sport_id] = (row[1], row[2])
+            self._sport_cache.set(sport_id, (row[1], row[2]))
 
     async def _upsert_countries(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
         rows_by_alpha2 = {
@@ -147,7 +149,7 @@ class CompetitionRepository:
         if rows_by_alpha2:
             def _commit_country_cache() -> None:
                 for alpha2, row in rows_by_alpha2.items():
-                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+                    self._country_cache.set(alpha2, (row[1], row[2], row[3]))
 
             if not register_post_commit_hook(_commit_country_cache):
                 _commit_country_cache()
@@ -210,7 +212,7 @@ class CompetitionRepository:
         if rows_by_id:
             def _commit_category_cache() -> None:
                 for category_id, row in rows_by_id.items():
-                    self._category_cache[category_id] = row[1:]
+                    self._category_cache.set(category_id, row[1:])
 
             if not register_post_commit_hook(_commit_category_cache):
                 _commit_category_cache()
@@ -274,8 +276,8 @@ class CompetitionRepository:
         )
 
     async def _upsert_unique_tournaments(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
-        rows = [
-            (
+        rows_by_id = {
+            int(item.id): (
                 item.id,
                 item.slug,
                 item.name,
@@ -304,6 +306,12 @@ class CompetitionRepository:
                 _jsonb(item.period_length),
             )
             for item in bundle.unique_tournaments
+            if item.id is not None
+        }
+        rows = [
+            row
+            for unique_tournament_id, row in sorted(rows_by_id.items())
+            if self._unique_tournament_cache.get(unique_tournament_id) != row[1:]
         ]
         await _executemany(
             executor,
@@ -395,6 +403,13 @@ class CompetitionRepository:
             """,
             rows,
         )
+        if rows_by_id:
+            def _commit_unique_tournament_cache() -> None:
+                for unique_tournament_id, row in rows_by_id.items():
+                    self._unique_tournament_cache.set(unique_tournament_id, row[1:])
+
+            if not register_post_commit_hook(_commit_unique_tournament_cache):
+                _commit_unique_tournament_cache()
 
     async def _upsert_seasons(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
         rows = [(item.id, item.name, item.year, item.editor) for item in bundle.seasons]
