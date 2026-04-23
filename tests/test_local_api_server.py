@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
+import threading
 
 from schema_inspector.local_api_server import (
     ApiResponse,
@@ -405,6 +407,36 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         response = await application.handle_api_get_http_response("/api/v1/event/15868599", "")
 
         self.assertEqual(response.cache_control, "public, max-age=30")
+
+    async def test_startup_runs_pool_on_dedicated_runtime_loop(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.database_config = object()
+        application._db_pool = None
+        application._runtime_loop = None
+        application._runtime_thread = None
+        application._runtime_ready = threading.Event()
+        application._response_cache = {}
+        application._response_cache_lock = None
+        application._cache_now = lambda: 1000.0
+
+        pool = _FakePoolConnectionBackend()
+
+        async def fake_create_pool_with_fallback(database_config):
+            del database_config
+            return pool
+
+        with patch("schema_inspector.local_api_server.create_pool_with_fallback", side_effect=fake_create_pool_with_fallback):
+            await application.startup()
+            try:
+                self.assertIsNotNone(application._runtime_loop)
+                self.assertIs(application._db_pool, pool)
+                self.assertEqual(application.run_async(_return_runtime_value("ok")), "ok")
+            finally:
+                await application.shutdown()
+
+        self.assertIsNone(application._db_pool)
+        self.assertTrue(pool.closed)
+        self.assertIsNone(application._runtime_loop)
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -1140,6 +1172,7 @@ class _FakePoolConnectionBackend:
         self.connection = _FakeCoverageConnection([])
         self.acquire_calls = 0
         self.release_calls = 0
+        self.closed = False
 
     async def acquire(self):
         self.acquire_calls += 1
@@ -1148,6 +1181,13 @@ class _FakePoolConnectionBackend:
     async def release(self, connection):
         self.asserted_connection = connection
         self.release_calls += 1
+
+    async def close(self):
+        self.closed = True
+
+
+async def _return_runtime_value(value):
+    return value
 
 
 async def _passthrough_reconcile(executor, route, payload):

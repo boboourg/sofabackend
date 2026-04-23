@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import dataclasses
 import os
 import re
@@ -177,6 +178,9 @@ class LocalApiApplication:
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.routes = build_route_specs()
         self._db_pool: Any | None = None
+        self._runtime_loop: asyncio.AbstractEventLoop | None = None
+        self._runtime_thread: threading.Thread | None = None
+        self._runtime_ready = threading.Event()
         self._response_cache: dict[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _CachedSerializedResponse] = {}
         self._response_cache_lock: threading.Lock | None = threading.Lock()
         self._cache_now = time.monotonic
@@ -194,13 +198,67 @@ class LocalApiApplication:
     async def startup(self) -> None:
         if self._db_pool is not None:
             return
-        self._db_pool = await create_pool_with_fallback(self.database_config)
+        self._ensure_runtime_loop()
+        await asyncio.wrap_future(self._submit_to_runtime(self._startup_async()))
 
     async def shutdown(self) -> None:
+        if self._runtime_loop is None:
+            return
+        await asyncio.wrap_future(self._submit_to_runtime(self._shutdown_async()))
+        runtime_loop = self._runtime_loop
+        runtime_thread = self._runtime_thread
+        self._runtime_loop = None
+        self._runtime_thread = None
+        self._runtime_ready.clear()
+        if runtime_loop is not None:
+            runtime_loop.call_soon_threadsafe(runtime_loop.stop)
+        if runtime_thread is not None:
+            runtime_thread.join(timeout=5)
+
+    def run_async(self, awaitable: Any) -> Any:
+        self._ensure_runtime_loop()
+        return self._submit_to_runtime(awaitable).result()
+
+    async def _startup_async(self) -> None:
+        if self._db_pool is not None:
+            return
+        self._db_pool = await create_pool_with_fallback(self.database_config)
+
+    async def _shutdown_async(self) -> None:
         if self._db_pool is None:
             return
         await self._db_pool.close()
         self._db_pool = None
+
+    def _ensure_runtime_loop(self) -> None:
+        if self._runtime_loop is not None:
+            return
+        self._runtime_ready.clear()
+        runtime_thread = threading.Thread(target=self._run_runtime_loop, name="local-api-runtime", daemon=True)
+        runtime_thread.start()
+        if not self._runtime_ready.wait(timeout=5):
+            raise RuntimeError("Local API runtime loop failed to start.")
+        self._runtime_thread = runtime_thread
+
+    def _run_runtime_loop(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._runtime_loop = loop
+        self._runtime_ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+
+    def _submit_to_runtime(self, awaitable: Any) -> concurrent.futures.Future[Any]:
+        if self._runtime_loop is None:
+            raise RuntimeError("Local API runtime loop is not running.")
+        return asyncio.run_coroutine_threadsafe(awaitable, self._runtime_loop)
 
     async def handle_api_get(self, path: str, raw_query: str) -> ApiResponse:
         route_match = match_route(path, self.routes)
@@ -1031,11 +1089,13 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, payload, cache_control="no-cache")
             return
         if path.startswith("/ops/"):
-            response = asyncio.run(self.server.application.handle_ops_get(path, split.query))
+            response = self.server.application.run_async(self.server.application.handle_ops_get(path, split.query))
             self._send_json(response.status_code, response.payload, cache_control="no-cache")
             return
         if path.startswith("/api/"):
-            response = asyncio.run(self.server.application.handle_api_get_http_response(path, split.query))
+            response = self.server.application.run_async(
+                self.server.application.handle_api_get_http_response(path, split.query)
+            )
             self._send_bytes(
                 response.status_code,
                 response.body,
