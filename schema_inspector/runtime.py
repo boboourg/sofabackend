@@ -240,6 +240,25 @@ def load_structure_runtime_config(
             "SCHEMA_INSPECTOR_STRUCTURE_PROXY_REQUEST_JITTER_SECONDS",
             0.1,
         ),
+        retry_policy=replace(
+            config.retry_policy,
+            max_attempts=_env_int(resolved_env, "SCHEMA_INSPECTOR_STRUCTURE_MAX_ATTEMPTS", 2),
+            challenge_max_attempts=_env_int(
+                resolved_env,
+                "SCHEMA_INSPECTOR_STRUCTURE_CHALLENGE_MAX_ATTEMPTS",
+                2,
+            ),
+            network_error_max_attempts=_env_int(
+                resolved_env,
+                "SCHEMA_INSPECTOR_STRUCTURE_NETWORK_ERROR_MAX_ATTEMPTS",
+                2,
+            ),
+            backoff_seconds=_env_float(
+                resolved_env,
+                "SCHEMA_INSPECTOR_STRUCTURE_BACKOFF_SECONDS",
+                0.25,
+            ),
+        ),
     )
     if require_non_residential and not config.proxy_endpoints:
         raise RuntimeError(
