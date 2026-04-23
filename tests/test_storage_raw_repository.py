@@ -159,6 +159,37 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(executor.executemany_calls), 2)
 
+    async def test_upsert_endpoint_registry_entries_skips_overlapping_subset_after_rows_are_cached(self) -> None:
+        first_repository = RawRepository()
+        second_repository = RawRepository()
+        executor = _FakeExecutor()
+        executor._enable_registry_sync_cache = True
+        primary_entry = EndpointRegistryEntry(
+            pattern="/api/v1/event/{event_id}",
+            path_template="/api/v1/event/{event_id}",
+            query_template=None,
+            envelope_key="event",
+            target_table="event",
+            notes="primary route",
+            source_slug="sofascore",
+            contract_version="v1",
+        )
+        secondary_entry = EndpointRegistryEntry(
+            pattern="/api/v1/event/{event_id}/statistics",
+            path_template="/api/v1/event/{event_id}/statistics",
+            query_template=None,
+            envelope_key="statistics",
+            target_table="event_statistic",
+            notes="statistics route",
+            source_slug="sofascore",
+            contract_version="v1",
+        )
+
+        await first_repository.upsert_endpoint_registry_entries(executor, [primary_entry, secondary_entry])
+        await second_repository.upsert_endpoint_registry_entries(executor, [primary_entry])
+
+        self.assertEqual(len(executor.executemany_calls), 2)
+
     async def test_upsert_endpoint_registry_entries_keeps_secondary_source_out_of_serving_registry(self) -> None:
         repository = RawRepository()
         executor = _FakeExecutor()

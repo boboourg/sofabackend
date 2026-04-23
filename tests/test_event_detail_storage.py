@@ -44,6 +44,7 @@ from schema_inspector.event_detail_parser import (
     VenueRecord,
 )
 from schema_inspector.event_detail_repository import EventDetailRepository, EventDetailWriteResult
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 from schema_inspector.event_list_parser import (
     EventChangeItemRecord,
     EventFilterValueRecord,
@@ -363,6 +364,9 @@ def _build_bundle() -> EventDetailBundle:
 
 
 class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_event_detail_repository_inherits_guarded_topology_writes(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()

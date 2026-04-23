@@ -24,6 +24,7 @@ from schema_inspector.entities_parser import (
 from schema_inspector.entities_repository import EntitiesRepository, EntitiesWriteResult
 from schema_inspector.event_detail_parser import EventDetailTeamRecord, EventDetailTournamentRecord, ManagerRecord, ManagerTeamMembershipRecord, PlayerRecord, VenueRecord
 from schema_inspector.event_list_parser import EventSeasonRecord
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 
 
 class _FakeExecutor:
@@ -182,6 +183,9 @@ def _build_bundle() -> EntitiesBundle:
 
 
 class EntitiesStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_entities_repository_inherits_guarded_topology_writes(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()

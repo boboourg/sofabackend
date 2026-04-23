@@ -21,6 +21,7 @@ from schema_inspector.event_list_parser import (
     TournamentRecord,
 )
 from schema_inspector.event_list_repository import EventListRepository, EventListWriteResult
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 from schema_inspector.competition_parser import (
     ApiPayloadSnapshotRecord,
     CategoryRecord,
@@ -385,6 +386,9 @@ def _build_bundle() -> EventListBundle:
 
 
 class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_event_list_repository_skips_redundant_sport_writes_after_first_upsert(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()
@@ -533,6 +537,33 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
 
         season_sql = next(sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql)
         self.assertIn("IS DISTINCT FROM", season_sql)
+
+    async def test_event_list_repository_only_caches_season_rows_after_post_commit(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.event_list_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_seasons(executor, bundle)
+            await repository._upsert_seasons(executor, bundle)
+
+        season_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql]
+        self.assertEqual(len(season_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
+
+        registered_hooks[-1]()
+        await repository._upsert_seasons(executor, bundle)
+
+        season_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql]
+        self.assertEqual(len(season_statements), 2)
 
     async def test_event_list_repository_only_caches_event_status_rows_after_post_commit(self) -> None:
         bundle = _build_bundle()

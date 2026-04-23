@@ -33,3 +33,6 @@ class ExpiringValueCache(Generic[TKey, TValue]):
 
     def set(self, key: TKey, value: TValue) -> None:
         self._entries[key] = (self._clock() + self._ttl_seconds, value)
+
+    def clear(self) -> None:
+        self._entries.clear()

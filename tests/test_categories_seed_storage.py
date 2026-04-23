@@ -14,6 +14,7 @@ from schema_inspector.categories_seed_parser import (
 from schema_inspector.categories_seed_repository import CategoriesSeedRepository, CategoriesSeedWriteResult
 from schema_inspector.competition_parser import ApiPayloadSnapshotRecord, CategoryRecord, CountryRecord, SportRecord
 from schema_inspector.endpoints import categories_seed_registry_entries
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 
 
 class _FakeExecutor:
@@ -149,6 +150,9 @@ def _build_bundle() -> CategoriesSeedBundle:
 
 
 class CategoriesSeedStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_categories_seed_repository_skips_redundant_country_writes(self) -> None:
         repository = CategoriesSeedRepository()
         executor = _FakeExecutor()

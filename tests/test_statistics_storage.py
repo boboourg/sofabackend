@@ -18,6 +18,7 @@ from schema_inspector.statistics_parser import (
     StatisticsTeamRecord,
 )
 from schema_inspector.statistics_repository import StatisticsRepository, StatisticsWriteResult
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 
 
 class _FakeExecutor:
@@ -179,6 +180,9 @@ def _build_bundle() -> StatisticsBundle:
 
 
 class StatisticsStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_statistics_repository_skips_redundant_sport_writes(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()

@@ -21,6 +21,7 @@ from schema_inspector.competition_parser import (
 from schema_inspector.competition_repository import CompetitionRepository, CompetitionWriteResult
 from schema_inspector.db import load_database_config
 from schema_inspector.endpoints import EndpointRegistryEntry
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 
 
 class _FakeExecutor:
@@ -189,6 +190,9 @@ def _build_bundle() -> CompetitionBundle:
 
 
 class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_competition_repository_skips_redundant_topology_updates(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()
@@ -280,15 +284,34 @@ class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
             sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament " in sql
         ]
         self.assertEqual(len(unique_tournament_statements), 2)
+
+    async def test_competition_repository_only_caches_season_rows_after_post_commit(self) -> None:
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = CompetitionRepository()
+        registered_hooks: list[object] = []
+
+        def _capture_post_commit_hook(callback):
+            registered_hooks.append(callback)
+            return True
+
+        with patch(
+            "schema_inspector.competition_repository.register_post_commit_hook",
+            side_effect=_capture_post_commit_hook,
+        ):
+            await repository._upsert_seasons(executor, bundle)
+            await repository._upsert_seasons(executor, bundle)
+
+        season_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql]
+        self.assertEqual(len(season_statements), 2)
         self.assertEqual(len(registered_hooks), 2)
 
         registered_hooks[-1]()
-        await repository._upsert_unique_tournaments(executor, bundle)
+        await repository._upsert_seasons(executor, bundle)
 
-        unique_tournament_statements = [
-            sql for sql, _ in executor.executemany_calls if "INSERT INTO unique_tournament " in sql
-        ]
-        self.assertEqual(len(unique_tournament_statements), 2)
+        season_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO season" in sql]
+        self.assertEqual(len(season_statements), 2)
+        self.assertEqual(len(registered_hooks), 2)
 
     def test_load_database_config_uses_higher_pool_defaults(self) -> None:
         config = load_database_config(

@@ -16,6 +16,7 @@ from schema_inspector.standings_parser import (
 )
 from schema_inspector.standings_repository import StandingsRepository, StandingsWriteResult
 from schema_inspector.competition_parser import CategoryRecord, CountryRecord, SportRecord, UniqueTournamentRecord
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 
 
 class _FakeExecutor:
@@ -171,6 +172,9 @@ def _build_bundle() -> StandingsBundle:
 
 
 class StandingsStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_standings_repository_skips_redundant_topology_updates(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()

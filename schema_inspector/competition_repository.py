@@ -50,6 +50,7 @@ class CompetitionRepository:
             tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
         ]()
         self._unique_tournament_cache = ExpiringValueCache[int, tuple[object, ...]]()
+        self._season_cache = ExpiringValueCache[int, tuple[str | None, int | None, str | None]]()
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CompetitionBundle) -> CompetitionWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -412,7 +413,16 @@ class CompetitionRepository:
                 _commit_unique_tournament_cache()
 
     async def _upsert_seasons(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
-        rows = [(item.id, item.name, item.year, item.editor) for item in bundle.seasons]
+        rows_by_id = {
+            int(item.id): (item.id, item.name, item.year, item.editor)
+            for item in bundle.seasons
+            if item.id is not None
+        }
+        rows = [
+            row
+            for season_id, row in sorted(rows_by_id.items())
+            if self._season_cache.get(season_id) != row[1:]
+        ]
         await _executemany(
             executor,
             """
@@ -428,6 +438,13 @@ class CompetitionRepository:
             """,
             rows,
         )
+        if rows_by_id:
+            def _commit_season_cache() -> None:
+                for season_id, row in rows_by_id.items():
+                    self._season_cache.set(season_id, row[1:])
+
+            if not register_post_commit_hook(_commit_season_cache):
+                _commit_season_cache()
 
     async def _upsert_unique_tournament_seasons(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
         rows = [(item.unique_tournament_id, item.season_id) for item in bundle.unique_tournament_seasons]

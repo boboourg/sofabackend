@@ -11,6 +11,7 @@ import orjson
 from .db import register_post_commit_hook
 from .categories_seed_parser import CategoriesSeedBundle
 from .storage.raw_repository import RawRepository
+from .write_avoidance_cache import ExpiringValueCache
 
 
 _RAW_REPOSITORY = RawRepository()
@@ -36,11 +37,11 @@ class CategoriesSeedRepository:
     """Writes categories discovery data into PostgreSQL."""
 
     def __init__(self) -> None:
-        self._country_cache: dict[str, tuple[str | None, str | None, str | None]] = {}
-        self._category_cache: dict[
+        self._country_cache = ExpiringValueCache[str, tuple[str | None, str | None, str | None]]()
+        self._category_cache = ExpiringValueCache[
             int,
             tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
-        ] = {}
+        ]()
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CategoriesSeedBundle) -> CategoriesSeedWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -107,7 +108,7 @@ class CategoriesSeedRepository:
         if rows_by_alpha2:
             def _commit_country_cache() -> None:
                 for alpha2, row in rows_by_alpha2.items():
-                    self._country_cache[alpha2] = (row[1], row[2], row[3])
+                    self._country_cache.set(alpha2, (row[1], row[2], row[3]))
 
             if not register_post_commit_hook(_commit_country_cache):
                 _commit_country_cache()
@@ -162,7 +163,7 @@ class CategoriesSeedRepository:
         if rows_by_id:
             def _commit_category_cache() -> None:
                 for category_id, row in rows_by_id.items():
-                    self._category_cache[category_id] = row[1:]
+                    self._category_cache.set(category_id, row[1:])
 
             if not register_post_commit_hook(_commit_category_cache):
                 _commit_category_cache()

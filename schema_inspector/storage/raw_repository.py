@@ -10,6 +10,7 @@ import orjson
 
 from ..db import register_post_commit_hook
 from ..endpoints import EndpointRegistryEntry
+from ..write_avoidance_cache import ExpiringValueCache
 from ..parsers.base import RawSnapshot
 from ._temporal import coerce_timestamptz
 
@@ -117,16 +118,25 @@ class RawRepository:
         rows = _normalize_registry_rows(rows)
         if not rows:
             return
-        registry_signature = tuple(rows)
-        cache_enabled = getattr(
-            executor,
-            "_enable_registry_sync_cache",
-            executor.__class__.__module__.startswith("asyncpg"),
-        )
+        cache_enabled = getattr(executor, "_enable_registry_sync_cache", True)
+        contract_rows = rows
+        serving_rows = [row for row in rows if row[6] == self._SERVING_SOURCE_SLUG]
         if cache_enabled:
             with _REGISTRY_SYNC_CACHE_LOCK:
-                if registry_signature in _REGISTRY_SYNC_CACHE:
-                    return
+                contract_rows = [
+                    row
+                    for row in rows
+                    if _REGISTRY_CONTRACT_ROW_CACHE.get(_contract_registry_cache_key(row))
+                    != _contract_registry_cache_value(row)
+                ]
+                serving_rows = [
+                    row
+                    for row in serving_rows
+                    if _REGISTRY_SERVING_ROW_CACHE.get(_serving_registry_cache_key(row))
+                    != _serving_registry_cache_value(row)
+                ]
+        if not contract_rows and not serving_rows:
+            return
         contract_query = """
             INSERT INTO endpoint_contract_registry (
                 pattern,
@@ -153,7 +163,6 @@ class RawRepository:
                OR endpoint_contract_registry.notes IS DISTINCT FROM EXCLUDED.notes
                OR endpoint_contract_registry.contract_version IS DISTINCT FROM EXCLUDED.contract_version
         """
-        serving_rows = [row for row in rows if row[6] == self._SERVING_SOURCE_SLUG]
         serving_query = """
             INSERT INTO endpoint_registry (
                 pattern,
@@ -184,23 +193,40 @@ class RawRepository:
         """
         executemany = getattr(executor, "executemany", None)
         if callable(executemany):
-            await executemany(contract_query, rows)
+            if contract_rows:
+                await executemany(contract_query, contract_rows)
             if serving_rows:
                 await executemany(serving_query, serving_rows)
             if cache_enabled:
-                self._register_registry_signature(registry_signature)
+                self._register_registry_rows(contract_rows, serving_rows)
             return
-        for row in rows:
+        for row in contract_rows:
             await executor.execute(contract_query, *row)
         for row in serving_rows:
             await executor.execute(serving_query, *row)
         if cache_enabled:
-            self._register_registry_signature(registry_signature)
+            self._register_registry_rows(contract_rows, serving_rows)
 
-    def _register_registry_signature(self, registry_signature: tuple[tuple[str | None, ...], ...]) -> None:
+    def _register_registry_rows(
+        self,
+        contract_rows: Iterable[tuple[str | None, ...]],
+        serving_rows: Iterable[tuple[str | None, ...]],
+    ) -> None:
+        resolved_contract_rows = tuple(contract_rows)
+        resolved_serving_rows = tuple(serving_rows)
+
         def _commit_cache_entry() -> None:
             with _REGISTRY_SYNC_CACHE_LOCK:
-                _REGISTRY_SYNC_CACHE.add(registry_signature)
+                for row in resolved_contract_rows:
+                    _REGISTRY_CONTRACT_ROW_CACHE.set(
+                        _contract_registry_cache_key(row),
+                        _contract_registry_cache_value(row),
+                    )
+                for row in resolved_serving_rows:
+                    _REGISTRY_SERVING_ROW_CACHE.set(
+                        _serving_registry_cache_key(row),
+                        _serving_registry_cache_value(row),
+                    )
 
         if not register_post_commit_hook(_commit_cache_entry):
             _commit_cache_entry()
@@ -491,13 +517,21 @@ def _jsonb(value: object) -> str | None:
     return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
 
 
-_REGISTRY_SYNC_CACHE: set[tuple[tuple[str | None, ...], ...]] = set()
+_REGISTRY_CONTRACT_ROW_CACHE = ExpiringValueCache[
+    tuple[str | None, str | None],
+    tuple[str | None, str | None, str | None, str | None, str | None, str | None],
+](ttl_seconds=1800.0)
+_REGISTRY_SERVING_ROW_CACHE = ExpiringValueCache[
+    str | None,
+    tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None],
+](ttl_seconds=1800.0)
 _REGISTRY_SYNC_CACHE_LOCK = threading.Lock()
 
 
 def reset_all_registry_sync_caches() -> None:
     with _REGISTRY_SYNC_CACHE_LOCK:
-        _REGISTRY_SYNC_CACHE.clear()
+        _REGISTRY_CONTRACT_ROW_CACHE.clear()
+        _REGISTRY_SERVING_ROW_CACHE.clear()
 
 
 def _normalize_registry_rows(
@@ -508,6 +542,30 @@ def _normalize_registry_rows(
         unique_rows,
         key=lambda row: tuple("" if value is None else value for value in row),
     )
+
+
+def _contract_registry_cache_key(
+    row: tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]
+) -> tuple[str | None, str | None]:
+    return row[0], row[6]
+
+
+def _contract_registry_cache_value(
+    row: tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+    return row[1], row[2], row[3], row[4], row[5], row[7]
+
+
+def _serving_registry_cache_key(
+    row: tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]
+) -> str | None:
+    return row[0]
+
+
+def _serving_registry_cache_value(
+    row: tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None, str | None]:
+    return row[1], row[2], row[3], row[4], row[5], row[6], row[7]
 
 
 def _maybe_int(value: object) -> int | None:

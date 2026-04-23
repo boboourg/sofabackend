@@ -56,6 +56,7 @@ class EventListRepository:
             tuple[str | None, str | None, str | None, str | None, int | None, int | None, str | None, str | None],
         ]()
         self._unique_tournament_cache = ExpiringValueCache[int, tuple[object, ...]]()
+        self._season_cache = ExpiringValueCache[int, tuple[str | None, int | None, str | None, str | None]]()
         self._event_status_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
 
     async def load_surface_states(self, executor: SqlExecutor, event_ids: Iterable[int]) -> dict[int, SurfaceEventState]:
@@ -536,9 +537,15 @@ class EventListRepository:
                 _commit_unique_tournament_cache()
 
     async def _upsert_seasons(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
-        rows = [
-            (item.id, item.name, item.year, item.editor, _jsonb(item.season_coverage_info))
+        rows_by_id = {
+            int(item.id): (item.id, item.name, item.year, item.editor, _jsonb(item.season_coverage_info))
             for item in bundle.seasons
+            if item.id is not None
+        }
+        rows = [
+            row
+            for season_id, row in sorted(rows_by_id.items())
+            if self._season_cache.get(season_id) != row[1:]
         ]
         await _executemany(
             executor,
@@ -557,6 +564,13 @@ class EventListRepository:
             """,
             rows,
         )
+        if rows_by_id:
+            def _commit_season_cache() -> None:
+                for season_id, row in rows_by_id.items():
+                    self._season_cache.set(season_id, row[1:])
+
+            if not register_post_commit_hook(_commit_season_cache):
+                _commit_season_cache()
 
     async def _upsert_tournaments(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows = [

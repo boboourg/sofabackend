@@ -23,6 +23,7 @@ from schema_inspector.leaderboards_parser import (
     TournamentTeamEventSnapshotRecord,
 )
 from schema_inspector.leaderboards_repository import LeaderboardsRepository, LeaderboardsWriteResult
+from schema_inspector.storage.raw_repository import reset_all_registry_sync_caches
 
 
 class _FakeExecutor:
@@ -222,6 +223,9 @@ def _build_bundle() -> LeaderboardsBundle:
 
 
 class LeaderboardsStorageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_all_registry_sync_caches()
+
     async def test_leaderboards_repository_inherits_guarded_topology_writes(self) -> None:
         bundle = _build_bundle()
         executor = _FakeExecutor()
