@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import unittest
 
+from curl_cffi.requests import RequestsError
+
 from schema_inspector.queue.streams import STREAM_HYDRATE, StreamEntry
 
 
@@ -278,6 +280,73 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(retries, [("1-5", 5_000)])
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5",))])
+
+    async def test_worker_runtime_requeues_upstream_access_denied_errors_via_callback(self) -> None:
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+        from schema_inspector.sofascore_client import SofascoreAccessDeniedError
+
+        queue = _FakeQueue(entries=(StreamEntry(stream=STREAM_HYDRATE, message_id="1-5b", values={"attempt": "1"}),))
+        retries: list[tuple[str, int]] = []
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            del entry
+            raise SofascoreAccessDeniedError("Access denied by upstream")
+
+        async def on_retry(entry: StreamEntry, exc: Exception, *, delay_ms: int) -> None:
+            self.assertIsInstance(exc, SofascoreAccessDeniedError)
+            retries.append((entry.message_id, delay_ms))
+            assert runtime is not None
+            runtime.request_shutdown()
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            retry_handler=on_retry,
+            block_ms=0,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(retries, [("1-5b", 30_000)])
+        self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5b",))])
+
+    async def test_worker_runtime_requeues_transport_requests_errors_via_callback(self) -> None:
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(entries=(StreamEntry(stream=STREAM_HYDRATE, message_id="1-5c", values={"attempt": "2"}),))
+        retries: list[tuple[str, int]] = []
+        runtime: WorkerRuntime | None = None
+
+        async def handler(entry: StreamEntry) -> str:
+            del entry
+            raise RequestsError("SSL_ERROR_SYSCALL", 35, None)
+
+        async def on_retry(entry: StreamEntry, exc: Exception, *, delay_ms: int) -> None:
+            self.assertIsInstance(exc, RequestsError)
+            retries.append((entry.message_id, delay_ms))
+            assert runtime is not None
+            runtime.request_shutdown()
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            retry_handler=on_retry,
+            block_ms=0,
+        )
+
+        await runtime.run_forever(install_signal_handlers=False)
+
+        self.assertEqual(retries, [("1-5c", 20_000)])
+        self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5c",))])
 
     async def test_worker_runtime_uses_custom_retry_delay_for_admission_deferrals(self) -> None:
         from schema_inspector.services.retry_policy import AdmissionDeferredError

@@ -132,14 +132,28 @@ class DelayedEnvelopeStore:
         self.backend = backend
         self.hash_key = hash_key
 
-    def save_entry(self, entry: StreamEntry) -> None:
-        self.save_payload(entry.values, fallback_job_id=entry.message_id)
+    def save_entry(self, entry: StreamEntry, *, attempt_increment: int = 1) -> None:
+        self.save_payload(entry.values, fallback_job_id=entry.message_id, attempt_increment=attempt_increment)
 
-    def save_payload(self, payload: dict[str, object] | dict[str, str], *, fallback_job_id: str | None = None) -> None:
+    def save_payload(
+        self,
+        payload: dict[str, object] | dict[str, str],
+        *,
+        fallback_job_id: str | None = None,
+        attempt_increment: int = 0,
+    ) -> None:
         job_id = str(payload.get("job_id") or fallback_job_id or "")
         if not job_id:
             raise RuntimeError("Delayed envelope store requires a job_id.")
-        encoded = json.dumps({str(key): value for key, value in payload.items()}, ensure_ascii=True, sort_keys=True)
+        values = {str(key): value for key, value in payload.items()}
+        if attempt_increment:
+            raw_attempt = values.get("attempt")
+            try:
+                next_attempt = int(raw_attempt) + int(attempt_increment)
+            except (TypeError, ValueError):
+                next_attempt = 1 + int(attempt_increment)
+            values["attempt"] = next_attempt
+        encoded = json.dumps(values, ensure_ascii=True, sort_keys=True)
         try:
             self.backend.hset(self.hash_key, mapping={job_id: encoded})
         except TypeError:

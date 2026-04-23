@@ -32,9 +32,6 @@ class ProxyPool:
     def acquire(self) -> ProxyEndpoint | None:
         if not self._states:
             return None
-        if len(self._states) == 1:
-            self._cursor = 0
-            return self._states[0].endpoint
 
         now = self._clock()
         for offset in range(len(self._states)):

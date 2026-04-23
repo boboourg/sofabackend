@@ -21,7 +21,7 @@ from .job_execution_context import (
     push_job_execution_context,
     reset_job_execution_context,
 )
-from .retry_policy import is_retryable_db_error, retry_audit_status, retry_delay_ms
+from .retry_policy import is_retryable_worker_error, retry_audit_status, retry_delay_ms
 
 StreamHandler = Callable[[StreamEntry], object]
 RetryHandler = Callable[[StreamEntry, Exception], object]
@@ -294,9 +294,17 @@ class WorkerRuntime:
             try:
                 outcome = await _await_maybe(self.handler(entry))
             except Exception as exc:
-                if self.retry_handler is not None and is_retryable_db_error(exc):
+                if self.retry_handler is not None and is_retryable_worker_error(exc):
                     delay_ms = retry_delay_ms(attempt=_entry_attempt(entry), exc=exc)
                     retry_status = retry_audit_status(exc)
+                    logger.warning(
+                        "Worker %s scheduling retry: stream=%s message_id=%s delay_ms=%s exc=%s",
+                        self.name,
+                        entry.stream,
+                        entry.message_id,
+                        delay_ms,
+                        exc,
+                    )
                     await _await_maybe(self.retry_handler(entry, exc, delay_ms=delay_ms))
                     await self._record_job_run(
                         entry,

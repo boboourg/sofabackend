@@ -23,6 +23,8 @@ class RetryPolicy:
     """Retry and backoff configuration."""
 
     max_attempts: int = 3
+    challenge_max_attempts: int = 5
+    network_error_max_attempts: int = 4
     backoff_seconds: float = 1.0
     retry_status_codes: tuple[int, ...] = (408, 429, 500, 502, 503, 504)
 
@@ -124,6 +126,8 @@ def load_runtime_config(
         default_headers=headers,
         retry_policy=RetryPolicy(
             max_attempts=max_attempts or _env_int(env, "SCHEMA_INSPECTOR_MAX_ATTEMPTS", 3),
+            challenge_max_attempts=_env_int(env, "SCHEMA_INSPECTOR_CHALLENGE_MAX_ATTEMPTS", 5),
+            network_error_max_attempts=_env_int(env, "SCHEMA_INSPECTOR_NETWORK_ERROR_MAX_ATTEMPTS", 4),
             backoff_seconds=_env_float(env, "SCHEMA_INSPECTOR_BACKOFF_SECONDS", 1.0),
         ),
         tls_policy=TlsPolicy(

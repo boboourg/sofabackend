@@ -348,6 +348,44 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload_store.saved_message_ids, ["1-9"])
         self.assertEqual(scheduler.calls, [("job-9", 1_800_000_020_000)])
 
+    async def test_discovery_worker_runtime_requeues_upstream_access_denied_without_crashing(self) -> None:
+        from schema_inspector.sofascore_client import SofascoreAccessDeniedError
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        scheduler = _FakeDelayedScheduler()
+        payload_store = _FakePayloadStore()
+        queue = _FakeQueue()
+        worker = DiscoveryWorker(
+            orchestrator=_FailingDiscoveryOrchestrator(SofascoreAccessDeniedError("Access denied by upstream")),
+            queue=queue,
+            consumer="worker-discovery-1",
+            delayed_scheduler=scheduler,
+            delayed_payload_store=payload_store,
+            now_ms_factory=lambda: 1_800_000_000_000,
+            block_ms=0,
+        )
+        entry = StreamEntry(
+            stream=STREAM_DISCOVERY,
+            message_id="1-10",
+            values={
+                "job_id": "job-10",
+                "job_type": "discover_sport_surface",
+                "sport_slug": "football",
+                "entity_type": "sport",
+                "entity_id": "",
+                "scope": "live",
+                "params_json": "{}",
+                "attempt": "1",
+            },
+        )
+
+        result = await worker.runtime._handle_entry(entry)
+
+        self.assertEqual(result, "requeued")
+        self.assertEqual(payload_store.saved_message_ids, ["1-10"])
+        self.assertEqual(scheduler.calls, [("job-10", 1_800_000_030_000)])
+        self.assertEqual(queue.acked, [(STREAM_DISCOVERY, "cg:discovery", ("1-10",))])
+
 
 class _FakeDiscoveryOrchestrator:
     def __init__(
@@ -376,10 +414,20 @@ class _FakeDiscoveryOrchestrator:
         return self.event_ids
 
 
+class _FailingDiscoveryOrchestrator:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def discover_live_events(self, *, sport_slug: str, timeout: float):
+        del sport_slug, timeout
+        raise self.exc
+
+
 class _FakeQueue:
     def __init__(self) -> None:
         self.published_streams: list[str] = []
         self.published_payloads: list[dict[str, object]] = []
+        self.acked: list[tuple[str, str, tuple[str, ...]]] = []
 
     def publish(self, stream: str, values: dict[str, object]) -> str:
         self.published_streams.append(stream)
@@ -391,8 +439,10 @@ class _FakeQueue:
         return ()
 
     def ack(self, *args, **kwargs):
-        del args, kwargs
-        return 0
+        stream, group, message_ids = args
+        del kwargs
+        self.acked.append((stream, group, tuple(message_ids)))
+        return len(message_ids)
 
 
 class _FakeDelayedScheduler:

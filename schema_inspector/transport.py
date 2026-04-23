@@ -76,7 +76,12 @@ class InspectorTransport:
             request_headers["If-None-Match"] = cached_etag_entry[0]
 
         attempts = []
-        for attempt_number in range(1, self.runtime_config.retry_policy.max_attempts + 1):
+        max_attempt_budget = max(
+            int(self.runtime_config.retry_policy.max_attempts),
+            int(self.runtime_config.retry_policy.challenge_max_attempts),
+            int(self.runtime_config.retry_policy.network_error_max_attempts),
+        )
+        for attempt_number in range(1, max_attempt_budget + 1):
             proxy = self.proxy_pool.acquire()
             while proxy_required and proxy is None and self.runtime_config.proxy_endpoints:
                 wait_seconds = max(
@@ -149,7 +154,10 @@ class InspectorTransport:
                         raw.status_code in self.runtime_config.retry_policy.retry_status_codes
                         or challenge_reason is not None
                     )
-                    and attempt_number < self.runtime_config.retry_policy.max_attempts
+                    and attempt_number < self._response_attempt_budget(
+                        status_code=raw.status_code,
+                        challenge_reason=challenge_reason,
+                    )
                 )
                 if should_retry:
                     if proxy_name is not None:
@@ -193,7 +201,7 @@ class InspectorTransport:
                 )
                 if proxy_name is not None:
                     self.proxy_pool.record_failure(proxy_name)
-                if attempt_number < self.runtime_config.retry_policy.max_attempts:
+                if attempt_number < self._network_attempt_budget():
                     await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
                 raise
@@ -211,6 +219,19 @@ class InspectorTransport:
         if status_code in self.runtime_config.retry_policy.retry_status_codes:
             return True
         return status_code >= 500
+
+    def _response_attempt_budget(self, *, status_code: int, challenge_reason: str | None) -> int:
+        budget = int(self.runtime_config.retry_policy.max_attempts)
+        if challenge_reason is not None or status_code in {403, 429}:
+            budget = max(budget, int(self.runtime_config.retry_policy.challenge_max_attempts))
+        return max(1, budget)
+
+    def _network_attempt_budget(self) -> int:
+        return max(
+            1,
+            int(self.runtime_config.retry_policy.max_attempts),
+            int(self.runtime_config.retry_policy.network_error_max_attempts),
+        )
 
     async def _execute_once(
         self,

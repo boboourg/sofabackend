@@ -199,6 +199,32 @@ class StructureWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "ignored")
         self.assertEqual(orchestrator.calls, [])
 
+    async def test_structure_worker_runtime_requeues_upstream_access_denied_without_crashing(self) -> None:
+        from schema_inspector.sofascore_client import SofascoreAccessDeniedError
+        from schema_inspector.workers.structure_worker import StructureSyncWorker
+
+        scheduler = _FakeDelayedScheduler()
+        payload_store = _FakePayloadStore()
+        queue = _FakeRuntimeQueue()
+        worker = StructureSyncWorker(
+            orchestrator=_FailingStructureOrchestrator(SofascoreAccessDeniedError("Access denied by upstream")),
+            queue=queue,
+            consumer="structure-1",
+            delayed_scheduler=scheduler,
+            delayed_payload_store=payload_store,
+            now_ms_factory=lambda: 1_800_000_000_000,
+            block_ms=0,
+        )
+        entry = _structure_entry(job_type=JOB_SYNC_TOURNAMENT_STRUCTURE, entity_id=17)
+        entry.values["attempt"] = "1"
+
+        result = await worker.runtime._handle_entry(entry)
+
+        self.assertEqual(result, "requeued")
+        self.assertEqual(payload_store.saved_message_ids, ["1-1"])
+        self.assertEqual(scheduler.calls, [(str(entry.values["job_id"]), 1_800_000_030_000)])
+        self.assertEqual(queue.acked, [(STREAM_STRUCTURE_SYNC, GROUP_STRUCTURE_SYNC, ("1-1",))])
+
 
 class StructureServiceAppTests(unittest.TestCase):
     def test_service_app_ensures_structure_consumer_groups(self) -> None:
@@ -1057,13 +1083,34 @@ class _FakeQueue:
 
 
 class _FakeRuntimeQueue:
+    def __init__(self) -> None:
+        self.acked: list[tuple[str, str, tuple[str, ...]]] = []
+
     def read_group(self, *args, **kwargs):
         del args, kwargs
         return ()
 
     def ack(self, *args, **kwargs) -> int:
-        del args, kwargs
-        return 0
+        stream, group, message_ids = args
+        del kwargs
+        self.acked.append((stream, group, tuple(message_ids)))
+        return len(message_ids)
+
+
+class _FakeDelayedScheduler:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def schedule(self, job_id: str, *, run_at_epoch_ms: int) -> None:
+        self.calls.append((job_id, run_at_epoch_ms))
+
+
+class _FakePayloadStore:
+    def __init__(self) -> None:
+        self.saved_message_ids: list[str] = []
+
+    def save_entry(self, entry: StreamEntry) -> None:
+        self.saved_message_ids.append(entry.message_id)
 
 
 class _FakeOrchestrator:
@@ -1075,6 +1122,15 @@ class _FakeOrchestrator:
     async def run_structure_sync_for_tournament(self, *, unique_tournament_id: int, sport_slug: str):
         self.calls.append((unique_tournament_id, sport_slug))
         return type("Result", (), {"success": self.success, "reason": self.reason})()
+
+
+class _FailingStructureOrchestrator:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def run_structure_sync_for_tournament(self, *, unique_tournament_id: int, sport_slug: str):
+        del unique_tournament_id, sport_slug
+        raise self.exc
 
 
 class _FakeStreamQueue:
