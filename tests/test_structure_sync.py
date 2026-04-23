@@ -39,6 +39,18 @@ class StructureRuntimeConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS"):
             load_structure_runtime_config(env={})
 
+    def test_load_structure_runtime_config_uses_aggressive_structure_shaping_defaults(self) -> None:
+        from schema_inspector.runtime import load_structure_runtime_config
+
+        config = load_structure_runtime_config(
+            env={
+                "SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS": "http://isp-1.local:8080,http://isp-2.local:8080",
+            }
+        )
+
+        self.assertEqual(config.proxy_request_cooldown_seconds, 0.5)
+        self.assertEqual(config.proxy_request_jitter_seconds, 0.1)
+
 
 class StructurePlannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_structure_planner_publishes_bootstrap_then_refresh_after_interval(self) -> None:
@@ -788,6 +800,73 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         event_list_job.run_featured.assert_not_awaited()
         event_list_job.run_unique_tournament_scheduled.assert_not_awaited()
+
+    async def test_structure_sync_rounds_mode_stops_after_consecutive_missing_round_404s(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+        from schema_inspector.sofascore_client import SofascoreHttpError
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(9001,),
+                ),
+            ]
+        )
+        missing_round = SofascoreHttpError(
+            "HTTP request failed: status=404",
+            transport_result=SimpleNamespace(status_code=404),
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(
+            side_effect=[
+                _event_result((101, 102)),
+                missing_round,
+                missing_round,
+            ]
+        )
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=17,
+                sport_slug="football",
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "rounds")
+        self.assertEqual(result.rounds_probed, 3)
+        self.assertEqual(result.rounds_with_events, 1)
+        self.assertEqual(result.event_ids, (101, 102))
+        self.assertEqual(event_list_job.run_round.await_count, 3)
 
     async def test_structure_sync_auto_falls_back_to_calendar_when_tournament_has_no_rounds(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord

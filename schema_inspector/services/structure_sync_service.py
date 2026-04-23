@@ -183,6 +183,17 @@ def _resolve_mode(profile: SportProfile, tournament: UniqueTournamentRecord | No
     return "calendar"
 
 
+def _http_status_code(exc: Exception) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    transport_result = getattr(exc, "transport_result", None)
+    status = getattr(transport_result, "status_code", None)
+    if isinstance(status, int):
+        return status
+    return None
+
+
 async def _run_rounds_mode(
     *,
     unique_tournament_id: int,
@@ -199,6 +210,7 @@ async def _run_rounds_mode(
     rounds_probed = 0
     rounds_with_events = 0
     collected_event_ids: list[int] = []
+    missing_round_streak = 0
 
     for round_number in range(1, max_rounds_probe + 1):
         rounds_probed += 1
@@ -220,9 +232,18 @@ async def _run_rounds_mode(
             )
             # Don't escalate per-round failures — structure sync is best-effort.
             # If every round fails and we accumulated nothing, we'll downgrade.
+            if _http_status_code(exc) == 404:
+                missing_round_streak += 1
+                if rounds_with_events > 0 and missing_round_streak >= 2:
+                    break
+                if rounds_with_events == 0 and missing_round_streak >= 3:
+                    break
+            else:
+                missing_round_streak = 0
             continue
         event_count = len(result.parsed.events)
         if event_count == 0:
+            missing_round_streak = 0
             # First empty round after we had at least one populated round — stop.
             if rounds_with_events > 0:
                 break
@@ -230,6 +251,7 @@ async def _run_rounds_mode(
             if round_number >= 3:
                 break
             continue
+        missing_round_streak = 0
         rounds_with_events += 1
         collected_event_ids.extend(int(event.id) for event in result.parsed.events)
 

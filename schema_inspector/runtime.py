@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -227,6 +227,19 @@ def load_structure_runtime_config(
         user_agent=user_agent,
         extra_headers=extra_headers,
         max_attempts=max_attempts,
+    )
+    config = replace(
+        config,
+        proxy_request_cooldown_seconds=_env_float(
+            resolved_env,
+            "SCHEMA_INSPECTOR_STRUCTURE_PROXY_REQUEST_COOLDOWN_SECONDS",
+            0.5,
+        ),
+        proxy_request_jitter_seconds=_env_float(
+            resolved_env,
+            "SCHEMA_INSPECTOR_STRUCTURE_PROXY_REQUEST_JITTER_SECONDS",
+            0.1,
+        ),
     )
     if require_non_residential and not config.proxy_endpoints:
         raise RuntimeError(
