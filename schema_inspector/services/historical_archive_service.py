@@ -174,11 +174,31 @@ async def run_historical_tournament_entities_batch(
 
 
 def _build_historical_enrichment_adapter(app):
-    return build_source_adapter(
-        app.runtime_config.source_slug,
-        runtime_config=app.runtime_config,
-        transport=app.transport,
-    )
+    adapter = getattr(app, "_historical_enrichment_adapter", None)
+    if adapter is None:
+        adapter = build_source_adapter(
+            app.runtime_config.source_slug,
+            runtime_config=app.runtime_config,
+            transport=app.transport,
+        )
+        setattr(app, "_historical_enrichment_adapter", adapter)
+    return adapter
+
+
+def _get_historical_enrichment_event_detail_job(app, adapter):
+    event_detail_job = getattr(app, "_historical_enrichment_event_detail_job", None)
+    if event_detail_job is None:
+        event_detail_job = adapter.build_event_detail_job(app.database)
+        setattr(app, "_historical_enrichment_event_detail_job", event_detail_job)
+    return event_detail_job
+
+
+def _get_historical_enrichment_entities_job(app, adapter):
+    entities_job = getattr(app, "_historical_enrichment_entities_job", None)
+    if entities_job is None:
+        entities_job = adapter.build_entities_job(app.database)
+        setattr(app, "_historical_enrichment_entities_job", entities_job)
+    return entities_job
 
 
 def _resolve_historical_enrichment_inputs(sport_slug: str, *, now_factory=None) -> dict[str, object]:
@@ -206,7 +226,7 @@ async def _run_historical_tournament_event_detail_batch(
     timeout: float,
 ) -> dict[str, object]:
     event_detail_backfill_job = EventDetailBackfillJob(
-        adapter.build_event_detail_job(app.database),
+        _get_historical_enrichment_event_detail_job(app, adapter),
         app.database,
     )
     async with _stage_scope(
@@ -225,7 +245,6 @@ async def _run_historical_tournament_event_detail_batch(
         event_detail_result = await event_detail_backfill_job.run(
             limit=event_detail_limit,
             only_missing=True,
-            season_ids=season_ids,
             unique_tournament_ids=(int(unique_tournament_id),),
             start_timestamp_from=recent_window_start,
             start_timestamp_to=recent_window_end,
@@ -252,7 +271,7 @@ async def _run_historical_tournament_entities_batch(
     timeout: float,
 ) -> dict[str, object]:
     entities_backfill_job = EntitiesBackfillJob(
-        adapter.build_entities_job(app.database),
+        _get_historical_enrichment_entities_job(app, adapter),
         app.database,
     )
     async with _stage_scope(
