@@ -6,6 +6,8 @@ import unittest
 from schema_inspector.db import (
     AsyncpgDatabase,
     DatabaseConfig,
+    connect_with_fallback,
+    create_pool_with_fallback,
     load_database_config,
     register_post_commit_hook,
 )
@@ -96,6 +98,7 @@ class DatabaseConfigTests(unittest.TestCase):
         config = DatabaseConfig(
             dsn="postgresql://localhost:5432/sofascore_schema_inspector",
             application_name="worker-live-hot",
+            unix_socket_dir="/var/run/postgresql",
         )
 
         kwargs = config.connect_kwargs(platform="linux", socket_dir="/var/run/postgresql")
@@ -109,6 +112,7 @@ class DatabaseConfigTests(unittest.TestCase):
         config = DatabaseConfig(
             dsn="postgresql://localhost:5432/sofascore_schema_inspector",
             application_name="local_api",
+            unix_socket_dir="/var/run/postgresql",
         )
 
         kwargs = config.connect_kwargs(platform="win32", socket_dir="/var/run/postgresql")
@@ -116,3 +120,61 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(kwargs["dsn"], config.dsn)
         self.assertNotIn("host", kwargs)
         self.assertEqual(kwargs["server_settings"], {"application_name": "local_api"})
+
+
+class DatabaseFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_pool_falls_back_to_tcp_when_socket_auth_fails(self) -> None:
+        class InvalidAuthorizationSpecificationError(Exception):
+            pass
+
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/sofascore_schema_inspector",
+            application_name="worker-live-hot",
+            unix_socket_dir="/var/run/postgresql",
+        )
+        attempts: list[dict[str, object]] = []
+        result = object()
+
+        async def fake_create_pool(**kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise InvalidAuthorizationSpecificationError("peer auth failed")
+            return result
+
+        with patch("schema_inspector.db.sys.platform", "linux"), patch(
+            "asyncpg.create_pool",
+            side_effect=fake_create_pool,
+        ):
+            pool = await create_pool_with_fallback(config)
+
+        self.assertIs(pool, result)
+        self.assertEqual(attempts[0]["host"], "/var/run/postgresql")
+        self.assertNotIn("host", attempts[1])
+
+    async def test_connect_falls_back_to_tcp_when_socket_auth_fails(self) -> None:
+        class InvalidAuthorizationSpecificationError(Exception):
+            pass
+
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/sofascore_schema_inspector",
+            application_name="local_api",
+            unix_socket_dir="/var/run/postgresql",
+        )
+        attempts: list[dict[str, object]] = []
+        result = object()
+
+        async def fake_connect(**kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise InvalidAuthorizationSpecificationError("peer auth failed")
+            return result
+
+        with patch("schema_inspector.db.sys.platform", "linux"), patch(
+            "asyncpg.connect",
+            side_effect=fake_connect,
+        ):
+            connection = await connect_with_fallback(config)
+
+        self.assertIs(connection, result)
+        self.assertEqual(attempts[0]["host"], "/var/run/postgresql")
+        self.assertNotIn("host", attempts[1])

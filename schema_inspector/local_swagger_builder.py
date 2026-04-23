@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .db import load_database_config
+from .db import connect_with_fallback, load_database_config
 from .endpoints import (
     CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT,
     COMPETITION_ENDPOINTS,
@@ -206,7 +206,7 @@ async def _load_summary(database_url: str | None) -> SwaggerDataSummary:
         return SwaggerDataSummary(generated_at=generated_at, table_counts={}, snapshot_counts={})
 
     database_config = load_database_config(dsn=database_url)
-    connection = await asyncpg.connect(**database_config.connect_kwargs())
+    connection = await connect_with_fallback(database_config)
     try:
         table_counts: dict[str, int] = {}
         for table_name in _SUPPORTED_TABLES:

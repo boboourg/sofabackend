@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from .db import load_database_config
+from .db import connect_with_fallback, load_database_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MIGRATION_TABLE = "schema_migration"
@@ -109,7 +109,7 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"[db] database `{target_database}` already exists", flush=True)
 
     print(f"[db] connecting to `{target_database}`", flush=True)
-    connection = await asyncpg.connect(**database_config.connect_kwargs())
+    connection = await connect_with_fallback(database_config)
     try:
         existing_tables = await _list_user_tables(connection)
         schema_initialized = False

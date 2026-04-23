@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import orjson
 
-from .db import DatabaseConfig, load_database_config
+from .db import DatabaseConfig, create_pool_with_fallback, load_database_config
 from .endpoints import SofascoreEndpoint, local_api_endpoints
 from .ops.health import collect_health_report
 from .ops.queue_summary import collect_queue_summary
@@ -194,11 +194,7 @@ class LocalApiApplication:
     async def startup(self) -> None:
         if self._db_pool is not None:
             return
-        try:
-            import asyncpg
-        except ImportError as exc:
-            raise RuntimeError("asyncpg is required to serve the local multi-sport API.") from exc
-        self._db_pool = await asyncpg.create_pool(**self.database_config.pool_kwargs())
+        self._db_pool = await create_pool_with_fallback(self.database_config)
 
     async def shutdown(self) -> None:
         if self._db_pool is None:

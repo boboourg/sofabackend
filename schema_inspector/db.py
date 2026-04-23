@@ -51,18 +51,20 @@ class DatabaseConfig:
         *,
         platform: str | None = None,
         socket_dir: str | None = None,
+        prefer_unix_socket: bool = True,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "dsn": self.dsn,
             "command_timeout": self.command_timeout,
         }
-        resolved_socket_dir = socket_dir if socket_dir is not None else self.unix_socket_dir
-        socket_host = _resolve_unix_socket_host(self.dsn, platform=platform, socket_dir=resolved_socket_dir)
-        if socket_host is not None:
-            kwargs["host"] = socket_host
-            parsed = urlsplit(self.dsn)
-            if parsed.port is not None:
-                kwargs["port"] = parsed.port
+        if prefer_unix_socket:
+            resolved_socket_dir = socket_dir if socket_dir is not None else self.unix_socket_dir
+            socket_host = _resolve_unix_socket_host(self.dsn, platform=platform, socket_dir=resolved_socket_dir)
+            if socket_host is not None:
+                kwargs["host"] = socket_host
+                parsed = urlsplit(self.dsn)
+                if parsed.port is not None:
+                    kwargs["port"] = parsed.port
         if self.application_name:
             kwargs["server_settings"] = {"application_name": self.application_name}
         return kwargs
@@ -72,8 +74,13 @@ class DatabaseConfig:
         *,
         platform: str | None = None,
         socket_dir: str | None = None,
+        prefer_unix_socket: bool = True,
     ) -> dict[str, Any]:
-        kwargs = self.connect_kwargs(platform=platform, socket_dir=socket_dir)
+        kwargs = self.connect_kwargs(
+            platform=platform,
+            socket_dir=socket_dir,
+            prefer_unix_socket=prefer_unix_socket,
+        )
         kwargs["min_size"] = self.min_size
         kwargs["max_size"] = self.max_size
         return kwargs
@@ -90,14 +97,7 @@ class AsyncpgDatabase:
         if self._pool is not None:
             return
 
-        try:
-            import asyncpg
-        except ImportError as exc:
-            raise RuntimeError(
-                "asyncpg is required for PostgreSQL ingestion. Add it to the environment before running ETL jobs."
-            ) from exc
-
-        self._pool = await asyncpg.create_pool(**self.config.pool_kwargs())
+        self._pool = await create_pool_with_fallback(self.config)
         _reset_registry_sync_caches()
 
     async def close(self) -> None:
@@ -174,6 +174,20 @@ def load_database_config(
     )
 
 
+async def connect_with_fallback(config: DatabaseConfig) -> Any:
+    asyncpg = _require_asyncpg()
+    preferred_kwargs = config.connect_kwargs()
+    tcp_kwargs = config.connect_kwargs(prefer_unix_socket=False)
+    return await _connect_with_optional_fallback(asyncpg.connect, preferred_kwargs, tcp_kwargs)
+
+
+async def create_pool_with_fallback(config: DatabaseConfig) -> Any:
+    asyncpg = _require_asyncpg()
+    preferred_kwargs = config.pool_kwargs()
+    tcp_kwargs = config.pool_kwargs(prefer_unix_socket=False)
+    return await _connect_with_optional_fallback(asyncpg.create_pool, preferred_kwargs, tcp_kwargs)
+
+
 def _default_application_name(argv: list[str] | None = None) -> str:
     raw_argv = list(sys.argv if argv is None else argv)
     if len(raw_argv) <= 1:
@@ -212,6 +226,48 @@ def _resolve_unix_socket_host(
     if hostname not in {"localhost", "127.0.0.1", "::1"}:
         return None
     return socket_dir
+
+
+async def _connect_with_optional_fallback(
+    factory: Callable[..., Any],
+    preferred_kwargs: dict[str, Any],
+    tcp_kwargs: dict[str, Any],
+) -> Any:
+    try:
+        return await factory(**preferred_kwargs)
+    except Exception as exc:
+        if not _should_retry_with_tcp(exc, preferred_kwargs=preferred_kwargs, tcp_kwargs=tcp_kwargs):
+            raise
+        return await factory(**tcp_kwargs)
+
+
+def _should_retry_with_tcp(
+    exc: Exception,
+    *,
+    preferred_kwargs: dict[str, Any],
+    tcp_kwargs: dict[str, Any],
+) -> bool:
+    if preferred_kwargs == tcp_kwargs:
+        return False
+    host = preferred_kwargs.get("host")
+    if not isinstance(host, str) or not host.startswith("/"):
+        return False
+    return exc.__class__.__name__ in {
+        "InvalidAuthorizationSpecificationError",
+        "ConnectionDoesNotExistError",
+        "CannotConnectNowError",
+        "ConnectionFailureError",
+    } or isinstance(exc, OSError)
+
+
+def _require_asyncpg() -> Any:
+    try:
+        import asyncpg
+    except ImportError as exc:
+        raise RuntimeError(
+            "asyncpg is required for PostgreSQL ingestion. Add it to the environment before running ETL jobs."
+        ) from exc
+    return asyncpg
 
 
 def _load_project_env() -> dict[str, str]:
