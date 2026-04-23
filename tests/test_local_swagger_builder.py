@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 from schema_inspector.endpoints import LOCAL_API_SUPPORTED_SPORTS, local_api_endpoints
 from schema_inspector.local_swagger_builder import (
     SwaggerDataSummary,
     _build_viewer_html,
     build_openapi_document,
+    load_cached_openapi_bytes,
     resolve_openapi_base_urls,
+    resolve_openapi_cache_path,
+    write_cached_openapi_bytes,
 )
 
 
@@ -156,6 +161,36 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
                     "http://localhost:8000",
                 ),
             )
+
+    def test_openapi_cache_round_trips_bytes(self) -> None:
+        document = {"openapi": "3.1.0", "paths": {}, "components": {"schemas": {}}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            payload = write_cached_openapi_bytes(
+                document,
+                base_urls=("http://127.0.0.1:8000",),
+                cache_dir=cache_dir,
+            )
+            loaded = load_cached_openapi_bytes(
+                base_urls=("http://127.0.0.1:8000",),
+                cache_dir=cache_dir,
+            )
+
+        self.assertEqual(loaded, payload)
+
+    def test_openapi_cache_path_changes_with_base_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            first = resolve_openapi_cache_path(
+                base_urls=("http://127.0.0.1:8000",),
+                cache_dir=cache_dir,
+            )
+            second = resolve_openapi_cache_path(
+                base_urls=("https://api.example.com",),
+                cache_dir=cache_dir,
+            )
+
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

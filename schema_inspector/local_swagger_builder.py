@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -50,8 +51,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "local_swagger"
 DEFAULT_OPENAPI_FILE = "multisport.openapi.json"
 DEFAULT_VIEWER_FILE = "index.html"
+DEFAULT_OPENAPI_CACHE_DIR = PROJECT_ROOT / ".cache" / "local_api"
 DEFAULT_LOCAL_API_BASE_URLS = ("http://127.0.0.1:8000", "http://localhost:8000")
 _LOCAL_SWAGGER_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+_OPENAPI_CACHE_INPUTS = (
+    PROJECT_ROOT / "schema_inspector" / "local_swagger_builder.py",
+    PROJECT_ROOT / "schema_inspector" / "endpoints.py",
+    PROJECT_ROOT / "schema_inspector" / "entities_parser.py",
+    PROJECT_ROOT / "schema_inspector" / "statistics_parser.py",
+    PROJECT_ROOT / "schema_inspector" / "sport_profiles.py",
+)
 _LOCAL_API_TAGS = (
     ("Operations", "Operational monitoring endpoints for the Hybrid ETL control plane and Autopilot services."),
     ("Event List", "Sport-specific scheduled/live/tournament event feeds."),
@@ -242,6 +251,53 @@ def _empty_summary() -> SwaggerDataSummary:
         table_counts={},
         snapshot_counts={},
     )
+
+
+def resolve_openapi_cache_path(
+    *,
+    base_urls: tuple[str, ...] | list[str] | None = None,
+    cache_dir: Path | None = None,
+) -> Path:
+    resolved_cache_dir = Path(cache_dir or DEFAULT_OPENAPI_CACHE_DIR)
+    cache_key = _openapi_cache_key(tuple(base_urls or resolve_openapi_base_urls()))
+    return resolved_cache_dir / f"{cache_key}.openapi.json"
+
+
+def load_cached_openapi_bytes(
+    *,
+    base_urls: tuple[str, ...] | list[str] | None = None,
+    cache_dir: Path | None = None,
+) -> bytes | None:
+    cache_path = resolve_openapi_cache_path(base_urls=base_urls, cache_dir=cache_dir)
+    try:
+        return cache_path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def write_cached_openapi_bytes(
+    document: dict[str, Any],
+    *,
+    base_urls: tuple[str, ...] | list[str] | None = None,
+    cache_dir: Path | None = None,
+) -> bytes:
+    cache_path = resolve_openapi_cache_path(base_urls=base_urls, cache_dir=cache_dir)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    cache_path.write_bytes(payload)
+    return payload
+
+
+def _openapi_cache_key(base_urls: tuple[str, ...]) -> str:
+    hasher = hashlib.sha256()
+    for path in _OPENAPI_CACHE_INPUTS:
+        stat = path.stat()
+        hasher.update(path.relative_to(PROJECT_ROOT).as_posix().encode("utf-8"))
+        hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+        hasher.update(str(stat.st_size).encode("utf-8"))
+    for url in _normalize_openapi_base_urls(base_urls):
+        hasher.update(url.encode("utf-8"))
+    return hasher.hexdigest()[:16]
 
 
 def build_openapi_document(

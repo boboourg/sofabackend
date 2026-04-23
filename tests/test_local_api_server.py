@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import concurrent.futures
 import unittest
 from unittest.mock import patch
 import threading
@@ -12,9 +13,9 @@ from schema_inspector.local_api_server import (
     _compile_path_template,
     _decode_snapshot_payload,
     _extract_event_id_from_entity_root_path,
-    _fallback_terminal_status_payload,
     _normalized_query_map,
     _parse_context_value,
+    _json_dumps_bytes,
     _synthesize_event_root_payload,
     _synthesize_manager_root_payload,
     _synthesize_player_root_payload,
@@ -82,17 +83,6 @@ class LocalApiServerTests(unittest.TestCase):
         assert result is not None
         route, params = result
         self.assertEqual(_parse_context_value(route, params), 14083182)
-
-    def test_fallback_terminal_status_payload_accepts_canceled_alias(self) -> None:
-        payload = _fallback_terminal_status_payload("canceled", None)
-
-        self.assertEqual(
-            payload,
-            {
-                "type": "canceled",
-                "description": "Canceled",
-            },
-        )
 
     def test_team_performance_graph_route_uses_team_context(self) -> None:
         routes = build_route_specs()
@@ -415,6 +405,10 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         application._runtime_loop = None
         application._runtime_thread = None
         application._runtime_ready = threading.Event()
+        application._openapi_json = None
+        application._openapi_build_future = None
+        application._openapi_build_lock = threading.Lock()
+        application.openapi_base_urls = ("http://127.0.0.1:8000",)
         application._response_cache = {}
         application._response_cache_lock = None
         application._cache_now = lambda: 1000.0
@@ -425,7 +419,14 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
             del database_config
             return pool
 
-        with patch("schema_inspector.local_api_server.create_pool_with_fallback", side_effect=fake_create_pool_with_fallback):
+        ready_future: concurrent.futures.Future[bytes] = concurrent.futures.Future()
+        ready_future.set_result(b"{}")
+
+        with patch("schema_inspector.local_api_server.create_pool_with_fallback", side_effect=fake_create_pool_with_fallback), patch.object(
+            application,
+            "_schedule_openapi_build",
+            return_value=ready_future,
+        ):
             await application.startup()
             try:
                 self.assertIsNotNone(application._runtime_loop)
@@ -437,6 +438,58 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(application._db_pool)
         self.assertTrue(pool.closed)
         self.assertIsNone(application._runtime_loop)
+
+    def test_constructor_does_not_build_openapi_eagerly(self) -> None:
+        with patch(
+            "schema_inspector.local_api_server.LocalApiApplication._build_openapi_document",
+            side_effect=AssertionError("should not eagerly build openapi"),
+        ), patch(
+            "schema_inspector.local_api_server.load_cached_openapi_bytes",
+            return_value=None,
+        ):
+            application = LocalApiApplication(
+                database_config=object(),
+                base_url="http://127.0.0.1:8000",
+            )
+
+        self.assertIsNone(application._openapi_json)
+
+    async def test_openapi_json_builds_lazily_and_caches_bytes(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.database_config = object()
+        application.base_url = "http://127.0.0.1:8000"
+        application.openapi_base_urls = ("http://127.0.0.1:8000",)
+        application._db_pool = None
+        application._runtime_loop = None
+        application._runtime_thread = None
+        application._runtime_ready = threading.Event()
+        application._openapi_json = None
+        application._openapi_build_future = None
+        application._openapi_build_lock = threading.Lock()
+        application._response_cache = {}
+        application._response_cache_lock = None
+        application._cache_now = lambda: 1000.0
+        application.swagger_html = ""
+        build_calls = []
+
+        async def fake_build_openapi_document() -> dict[str, object]:
+            build_calls.append("build")
+            return {"openapi": "3.1.0", "paths": {}, "components": {"schemas": {}}}
+
+        application._build_openapi_document = fake_build_openapi_document
+
+        with patch(
+            "schema_inspector.local_api_server.write_cached_openapi_bytes",
+            side_effect=lambda document, **_: _json_dumps_bytes(document),
+        ):
+            try:
+                first = application.openapi_json
+                second = application.openapi_json
+            finally:
+                await application.shutdown()
+
+        self.assertEqual(first, second)
+        self.assertEqual(build_calls, ["build"])
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):

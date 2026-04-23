@@ -33,7 +33,9 @@ from .local_swagger_builder import (
     _empty_summary,
     _load_summary,
     build_openapi_document,
+    load_cached_openapi_bytes,
     resolve_openapi_base_urls,
+    write_cached_openapi_bytes,
 )
 
 _ALL_ENDPOINTS = local_api_endpoints()
@@ -181,12 +183,13 @@ class LocalApiApplication:
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._runtime_thread: threading.Thread | None = None
         self._runtime_ready = threading.Event()
+        self._openapi_build_future: concurrent.futures.Future[bytes] | None = None
+        self._openapi_build_lock = threading.Lock()
         self._response_cache: dict[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _CachedSerializedResponse] = {}
         self._response_cache_lock: threading.Lock | None = threading.Lock()
         self._cache_now = time.monotonic
         self.swagger_html = _build_viewer_html("openapi.json")
-        self.openapi_document = asyncio.run(self._build_openapi_document())
-        self.openapi_json = _json_dumps_bytes(self.openapi_document)
+        self._openapi_json = load_cached_openapi_bytes(base_urls=self.openapi_base_urls)
 
     async def _build_openapi_document(self) -> dict[str, Any]:
         try:
@@ -200,6 +203,7 @@ class LocalApiApplication:
             return
         self._ensure_runtime_loop()
         await asyncio.wrap_future(self._submit_to_runtime(self._startup_async()))
+        self._schedule_openapi_build()
 
     async def shutdown(self) -> None:
         if self._runtime_loop is None:
@@ -218,6 +222,14 @@ class LocalApiApplication:
     def run_async(self, awaitable: Any) -> Any:
         self._ensure_runtime_loop()
         return self._submit_to_runtime(awaitable).result()
+
+    @property
+    def openapi_json(self) -> bytes:
+        cached = self._openapi_json
+        if cached is not None:
+            return cached
+        self._ensure_runtime_loop()
+        return self._schedule_openapi_build().result()
 
     async def _startup_async(self) -> None:
         if self._db_pool is not None:
@@ -259,6 +271,26 @@ class LocalApiApplication:
         if self._runtime_loop is None:
             raise RuntimeError("Local API runtime loop is not running.")
         return asyncio.run_coroutine_threadsafe(awaitable, self._runtime_loop)
+
+    def _schedule_openapi_build(self) -> concurrent.futures.Future[bytes]:
+        with self._openapi_build_lock:
+            if self._openapi_json is not None:
+                future: concurrent.futures.Future[bytes] = concurrent.futures.Future()
+                future.set_result(self._openapi_json)
+                return future
+            if self._openapi_build_future is None:
+                self._openapi_build_future = self._submit_to_runtime(self._build_and_cache_openapi_json())
+            return self._openapi_build_future
+
+    async def _build_and_cache_openapi_json(self) -> bytes:
+        try:
+            document = await self._build_openapi_document()
+            payload = write_cached_openapi_bytes(document, base_urls=self.openapi_base_urls)
+            self._openapi_json = payload
+            return payload
+        finally:
+            with self._openapi_build_lock:
+                self._openapi_build_future = None
 
     async def handle_api_get(self, path: str, raw_query: str) -> ApiResponse:
         route_match = match_route(path, self.routes)
@@ -1595,7 +1627,6 @@ def _fallback_terminal_status_payload(
         "finished": {"code": 100, "type": "finished", "description": "Ended"},
         "afterextra": {"type": "afterextra", "description": "After extra time"},
         "afterpen": {"type": "afterpen", "description": "After penalties"},
-        "canceled": {"type": "canceled", "description": "Canceled"},
         "cancelled": {"type": "cancelled", "description": "Cancelled"},
         "postponed": {"type": "postponed", "description": "Postponed"},
     }
