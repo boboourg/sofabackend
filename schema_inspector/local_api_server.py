@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import dataclasses
+import logging
 import os
 import re
 import threading
@@ -50,6 +51,9 @@ _NATURAL_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"finished", "afterextra", "afterpen", "cancelled", "postponed"}
 )
 _QUEUE_GROUPS = ALL_CONSUMER_GROUPS
+_OPENAPI_WARMUP_DELAY_SECONDS = 120.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,7 @@ class LocalApiApplication:
         self._runtime_thread: threading.Thread | None = None
         self._runtime_ready = threading.Event()
         self._openapi_build_future: concurrent.futures.Future[bytes] | None = None
+        self._openapi_warmup_future: concurrent.futures.Future[None] | None = None
         self._openapi_build_lock = threading.Lock()
         self._response_cache: dict[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _CachedSerializedResponse] = {}
         self._response_cache_lock: threading.Lock | None = threading.Lock()
@@ -203,11 +208,15 @@ class LocalApiApplication:
             return
         self._ensure_runtime_loop()
         await asyncio.wrap_future(self._submit_to_runtime(self._startup_async()))
-        self._schedule_openapi_build()
+        self._schedule_deferred_openapi_warmup()
 
     async def shutdown(self) -> None:
         if self._runtime_loop is None:
             return
+        warmup_future = self._openapi_warmup_future
+        self._openapi_warmup_future = None
+        if warmup_future is not None:
+            warmup_future.cancel()
         await asyncio.wrap_future(self._submit_to_runtime(self._shutdown_async()))
         runtime_loop = self._runtime_loop
         runtime_thread = self._runtime_thread
@@ -291,6 +300,27 @@ class LocalApiApplication:
         finally:
             with self._openapi_build_lock:
                 self._openapi_build_future = None
+
+    def _schedule_deferred_openapi_warmup(self) -> None:
+        if self._openapi_json is not None:
+            return
+        future = self._openapi_warmup_future
+        if future is not None and not future.done():
+            return
+        self._openapi_warmup_future = self._submit_to_runtime(self._deferred_openapi_warmup())
+
+    async def _deferred_openapi_warmup(self) -> None:
+        try:
+            await asyncio.sleep(_OPENAPI_WARMUP_DELAY_SECONDS)
+            if self._openapi_json is not None:
+                return
+            await self._build_and_cache_openapi_json()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Deferred OpenAPI warmup failed.")
+        finally:
+            self._openapi_warmup_future = None
 
     async def handle_api_get(self, path: str, raw_query: str) -> ApiResponse:
         route_match = match_route(path, self.routes)

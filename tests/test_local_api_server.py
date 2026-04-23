@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import concurrent.futures
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import threading
 
 from schema_inspector.local_api_server import (
@@ -407,6 +407,7 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         application._runtime_ready = threading.Event()
         application._openapi_json = None
         application._openapi_build_future = None
+        application._openapi_warmup_future = None
         application._openapi_build_lock = threading.Lock()
         application.openapi_base_urls = ("http://127.0.0.1:8000",)
         application._response_cache = {}
@@ -419,13 +420,10 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
             del database_config
             return pool
 
-        ready_future: concurrent.futures.Future[bytes] = concurrent.futures.Future()
-        ready_future.set_result(b"{}")
-
         with patch("schema_inspector.local_api_server.create_pool_with_fallback", side_effect=fake_create_pool_with_fallback), patch.object(
             application,
-            "_schedule_openapi_build",
-            return_value=ready_future,
+            "_schedule_deferred_openapi_warmup",
+            return_value=None,
         ):
             await application.startup()
             try:
@@ -465,6 +463,7 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         application._runtime_ready = threading.Event()
         application._openapi_json = None
         application._openapi_build_future = None
+        application._openapi_warmup_future = None
         application._openapi_build_lock = threading.Lock()
         application._response_cache = {}
         application._response_cache_lock = None
@@ -490,6 +489,41 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(build_calls, ["build"])
+
+    async def test_deferred_openapi_warmup_waits_before_building(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application._openapi_json = None
+        application._openapi_warmup_future = None
+        application._build_and_cache_openapi_json = AsyncMock(return_value=b"{}")
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        with patch("schema_inspector.local_api_server.asyncio.sleep", side_effect=fake_sleep):
+            await application._deferred_openapi_warmup()
+
+        self.assertEqual(delays, [120.0])
+        application._build_and_cache_openapi_json.assert_awaited_once()
+        self.assertIsNone(application._openapi_warmup_future)
+
+    async def test_deferred_openapi_warmup_logs_and_swallows_failures(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application._openapi_json = None
+        application._openapi_warmup_future = None
+        application._build_and_cache_openapi_json = AsyncMock(side_effect=RuntimeError("boom"))
+
+        async def fake_sleep(delay: float) -> None:
+            del delay
+
+        with patch("schema_inspector.local_api_server.asyncio.sleep", side_effect=fake_sleep), patch(
+            "schema_inspector.local_api_server.logger.exception"
+        ) as log_exception:
+            await application._deferred_openapi_warmup()
+
+        log_exception.assert_called_once()
+        self.assertIsNone(application._openapi_warmup_future)
 
 
 class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
