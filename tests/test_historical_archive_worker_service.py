@@ -362,7 +362,7 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_adapter.event_detail_build_calls, [app.database])
         self.assertIs(app.event_detail_backfill_job, fake_adapter.event_detail_job)
         self.assertEqual(app.event_detail_run_kwargs["unique_tournament_ids"], (17,))
-        self.assertEqual(app.event_detail_run_kwargs["season_ids"], (701, 702))
+        self.assertNotIn("season_ids", app.event_detail_run_kwargs)
         self.assertEqual(app.event_detail_run_kwargs["start_timestamp_from"], expected_from)
         self.assertEqual(app.event_detail_run_kwargs["start_timestamp_to"], expected_to)
         self.assertEqual(app.event_detail_run_kwargs["limit"], expected_event_detail_limit)
