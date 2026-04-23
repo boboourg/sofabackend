@@ -11,6 +11,7 @@ from ..endpoints import (
     unique_tournament_top_players_per_game_endpoint,
     unique_tournament_top_teams_endpoint,
 )
+from ..live_delta_policy import live_delta_edge_kinds
 from ..jobs.types import (
     JOB_FINALIZE_EVENT,
     JOB_HYDRATE_EVENT_EDGE,
@@ -24,7 +25,14 @@ from ..sport_profiles import resolve_sport_profile
 from ..season_widget_negative_cache import widget_endpoint_pattern_from_params
 
 
-def event_edge_candidates(*, sport_slug: str | None, status_type: str | None) -> tuple[str, ...]:
+def event_edge_candidates(
+    *,
+    sport_slug: str | None,
+    status_type: str | None,
+    hydration_mode: str | None = None,
+) -> tuple[str, ...]:
+    if str(hydration_mode or "").strip().lower() == "live_delta" and supports_live_detail_resources(status_type):
+        return live_delta_edge_kinds(sport_slug)
     adapter = resolve_sport_adapter(str(sport_slug or ""))
     if supports_live_detail_resources(status_type):
         return adapter.core_event_edges + adapter.live_optional_edges
@@ -46,8 +54,9 @@ def should_schedule_edge(edge_kind: str, capability_rollup: dict[str, str] | Non
 
 def edge_jobs_for_event(job, capability_rollup: dict[str, str] | None) -> tuple[object, ...]:
     status_type = str(job.params.get("status_type") or "").strip().lower()
+    hydration_mode = str(job.params.get("hydration_mode") or "").strip().lower()
     planned = []
-    for edge_kind in event_edge_candidates(sport_slug=job.sport_slug, status_type=status_type):
+    for edge_kind in event_edge_candidates(sport_slug=job.sport_slug, status_type=status_type, hydration_mode=hydration_mode):
         if not should_schedule_edge(edge_kind, capability_rollup, sport_slug=job.sport_slug):
             continue
         planned.append(

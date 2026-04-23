@@ -128,6 +128,42 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("lineups", kinds)
         self.assertIn("incidents", kinds)
 
+    def test_live_delta_football_edges_are_only_live_delta_policy(self) -> None:
+        planner = Planner()
+        job = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="football",
+            entity_type="event",
+            entity_id=1,
+            scope="live",
+            params={"status_type": "inprogress", "hydration_mode": "live_delta"},
+            priority=0,
+            trace_id=None,
+        )
+
+        planned = planner.expand(job)
+        edge_kinds = tuple(item.params["edge_kind"] for item in planned if item.job_type == JOB_HYDRATE_EVENT_EDGE)
+
+        self.assertEqual(edge_kinds, ("meta", "statistics", "lineups", "incidents", "graph"))
+
+    def test_live_delta_tennis_edges_drop_lineups_and_incidents(self) -> None:
+        planner = Planner()
+        job = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="tennis",
+            entity_type="event",
+            entity_id=1,
+            scope="live",
+            params={"status_type": "inprogress", "hydration_mode": "live_delta"},
+            priority=0,
+            trace_id=None,
+        )
+
+        planned = planner.expand(job)
+        edge_kinds = tuple(item.params["edge_kind"] for item in planned if item.job_type == JOB_HYDRATE_EVENT_EDGE)
+
+        self.assertEqual(edge_kinds, ("meta", "statistics"))
+
     def test_season_widgets_follow_sport_profile(self) -> None:
         planner = Planner()
 

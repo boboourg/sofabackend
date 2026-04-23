@@ -154,7 +154,9 @@ class PilotOrchestrator:
         if self.fetch_executor is None:
             raise RuntimeError("fetch_executor is required for run_event")
 
-        core_only = str(hydration_mode or "full").strip().lower() == "core"
+        effective_hydration_mode = str(hydration_mode or "full").strip().lower()
+        core_only = effective_hydration_mode == "core"
+        lightweight_only = effective_hydration_mode in {"core", "live_delta"}
         fetch_outcomes: list[FetchOutcomeEnvelope] = []
         parse_results: list[object] = []
         live_lane: str | None = None
@@ -239,7 +241,7 @@ class PilotOrchestrator:
             entity_type="event",
             entity_id=event_id,
             scope="pilot",
-            params={"status_type": status_type},
+            params={"status_type": status_type, "hydration_mode": effective_hydration_mode},
             priority=0,
             trace_id=f"pilot:{sport_slug}:{event_id}",
         )
@@ -261,7 +263,7 @@ class PilotOrchestrator:
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
-                if not core_only:
+                if not lightweight_only:
                     followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
                     for followup_job in followup_jobs:
                         special_outcome, special_parse = await self._run_special_job(
@@ -359,7 +361,7 @@ class PilotOrchestrator:
                 observed_at=root_outcome.fetched_at,
             )
 
-        if not core_only:
+        if not lightweight_only:
             hydrated_entities: set[tuple[str, int]] = set()
             while True:
                 next_targets = _entity_profile_targets(
@@ -451,6 +453,7 @@ class PilotOrchestrator:
             has_event_player_heat_map=has_event_player_heat_map,
             has_xg=has_xg,
             core_only=core_only,
+            hydration_mode=effective_hydration_mode,
         ):
             endpoint = request_spec.endpoint
             if (

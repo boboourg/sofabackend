@@ -23,6 +23,7 @@ from .endpoints import (
     EVENT_WINNING_ODDS_ENDPOINT,
     SofascoreEndpoint,
 )
+from .live_delta_policy import live_delta_detail_endpoints
 from .parsers.sports import resolve_sport_adapter
 
 
@@ -55,8 +56,10 @@ def build_event_detail_request_specs(
     has_event_player_heat_map: bool | None = None,
     has_xg: bool | None = None,
     core_only: bool = False,
+    hydration_mode: str = "full",
 ) -> tuple[EventDetailRequestSpec, ...]:
     normalized_sport_slug = str(sport_slug or "").strip().lower()
+    normalized_hydration_mode = str(hydration_mode or "full").strip().lower()
     adapter = resolve_sport_adapter(normalized_sport_slug)
     is_live_detail = supports_live_detail_resources(status_type)
     deduped: list[EventDetailRequestSpec] = []
@@ -68,6 +71,13 @@ def build_event_detail_request_specs(
             return
         seen.add(signature)
         deduped.append(EventDetailRequestSpec(endpoint=endpoint, path_params={key: int(value) for key, value in path_params.items()}))
+
+    if normalized_hydration_mode == "live_delta":
+        if not is_live_detail:
+            return ()
+        for endpoint in live_delta_detail_endpoints(normalized_sport_slug):
+            add(endpoint)
+        return tuple(deduped)
 
     if not core_only:
         for endpoint in (

@@ -309,6 +309,29 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("15921223", live_backend.zsets.get(LIVE_WARM_ZSET, {}))
         self.assertNotIn("15921223", live_backend.zsets.get(LIVE_COLD_ZSET, {}))
 
+    async def test_live_delta_tennis_propagates_to_planner_and_detail_policy(self) -> None:
+        now_ms = 1_800_000_000_000
+        transport = _FakeTransport(
+            _tennis_responses(
+                event_id=15921219,
+                status_type="inprogress",
+                start_timestamp=(now_ms // 1000) - 300,
+            )
+        )
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(_FakeLiveBackend()),
+            stream_queue=RedisStreamQueue(_FakeStreamBackend()),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        await orchestrator.run_event(event_id=15921219, sport_slug="tennis", hydration_mode="live_delta")
+
+        self.assertIn("https://www.sofascore.com/api/v1/event/15921219/point-by-point", transport.seen_urls)
+        self.assertIn("https://www.sofascore.com/api/v1/event/15921219/tennis-power", transport.seen_urls)
+        self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/lineups", transport.seen_urls)
+        self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/incidents", transport.seen_urls)
+
 
 def _build_orchestrator(*, transport, live_state_store, stream_queue, now_ms_factory, sql_executor=None):
     raw_store = _FakeRawSnapshotStore()

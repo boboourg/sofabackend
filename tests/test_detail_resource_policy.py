@@ -109,6 +109,27 @@ class EventDetailResourcePolicyTests(unittest.TestCase):
         self.assertNotIn("/api/v1/event/{event_id}/shotmap", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/odds/{provider_id}/all", patterns)
 
+    def test_live_delta_tennis_fetches_only_live_point_feeds(self) -> None:
+        specs = build_event_detail_request_specs(
+            sport_slug="tennis",
+            status_type="inprogress",
+            team_ids=(199527, 199528),
+            provider_ids=(1,),
+            has_event_player_heat_map=True,
+            has_xg=True,
+            hydration_mode="live_delta",
+        )
+
+        patterns = {item.endpoint.pattern for item in specs}
+
+        self.assertEqual(
+            patterns,
+            {
+                "/api/v1/event/{event_id}/point-by-point",
+                "/api/v1/event/{event_id}/tennis-power",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
