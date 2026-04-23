@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from schema_inspector.endpoints import LOCAL_API_SUPPORTED_SPORTS
+from schema_inspector.endpoints import LOCAL_API_SUPPORTED_SPORTS, local_api_endpoints
 from schema_inspector.local_swagger_builder import (
     SwaggerDataSummary,
     _build_viewer_html,
@@ -26,8 +26,24 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("schemas", document["components"])
         self.assertIn("/api/v1/player/{player_id}/statistics", document["paths"])
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics", document["paths"])
+        self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds", document["paths"])
+        self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees", document["paths"])
         self.assertIn("PlayerStatisticsEnvelope", document["components"]["schemas"])
         self.assertIn("SeasonStatisticsEnvelope", document["components"]["schemas"])
+        self.assertIn("SeasonRoundsEnvelope", document["components"]["schemas"])
+        self.assertIn("SeasonCupTreesEnvelope", document["components"]["schemas"])
+
+    def test_document_covers_every_registered_local_api_path(self) -> None:
+        summary = SwaggerDataSummary(
+            generated_at="2026-04-23T18:00:00+00:00",
+            table_counts={},
+            snapshot_counts={},
+        )
+
+        document = build_openapi_document(summary)
+
+        route_paths = {endpoint.path_template for endpoint in local_api_endpoints()}
+        self.assertEqual(route_paths - set(document["paths"]), set())
 
     def test_viewer_html_points_to_openapi_file(self) -> None:
         html = _build_viewer_html("football.openapi.json")

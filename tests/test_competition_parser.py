@@ -4,6 +4,7 @@ import unittest
 
 from schema_inspector.competition_parser import CompetitionParser, CompetitionParserError
 from schema_inspector.endpoints import (
+    COMPETITION_ENDPOINTS,
     UNIQUE_TOURNAMENT_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
@@ -196,7 +197,7 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
         bundle = await parser.fetch_bundle(17, season_id=76986)
 
         self.assertEqual(fake_client.seen_urls, [tournament_url, seasons_url, info_url])
-        self.assertEqual(len(bundle.registry_entries), 3)
+        self.assertEqual(len(bundle.registry_entries), len(COMPETITION_ENDPOINTS))
         self.assertEqual(len(bundle.payload_snapshots), 3)
         self.assertEqual(bundle.sports[0].slug, "football")
         self.assertEqual(bundle.categories[0].slug, "england")

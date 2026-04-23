@@ -32,6 +32,8 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertIn("/api/v1/event/{event_id}/graph", patterns)
         self.assertIn("/api/v1/event/{event_id}/heatmap/{team_id}", patterns)
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics", patterns)
+        self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds", patterns)
+        self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees", patterns)
         self.assertIn("/api/v1/sport/handball/scheduled-events/{date}", patterns)
         self.assertIn("/api/v1/sport/esports/events/live", patterns)
         self.assertIn("/api/v1/event/{event_id}/innings", patterns)

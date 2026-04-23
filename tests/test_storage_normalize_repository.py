@@ -188,11 +188,258 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         await NormalizeRepository().persist_parse_result(executor, parser.parse(snapshot))
 
+        status_call_index = next(
+            index for index, (sql, _) in enumerate(executor.executemany_calls) if "INSERT INTO event_status" in sql
+        )
+        event_call_index = next(
+            index for index, (sql, _) in enumerate(executor.executemany_calls) if "INSERT INTO event (" in sql
+        )
+        self.assertLess(status_call_index, event_call_index)
+
         status_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_status" in sql)
         self.assertEqual(status_rows[0], (100, "2nd half", "inprogress"))
 
         event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event (" in sql)
         self.assertEqual(event_rows[0][8], 100)
+
+    async def test_repository_sorts_detail_batch_rows_lexicographically(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=953,
+            parser_family="event_comments",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={},
+            metric_rows={
+                "event_comment_feed": (
+                    {"event_id": 200, "home_player_color": {"primary": "#fff"}},
+                    {"event_id": 100, "home_player_color": {"primary": "#000"}},
+                ),
+                "event_comment": (
+                    {"event_id": 100, "comment_id": 9, "sequence": 2, "text": "late"},
+                    {"event_id": 100, "comment_id": 2, "sequence": 1, "text": "early"},
+                ),
+                "event_vote_option": (
+                    {"event_id": 100, "vote_type": "vote", "option_name": "away", "vote_count": 8},
+                    {"event_id": 100, "vote_type": "vote", "option_name": "home", "vote_count": 12},
+                ),
+                "event_team_heatmap": (
+                    {"event_id": 100, "team_id": 3002},
+                    {"event_id": 100, "team_id": 3001},
+                ),
+                "event_team_heatmap_point": (
+                    {"event_id": 100, "team_id": 3001, "point_type": "player", "ordinal": 2, "x": 0.2, "y": 0.4},
+                    {"event_id": 100, "team_id": 3001, "point_type": "player", "ordinal": 1, "x": 0.1, "y": 0.3},
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        feed_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_comment_feed" in sql)
+        self.assertEqual([row[0] for row in feed_rows], [100, 200])
+
+        comment_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_comment (" in sql)
+        self.assertEqual([(row[0], row[1]) for row in comment_rows], [(100, 2), (100, 9)])
+
+        vote_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_vote_option" in sql)
+        self.assertEqual([(row[0], row[1], row[2]) for row in vote_rows], [(100, "vote", "away"), (100, "vote", "home")])
+
+        heatmap_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event_team_heatmap (" in sql)
+        self.assertEqual([(row[0], row[1]) for row in heatmap_rows], [(100, 3001), (100, 3002)])
+
+        heatmap_point_rows = next(
+            rows for sql, rows in executor.executemany_calls if "INSERT INTO event_team_heatmap_point" in sql
+        )
+        self.assertEqual(
+            [(row[0], row[1], row[2], row[3]) for row in heatmap_point_rows],
+            [(100, 3001, "player", 1), (100, 3001, "player", 2)],
+        )
+
+    async def test_repository_persists_extended_event_detail_metric_rows(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=951,
+            parser_family="event_managers",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={},
+            metric_rows={
+                "event_manager_assignment": ({"event_id": 15868599, "side": "home", "manager_id": 500},),
+                "event_duel": ({"event_id": 15868599, "duel_type": "team", "home_wins": 1, "away_wins": 2, "draws": 3},),
+                "event_pregame_form": ({"event_id": 15868599, "label": "Pts"},),
+                "event_pregame_form_side": (
+                    {"event_id": 15868599, "side": "home", "avg_rating": "6.7", "position": 2, "value": "70"},
+                ),
+                "event_pregame_form_item": (
+                    {"event_id": 15868599, "side": "home", "ordinal": 0, "form_value": "W"},
+                ),
+                "event_vote_option": (
+                    {"event_id": 15868599, "vote_type": "vote", "option_name": "home", "vote_count": 12},
+                ),
+                "event_team_heatmap": ({"event_id": 15868599, "team_id": 3002},),
+                "event_team_heatmap_point": (
+                    {"event_id": 15868599, "team_id": 3002, "point_type": "player", "ordinal": 0, "x": 0.1, "y": 0.2},
+                ),
+                "provider": ({"id": 1, "slug": None, "name": "Provider One", "country": None},),
+                "provider_configuration": (
+                    {
+                        "id": 77,
+                        "provider_id": 1,
+                        "campaign_id": None,
+                        "fallback_provider_id": None,
+                        "type": "main",
+                        "weight": None,
+                        "branded": None,
+                        "featured_odds_type": None,
+                        "bet_slip_link": None,
+                        "default_bet_slip_link": None,
+                        "impression_cost_encrypted": None,
+                    },
+                ),
+                "event_market": (
+                    {
+                        "id": 900,
+                        "event_id": 15868599,
+                        "provider_id": 1,
+                        "fid": 44,
+                        "market_id": 2,
+                        "source_id": 555,
+                        "market_group": "Match",
+                        "market_name": "1X2",
+                        "market_period": "ALL",
+                        "structure_type": 1,
+                        "choice_group": None,
+                        "is_live": True,
+                        "suspended": False,
+                    },
+                ),
+                "event_market_choice": (
+                    {
+                        "source_id": 6001,
+                        "event_market_id": 900,
+                        "name": "Home",
+                        "change_value": 0,
+                        "fractional_value": "2/1",
+                        "initial_fractional_value": "2/1",
+                    },
+                ),
+                "event_winning_odds": (
+                    {
+                        "event_id": 15868599,
+                        "provider_id": 1,
+                        "side": "home",
+                        "odds_id": 10,
+                        "actual": 52,
+                        "expected": 48,
+                        "fractional_value": "1/2",
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        statements = [sql for sql, _ in executor.execute_calls] + [sql for sql, _ in executor.executemany_calls]
+        self.assertTrue(any("event_manager_assignment" in sql for sql in statements))
+        self.assertTrue(any("event_duel" in sql for sql in statements))
+        self.assertTrue(any("event_pregame_form" in sql for sql in statements))
+        self.assertTrue(any("event_vote_option" in sql for sql in statements))
+        self.assertTrue(any("event_team_heatmap" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO provider " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO provider_configuration " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_market " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO event_market_choice " in sql for sql in statements))
+        self.assertTrue(any("event_winning_odds" in sql for sql in statements))
+
+    async def test_repository_persists_season_rounds_and_cuptrees(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=952,
+            parser_family="season_cuptrees",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={},
+            metric_rows={
+                "season_round": (
+                    {
+                        "unique_tournament_id": 336,
+                        "season_id": 80287,
+                        "round_number": 27,
+                        "round_name": "Quarterfinals",
+                        "round_slug": "quarterfinals",
+                        "is_current": False,
+                    },
+                    {
+                        "unique_tournament_id": 336,
+                        "season_id": 80287,
+                        "round_number": 28,
+                        "round_name": "Semifinals",
+                        "round_slug": "semifinals",
+                        "is_current": True,
+                    },
+                ),
+                "season_cup_tree": (
+                    {
+                        "cup_tree_id": 10845780,
+                        "unique_tournament_id": 336,
+                        "season_id": 80287,
+                        "tournament_id": 207,
+                        "name": "Taca de Portugal 25/26",
+                        "current_round": 7,
+                    },
+                ),
+                "season_cup_tree_round": (
+                    {
+                        "cup_tree_id": 10845780,
+                        "round_order": 1,
+                        "round_type": 101,
+                        "description": "Round 1",
+                    },
+                ),
+                "season_cup_tree_block": (
+                    {
+                        "entry_id": 2873386,
+                        "cup_tree_id": 10845780,
+                        "round_order": 1,
+                        "block_id": 2421533,
+                        "block_order": 1,
+                        "finished": True,
+                        "matches_in_round": 1,
+                        "result": "7:1",
+                        "home_team_score": "7",
+                        "away_team_score": "1",
+                        "has_next_round_link": True,
+                        "series_start_date_timestamp": 1756656000,
+                        "automatic_progression": False,
+                        "event_ids_json": [14410747],
+                    },
+                ),
+                "season_cup_tree_participant": (
+                    {
+                        "participant_id": 5276248,
+                        "entry_id": 2873386,
+                        "team_id": 190324,
+                        "order_value": 1,
+                        "winner": True,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        statements = [sql for sql, _ in executor.execute_calls] + [sql for sql, _ in executor.executemany_calls]
+        self.assertTrue(any("DELETE FROM season_round" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO season_round" in sql for sql in statements))
+        self.assertTrue(any("DELETE FROM season_cup_tree" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO season_cup_tree " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO season_cup_tree_round " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO season_cup_tree_block " in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO season_cup_tree_participant " in sql for sql in statements))
 
     async def test_repository_coerces_event_statistic_text_fields_to_strings(self) -> None:
         repository = NormalizeRepository()
