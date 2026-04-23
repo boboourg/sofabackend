@@ -710,7 +710,8 @@ CREATE TABLE event (
     has_event_player_statistics BOOLEAN,
     has_event_player_heat_map BOOLEAN,
     has_global_highlights BOOLEAN,
-    has_xg BOOLEAN
+    has_xg BOOLEAN,
+    live_bootstrap_done_at TIMESTAMPTZ
 );
 
 CREATE TABLE event_round_info (
