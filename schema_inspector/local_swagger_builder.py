@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .db import connect_with_fallback, load_database_config
@@ -1809,7 +1809,7 @@ def _build_schemas() -> dict[str, Any]:
         "EventComment": _obj(
             {
                 "id": _int64(),
-                "sequence": _int32(),
+                "sequence": _int64(),
                 "periodName": {"type": "string"},
                 "isHome": {"type": "boolean"},
                 "player": _ref("Player"),
@@ -2405,6 +2405,17 @@ def resolve_openapi_base_urls(
     return _normalize_openapi_base_urls(tuple(candidates))
 
 
+def resolve_request_openapi_base_urls(
+    *,
+    request_headers: Mapping[str, str] | None = None,
+    configured_base_urls: tuple[str, ...] | list[str] | None = None,
+) -> tuple[str, ...]:
+    candidates: list[str] = []
+    candidates.extend(_forwarded_request_base_urls(request_headers))
+    candidates.extend(str(url) for url in (configured_base_urls or resolve_openapi_base_urls()))
+    return _normalize_openapi_base_urls(tuple(candidates))
+
+
 def _normalize_openapi_base_urls(base_urls: tuple[str, ...]) -> tuple[str, ...]:
     deduped: list[str] = []
     seen: set[str] = set()
@@ -2417,6 +2428,86 @@ def _normalize_openapi_base_urls(base_urls: tuple[str, ...]) -> tuple[str, ...]:
     public_urls = [url for url in deduped if not _is_local_base_url(url)]
     local_urls = [url for url in deduped if _is_local_base_url(url)]
     return tuple(public_urls + local_urls)
+
+
+def _forwarded_request_base_urls(request_headers: Mapping[str, str] | None) -> tuple[str, ...]:
+    candidates: list[str] = []
+    forwarded_url = _forwarded_header_base_url(request_headers)
+    if forwarded_url:
+        candidates.append(forwarded_url)
+    x_forwarded_url = _x_forwarded_header_base_url(request_headers)
+    if x_forwarded_url and x_forwarded_url not in candidates:
+        candidates.append(x_forwarded_url)
+    return tuple(candidates)
+
+
+def _forwarded_header_base_url(request_headers: Mapping[str, str] | None) -> str | None:
+    forwarded = _get_header_value(request_headers, "Forwarded")
+    if not forwarded:
+        return None
+    first_entry = forwarded.split(",", 1)[0].strip()
+    if not first_entry:
+        return None
+    params: dict[str, str] = {}
+    for part in first_entry.split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        params[key.strip().lower()] = value.strip().strip('"')
+    proto = (params.get("proto") or "").strip().lower()
+    host = (params.get("host") or "").strip()
+    if proto not in {"http", "https"} or not host:
+        return None
+    return _clean_base_url(f"{proto}://{host}")
+
+
+def _x_forwarded_header_base_url(request_headers: Mapping[str, str] | None) -> str | None:
+    proto = _forwarded_header_token(request_headers, "X-Forwarded-Proto")
+    if proto not in {"http", "https"}:
+        return None
+    host = _forwarded_header_token(request_headers, "X-Forwarded-Host") or _forwarded_header_token(
+        request_headers,
+        "Host",
+    )
+    if not host:
+        return None
+    port = _forwarded_header_token(request_headers, "X-Forwarded-Port")
+    host_with_port = _append_forwarded_port(host=host, port=port, proto=proto)
+    return _clean_base_url(f"{proto}://{host_with_port}")
+
+
+def _forwarded_header_token(request_headers: Mapping[str, str] | None, name: str) -> str | None:
+    raw_value = _get_header_value(request_headers, name)
+    if not raw_value:
+        return None
+    return raw_value.split(",", 1)[0].strip().strip('"')
+
+
+def _get_header_value(request_headers: Mapping[str, str] | None, name: str) -> str | None:
+    if request_headers is None:
+        return None
+    getter = getattr(request_headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        if value is not None:
+            return str(value)
+    for key, value in request_headers.items():
+        if str(key).lower() == name.lower():
+            return str(value)
+    return None
+
+
+def _append_forwarded_port(*, host: str, port: str | None, proto: str) -> str:
+    cleaned_host = host.strip()
+    if not cleaned_host or not port or ":" in cleaned_host:
+        return cleaned_host
+    cleaned_port = port.strip()
+    if not cleaned_port:
+        return cleaned_host
+    default_port = "443" if proto == "https" else "80"
+    if cleaned_port == default_port:
+        return cleaned_host
+    return f"{cleaned_host}:{cleaned_port}"
 
 
 def _local_base_urls(primary_base_url: str | None) -> tuple[str, ...]:

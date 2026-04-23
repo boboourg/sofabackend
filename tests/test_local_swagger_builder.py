@@ -12,6 +12,7 @@ from schema_inspector.local_swagger_builder import (
     build_openapi_document,
     load_cached_openapi_bytes,
     resolve_openapi_base_urls,
+    resolve_request_openapi_base_urls,
     resolve_openapi_cache_path,
     write_cached_openapi_bytes,
 )
@@ -161,6 +162,35 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
                     "http://localhost:8000",
                 ),
             )
+
+    def test_resolve_request_openapi_base_urls_prefers_forwarded_https_host(self) -> None:
+        self.assertEqual(
+            resolve_request_openapi_base_urls(
+                request_headers={"Forwarded": 'for=10.0.0.1;proto=https;host="api.var11.com"'},
+                configured_base_urls=("http://127.0.0.1:8000",),
+            ),
+            (
+                "https://api.var11.com",
+                "http://127.0.0.1:8000",
+            ),
+        )
+
+    def test_resolve_request_openapi_base_urls_uses_x_forwarded_fallback(self) -> None:
+        self.assertEqual(
+            resolve_request_openapi_base_urls(
+                request_headers={
+                    "X-Forwarded-Proto": "https",
+                    "X-Forwarded-Host": "api.var11.com",
+                    "X-Forwarded-Port": "443",
+                },
+                configured_base_urls=("http://127.0.0.1:8000", "http://localhost:8000"),
+            ),
+            (
+                "https://api.var11.com",
+                "http://127.0.0.1:8000",
+                "http://localhost:8000",
+            ),
+        )
 
     def test_openapi_cache_round_trips_bytes(self) -> None:
         document = {"openapi": "3.1.0", "paths": {}, "components": {"schemas": {}}}

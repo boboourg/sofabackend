@@ -5,6 +5,7 @@ import concurrent.futures
 import unittest
 from unittest.mock import AsyncMock, patch
 import threading
+from types import SimpleNamespace
 
 from schema_inspector.local_api_server import (
     ApiResponse,
@@ -24,6 +25,15 @@ from schema_inspector.local_api_server import (
     build_route_specs,
     match_route,
 )
+from schema_inspector.local_swagger_builder import SwaggerDataSummary
+
+
+def _swagger_summary(generated_at: str) -> SwaggerDataSummary:
+    return SwaggerDataSummary(
+        generated_at=generated_at,
+        table_counts={},
+        snapshot_counts={},
+    )
 
 
 class LocalApiServerTests(unittest.TestCase):
@@ -469,6 +479,7 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         application._response_cache_lock = None
         application._cache_now = lambda: 1000.0
         application.swagger_html = ""
+        application._openapi_json_variants = {}
         build_calls = []
 
         async def fake_build_openapi_document() -> dict[str, object]:
@@ -489,6 +500,45 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(build_calls, ["build"])
+
+    async def test_openapi_json_for_request_builds_https_variant_from_forwarded_headers(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.database_config = SimpleNamespace(dsn="postgresql://example")
+        application.base_url = "http://127.0.0.1:8000"
+        application.openapi_base_urls = ("http://127.0.0.1:8000",)
+        application._db_pool = None
+        application._runtime_loop = None
+        application._runtime_thread = None
+        application._runtime_ready = threading.Event()
+        application._openapi_json = b'{"servers":[{"url":"http://127.0.0.1:8000"}]}'
+        application._openapi_json_variants = {}
+        application._openapi_build_future = None
+        application._openapi_warmup_future = None
+        application._openapi_build_lock = threading.Lock()
+        application._response_cache = {}
+        application._response_cache_lock = None
+        application._cache_now = lambda: 1000.0
+        application.swagger_html = ""
+
+        with patch(
+            "schema_inspector.local_api_server.load_cached_openapi_bytes",
+            return_value=None,
+        ), patch(
+            "schema_inspector.local_api_server._load_summary",
+            return_value=_swagger_summary("2026-04-23T19:00:00+00:00"),
+        ):
+            try:
+                payload = application.openapi_json_for_request(
+                    {
+                        "X-Forwarded-Proto": "https",
+                        "X-Forwarded-Host": "api.var11.com",
+                        "X-Forwarded-Port": "443",
+                    }
+                )
+            finally:
+                await application.shutdown()
+
+        self.assertIn(b'"url":"https://api.var11.com"', payload)
 
     async def test_deferred_openapi_warmup_waits_before_building(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)

@@ -36,6 +36,7 @@ from .local_swagger_builder import (
     build_openapi_document,
     load_cached_openapi_bytes,
     resolve_openapi_base_urls,
+    resolve_request_openapi_base_urls,
     write_cached_openapi_bytes,
 )
 
@@ -195,6 +196,9 @@ class LocalApiApplication:
         self._cache_now = time.monotonic
         self.swagger_html = _build_viewer_html("openapi.json")
         self._openapi_json = load_cached_openapi_bytes(base_urls=self.openapi_base_urls)
+        self._openapi_json_variants: dict[tuple[str, ...], bytes] = {}
+        if self._openapi_json is not None:
+            self._openapi_json_variants[self.openapi_base_urls] = self._openapi_json
 
     async def _build_openapi_document(self) -> dict[str, Any]:
         try:
@@ -239,6 +243,29 @@ class LocalApiApplication:
             return cached
         self._ensure_runtime_loop()
         return self._schedule_openapi_build().result()
+
+    def openapi_json_for_request(self, request_headers: dict[str, str] | None = None) -> bytes:
+        resolved_base_urls = resolve_request_openapi_base_urls(
+            request_headers=request_headers,
+            configured_base_urls=self.openapi_base_urls,
+        )
+        if resolved_base_urls == self.openapi_base_urls:
+            return self.openapi_json
+        cached_variants = getattr(self, "_openapi_json_variants", None)
+        if cached_variants is None:
+            cached_variants = {}
+            self._openapi_json_variants = cached_variants
+        cached = cached_variants.get(resolved_base_urls)
+        if cached is not None:
+            return cached
+        cached = load_cached_openapi_bytes(base_urls=resolved_base_urls)
+        if cached is not None:
+            cached_variants[resolved_base_urls] = cached
+            return cached
+        self._ensure_runtime_loop()
+        payload = self._submit_to_runtime(self._build_and_cache_openapi_json_variant(resolved_base_urls)).result()
+        cached_variants[resolved_base_urls] = payload
+        return payload
 
     async def _startup_async(self) -> None:
         if self._db_pool is not None:
@@ -296,10 +323,19 @@ class LocalApiApplication:
             document = await self._build_openapi_document()
             payload = write_cached_openapi_bytes(document, base_urls=self.openapi_base_urls)
             self._openapi_json = payload
+            self._openapi_json_variants[self.openapi_base_urls] = payload
             return payload
         finally:
             with self._openapi_build_lock:
                 self._openapi_build_future = None
+
+    async def _build_and_cache_openapi_json_variant(self, base_urls: tuple[str, ...]) -> bytes:
+        try:
+            summary = await _load_summary(self.database_config.dsn)
+        except Exception:
+            summary = _empty_summary()
+        document = build_openapi_document(summary, base_urls=base_urls)
+        return write_cached_openapi_bytes(document, base_urls=base_urls)
 
     def _schedule_deferred_openapi_warmup(self) -> None:
         if self._openapi_json is not None:
@@ -1141,7 +1177,7 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
         if path == "/openapi.json":
             self._send_bytes(
                 HTTPStatus.OK,
-                self.server.application.openapi_json,
+                self.server.application.openapi_json_for_request(dict(self.headers.items())),
                 "application/json; charset=utf-8",
                 cache_control="public, max-age=300",
             )

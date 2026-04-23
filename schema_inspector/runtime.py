@@ -238,7 +238,7 @@ def load_structure_runtime_config(
         proxy_request_jitter_seconds=_env_float(
             resolved_env,
             "SCHEMA_INSPECTOR_STRUCTURE_PROXY_REQUEST_JITTER_SECONDS",
-            0.1,
+            1.5,
         ),
         retry_policy=replace(
             config.retry_policy,

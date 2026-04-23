@@ -49,7 +49,7 @@ class StructureRuntimeConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(config.proxy_request_cooldown_seconds, 0.5)
-        self.assertEqual(config.proxy_request_jitter_seconds, 0.1)
+        self.assertEqual(config.proxy_request_jitter_seconds, 1.5)
         self.assertEqual(config.retry_policy.max_attempts, 2)
         self.assertEqual(config.retry_policy.challenge_max_attempts, 2)
         self.assertEqual(config.retry_policy.network_error_max_attempts, 2)
