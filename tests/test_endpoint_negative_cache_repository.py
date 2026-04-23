@@ -13,6 +13,10 @@ class _CapturingExecutor:
         self.calls.append((sql, args))
         return self.value
 
+    async def execute(self, sql: str, *args):
+        self.calls.append((sql, args))
+        return "OK"
+
 
 class _StaticNegativeCacheRepository:
     def __init__(self, state) -> None:
@@ -101,6 +105,47 @@ class EndpointNegativeCacheRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(blocked, ())
         self.assertEqual(len(gate.events), 1)
         self.assertEqual(gate.events[0].decision, "shadow_suppress")
+
+    async def test_upsert_state_keeps_last_200_at_separate_from_jsonb_columns(self) -> None:
+        from schema_inspector.season_widget_negative_cache import NegativeCacheState
+        from schema_inspector.storage.endpoint_negative_cache_repository import EndpointNegativeCacheRepository
+
+        now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+        state = NegativeCacheState(
+            scope_kind="tournament",
+            unique_tournament_id=15006,
+            season_id=None,
+            endpoint_pattern="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/overall",
+            classification="mixed_by_season",
+            first_404_at=now - timedelta(days=5),
+            last_404_at=now - timedelta(days=2),
+            first_200_at=now - timedelta(days=1),
+            last_200_at=now,
+            seen_404_season_ids=(88262,),
+            seen_200_season_ids=(87327,),
+            suppressed_hits_total=3,
+            actual_probe_total=4,
+            recheck_iteration=0,
+            next_probe_after=None,
+            probe_lease_until=None,
+            probe_lease_owner=None,
+            last_http_status=200,
+            last_job_type="sync_season_widget",
+            last_trace_id="trace-200",
+            created_at=now - timedelta(days=5),
+            updated_at=now,
+        )
+        repository = EndpointNegativeCacheRepository()
+        executor = _CapturingExecutor()
+
+        await repository._upsert_state(executor, state)
+
+        sql, args = executor.calls[0]
+        self.assertIn("$7, $8, $9, $10, $11::jsonb, $12::jsonb", sql)
+        self.assertEqual(len(args), 23)
+        self.assertEqual(str(args[9]), "2026-04-23 12:00:00+00:00")
+        self.assertEqual(args[10], "[88262]")
+        self.assertEqual(args[11], "[87327]")
 
     async def test_shadow_and_enforce_make_same_coarse_suppress_decision_for_structural_state(self) -> None:
         from schema_inspector.season_widget_negative_cache import (
