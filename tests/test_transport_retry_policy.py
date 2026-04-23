@@ -9,6 +9,12 @@ from schema_inspector.transport import InspectorTransport
 
 
 class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
+    def test_runtime_fingerprint_profiles_use_supported_impersonation_values(self) -> None:
+        config = load_runtime_config(env={})
+        supported = {"chrome104", "chrome107", "chrome110", "edge101", "safari15_5", "safari15_3"}
+        self.assertTrue(config.fingerprint_profiles)
+        self.assertTrue({profile.impersonate for profile in config.fingerprint_profiles}.issubset(supported))
+
     def test_proxy_cooldown_decisions_follow_retry_policy_and_challenge_reason(self) -> None:
         transport = InspectorTransport(load_runtime_config(env={}, proxy_urls=["http://proxy-1.local:8080"]))
 

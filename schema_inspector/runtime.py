@@ -297,27 +297,27 @@ def _build_fingerprint_profiles(
 ) -> tuple[FingerprintProfile, ...]:
     profiles = (
         FingerprintProfile(
-            name="chrome-win-120",
-            impersonate="chrome120",
+            name="chrome-win-110",
+            impersonate="chrome110",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
             ),
             accept_language="en-US,en;q=0.9,uk;q=0.8",
-            sec_ch_ua='"Chromium";v="120", "Google Chrome";v="120", "Not A(Brand";v="99"',
+            sec_ch_ua='"Chromium";v="110", "Google Chrome";v="110", "Not A(Brand";v="24"',
             sec_ch_ua_mobile="?0",
             sec_ch_ua_platform='"Windows"',
             referer="https://www.sofascore.com/",
         ),
         FingerprintProfile(
-            name="chrome-win-110",
-            impersonate=default_impersonate,
+            name="chrome-win-107",
+            impersonate="chrome107",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
             ),
             accept_language="en-US,en;q=0.9",
-            sec_ch_ua='"Chromium";v="110", "Google Chrome";v="110", "Not A(Brand";v="24"',
+            sec_ch_ua='"Chromium";v="107", "Google Chrome";v="107", "Not=A?Brand";v="24"',
             sec_ch_ua_mobile="?0",
             sec_ch_ua_platform='"Windows"',
             referer="https://www.sofascore.com/football",
@@ -337,14 +337,14 @@ def _build_fingerprint_profiles(
             referer="https://www.sofascore.com/basketball",
         ),
         FingerprintProfile(
-            name="chrome-linux-120",
-            impersonate="chrome120",
+            name="chrome-linux-104",
+            impersonate="chrome104",
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"
             ),
             accept_language="en-US,en;q=0.9,fr;q=0.7",
-            sec_ch_ua='"Chromium";v="120", "Google Chrome";v="120", "Not A(Brand";v="99"',
+            sec_ch_ua='"Chromium";v="104", "Google Chrome";v="104", "Not A(Brand";v="99"',
             sec_ch_ua_mobile="?0",
             sec_ch_ua_platform='"Linux"',
             referer="https://www.sofascore.com/tennis",
