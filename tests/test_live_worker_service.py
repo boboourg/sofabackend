@@ -16,7 +16,7 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
             "SOFASCORE_WORKER_MAX_CONCURRENCY",
             "SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",
             "SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",
-        ):
+        ), _patched_env(SOFASCORE_LIVE_HYDRATION_MODE="full"):
             worker = LiveWorkerService(
                 orchestrator=orchestrator,
                 delayed_scheduler=_FakeDelayedScheduler(),
@@ -25,20 +25,20 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
                 consumer="worker-live-hot-1",
             )
 
-        result = await worker.handle(
-            StreamEntry(
-                stream=STREAM_LIVE_HOT,
-                message_id="2-1",
-                values={
-                    "job_id": "job-live-1",
-                    "job_type": "refresh_live_event",
-                    "sport_slug": "football",
-                    "event_id": "7001",
-                    "lane": "hot",
-                    "attempt": "1",
-                },
+            result = await worker.handle(
+                StreamEntry(
+                    stream=STREAM_LIVE_HOT,
+                    message_id="2-1",
+                    values={
+                        "job_id": "job-live-1",
+                        "job_type": "refresh_live_event",
+                        "sport_slug": "football",
+                        "event_id": "7001",
+                        "lane": "hot",
+                        "attempt": "1",
+                    },
+                )
             )
-        )
 
         self.assertEqual(result, "completed")
         self.assertEqual(orchestrator.calls, [(7001, "football", "full")])
