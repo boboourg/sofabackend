@@ -345,6 +345,7 @@ def _build_orchestrator(
     sql_executor=None,
     live_bootstrap_coordinator=None,
     final_sweep_gate=None,
+    season_widget_gate=None,
 ):
     raw_store = _FakeRawSnapshotStore()
     sql_executor = sql_executor or object()
@@ -364,6 +365,7 @@ def _build_orchestrator(
         live_state_store=live_state_store,
         stream_queue=stream_queue,
         now_ms_factory=now_ms_factory,
+        season_widget_gate=season_widget_gate,
         live_bootstrap_coordinator=live_bootstrap_coordinator,
         final_sweep_gate=final_sweep_gate,
     )

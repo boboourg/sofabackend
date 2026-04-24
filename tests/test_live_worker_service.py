@@ -48,6 +48,56 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.prefetch_count, 25)
         self.assertIsNotNone(worker.runtime.batch_preprocessor)
 
+    async def test_live_worker_auto_mode_limits_delta_to_canary_sports(self) -> None:
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        orchestrator = _FakeOrchestrator()
+        with _patched_env(
+            SOFASCORE_LIVE_HYDRATION_MODE="auto",
+            SOFASCORE_LIVE_HYDRATION_CANARY_SPORTS="football",
+            CANARY_SPORTS=None,
+        ):
+            worker = LiveWorkerService(
+                orchestrator=orchestrator,
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="hot",
+                consumer="worker-live-hot-1",
+            )
+            await worker.handle(
+                StreamEntry(
+                    stream=STREAM_LIVE_HOT,
+                    message_id="2-football",
+                    values={
+                        "job_id": "job-live-football",
+                        "job_type": "refresh_live_event",
+                        "sport_slug": "football",
+                        "event_id": "7101",
+                        "lane": "hot",
+                        "params_json": '{"hydration_mode":"live_delta"}',
+                    },
+                )
+            )
+            await worker.handle(
+                StreamEntry(
+                    stream=STREAM_LIVE_HOT,
+                    message_id="2-basketball",
+                    values={
+                        "job_id": "job-live-basketball",
+                        "job_type": "refresh_live_event",
+                        "sport_slug": "basketball",
+                        "event_id": "7102",
+                        "lane": "hot",
+                        "params_json": '{"hydration_mode":"live_delta"}',
+                    },
+                )
+            )
+
+        self.assertEqual(
+            orchestrator.calls,
+            [(7101, "football", "live_delta"), (7102, "basketball", "full")],
+        )
+
     async def test_live_worker_warm_uses_independent_runtime(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
 
@@ -257,6 +307,24 @@ def _cleared_env(*names: str):
     try:
         for name in names:
             os.environ.pop(name, None)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@contextmanager
+def _patched_env(**values: str | None):
+    previous = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         yield
     finally:
         for name, value in previous.items():

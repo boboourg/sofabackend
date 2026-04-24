@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from ..live_hydration_mode import resolve_live_hydration_mode
 from ..queue.streams import GROUP_HYDRATE, STREAM_HISTORICAL_HYDRATE, STREAM_HYDRATE, StreamEntry
 from ..services.worker_runtime import WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
@@ -62,10 +63,15 @@ class HydrateWorker:
         job = decode_stream_job(entry)
         if job.entity_id is None:
             raise RuntimeError("Hydrate worker requires event entity_id in stream payload.")
+        sport_slug = job.sport_slug or self.default_sport_slug
         await self.orchestrator.run_event(
             event_id=int(job.entity_id),
-            sport_slug=job.sport_slug or self.default_sport_slug,
-            hydration_mode=str(job.params.get("hydration_mode", "full")),
+            sport_slug=sport_slug,
+            hydration_mode=resolve_live_hydration_mode(
+                requested_mode=job.params.get("hydration_mode", "full"),
+                sport_slug=sport_slug,
+                scope=job.scope,
+            ),
         )
         return "completed"
 

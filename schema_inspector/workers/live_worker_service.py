@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from ..jobs.types import JOB_REFRESH_LIVE_EVENT
+from ..live_hydration_mode import resolve_live_hydration_mode
 from ..queue.streams import GROUP_LIVE_HOT, GROUP_LIVE_WARM, STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
 from ..services.worker_runtime import BatchDispatchPlan, WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
@@ -73,10 +74,15 @@ class LiveWorkerService:
         job = decode_stream_job(entry)
         if job.entity_id is None:
             raise RuntimeError("Live worker requires event entity_id in stream payload.")
+        sport_slug = job.sport_slug or self.default_sport_slug
         await self.orchestrator.run_event(
             event_id=int(job.entity_id),
-            sport_slug=job.sport_slug or self.default_sport_slug,
-            hydration_mode="full",
+            sport_slug=sport_slug,
+            hydration_mode=resolve_live_hydration_mode(
+                requested_mode=job.params.get("hydration_mode") or "live_delta",
+                sport_slug=sport_slug,
+                scope=job.scope,
+            ),
         )
         return "completed"
 

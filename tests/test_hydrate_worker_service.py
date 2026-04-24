@@ -50,6 +50,132 @@ class HydrateWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.max_concurrency, 2)
         self.assertEqual(scheduler.calls, [])
 
+    async def test_hydrate_worker_can_force_full_live_hydration_with_rollback_env(self) -> None:
+        from schema_inspector.workers.hydrate_worker import HydrateWorker
+
+        orchestrator = _FakeOrchestrator()
+        scheduler = _FakeDelayedScheduler()
+        with _patched_env(
+            SOFASCORE_LIVE_HYDRATION_MODE="full",
+            SOFASCORE_LIVE_HYDRATION_CANARY_SPORTS=None,
+            CANARY_SPORTS=None,
+        ):
+            worker = HydrateWorker(
+                orchestrator=orchestrator,
+                delayed_scheduler=scheduler,
+                queue=_FakeQueue(),
+                consumer="worker-hydrate-1",
+            )
+
+            result = await worker.handle(
+                StreamEntry(
+                    stream=STREAM_HYDRATE,
+                    message_id="1-live-rollback",
+                    values={
+                        "job_id": "job-live-rollback",
+                        "job_type": "hydrate_event_root",
+                        "sport_slug": "football",
+                        "entity_type": "event",
+                        "entity_id": "701",
+                        "scope": "live",
+                        "params_json": '{"hydration_mode":"live_delta"}',
+                        "attempt": "1",
+                    },
+                )
+            )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(orchestrator.calls, [(701, "football", "full")])
+
+    async def test_hydrate_worker_auto_mode_limits_delta_to_canary_sports(self) -> None:
+        from schema_inspector.workers.hydrate_worker import HydrateWorker
+
+        orchestrator = _FakeOrchestrator()
+        scheduler = _FakeDelayedScheduler()
+        with _patched_env(
+            SOFASCORE_LIVE_HYDRATION_MODE="auto",
+            SOFASCORE_LIVE_HYDRATION_CANARY_SPORTS="football",
+            CANARY_SPORTS=None,
+        ):
+            worker = HydrateWorker(
+                orchestrator=orchestrator,
+                delayed_scheduler=scheduler,
+                queue=_FakeQueue(),
+                consumer="worker-hydrate-1",
+            )
+
+            await worker.handle(
+                StreamEntry(
+                    stream=STREAM_HYDRATE,
+                    message_id="1-football",
+                    values={
+                        "job_id": "job-football",
+                        "job_type": "hydrate_event_root",
+                        "sport_slug": "football",
+                        "entity_type": "event",
+                        "entity_id": "801",
+                        "scope": "live",
+                        "params_json": '{"hydration_mode":"live_delta"}',
+                    },
+                )
+            )
+            await worker.handle(
+                StreamEntry(
+                    stream=STREAM_HYDRATE,
+                    message_id="1-basketball",
+                    values={
+                        "job_id": "job-basketball",
+                        "job_type": "hydrate_event_root",
+                        "sport_slug": "basketball",
+                        "entity_type": "event",
+                        "entity_id": "802",
+                        "scope": "live",
+                        "params_json": '{"hydration_mode":"live_delta"}',
+                    },
+                )
+            )
+
+        self.assertEqual(
+            orchestrator.calls,
+            [(801, "football", "live_delta"), (802, "basketball", "full")],
+        )
+
+    async def test_hydrate_worker_keeps_non_live_modes_outside_live_rollout_flag(self) -> None:
+        from schema_inspector.workers.hydrate_worker import HydrateWorker
+
+        orchestrator = _FakeOrchestrator()
+        scheduler = _FakeDelayedScheduler()
+        with _patched_env(
+            SOFASCORE_LIVE_HYDRATION_MODE="full",
+            SOFASCORE_LIVE_HYDRATION_CANARY_SPORTS=None,
+            CANARY_SPORTS=None,
+        ):
+            worker = HydrateWorker(
+                orchestrator=orchestrator,
+                delayed_scheduler=scheduler,
+                queue=_FakeQueue(),
+                consumer="worker-hydrate-1",
+            )
+
+            result = await worker.handle(
+                StreamEntry(
+                    stream=STREAM_HYDRATE,
+                    message_id="1-scheduled-core",
+                    values={
+                        "job_id": "job-scheduled-core",
+                        "job_type": "hydrate_event_root",
+                        "sport_slug": "football",
+                        "entity_type": "event",
+                        "entity_id": "901",
+                        "scope": "scheduled",
+                        "params_json": '{"hydration_mode":"core"}',
+                    },
+                )
+            )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(orchestrator.calls, [(901, "football", "core")])
+
     async def test_hydrate_worker_schedules_retry_for_lock_errors(self) -> None:
         from schema_inspector.workers.hydrate_worker import HydrateWorker
 
@@ -169,6 +295,24 @@ def _cleared_env(*names: str):
     try:
         for name in names:
             os.environ.pop(name, None)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@contextmanager
+def _patched_env(**values: str | None):
+    previous = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         yield
     finally:
         for name, value in previous.items():
