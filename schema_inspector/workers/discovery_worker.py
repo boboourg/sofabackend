@@ -78,7 +78,7 @@ class DiscoveryWorker:
         scope = str(job.scope or "").strip().lower() or "scheduled"
         if scope == "live":
             discovery = await self._discover_live_surface(sport_slug=sport_slug)
-            hydration_mode = "full"
+            hydration_mode = "live_delta"
         else:
             observed_date = str(job.params.get("date") or _utc_today())
             discovery = await self._discover_scheduled_surface(sport_slug=sport_slug, observed_date=observed_date)
@@ -122,6 +122,8 @@ class DiscoveryWorker:
                 ):
                     continue
             params = {"hydration_mode": resolved_mode}
+            if scope == "live" and not force_rehydrate:
+                params["live_bootstrap"] = True
             if correction is not None:
                 params["force_rehydrate"] = True
                 params["correction_reason"] = correction.reason

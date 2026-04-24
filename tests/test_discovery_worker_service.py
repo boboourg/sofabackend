@@ -50,7 +50,7 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.group, "cg:discovery")
         self.assertEqual(worker.runtime.stream, STREAM_DISCOVERY)
 
-    async def test_discovery_worker_expands_live_surface_into_full_hydrate_jobs(self) -> None:
+    async def test_discovery_worker_expands_live_surface_into_delta_hydrate_jobs(self) -> None:
         from schema_inspector.workers.discovery_worker import DiscoveryWorker
 
         orchestrator = _FakeDiscoveryOrchestrator(event_ids=(901,))
@@ -85,7 +85,7 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "published:1")
         self.assertEqual(orchestrator.live_calls, [("tennis", 9.0)])
         payload = queue.published_payloads[0]
-        self.assertEqual(json.loads(str(payload["params_json"])), {"hydration_mode": "full"})
+        self.assertEqual(json.loads(str(payload["params_json"])), {"hydration_mode": "live_delta", "live_bootstrap": True})
 
     async def test_discovery_worker_skips_duplicate_hydrate_jobs_when_freshness_blocks_publish(self) -> None:
         from schema_inspector.workers.discovery_worker import DiscoveryWorker
