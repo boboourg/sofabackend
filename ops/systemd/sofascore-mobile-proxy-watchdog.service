@@ -1,0 +1,11 @@
+[Unit]
+Description=Sofascore Mobile Proxy Watchdog
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+ExecStart=/opt/sofascore/scripts/ops/mobile_proxy_watchdog.sh
