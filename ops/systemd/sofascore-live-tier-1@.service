@@ -1,0 +1,18 @@
+[Unit]
+Description=Sofascore Live Tier 1 Worker %i
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sofascore/deploy/run_service.sh worker-live-tier-1 --consumer-name live-tier-1-%i --block-ms 5000
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -29,6 +30,15 @@ class _FakeExecutor:
         if self.fetch_results:
             return self.fetch_results.pop(0)
         return []
+
+
+class _FakeRedisPublisher:
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str]] = []
+
+    def publish(self, channel: str, payload: str) -> int:
+        self.published.append((channel, payload))
+        return 1
 
 
 class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
@@ -291,6 +301,71 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         event_status_statements = [sql for sql, _ in executor.executemany_calls if "INSERT INTO event_status" in sql]
         self.assertEqual(len(event_status_statements), 2)
+
+    async def test_repository_publishes_live_event_update_after_post_commit(self) -> None:
+        redis = _FakeRedisPublisher()
+        repository = NormalizeRepository(redis_backend=redis)
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=956,
+            parser_family="event_statistics",
+            parser_version="v1",
+            status="parsed",
+            metric_rows={
+                "event_statistic": (
+                    {
+                        "event_id": 14083191,
+                        "period": "ALL",
+                        "group_name": "Match overview",
+                        "name": "Ball possession",
+                        "home_value": "55%",
+                        "away_value": "45%",
+                        "compare_code": 1,
+                        "statistics_type": "positive",
+                    },
+                )
+            },
+        )
+        hooks: list[object] = []
+
+        with unittest.mock.patch(
+            "schema_inspector.storage.normalize_repository.register_post_commit_hook",
+            side_effect=lambda callback: hooks.append(callback) or True,
+        ):
+            await repository.persist_parse_result(executor, result)
+
+        self.assertEqual(redis.published, [])
+        self.assertEqual(len(hooks), 1)
+        hooks[0]()
+
+        self.assertEqual(len(redis.published), 1)
+        channel, payload = redis.published[0]
+        self.assertEqual(channel, "live:event:14083191")
+        self.assertEqual(
+            json.loads(payload),
+            {
+                "event_id": 14083191,
+                "parser_family": "event_statistics",
+                "snapshot_id": 956,
+                "status": "parsed",
+            },
+        )
+
+    async def test_repository_does_not_publish_non_live_parser_families(self) -> None:
+        redis = _FakeRedisPublisher()
+        repository = NormalizeRepository(redis_backend=redis)
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=957,
+            parser_family="event_odds",
+            parser_version="v1",
+            status="parsed",
+            metric_rows={"event_market": ({"event_id": 14083191, "market_id": 1, "name": "1X2"},)},
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        self.assertEqual(redis.published, [])
 
     async def test_repository_sorts_event_status_rows_before_upsert(self) -> None:
         repository = NormalizeRepository()

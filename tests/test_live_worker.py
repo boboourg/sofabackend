@@ -16,6 +16,9 @@ class _FakeLiveBackend:
         self.hashes.setdefault(key, {}).update(mapping)
         return 1
 
+    def hgetall(self, key: str) -> dict[str, object]:
+        return dict(self.hashes.get(key, {}))
+
     def zadd(self, key: str, mapping: dict[str, float]) -> int:
         bucket = self.zsets.setdefault(key, {})
         for member, score in mapping.items():
@@ -91,6 +94,27 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(backend.zsets[LIVE_WARM_ZSET]["15400165"], float(1_800_000_600_000))
         self.assertEqual(queue.published, [])
         self.assertEqual(backend.claims, {})
+
+    def test_track_event_assigns_tier_1_dispatch_for_top_live_football(self) -> None:
+        store = LiveEventStateStore(_FakeLiveBackend())
+        worker = LiveWorker(now_ms_factory=lambda: 1_800_000_000_000)
+
+        result = worker.track_event(
+            sport_slug="football",
+            event_id=15235532,
+            status_type="inprogress",
+            minutes_to_start=0,
+            trace_id="trace-2",
+            detail_id=1,
+            tournament_user_count=317795,
+            live_state_store=store,
+            stream_queue=_FakeStreamQueue(),
+        )
+
+        self.assertEqual(result.decision.lane, "hot")
+        self.assertEqual(result.stream, "stream:etl:live_tier_1")
+        self.assertEqual(result.next_poll_at, 1_800_000_005_000)
+        self.assertEqual(store.fetch(15235532).dispatch_tier, "tier_1")
 
 
 if __name__ == "__main__":

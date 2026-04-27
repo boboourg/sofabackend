@@ -939,6 +939,70 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured.assert_awaited_once()
         event_list_job.run_unique_tournament_scheduled.assert_awaited()
 
+    async def test_structure_sync_calendar_mode_stops_after_three_empty_days(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+        from schema_inspector.sport_profiles import resolve_sport_profile
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=501,
+                            slug="masters",
+                            name="Masters",
+                            category_id=2,
+                            has_rounds=False,
+                        ),
+                    ),
+                    season_ids=(7001,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=501,
+                            slug="masters",
+                            name="Masters",
+                            category_id=2,
+                            has_rounds=False,
+                        ),
+                    ),
+                    season_ids=(7001,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock()
+        event_list_job.run_featured = mock.AsyncMock(return_value=_event_result(()))
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock(return_value=_event_result(()))
+
+        tennis_auto = replace(
+            resolve_sport_profile("tennis"),
+            structure_sync_mode="auto",
+            structure_calendar_forward_months=1,
+        )
+
+        with (
+            mock.patch(
+                "schema_inspector.services.structure_sync_service.build_source_adapter",
+                return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+            ),
+            mock.patch("schema_inspector.services.structure_sync_service.resolve_sport_profile", return_value=tennis_auto),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=501,
+                sport_slug="tennis",
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "calendar")
+        self.assertEqual(result.calendar_dates_probed, 3)
+        self.assertEqual(event_list_job.run_unique_tournament_scheduled.await_count, 3)
+
     async def test_structure_sync_returns_reason_when_upstream_reports_no_seasons(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament

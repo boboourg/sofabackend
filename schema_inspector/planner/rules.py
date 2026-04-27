@@ -273,6 +273,21 @@ def lineup_followup_jobs(job, parse_result, capability_rollup: dict[str, str] | 
                     priority=1,
                 )
             )
+        if _special_kind_supported("event_player_heatmap", capability_rollup):
+            planned.append(
+                job.spawn_child(
+                    job_type=JOB_HYDRATE_SPECIAL_ROUTE,
+                    entity_type="player",
+                    entity_id=player_id,
+                    scope="event_player_analytics",
+                    params={
+                        "special_kind": "event_player_heatmap",
+                        "event_id": job.entity_id,
+                        "player_id": player_id,
+                    },
+                    priority=1,
+                )
+            )
         if _special_kind_supported("event_player_rating_breakdown", capability_rollup):
             planned.append(
                 job.spawn_child(
@@ -316,6 +331,9 @@ def _special_kind_pattern(special_kind: str) -> str | None:
     mapping = {
         "best_players_summary": "/api/v1/event/{event_id}/best-players/summary",
         "event_player_statistics": "/api/v1/event/{event_id}/player/{player_id}/statistics",
+        "event_player_heatmap": "/api/v1/event/{event_id}/player/{player_id}/heatmap",
         "event_player_rating_breakdown": "/api/v1/event/{event_id}/player/{player_id}/rating-breakdown",
+        "event_player_shotmap": "/api/v1/event/{event_id}/shotmap/player/{player_id}",
+        "event_goalkeeper_shotmap": "/api/v1/event/{event_id}/goalkeeper-shotmap/player/{player_id}",
     }
     return mapping.get(special_kind)

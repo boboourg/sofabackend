@@ -5,9 +5,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+from ..live_dispatch_policy import poll_seconds_for_live_dispatch_tier, resolve_live_dispatch_tier
 from ..queue.live_state import LiveEventState
-from ..queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM
-from ..planner.live import classify_live_polling
+from ..queue.streams import STREAM_LIVE_TIER_1, STREAM_LIVE_TIER_2, STREAM_LIVE_TIER_3, STREAM_LIVE_WARM
+from ..planner.live import ACTIVE_LIVE_STATUS_TYPES, classify_live_polling
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,9 @@ class LiveWorker:
         status_type: str | None,
         minutes_to_start: int | None,
         trace_id: str | None,
+        detail_id: int | None = None,
+        tournament_tier: int | None = None,
+        tournament_user_count: int | None = None,
         live_state_store=None,
         stream_queue=None,
     ) -> LiveTrackResult:
@@ -52,7 +56,20 @@ class LiveWorker:
             sport_slug=sport_slug,
         )
         now_ms = int(self.now_ms_factory())
-        next_poll_at = now_ms + (decision.next_poll_seconds * 1000) if decision.next_poll_seconds is not None else None
+        dispatch_tier = resolve_live_dispatch_tier(
+            sport_slug=sport_slug,
+            detail_id=detail_id,
+            tournament_tier=tournament_tier,
+            tournament_user_count=tournament_user_count,
+        )
+        next_poll_seconds = decision.next_poll_seconds
+        normalized_status = str(status_type or "").strip().lower()
+        if normalized_status in ACTIVE_LIVE_STATUS_TYPES:
+            next_poll_seconds = poll_seconds_for_live_dispatch_tier(
+                dispatch_tier,
+                default_seconds=decision.next_poll_seconds,
+            )
+        next_poll_at = now_ms + (next_poll_seconds * 1000) if next_poll_seconds is not None else None
 
         if live_state_store is not None:
             live_state_store.upsert(
@@ -70,6 +87,7 @@ class LiveWorker:
                     away_score=None,
                     version_hint=None,
                     is_finalized=False,
+                    dispatch_tier=dispatch_tier,
                 ),
                 lane=decision.lane if decision.lane in {"hot", "warm", "cold"} else None,
             )
@@ -77,7 +95,7 @@ class LiveWorker:
             if callable(clear_claim):
                 clear_claim(event_id)
 
-        stream = _stream_for_lane(decision.lane)
+        stream = _stream_for_lane(decision.lane, dispatch_tier=dispatch_tier)
         del stream_queue, trace_id
         job = None
 
@@ -115,6 +133,7 @@ class LiveWorker:
                 away_score=None,
                 version_hint=None,
                 is_finalized=True,
+                dispatch_tier=None,
             ),
             lane=None,
         )
@@ -127,10 +146,14 @@ class LiveWorker:
             clear_claim(event_id)
 
 
-def _stream_for_lane(lane: str | None) -> str | None:
+def _stream_for_lane(lane: str | None, *, dispatch_tier: str | None) -> str | None:
     normalized = str(lane or "").strip().lower()
     if normalized == "hot":
-        return STREAM_LIVE_HOT
+        if dispatch_tier == "tier_1":
+            return STREAM_LIVE_TIER_1
+        if dispatch_tier == "tier_2":
+            return STREAM_LIVE_TIER_2
+        return STREAM_LIVE_TIER_3
     if normalized == "warm":
         return STREAM_LIVE_WARM
     return None

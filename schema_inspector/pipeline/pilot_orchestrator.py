@@ -12,10 +12,14 @@ from ..endpoints import (
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
+    EVENT_PLAYER_HEATMAP_ENDPOINT,
+    EVENT_PLAYER_SHOTMAP_ENDPOINT,
+    EVENT_GOALKEEPER_SHOTMAP_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
     EVENT_PLAYER_STATISTICS_ENDPOINT,
+    EVENT_SHOTMAP_ENDPOINT,
     EVENT_STATISTICS_ENDPOINT,
     MANAGER_ENDPOINT,
     PLAYER_ENDPOINT,
@@ -30,6 +34,7 @@ from ..detail_resource_policy import build_event_detail_request_specs
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
+from ..match_center_policy import football_edge_allowed, football_special_allowed
 from ..parsers.sports import resolve_sport_adapter
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
 from ..storage.live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord
@@ -107,6 +112,23 @@ class CapabilityRollupAccumulator:
 class DeferredCapabilityRecord:
     observation: CapabilityObservationRecord
     rollup: CapabilityRollupRecord
+
+
+@dataclass(frozen=True)
+class _SyntheticSpecialJob:
+    special_kind: str
+    player_id: int
+
+    @property
+    def job_type(self) -> str:
+        return "hydrate_special_route"
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return {
+            "special_kind": self.special_kind,
+            "player_id": int(self.player_id),
+        }
 
 
 class PilotOrchestrator:
@@ -234,8 +256,14 @@ class PilotOrchestrator:
         start_timestamp = None
         home_team_id = None
         away_team_id = None
+        detail_id = None
+        custom_id = None
         has_event_player_heat_map = None
+        has_event_player_statistics = None
+        has_global_highlights = None
         has_xg = None
+        tournament_tier = None
+        tournament_user_count = None
         if root_parse is not None:
             event_rows = root_parse.entity_upserts.get("event", ())
             season_rows = root_parse.entity_upserts.get("season", ())
@@ -246,12 +274,19 @@ class PilotOrchestrator:
                 start_timestamp = event_row.get("start_timestamp")
                 home_team_id = _as_int(event_row.get("home_team_id"))
                 away_team_id = _as_int(event_row.get("away_team_id"))
+                detail_id = _as_int(event_row.get("detail_id"))
+                custom_id = event_row.get("custom_id")
                 has_event_player_heat_map = event_row.get("has_event_player_heat_map")
+                has_event_player_statistics = event_row.get("has_event_player_statistics")
+                has_global_highlights = event_row.get("has_global_highlights")
                 has_xg = event_row.get("has_xg")
             if season_rows:
                 season_id = season_rows[0].get("id")
             if unique_tournament_rows:
-                unique_tournament_id = unique_tournament_rows[0].get("id")
+                unique_tournament_row = unique_tournament_rows[0]
+                unique_tournament_id = unique_tournament_row.get("id")
+                tournament_tier = _as_int(unique_tournament_row.get("tier"))
+                tournament_user_count = _as_int(unique_tournament_row.get("user_count"))
 
         root_job = JobEnvelope.create(
             job_type=JOB_HYDRATE_EVENT_ROOT,
@@ -259,13 +294,29 @@ class PilotOrchestrator:
             entity_type="event",
             entity_id=event_id,
             scope="pilot",
-            params={"status_type": status_type, "hydration_mode": effective_hydration_mode},
+            params={
+                "status_type": status_type,
+                "hydration_mode": effective_hydration_mode,
+                "detail_id": detail_id,
+                "has_event_player_statistics": has_event_player_statistics,
+                "has_event_player_heat_map": has_event_player_heat_map,
+                "has_global_highlights": has_global_highlights,
+                "has_xg": has_xg,
+            },
             priority=0,
             trace_id=f"pilot:{sport_slug}:{event_id}",
         )
         planned_jobs = self.planner.expand(root_job)
         for edge_job in planned_jobs:
             edge_kind = str(edge_job.params.get("edge_kind") or "")
+            if not football_edge_allowed(
+                sport_slug=sport_slug,
+                edge_kind=edge_kind,
+                detail_id=detail_id,
+                status_type=status_type,
+                has_xg=has_xg,
+            ):
+                continue
             endpoint = _endpoint_for_edge_kind(edge_kind)
             if endpoint is None:
                 continue
@@ -284,6 +335,15 @@ class PilotOrchestrator:
                 if not lightweight_only:
                     followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
                     for followup_job in followup_jobs:
+                        if not football_special_allowed(
+                            sport_slug=sport_slug,
+                            special_kind=str(followup_job.params.get("special_kind") or ""),
+                            detail_id=detail_id,
+                            has_event_player_statistics=has_event_player_statistics,
+                            has_event_player_heat_map=has_event_player_heat_map,
+                            has_xg=has_xg,
+                        ):
+                            continue
                         special_outcome, special_parse = await self._run_special_job(
                             job=followup_job,
                             sport_slug=sport_slug,
@@ -315,6 +375,9 @@ class PilotOrchestrator:
                     status_type=status_type,
                     minutes_to_start=minutes_to_start,
                     trace_id=root_job.trace_id,
+                    detail_id=detail_id,
+                    tournament_tier=tournament_tier,
+                    tournament_user_count=tournament_user_count,
                     live_state_store=self.live_state_store,
                     stream_queue=self.stream_queue,
                 )
@@ -332,6 +395,9 @@ class PilotOrchestrator:
                     return await self._run_final_sweep(
                         event_id=event_id,
                         sport_slug=sport_slug,
+                        detail_id=detail_id,
+                        status_type=status_type,
+                        has_xg=has_xg,
                     )
 
                 if self.final_sweep_gate is None:
@@ -375,6 +441,9 @@ class PilotOrchestrator:
                 status_type=status_type,
                 minutes_to_start=minutes_to_start,
                 trace_id=root_job.trace_id,
+                detail_id=detail_id,
+                tournament_tier=tournament_tier,
+                tournament_user_count=tournament_user_count,
                 live_state_store=self.live_state_store,
                 stream_queue=self.stream_queue,
             )
@@ -477,7 +546,13 @@ class PilotOrchestrator:
             team_ids=tuple(team_id for team_id in (home_team_id, away_team_id) if isinstance(team_id, int)),
             provider_ids=(1,),
             has_event_player_heat_map=has_event_player_heat_map,
+            has_event_player_statistics=has_event_player_statistics,
+            has_global_highlights=has_global_highlights,
             has_xg=has_xg,
+            detail_id=detail_id,
+            custom_id=str(custom_id) if custom_id is not None else None,
+            start_timestamp=_as_int(start_timestamp),
+            now_timestamp=int(self.now_ms_factory()) // 1000,
             core_only=core_only,
             hydration_mode=effective_hydration_mode,
         ):
@@ -509,6 +584,17 @@ class PilotOrchestrator:
             )
             fetch_outcomes.extend(child_outcomes)
             parse_results.extend(child_parses)
+            if not lightweight_only:
+                shotmap_outcomes, shotmap_parses = await self._run_football_shotmap_fanout(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    detail_id=detail_id,
+                    has_xg=has_xg,
+                    parent_endpoint=endpoint,
+                    parent_outcome=outcome,
+                )
+                fetch_outcomes.extend(shotmap_outcomes)
+                parse_results.extend(shotmap_parses)
 
         if should_mark_live_bootstrap and not finalized and root_outcome.classification in {"success_json", "success_empty_json"}:
             await self.live_bootstrap_coordinator.mark_bootstrapped(self.sql_executor, event_id=event_id)
@@ -574,11 +660,22 @@ class PilotOrchestrator:
         *,
         event_id: int,
         sport_slug: str,
+        detail_id: int | None = None,
+        status_type: str | None = None,
+        has_xg: bool | None = None,
     ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
         outcomes: list[FetchOutcomeEnvelope] = []
         parses: list[object] = []
         adapter = resolve_sport_adapter(sport_slug)
         for edge_kind in adapter.core_event_edges:
+            if not football_edge_allowed(
+                sport_slug=sport_slug,
+                edge_kind=edge_kind,
+                detail_id=detail_id,
+                status_type=status_type,
+                has_xg=has_xg,
+            ):
+                continue
             endpoint = _endpoint_for_edge_kind(edge_kind)
             if endpoint is None:
                 continue
@@ -611,7 +708,13 @@ class PilotOrchestrator:
         path_params: dict[str, Any] = {"event_id": event_id}
         context_entity_type = "event"
         context_entity_id = event_id
-        if special_kind in {"event_player_statistics", "event_player_rating_breakdown"}:
+        if special_kind in {
+            "event_player_statistics",
+            "event_player_rating_breakdown",
+            "event_player_heatmap",
+            "event_player_shotmap",
+            "event_goalkeeper_shotmap",
+        }:
             player_id = int(job.params["player_id"])
             path_params["player_id"] = player_id
             context_entity_type = "player"
@@ -672,6 +775,69 @@ class PilotOrchestrator:
             outcomes.append(outcome)
             if parsed is not None:
                 parses.append(parsed)
+        return outcomes, parses
+
+    async def _run_football_shotmap_fanout(
+        self,
+        *,
+        sport_slug: str,
+        event_id: int,
+        detail_id: int | None,
+        has_xg: bool | None,
+        parent_endpoint: SofascoreEndpoint,
+        parent_outcome: FetchOutcomeEnvelope,
+    ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
+        if (
+            sport_slug != "football"
+            or parent_outcome.snapshot_id is None
+            or parent_endpoint.pattern != EVENT_SHOTMAP_ENDPOINT.pattern
+        ):
+            return [], []
+
+        snapshot = self.snapshot_store.load_snapshot(parent_outcome.snapshot_id)
+        player_ids = _extract_shotmap_player_ids(snapshot.payload)
+        goalkeeper_ids = _extract_shotmap_goalkeeper_ids(snapshot.payload)
+        outcomes: list[FetchOutcomeEnvelope] = []
+        parses: list[object] = []
+
+        for player_id in player_ids:
+            if not football_special_allowed(
+                sport_slug=sport_slug,
+                special_kind="event_player_shotmap",
+                detail_id=detail_id,
+                has_event_player_statistics=None,
+                has_event_player_heat_map=None,
+                has_xg=has_xg,
+            ):
+                continue
+            outcome, parsed = await self._run_special_job(
+                job=_SyntheticSpecialJob("event_player_shotmap", player_id),
+                sport_slug=sport_slug,
+                event_id=event_id,
+            )
+            outcomes.append(outcome)
+            if parsed is not None:
+                parses.append(parsed)
+
+        for player_id in goalkeeper_ids:
+            if not football_special_allowed(
+                sport_slug=sport_slug,
+                special_kind="event_goalkeeper_shotmap",
+                detail_id=detail_id,
+                has_event_player_statistics=None,
+                has_event_player_heat_map=None,
+                has_xg=has_xg,
+            ):
+                continue
+            outcome, parsed = await self._run_special_job(
+                job=_SyntheticSpecialJob("event_goalkeeper_shotmap", player_id),
+                sport_slug=sport_slug,
+                event_id=event_id,
+            )
+            outcomes.append(outcome)
+            if parsed is not None:
+                parses.append(parsed)
+
         return outcomes, parses
 
     async def _record_capability(
@@ -826,8 +992,11 @@ def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
 def _endpoint_for_special_kind(special_kind: str) -> SofascoreEndpoint | None:
     mapping = {
         "best_players_summary": EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
+        "event_player_heatmap": EVENT_PLAYER_HEATMAP_ENDPOINT,
         "event_player_statistics": EVENT_PLAYER_STATISTICS_ENDPOINT,
         "event_player_rating_breakdown": EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+        "event_player_shotmap": EVENT_PLAYER_SHOTMAP_ENDPOINT,
+        "event_goalkeeper_shotmap": EVENT_GOALKEEPER_SHOTMAP_ENDPOINT,
     }
     return mapping.get(special_kind)
 
@@ -910,6 +1079,35 @@ def _extract_baseball_at_bat_ids(payload: object) -> tuple[int, ...]:
                     at_bat_id = _as_int(child.get("id"))
                     if at_bat_id is not None:
                         found.add(at_bat_id)
+                walk(child)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return tuple(sorted(found))
+
+
+def _extract_shotmap_player_ids(payload: object) -> tuple[int, ...]:
+    return _extract_nested_person_ids(payload, role_key="player")
+
+
+def _extract_shotmap_goalkeeper_ids(payload: object) -> tuple[int, ...]:
+    return _extract_nested_person_ids(payload, role_key="goalkeeper")
+
+
+def _extract_nested_person_ids(payload: object, *, role_key: str) -> tuple[int, ...]:
+    found: set[int] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            nested = value.get(role_key)
+            if isinstance(nested, dict):
+                nested_id = _as_int(nested.get("id"))
+                if nested_id is not None:
+                    found.add(nested_id)
+            for child in value.values():
                 walk(child)
             return
         if isinstance(value, (list, tuple)):

@@ -6,7 +6,7 @@ from schema_inspector.queue.streams import STREAM_HYDRATE, StreamEntry
 
 
 class ServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_service_app_restores_live_state_before_planner_and_live_workers(self) -> None:
+    async def test_service_app_restores_live_state_before_planner_but_not_live_workers(self) -> None:
         from schema_inspector.services.service_app import ServiceApp
 
         fake_app = _FakeServiceHybridApp()
@@ -19,7 +19,7 @@ class ServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await service_app.run_planner_daemon(sport_slugs=("football",), scheduled_interval_seconds=60.0, loop_interval_seconds=2.0)
         await service_app.run_live_worker(lane="hot", consumer_name="live-hot-1", block_ms=1500)
 
-        self.assertEqual(fake_app.recover_calls, 2)
+        self.assertEqual(fake_app.recover_calls, 1)
         self.assertEqual(planner.run_calls, 1)
         self.assertEqual(live_worker.run_calls, 1)
 

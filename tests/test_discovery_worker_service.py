@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 import unittest
 
-from schema_inspector.queue.streams import STREAM_DISCOVERY, STREAM_HYDRATE, StreamEntry
+from schema_inspector.queue.streams import (
+    STREAM_DISCOVERY,
+    STREAM_HYDRATE,
+    STREAM_LIVE_TIER_1,
+    STREAM_LIVE_TIER_3,
+    StreamEntry,
+)
 
 
 class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -84,8 +90,69 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "published:1")
         self.assertEqual(orchestrator.live_calls, [("tennis", 9.0)])
+        self.assertEqual(queue.published_streams, [STREAM_LIVE_TIER_3])
         payload = queue.published_payloads[0]
-        self.assertEqual(json.loads(str(payload["params_json"])), {"hydration_mode": "live_delta", "live_bootstrap": True})
+        self.assertEqual(
+            json.loads(str(payload["params_json"])),
+            {
+                "hydration_mode": "live_delta",
+                "live_bootstrap": True,
+                "live_dispatch_tier": "tier_3",
+            },
+        )
+
+    async def test_discovery_worker_keeps_live_corrections_on_lightweight_delta_mode(self) -> None:
+        from schema_inspector.services.surface_correction_detector import SurfaceCorrection
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        orchestrator = _FakeDiscoveryOrchestrator(
+            event_ids=(902,),
+            live_result=_FakeSurfaceDiscoveryResult(
+                event_ids=(902,),
+                event_specs=(_FakeParsedEventSpec(event_id=902, detail_id=1, unique_tournament_id=55),),
+                unique_tournaments=(_FakeUniqueTournamentSpec(unique_tournament_id=55, user_count=841903),),
+                corrections=(SurfaceCorrection(event_id=902, reason="change_log_changed"),),
+            ),
+        )
+        queue = _FakeQueue()
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-1",
+            timeout_s=9.0,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="1-22",
+                values={
+                    "job_id": "job-22",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "live",
+                    "params_json": "{}",
+                    "priority": "50",
+                    "attempt": "1",
+                    "scheduled_at": "2026-04-17T20:00:00+00:00",
+                    "idempotency_key": "key-22",
+                },
+            )
+        )
+
+        self.assertEqual(result, "published:1")
+        self.assertEqual(queue.published_streams, [STREAM_LIVE_TIER_1])
+        payload = queue.published_payloads[0]
+        self.assertEqual(
+            json.loads(str(payload["params_json"])),
+            {
+                "hydration_mode": "live_delta",
+                "live_bootstrap": True,
+                "live_dispatch_tier": "tier_1",
+            },
+        )
 
     async def test_discovery_worker_skips_duplicate_hydrate_jobs_when_freshness_blocks_publish(self) -> None:
         from schema_inspector.workers.discovery_worker import DiscoveryWorker
@@ -393,9 +460,11 @@ class _FakeDiscoveryOrchestrator:
         *,
         event_ids: tuple[int, ...],
         scheduled_result: _FakeSurfaceDiscoveryResult | None = None,
+        live_result: _FakeSurfaceDiscoveryResult | None = None,
     ) -> None:
         self.event_ids = tuple(event_ids)
         self.scheduled_result = scheduled_result
+        self.live_result = live_result
         self.scheduled_calls: list[tuple[str, str, float]] = []
         self.live_calls: list[tuple[str, float]] = []
 
@@ -412,6 +481,12 @@ class _FakeDiscoveryOrchestrator:
     async def discover_live_event_ids(self, *, sport_slug: str, timeout: float):
         self.live_calls.append((sport_slug, timeout))
         return self.event_ids
+
+    async def discover_live_events(self, *, sport_slug: str, timeout: float):
+        self.live_calls.append((sport_slug, timeout))
+        if self.live_result is not None:
+            return self.live_result
+        return _FakeSurfaceDiscoveryResult(event_ids=self.event_ids, corrections=())
 
 
 class _FailingDiscoveryOrchestrator:
@@ -488,18 +563,68 @@ class _FakeBackpressure:
 
 
 class _FakeParsedEvent:
-    def __init__(self, event_id: int) -> None:
+    def __init__(self, event_id: int, *, detail_id: int | None = None, unique_tournament_id: int | None = None) -> None:
         self.id = int(event_id)
+        self.detail_id = detail_id
+        self.unique_tournament_id = unique_tournament_id
+
+
+class _FakeParsedEventSpec:
+    def __init__(self, *, event_id: int, detail_id: int | None = None, unique_tournament_id: int | None = None) -> None:
+        self.event_id = int(event_id)
+        self.detail_id = detail_id
+        self.unique_tournament_id = unique_tournament_id
+
+
+class _FakeUniqueTournamentSpec:
+    def __init__(
+        self,
+        *,
+        unique_tournament_id: int,
+        tier: int | None = None,
+        user_count: int | None = None,
+    ) -> None:
+        self.id = int(unique_tournament_id)
+        self.tier = tier
+        self.user_count = user_count
 
 
 class _FakeParsedBundle:
-    def __init__(self, event_ids: tuple[int, ...]) -> None:
-        self.events = tuple(_FakeParsedEvent(event_id) for event_id in event_ids)
+    def __init__(
+        self,
+        event_ids: tuple[int, ...],
+        *,
+        event_specs: tuple[_FakeParsedEventSpec, ...] = (),
+        unique_tournaments: tuple[_FakeUniqueTournamentSpec, ...] = (),
+    ) -> None:
+        if event_specs:
+            self.events = tuple(
+                _FakeParsedEvent(
+                    item.event_id,
+                    detail_id=item.detail_id,
+                    unique_tournament_id=item.unique_tournament_id,
+                )
+                for item in event_specs
+            )
+        else:
+            self.events = tuple(_FakeParsedEvent(event_id) for event_id in event_ids)
+        self.unique_tournaments = tuple(unique_tournaments)
 
 
 class _FakeSurfaceDiscoveryResult:
-    def __init__(self, *, event_ids: tuple[int, ...], corrections: tuple[object, ...]) -> None:
-        self.parsed = _FakeParsedBundle(event_ids)
+    def __init__(
+        self,
+        *,
+        event_ids: tuple[int, ...],
+        corrections: tuple[object, ...],
+        event_specs: tuple[_FakeParsedEventSpec, ...] = (),
+        unique_tournaments: tuple[_FakeUniqueTournamentSpec, ...] = (),
+    ) -> None:
+        self.parsed = _FakeParsedBundle(
+            event_ids,
+            event_specs=event_specs,
+            unique_tournaments=unique_tournaments,
+        )
         self.corrections = tuple(corrections)
 
 

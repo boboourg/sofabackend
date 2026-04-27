@@ -24,6 +24,21 @@ _CACHEABLE_MINIMAL_ENTITY_KINDS = (
     "manager",
     "team",
 )
+_LIVE_EVENT_UPDATE_PARSER_FAMILIES = frozenset(
+    {
+        "event_root",
+        "event_statistics",
+        "event_incidents",
+        "event_lineups",
+        "event_graph",
+        "event_team_heatmap",
+        "shotmap",
+        "tennis_point_by_point",
+        "tennis_power",
+        "baseball_innings",
+        "esports_games",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +82,12 @@ class RetriableRepositoryError(RetryableJobError):
 class NormalizeRepository:
     """Persists normalized parser output into PostgreSQL fact tables."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, redis_backend: Any | None = None) -> None:
         self._known_minimal_entities: dict[str, set[object]] = {
             entity_kind: set() for entity_kind in _CACHEABLE_MINIMAL_ENTITY_KINDS
         }
         self._event_status_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
+        self.redis_backend = redis_backend
 
     async def persist_parse_result(
         self,
@@ -159,6 +175,44 @@ class NormalizeRepository:
             result.metric_rows.get("esports_game", ()),
             ("event_id", "ordinal", "game_id", "status", "map_name"),
         )
+        self._schedule_live_event_update_publish(result)
+
+    def _schedule_live_event_update_publish(self, result: ParseResult) -> None:
+        if self.redis_backend is None:
+            return
+        if result.parser_family not in _LIVE_EVENT_UPDATE_PARSER_FAMILIES:
+            return
+        event_ids = _event_ids_from_parse_result(result)
+        if not event_ids:
+            return
+
+        payloads = tuple(
+            (
+                int(event_id),
+                orjson.dumps(
+                    {
+                        "event_id": int(event_id),
+                        "parser_family": result.parser_family,
+                        "snapshot_id": result.snapshot_id,
+                        "status": result.status,
+                    }
+                ).decode("utf-8"),
+            )
+            for event_id in event_ids
+        )
+
+        def _publish_live_updates() -> None:
+            publish = getattr(self.redis_backend, "publish", None)
+            if not callable(publish):
+                return
+            for event_id, payload in payloads:
+                try:
+                    publish(f"live:event:{event_id}", payload)
+                except Exception as exc:
+                    logger.warning("Failed to publish live event update: event_id=%s error=%s", event_id, exc)
+
+        if not register_post_commit_hook(_publish_live_updates):
+            _publish_live_updates()
 
     async def _upsert_minimal_entities(
         self,
@@ -1983,6 +2037,29 @@ def _event_id_from_rows(rows: tuple[Mapping[str, object], ...]) -> int | None:
         if value is not None:
             return value
     return None
+
+
+def _event_ids_from_parse_result(result: ParseResult) -> tuple[int, ...]:
+    event_ids: set[int] = set()
+
+    def collect_rows(rows: object, *keys: str) -> None:
+        if not isinstance(rows, (list, tuple)):
+            return
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            for key in keys:
+                event_id = _as_int(row.get(key))
+                if event_id is not None:
+                    event_ids.add(event_id)
+
+    collect_rows(result.entity_upserts.get("event", ()), "id", "event_id")
+    for rows in result.relation_upserts.values():
+        collect_rows(rows, "event_id")
+    for rows in result.metric_rows.values():
+        collect_rows(rows, "event_id")
+
+    return tuple(sorted(event_ids))
 
 
 async def _executemany(executor: SqlExecutor, sql: str, rows: list[tuple[object, ...]]) -> None:

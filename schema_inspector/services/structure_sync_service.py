@@ -33,6 +33,9 @@ from ..sport_profiles import SportProfile, resolve_sport_profile
 
 logger = logging.getLogger(__name__)
 
+_MAX_CONSECUTIVE_MISSING_ROUNDS = 2
+_MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS = 3
+
 
 @dataclass(frozen=True)
 class StructureSyncResult:
@@ -234,9 +237,9 @@ async def _run_rounds_mode(
             # If every round fails and we accumulated nothing, we'll downgrade.
             if _http_status_code(exc) == 404:
                 missing_round_streak += 1
-                if rounds_with_events > 0 and missing_round_streak >= 2:
+                if rounds_with_events > 0 and missing_round_streak >= _MAX_CONSECUTIVE_MISSING_ROUNDS:
                     break
-                if rounds_with_events == 0 and missing_round_streak >= 3:
+                if rounds_with_events == 0 and missing_round_streak >= _MAX_CONSECUTIVE_MISSING_ROUNDS:
                     break
             else:
                 missing_round_streak = 0
@@ -389,14 +392,13 @@ async def _run_calendar_mode(
                 exc,
             )
             empty_streak += 1
-            if empty_streak >= 10:
+            if empty_streak >= _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS:
                 break
             continue
         event_count = len(daily.parsed.events)
         if event_count == 0:
             empty_streak += 1
-            # Abort early if we've crossed ~14 consecutive empty days.
-            if empty_streak >= 14:
+            if empty_streak >= _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS:
                 break
             continue
         empty_streak = 0

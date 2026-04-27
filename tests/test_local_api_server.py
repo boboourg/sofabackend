@@ -624,6 +624,24 @@ class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.payload["endpointPattern"], "/api/v1/sport/baseball/categories")
 
+    async def test_handle_api_get_returns_empty_events_for_missing_scheduled_events_date(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fake_snapshot(route, path, raw_query, path_params):
+            return None
+
+        async def fake_normalized(route, path, raw_query, path_params):
+            return None
+
+        application._fetch_snapshot_payload = fake_snapshot
+        application._fetch_normalized_payload = fake_normalized
+
+        response = await application.handle_api_get("/api/v1/sport/football/scheduled-events/2030-01-01", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload, {"events": []})
+
     async def test_fetch_snapshot_payload_pins_to_route_source_slug(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         routes = build_route_specs()

@@ -22,6 +22,9 @@ from ..queue.streams import (
     GROUP_HISTORICAL_MAINTENANCE,
     GROUP_HISTORICAL_TOURNAMENT,
     GROUP_LIVE_HOT,
+    GROUP_LIVE_TIER_1,
+    GROUP_LIVE_TIER_2,
+    GROUP_LIVE_TIER_3,
     GROUP_LIVE_WARM,
     GROUP_STRUCTURE_SYNC,
     HISTORICAL_CONSUMER_GROUPS,
@@ -35,6 +38,9 @@ from ..queue.streams import (
     STREAM_HYDRATE,
     STREAM_LIVE_DISCOVERY,
     STREAM_LIVE_HOT,
+    STREAM_LIVE_TIER_1,
+    STREAM_LIVE_TIER_2,
+    STREAM_LIVE_TIER_3,
     STREAM_LIVE_WARM,
     STREAM_MAINTENANCE,
     STREAM_STRUCTURE_SYNC,
@@ -51,8 +57,10 @@ from .backpressure_config import (
     HISTORICAL_HYDRATE_MAX_LAG,
     HISTORICAL_TOURNAMENT_MAX_LAG,
     HYDRATE_MAX_LAG,
-    LIVE_DISCOVERY_HYDRATE_MAX_LAG,
     LIVE_HOT_MAX_LAG,
+    LIVE_TIER_1_MAX_LAG,
+    LIVE_TIER_2_MAX_LAG,
+    LIVE_TIER_3_MAX_LAG,
     LIVE_WARM_MAX_LAG,
     SCHEDULED_DISCOVERY_MAX_LAG,
     STRUCTURE_SYNC_MAX_LAG,
@@ -237,7 +245,9 @@ class ServiceApp:
             live_backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=LIVE_HOT_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_1, group=GROUP_LIVE_TIER_1, max_lag=LIVE_TIER_1_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_2, group=GROUP_LIVE_TIER_2, max_lag=LIVE_TIER_2_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_3, group=GROUP_LIVE_TIER_3, max_lag=LIVE_TIER_3_MAX_LAG),
                     BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=LIVE_WARM_MAX_LAG),
                 ),
             ),
@@ -277,8 +287,9 @@ class ServiceApp:
             backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=LIVE_DISCOVERY_HYDRATE_MAX_LAG),
-                    BackpressureLimit(stream=STREAM_LIVE_HOT, group=GROUP_LIVE_HOT, max_lag=LIVE_HOT_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_1, group=GROUP_LIVE_TIER_1, max_lag=LIVE_TIER_1_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_2, group=GROUP_LIVE_TIER_2, max_lag=LIVE_TIER_2_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_3, group=GROUP_LIVE_TIER_3, max_lag=LIVE_TIER_3_MAX_LAG),
                     BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=LIVE_WARM_MAX_LAG),
                 ),
             ),
@@ -702,7 +713,9 @@ class ServiceApp:
             hydrate_backpressure=QueueBackpressure(
                 queue=self.stream_queue,
                 limits=(
-                    BackpressureLimit(stream=STREAM_HYDRATE, group=GROUP_HYDRATE, max_lag=HYDRATE_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_1, group=GROUP_LIVE_TIER_1, max_lag=LIVE_TIER_1_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_2, group=GROUP_LIVE_TIER_2, max_lag=LIVE_TIER_2_MAX_LAG),
+                    BackpressureLimit(stream=STREAM_LIVE_TIER_3, group=GROUP_LIVE_TIER_3, max_lag=LIVE_TIER_3_MAX_LAG),
                 ),
             ),
             job_audit_logger=self.job_audit_logger,
@@ -962,7 +975,6 @@ class ServiceApp:
         await worker.run_forever()
 
     async def run_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> None:
-        await self._recover_live_state()
         worker = self.build_live_worker(lane=lane, consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 

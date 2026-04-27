@@ -26,6 +26,7 @@ class LiveEventState:
     away_score: int | None
     version_hint: str | None
     is_finalized: bool
+    dispatch_tier: str | None = None
 
 
 class LiveEventStateStore:
@@ -62,6 +63,7 @@ class LiveEventStateStore:
                 "away_score": state.away_score,
                 "version_hint": state.version_hint,
                 "is_finalized": int(state.is_finalized),
+                "dispatch_tier": state.dispatch_tier,
                 }
             ),
         )
@@ -96,6 +98,7 @@ class LiveEventStateStore:
             away_score=_as_int(payload.get("away_score")),
             version_hint=_as_text(payload.get("version_hint")),
             is_finalized=_as_bool(payload.get("is_finalized")),
+            dispatch_tier=_as_text(payload.get("dispatch_tier")),
         )
 
     def claim_dispatch(self, event_id: int, *, now_ms: int, lease_ms: int) -> bool:

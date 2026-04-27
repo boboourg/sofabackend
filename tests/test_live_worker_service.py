@@ -4,7 +4,7 @@ import os
 import unittest
 from contextlib import contextmanager
 
-from schema_inspector.queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
+from schema_inspector.queue.streams import STREAM_LIVE_HOT, STREAM_LIVE_TIER_2, STREAM_LIVE_WARM, StreamEntry
 
 
 class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +119,27 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.runtime.consumer, "worker-live-warm-1")
         self.assertEqual(worker.runtime.max_concurrency, 2)
         self.assertIsNone(worker.runtime.batch_preprocessor)
+
+    async def test_live_worker_tier_2_uses_independent_runtime(self) -> None:
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        with _cleared_env(
+            "SOFASCORE_WORKER_MAX_CONCURRENCY",
+            "SOFASCORE_LIVE_TIER_2_WORKER_MAX_CONCURRENCY",
+        ):
+            worker = LiveWorkerService(
+                orchestrator=_FakeOrchestrator(),
+                delayed_scheduler=_FakeDelayedScheduler(),
+                queue=_FakeQueue(),
+                lane="tier_2",
+                consumer="worker-live-tier-2-1",
+            )
+
+        self.assertEqual(worker.runtime.stream, STREAM_LIVE_TIER_2)
+        self.assertEqual(worker.runtime.group, "cg:live_tier_2")
+        self.assertEqual(worker.runtime.consumer, "worker-live-tier-2-1")
+        self.assertEqual(worker.runtime.max_concurrency, 1)
+        self.assertIsNotNone(worker.runtime.batch_preprocessor)
 
     async def test_live_worker_hot_coalesces_stale_refreshes_by_event_id(self) -> None:
         from schema_inspector.services.worker_runtime import BatchDispatchPlan

@@ -6,7 +6,19 @@ import time
 
 from ..jobs.types import JOB_REFRESH_LIVE_EVENT
 from ..live_hydration_mode import resolve_live_hydration_mode
-from ..queue.streams import GROUP_LIVE_HOT, GROUP_LIVE_WARM, STREAM_LIVE_HOT, STREAM_LIVE_WARM, StreamEntry
+from ..queue.streams import (
+    GROUP_LIVE_HOT,
+    GROUP_LIVE_TIER_1,
+    GROUP_LIVE_TIER_2,
+    GROUP_LIVE_TIER_3,
+    GROUP_LIVE_WARM,
+    STREAM_LIVE_HOT,
+    STREAM_LIVE_TIER_1,
+    STREAM_LIVE_TIER_2,
+    STREAM_LIVE_TIER_3,
+    STREAM_LIVE_WARM,
+    StreamEntry,
+)
 from ..services.worker_runtime import BatchDispatchPlan, WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
 
@@ -31,7 +43,7 @@ class LiveWorkerService:
         max_concurrency: int | None = None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
-        if normalized_lane not in {"hot", "warm"}:
+        if normalized_lane not in {"hot", "warm", "tier_1", "tier_2", "tier_3"}:
             raise ValueError(f"Unsupported live lane: {lane!r}")
 
         self.orchestrator = orchestrator
@@ -40,19 +52,15 @@ class LiveWorkerService:
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
-        stream = STREAM_LIVE_HOT if normalized_lane == "hot" else STREAM_LIVE_WARM
-        group = GROUP_LIVE_HOT if normalized_lane == "hot" else GROUP_LIVE_WARM
+        stream, group = _lane_stream_group(normalized_lane)
+        hot_like_lane = normalized_lane in {"hot", "tier_1", "tier_2", "tier_3"}
         resolved_max_concurrency = resolve_worker_max_concurrency(
-            default=1 if normalized_lane == "hot" else 2,
+            default=1 if hot_like_lane else 2,
             explicit=max_concurrency,
-            env_names=(
-                ("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",)
-                if normalized_lane == "hot"
-                else ("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",)
-            ),
+            env_names=_lane_concurrency_env_names(normalized_lane),
         )
-        batch_preprocessor = _coalesce_live_refresh_batch if normalized_lane == "hot" else None
-        prefetch_count = _HOT_PREFETCH_COUNT if normalized_lane == "hot" else resolved_max_concurrency
+        batch_preprocessor = _coalesce_live_refresh_batch if hot_like_lane else None
+        prefetch_count = _HOT_PREFETCH_COUNT if hot_like_lane else resolved_max_concurrency
         self.runtime = WorkerRuntime(
             name=f"live-{normalized_lane}-worker",
             queue=queue,
@@ -133,3 +141,31 @@ def _coalesce_live_refresh_batch(entries: tuple[StreamEntry, ...]) -> BatchDispa
         stale_entries_to_ack=tuple(stale_entries),
         coalesced_counts=tuple(sorted(coalesced_counts.items())),
     )
+
+
+def _lane_stream_group(lane: str) -> tuple[str, str]:
+    normalized = str(lane).strip().lower()
+    if normalized == "hot":
+        return STREAM_LIVE_HOT, GROUP_LIVE_HOT
+    if normalized == "warm":
+        return STREAM_LIVE_WARM, GROUP_LIVE_WARM
+    if normalized == "tier_1":
+        return STREAM_LIVE_TIER_1, GROUP_LIVE_TIER_1
+    if normalized == "tier_2":
+        return STREAM_LIVE_TIER_2, GROUP_LIVE_TIER_2
+    if normalized == "tier_3":
+        return STREAM_LIVE_TIER_3, GROUP_LIVE_TIER_3
+    raise ValueError(f"Unsupported live lane: {lane!r}")
+
+
+def _lane_concurrency_env_names(lane: str) -> tuple[str, ...]:
+    normalized = str(lane).strip().lower()
+    if normalized == "tier_1":
+        return ("SOFASCORE_LIVE_TIER_1_WORKER_MAX_CONCURRENCY", "SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY")
+    if normalized == "tier_2":
+        return ("SOFASCORE_LIVE_TIER_2_WORKER_MAX_CONCURRENCY",)
+    if normalized == "tier_3":
+        return ("SOFASCORE_LIVE_TIER_3_WORKER_MAX_CONCURRENCY",)
+    if normalized == "hot":
+        return ("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",)
+    return ("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",)

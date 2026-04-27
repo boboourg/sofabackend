@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from ..jobs.types import JOB_DISCOVER_SPORT_SURFACE, JOB_HYDRATE_EVENT_ROOT
-from ..queue.streams import GROUP_DISCOVERY, STREAM_DISCOVERY, STREAM_HYDRATE, StreamEntry
+from ..live_dispatch_policy import LIVE_TIER_3, resolve_live_dispatch_tier
+from ..queue.streams import (
+    GROUP_DISCOVERY,
+    STREAM_DISCOVERY,
+    STREAM_HYDRATE,
+    STREAM_LIVE_TIER_1,
+    STREAM_LIVE_TIER_2,
+    STREAM_LIVE_TIER_3,
+    StreamEntry,
+)
 from ..services.retry_policy import AdmissionDeferredError
 from ..services.surface_correction_detector import SurfaceCorrection
 from ..services.worker_runtime import WorkerRuntime
@@ -106,13 +116,17 @@ class DiscoveryWorker:
                     delay_ms=self.admission_delay_ms,
                 )
         skipped_due_backpressure = 0
-        for event_id in discovery.event_ids:
+        for surface_event in discovery.events:
+            event_id = int(surface_event.event_id)
             correction = corrections.get(int(event_id))
-            force_rehydrate = correction is not None
+            force_rehydrate = correction is not None and scope != "live"
             if blocking_reason is not None and not force_rehydrate:
                 skipped_due_backpressure += 1
                 continue
-            resolved_mode = "full" if force_rehydrate else hydration_mode
+            if scope == "live":
+                resolved_mode = "live_delta"
+            else:
+                resolved_mode = "full" if force_rehydrate else hydration_mode
             if self.freshness_policy is not None and not force_rehydrate:
                 if not self.freshness_policy.claim_event_hydration(
                     event_id=int(event_id),
@@ -124,7 +138,13 @@ class DiscoveryWorker:
             params = {"hydration_mode": resolved_mode}
             if scope == "live" and not force_rehydrate:
                 params["live_bootstrap"] = True
-            if correction is not None:
+                params["live_dispatch_tier"] = resolve_live_dispatch_tier(
+                    sport_slug=sport_slug,
+                    detail_id=surface_event.detail_id,
+                    tournament_tier=surface_event.tournament_tier,
+                    tournament_user_count=surface_event.tournament_user_count,
+                )
+            if correction is not None and force_rehydrate:
                 params["force_rehydrate"] = True
                 params["correction_reason"] = correction.reason
             hydrate_job = job.spawn_child(
@@ -135,7 +155,12 @@ class DiscoveryWorker:
                 params=params,
                 priority=job.priority,
             )
-            self.queue.publish(self.hydrate_stream, encode_stream_job(hydrate_job))
+            target_stream = (
+                _stream_for_live_dispatch_tier(str(params.get("live_dispatch_tier") or LIVE_TIER_3))
+                if scope == "live"
+                else self.hydrate_stream
+            )
+            self.queue.publish(target_stream, encode_stream_job(hydrate_job))
             published += 1
         if skipped_due_backpressure:
             logger.info(
@@ -203,26 +228,74 @@ class DiscoveryWorker:
         return blocking_reason()
 
 
+@dataclass(frozen=True)
+class _SurfaceEvent:
+    event_id: int
+    detail_id: int | None = None
+    unique_tournament_id: int | None = None
+    tournament_tier: int | None = None
+    tournament_user_count: int | None = None
+
+
 class _SurfaceDiscovery:
-    def __init__(self, *, event_ids: tuple[int, ...], corrections: tuple[SurfaceCorrection, ...]) -> None:
-        self.event_ids = tuple(int(item) for item in event_ids)
+    def __init__(self, *, events: tuple[_SurfaceEvent, ...], corrections: tuple[SurfaceCorrection, ...]) -> None:
+        self.events = tuple(events)
+        self.event_ids = tuple(int(item.event_id) for item in self.events)
         self.corrections = tuple(corrections)
 
 
 def _normalize_surface_result(value: Any) -> _SurfaceDiscovery:
     if isinstance(value, (tuple, list)):
-        return _SurfaceDiscovery(event_ids=tuple(int(item) for item in value), corrections=())
+        return _SurfaceDiscovery(
+            events=tuple(_SurfaceEvent(event_id=int(item)) for item in value),
+            corrections=(),
+        )
     parsed = getattr(value, "parsed", None)
     if parsed is not None and hasattr(parsed, "events"):
-        event_ids = tuple(
-            int(getattr(item, "id"))
-            for item in getattr(parsed, "events", ())
+        tournaments_by_id = {
+            int(getattr(item, "id")): item
+            for item in getattr(parsed, "unique_tournaments", ())
             if getattr(item, "id", None) is not None
-        )
+        }
+        events = []
+        for item in getattr(parsed, "events", ()):
+            if getattr(item, "id", None) is None:
+                continue
+            unique_tournament_id = _as_int(getattr(item, "unique_tournament_id", None))
+            tournament = tournaments_by_id.get(int(unique_tournament_id)) if unique_tournament_id is not None else None
+            events.append(
+                _SurfaceEvent(
+                    event_id=int(getattr(item, "id")),
+                    detail_id=_as_int(getattr(item, "detail_id", None)),
+                    unique_tournament_id=unique_tournament_id,
+                    tournament_tier=_as_int(getattr(tournament, "tier", None)) if tournament is not None else None,
+                    tournament_user_count=(
+                        _as_int(getattr(tournament, "user_count", None)) if tournament is not None else None
+                    ),
+                )
+            )
         corrections = tuple(getattr(value, "corrections", ()) or ())
-        return _SurfaceDiscovery(event_ids=event_ids, corrections=corrections)
+        return _SurfaceDiscovery(events=tuple(events), corrections=corrections)
     raise TypeError(f"Unsupported discovery result: {value!r}")
 
 
 def _utc_today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _stream_for_live_dispatch_tier(dispatch_tier: str) -> str:
+    normalized = str(dispatch_tier or "").strip().lower()
+    if normalized == "tier_1":
+        return STREAM_LIVE_TIER_1
+    if normalized == "tier_2":
+        return STREAM_LIVE_TIER_2
+    return STREAM_LIVE_TIER_3
+
+
+def _as_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

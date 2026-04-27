@@ -453,6 +453,13 @@ EVENT_H2H_ENDPOINT = SofascoreEndpoint(
     target_table="event_duel",
 )
 
+EVENT_H2H_EVENTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{custom_id}/h2h/events",
+    envelope_key="events",
+    target_table="api_payload_snapshot",
+    notes="CustomId-based H2H events feed used by football match center surfaces.",
+)
+
 EVENT_PREGAME_FORM_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/pregame-form",
     envelope_key="homeTeam,awayTeam",
@@ -471,6 +478,19 @@ EVENT_COMMENTS_ENDPOINT = SofascoreEndpoint(
     target_table="event_comment",
 )
 
+EVENT_OFFICIAL_TWEETS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/official-tweets",
+    envelope_key="tweets",
+    target_table="api_payload_snapshot",
+)
+
+EVENT_HIGHLIGHTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/highlights",
+    envelope_key="highlights",
+    target_table="api_payload_snapshot",
+    notes="Event highlights payload gated by hasGlobalHighlights and finished-match age.",
+)
+
 EVENT_GRAPH_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/graph",
     envelope_key="graphPoints",
@@ -480,6 +500,12 @@ EVENT_GRAPH_ENDPOINT = SofascoreEndpoint(
 EVENT_GRAPH_SEQUENCE_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/graph/sequence",
     envelope_key="graphPoints",
+    target_table="api_payload_snapshot",
+)
+
+EVENT_AVERAGE_POSITIONS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/average-positions",
+    envelope_key="players",
     target_table="api_payload_snapshot",
 )
 
@@ -518,6 +544,18 @@ EVENT_SHOTMAP_ENDPOINT = SofascoreEndpoint(
     notes="Shotmap/event-map style payload used by hockey-style sports.",
 )
 
+EVENT_PLAYER_SHOTMAP_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/shotmap/player/{player_id}",
+    envelope_key="shotmap",
+    target_table="api_payload_snapshot",
+)
+
+EVENT_GOALKEEPER_SHOTMAP_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/goalkeeper-shotmap/player/{player_id}",
+    envelope_key="shotmap",
+    target_table="api_payload_snapshot",
+)
+
 EVENT_ESPORTS_GAMES_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/esports-games",
     envelope_key="games",
@@ -529,6 +567,12 @@ EVENT_HEATMAP_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/heatmap/{team_id}",
     envelope_key="playerPoints,goalkeeperPoints",
     target_table="event_team_heatmap",
+)
+
+EVENT_PLAYER_HEATMAP_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/player/{player_id}/heatmap",
+    envelope_key="heatmap",
+    target_table="api_payload_snapshot",
 )
 
 EVENT_ODDS_ALL_ENDPOINT = SofascoreEndpoint(
@@ -547,6 +591,18 @@ EVENT_WINNING_ODDS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
     envelope_key="home,away",
     target_table="event_winning_odds",
+)
+
+EVENT_TEAM_STREAKS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/team-streaks",
+    envelope_key="streaks",
+    target_table="api_payload_snapshot",
+)
+
+EVENT_TEAM_STREAKS_BETTING_ODDS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}",
+    envelope_key="home,away",
+    target_table="api_payload_snapshot",
 )
 
 EVENT_WEATHER_ENDPOINT = SofascoreEndpoint(
@@ -596,6 +652,14 @@ EVENT_DETAIL_FOOTBALL_ANALYTICS_ENDPOINTS = (
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_PLAYER_STATISTICS_ENDPOINT,
     EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
+    EVENT_H2H_EVENTS_ENDPOINT,
+    EVENT_OFFICIAL_TWEETS_ENDPOINT,
+    EVENT_AVERAGE_POSITIONS_ENDPOINT,
+    EVENT_PLAYER_SHOTMAP_ENDPOINT,
+    EVENT_GOALKEEPER_SHOTMAP_ENDPOINT,
+    EVENT_PLAYER_HEATMAP_ENDPOINT,
+    EVENT_TEAM_STREAKS_ENDPOINT,
+    EVENT_TEAM_STREAKS_BETTING_ODDS_ENDPOINT,
 )
 
 

@@ -371,6 +371,9 @@ class LocalApiApplication:
         if payload is None:
             payload = await self._fetch_normalized_payload(route, path, raw_query, path_params)
         if payload is None:
+            empty_payload = _empty_payload_for_missing_route(route)
+            if empty_payload is not None:
+                return ApiResponse(status_code=HTTPStatus.OK, payload=empty_payload)
             return ApiResponse(
                 status_code=HTTPStatus.NOT_FOUND,
                 payload={
@@ -1367,6 +1370,13 @@ def _response_ttl_seconds(route: RouteSpec | None, payload: Any) -> float:
     if path_template.startswith("/api/v1/event/"):
         return 2.0
     return 30.0
+
+
+def _empty_payload_for_missing_route(route: RouteSpec) -> dict[str, Any] | None:
+    path_template = route.endpoint.path_template
+    if route.endpoint.envelope_key == "events" and path_template.endswith("/scheduled-events/{date}"):
+        return {"events": []}
+    return None
 
 
 def _payload_status_type(payload: Any) -> str | None:

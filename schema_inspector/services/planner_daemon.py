@@ -19,6 +19,7 @@ from ..jobs.types import (
     JOB_REFRESH_LIVE_EVENT,
     JOB_SYNC_TOURNAMENT_ARCHIVE,
 )
+from ..live_dispatch_policy import LIVE_TIER_3, live_priority_for_dispatch_tier, normalize_live_dispatch_tier
 from ..queue.streams import (
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
@@ -26,6 +27,9 @@ from ..queue.streams import (
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HISTORICAL_TOURNAMENT,
     STREAM_HYDRATE,
+    STREAM_LIVE_TIER_1,
+    STREAM_LIVE_TIER_2,
+    STREAM_LIVE_TIER_3,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
 )
@@ -122,12 +126,13 @@ class PlannerDaemon:
 
     async def _publish_live_refreshes(self, now_ms: int) -> None:
         for lane in ("hot", "warm"):
-            stream = STREAM_LIVE_HOT if lane == "hot" else STREAM_LIVE_WARM
-            priority = 0 if lane == "hot" else 1
             for event_id in self.live_state_store.due_events(lane=lane, now_ms=now_ms):
                 state = self.live_state_store.fetch(int(event_id))
                 if state is None or state.is_finalized:
                     continue
+                dispatch_tier = normalize_live_dispatch_tier(getattr(state, "dispatch_tier", None))
+                stream = _live_stream_for_lane(lane=lane, dispatch_tier=dispatch_tier)
+                priority = 1 if lane == "warm" else live_priority_for_dispatch_tier(dispatch_tier)
                 claim_dispatch = getattr(self.live_state_store, "claim_dispatch", None)
                 if callable(claim_dispatch) and not claim_dispatch(
                     int(event_id),
@@ -144,6 +149,7 @@ class PlannerDaemon:
                     params={
                         "status_type": state.status_type,
                         "next_poll_at": state.next_poll_at,
+                        "live_dispatch_tier": dispatch_tier,
                     },
                     priority=priority,
                     trace_id=None,
@@ -168,9 +174,10 @@ class PlannerDaemon:
 
 def _stream_for_job(job: JobEnvelope) -> str:
     if job.job_type == JOB_REFRESH_LIVE_EVENT:
+        dispatch_tier = normalize_live_dispatch_tier(job.params.get("live_dispatch_tier"))
         if str(job.scope or "").strip().lower() == "warm":
             return STREAM_LIVE_WARM
-        return STREAM_LIVE_HOT
+        return _live_stream_for_lane(lane="hot", dispatch_tier=dispatch_tier)
     if _is_historical_scope(job.scope):
         if job.job_type == JOB_SYNC_TOURNAMENT_ARCHIVE:
             return STREAM_HISTORICAL_TOURNAMENT
@@ -233,3 +240,15 @@ def _blocking_reason(backpressure: object | None) -> str | None:
     if not callable(blocking_reason):
         return None
     return blocking_reason()
+
+
+def _live_stream_for_lane(*, lane: str, dispatch_tier: str | None) -> str:
+    normalized_lane = str(lane or "").strip().lower()
+    if normalized_lane == "warm":
+        return STREAM_LIVE_WARM
+    normalized_tier = normalize_live_dispatch_tier(dispatch_tier or LIVE_TIER_3)
+    if normalized_tier == "tier_1":
+        return STREAM_LIVE_TIER_1
+    if normalized_tier == "tier_2":
+        return STREAM_LIVE_TIER_2
+    return STREAM_LIVE_TIER_3

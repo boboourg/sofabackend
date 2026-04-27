@@ -202,7 +202,7 @@ class HybridApp:
         self.raw_repository = RawRepository()
         self.capability_repository = CapabilityRepository()
         self.live_state_repository = LiveStateRepository()
-        self.normalize_repository = NormalizeRepository()
+        self.normalize_repository = NormalizeRepository(redis_backend=redis_backend)
         self.endpoint_negative_cache_repository = EndpointNegativeCacheRepository()
         self.negative_cache_settings = load_negative_cache_settings()
         self.stage_audit_logger = StageAuditLogger(database=database)
@@ -1098,6 +1098,30 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "worker-live-tier-1":
+                service_app = ServiceApp(app)
+                await service_app.run_live_worker(
+                    lane="tier_1",
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-live-tier-2":
+                service_app = ServiceApp(app)
+                await service_app.run_live_worker(
+                    lane="tier_2",
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
+            if args.command == "worker-live-tier-3":
+                service_app = ServiceApp(app)
+                await service_app.run_live_worker(
+                    lane="tier_3",
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
             if args.command == "worker-live-warm":
                 service_app = ServiceApp(app)
                 await service_app.run_live_worker(
@@ -1313,6 +1337,18 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_live_hot = subparsers.add_parser("worker-live-hot", help="Run the live-hot consumer group loop.")
     worker_live_hot.add_argument("--consumer-name", default="worker-live-hot-1", help="Redis consumer name for the live-hot worker.")
     worker_live_hot.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_live_tier_1 = subparsers.add_parser("worker-live-tier-1", help="Run the live tier-1 consumer group loop.")
+    worker_live_tier_1.add_argument("--consumer-name", default="worker-live-tier-1-1", help="Redis consumer name for the live tier-1 worker.")
+    worker_live_tier_1.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_live_tier_2 = subparsers.add_parser("worker-live-tier-2", help="Run the live tier-2 consumer group loop.")
+    worker_live_tier_2.add_argument("--consumer-name", default="worker-live-tier-2-1", help="Redis consumer name for the live tier-2 worker.")
+    worker_live_tier_2.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_live_tier_3 = subparsers.add_parser("worker-live-tier-3", help="Run the live tier-3 consumer group loop.")
+    worker_live_tier_3.add_argument("--consumer-name", default="worker-live-tier-3-1", help="Redis consumer name for the live tier-3 worker.")
+    worker_live_tier_3.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_live_warm = subparsers.add_parser("worker-live-warm", help="Run the live-warm consumer group loop.")
     worker_live_warm.add_argument("--consumer-name", default="worker-live-warm-1", help="Redis consumer name for the live-warm worker.")

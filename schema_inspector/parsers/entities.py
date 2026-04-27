@@ -116,6 +116,8 @@ def _normalize_entity(
             "name": _as_str(mapping.get("name")),
             "category_id": _as_int(category.get("id")) if category is not None else None,
             "country_alpha2": _as_str(country.get("alpha2")) if country is not None else None,
+            "user_count": _as_int(mapping.get("userCount")),
+            "tier": _as_int(mapping.get("tier")),
         }
     if entity_type == "tournament":
         entity_id = _as_int(mapping.get("id"))
@@ -154,6 +156,7 @@ def _normalize_entity(
         return {
             "id": entity_id,
             "slug": _as_str(mapping.get("slug")),
+            "custom_id": _as_str(mapping.get("customId")),
             "tournament_id": _as_int(tournament.get("id")) if tournament is not None else None,
             "unique_tournament_id": _as_int(unique_tournament.get("id")) if unique_tournament is not None else None,
             "season_id": _as_int(season.get("id")) if season is not None else None,
@@ -162,8 +165,11 @@ def _normalize_entity(
             "away_team_id": _as_int(away_team.get("id")) if away_team is not None else None,
             "status_code": _as_int(status.get("code")) if status is not None else None,
             "status_type": _as_str(status.get("type")) if status is not None else None,
+            "detail_id": _as_int(mapping.get("detailId")),
             "start_timestamp": _as_int(mapping.get("startTimestamp")),
             "has_event_player_heat_map": _as_bool(mapping.get("hasEventPlayerHeatMap")),
+            "has_event_player_statistics": _as_bool(mapping.get("hasEventPlayerStatistics")),
+            "has_global_highlights": _as_bool(mapping.get("hasGlobalHighlights")),
             "has_xg": _as_bool(mapping.get("hasXg")),
         }
     if entity_type == "team":

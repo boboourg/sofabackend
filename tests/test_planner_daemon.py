@@ -19,6 +19,7 @@ from schema_inspector.queue.streams import (
     STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
     STREAM_HYDRATE,
+    STREAM_LIVE_TIER_1,
     STREAM_LIVE_HOT,
     STREAM_LIVE_WARM,
     ConsumerGroupInfo,
@@ -224,6 +225,7 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
                     away_score=0,
                     version_hint=None,
                     is_finalized=False,
+                    dispatch_tier="tier_1",
                 ),
                 7002: LiveEventState(
                     event_id=7002,
@@ -239,6 +241,7 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
                     away_score=80,
                     version_hint=None,
                     is_finalized=False,
+                    dispatch_tier="tier_3",
                 ),
             },
         )
@@ -253,7 +256,7 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
 
         await daemon.tick(now_ms=1_800_000_000_000)
 
-        self.assertEqual([stream for stream, _ in queue.published], [STREAM_LIVE_HOT, STREAM_LIVE_WARM])
+        self.assertEqual([stream for stream, _ in queue.published], [STREAM_LIVE_TIER_1, STREAM_LIVE_WARM])
         self.assertEqual([payload["job_type"] for _, payload in queue.published], [JOB_REFRESH_LIVE_EVENT, JOB_REFRESH_LIVE_EVENT])
         self.assertEqual(queue.published[0][1]["sport_slug"], "football")
         self.assertEqual(queue.published[1][1]["sport_slug"], "basketball")

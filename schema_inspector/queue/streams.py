@@ -14,6 +14,9 @@ STREAM_HISTORICAL_ENRICHMENT = "stream:etl:historical_enrichment"
 STREAM_HISTORICAL_HYDRATE = "stream:etl:historical_hydrate"
 STREAM_HISTORICAL_MAINTENANCE = "stream:etl:historical_maintenance"
 STREAM_LIVE_DISCOVERY = "stream:etl:live_discovery"
+STREAM_LIVE_TIER_1 = "stream:etl:live_tier_1"
+STREAM_LIVE_TIER_2 = "stream:etl:live_tier_2"
+STREAM_LIVE_TIER_3 = "stream:etl:live_tier_3"
 STREAM_LIVE_HOT = "stream:etl:live_hot"
 STREAM_LIVE_WARM = "stream:etl:live_warm"
 STREAM_MAINTENANCE = "stream:etl:maintenance"
@@ -28,6 +31,9 @@ GROUP_HISTORICAL_ENRICHMENT = "cg:historical_enrichment"
 GROUP_HISTORICAL_HYDRATE = "cg:historical_hydrate"
 GROUP_HISTORICAL_MAINTENANCE = "cg:historical_maintenance"
 GROUP_LIVE_DISCOVERY = "cg:live_discovery"
+GROUP_LIVE_TIER_1 = "cg:live_tier_1"
+GROUP_LIVE_TIER_2 = "cg:live_tier_2"
+GROUP_LIVE_TIER_3 = "cg:live_tier_3"
 GROUP_LIVE_HOT = "cg:live_hot"
 GROUP_LIVE_WARM = "cg:live_warm"
 GROUP_MAINTENANCE = "cg:maintenance"
@@ -37,6 +43,9 @@ OPERATIONAL_CONSUMER_GROUPS = (
     (STREAM_DISCOVERY, GROUP_DISCOVERY),
     (STREAM_LIVE_DISCOVERY, GROUP_LIVE_DISCOVERY),
     (STREAM_HYDRATE, GROUP_HYDRATE),
+    (STREAM_LIVE_TIER_1, GROUP_LIVE_TIER_1),
+    (STREAM_LIVE_TIER_2, GROUP_LIVE_TIER_2),
+    (STREAM_LIVE_TIER_3, GROUP_LIVE_TIER_3),
     (STREAM_LIVE_HOT, GROUP_LIVE_HOT),
     (STREAM_LIVE_WARM, GROUP_LIVE_WARM),
     (STREAM_MAINTENANCE, GROUP_MAINTENANCE),
