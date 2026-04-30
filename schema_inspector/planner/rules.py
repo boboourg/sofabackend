@@ -246,17 +246,6 @@ def lineup_followup_jobs(job, parse_result, capability_rollup: dict[str, str] | 
         return ()
 
     planned = []
-    if _special_kind_supported("best_players_summary", capability_rollup):
-        planned.append(
-            job.spawn_child(
-                job_type=JOB_HYDRATE_SPECIAL_ROUTE,
-                entity_type="event",
-                entity_id=job.entity_id,
-                scope="event_player_analytics",
-                params={"special_kind": "best_players_summary"},
-                priority=1,
-            )
-        )
     for player_id in starters:
         if _special_kind_supported("event_player_statistics", capability_rollup):
             planned.append(

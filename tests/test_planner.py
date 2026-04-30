@@ -231,10 +231,10 @@ class PlannerTests(unittest.TestCase):
 
         planned = planner.plan_lineup_followups(lineups_job, parse_result)
 
-        self.assertEqual(sum(item.job_type == JOB_HYDRATE_SPECIAL_ROUTE for item in planned), 5)
+        self.assertEqual(sum(item.job_type == JOB_HYDRATE_SPECIAL_ROUTE for item in planned), 6)
         special_kinds = [item.params["special_kind"] for item in planned]
-        self.assertEqual(special_kinds.count("best_players_summary"), 1)
         self.assertEqual(special_kinds.count("event_player_statistics"), 2)
+        self.assertEqual(special_kinds.count("event_player_heatmap"), 2)
         self.assertEqual(special_kinds.count("event_player_rating_breakdown"), 2)
 
 

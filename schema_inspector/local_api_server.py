@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -21,6 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import orjson
+from fastapi import FastAPI, Request, Response
 
 from .db import DatabaseConfig, create_pool_with_fallback, load_database_config
 from .endpoints import SofascoreEndpoint, local_api_endpoints
@@ -236,6 +238,10 @@ class LocalApiApplication:
         self._ensure_runtime_loop()
         return self._submit_to_runtime(awaitable).result()
 
+    async def run_in_runtime(self, awaitable: Any) -> Any:
+        self._ensure_runtime_loop()
+        return await asyncio.wrap_future(self._submit_to_runtime(awaitable))
+
     @property
     def openapi_json(self) -> bytes:
         cached = self._openapi_json
@@ -367,7 +373,9 @@ class LocalApiApplication:
             )
 
         route, path_params = route_match
-        payload = await self._fetch_snapshot_payload(route, path, raw_query, path_params)
+        fast_path_handled, payload = await self._fetch_entity_root_fast_path(path, raw_query)
+        if not fast_path_handled:
+            payload = await self._fetch_snapshot_payload(route, path, raw_query, path_params)
         if payload is None:
             payload = await self._fetch_normalized_payload(route, path, raw_query, path_params)
         if payload is None:
@@ -385,6 +393,32 @@ class LocalApiApplication:
             )
 
         return ApiResponse(status_code=HTTPStatus.OK, payload=payload)
+
+    async def _fetch_entity_root_fast_path(self, path: str, raw_query: str) -> tuple[bool, Any | None]:
+        if raw_query:
+            return False, None
+
+        event_root_id = _extract_event_id_from_entity_root_path(path, "event")
+        if event_root_id is not None:
+            return True, await self._fetch_event_root_payload(event_root_id)
+
+        team_root_id = _extract_event_id_from_entity_root_path(path, "team")
+        if team_root_id is not None:
+            return True, await self._fetch_team_root_payload(team_root_id)
+
+        player_root_id = _extract_event_id_from_entity_root_path(path, "player")
+        if player_root_id is not None:
+            return True, await self._fetch_player_root_payload(player_root_id)
+
+        manager_root_id = _extract_event_id_from_entity_root_path(path, "manager")
+        if manager_root_id is not None:
+            return True, await self._fetch_manager_root_payload(manager_root_id)
+
+        unique_tournament_root_id = _extract_event_id_from_entity_root_path(path, "unique-tournament")
+        if unique_tournament_root_id is not None:
+            return True, await self._fetch_unique_tournament_root_payload(unique_tournament_root_id)
+
+        return False, None
 
     async def handle_api_get_http_response(self, path: str, raw_query: str) -> SerializedApiResponse:
         route_match = match_route(path, self.routes)
@@ -767,18 +801,19 @@ class LocalApiApplication:
 
         connection = await self._connect()
         try:
-            final_payload_row = await connection.fetchrow(
+            terminal_row = await connection.fetchrow(
                 """
-                SELECT aps.payload AS final_payload
+                SELECT ets.terminal_status, ets.finalized_at, aps.payload AS final_payload
                 FROM event_terminal_state AS ets
-                JOIN api_payload_snapshot AS aps
+                LEFT JOIN api_payload_snapshot AS aps
                     ON aps.id = ets.final_snapshot_id
                 WHERE ets.event_id = $1
                 """,
                 event_id,
             )
-            if final_payload_row is not None:
-                decoded = _decode_snapshot_payload(final_payload_row["final_payload"])
+            terminal_status_raw = terminal_row.get("terminal_status") if terminal_row is not None else None
+            if terminal_row is not None:
+                decoded = _decode_snapshot_payload(terminal_row.get("final_payload"))
                 if isinstance(decoded, dict):
                     return decoded
 
@@ -797,7 +832,7 @@ class LocalApiApplication:
             if snapshot_row is not None:
                 decoded = _decode_snapshot_payload(snapshot_row["payload"])
                 if isinstance(decoded, dict):
-                    return decoded
+                    return _apply_terminal_status_to_event_payload(decoded, terminal_status_raw)
 
             normalized_row = await connection.fetchrow(
                 """
@@ -810,7 +845,10 @@ class LocalApiApplication:
             )
             if normalized_row is None:
                 return None
-            return _synthesize_event_root_payload(normalized_row)
+            return _apply_terminal_status_to_event_payload(
+                _synthesize_event_root_payload(normalized_row),
+                terminal_status_raw,
+            )
         finally:
             await connection.close()
 
@@ -1244,6 +1282,126 @@ class LocalApiRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Cache-Control", cache_control)
+
+
+def create_local_api_application(
+    *,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    database_url: str | None = None,
+    redis_url: str | None = None,
+    public_base_urls: tuple[str, ...] = (),
+) -> LocalApiApplication:
+    database_config = load_database_config(dsn=database_url)
+    base_url = f"http://{host}:{port}"
+    return LocalApiApplication(
+        database_config=database_config,
+        base_url=base_url,
+        openapi_base_urls=resolve_openapi_base_urls(
+            primary_base_url=base_url,
+            public_base_urls=public_base_urls,
+        ),
+        redis_backend=_load_optional_redis_backend(redis_url),
+    )
+
+
+def create_asgi_app(
+    *,
+    application: LocalApiApplication | None = None,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    database_url: str | None = None,
+    redis_url: str | None = None,
+    public_base_urls: tuple[str, ...] = (),
+):
+    local_application = application or create_local_api_application(
+        host=host,
+        port=port,
+        database_url=database_url,
+        redis_url=redis_url,
+        public_base_urls=public_base_urls,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await local_application.startup()
+        try:
+            yield
+        finally:
+            await local_application.shutdown()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.state.local_api_application = local_application
+
+    @app.api_route("/{path:path}", methods=["OPTIONS"])
+    async def _options(path: str) -> Response:
+        del path
+        return Response(status_code=HTTPStatus.NO_CONTENT, headers=_asgi_common_headers("no-cache"))
+
+    @app.get("/{path:path}")
+    async def _get(path: str, request: Request) -> Response:
+        raw_path = "/" + path if path else "/"
+        raw_query = request.url.query
+        if raw_path in {"/", "/docs"}:
+            return Response(
+                content=local_application.swagger_html,
+                status_code=HTTPStatus.OK,
+                media_type="text/html; charset=utf-8",
+                headers=_asgi_common_headers("public, max-age=300"),
+            )
+        if raw_path == "/openapi.json":
+            headers = {str(key): str(value) for key, value in request.headers.items()}
+            body = await asyncio.to_thread(local_application.openapi_json_for_request, headers)
+            return Response(
+                content=body,
+                status_code=HTTPStatus.OK,
+                media_type="application/json; charset=utf-8",
+                headers=_asgi_common_headers("public, max-age=300"),
+            )
+        if raw_path == "/healthz":
+            return Response(
+                content=_json_dumps_bytes({"ok": True, "service": "local-multisport-api"}),
+                status_code=HTTPStatus.OK,
+                media_type="application/json; charset=utf-8",
+                headers=_asgi_common_headers("no-cache"),
+            )
+        if raw_path.startswith("/ops/"):
+            api_response = await local_application.run_in_runtime(
+                local_application.handle_ops_get(raw_path, raw_query)
+            )
+            return Response(
+                content=_json_dumps_bytes(api_response.payload),
+                status_code=api_response.status_code,
+                media_type="application/json; charset=utf-8",
+                headers=_asgi_common_headers("no-cache"),
+            )
+        if raw_path.startswith("/api/"):
+            api_response = await local_application.run_in_runtime(
+                local_application.handle_api_get_http_response(raw_path, raw_query)
+            )
+            return Response(
+                content=api_response.body,
+                status_code=api_response.status_code,
+                media_type="application/json; charset=utf-8",
+                headers=_asgi_common_headers(api_response.cache_control),
+            )
+        return Response(
+            content=_json_dumps_bytes({"error": "Unknown route.", "path": raw_path}),
+            status_code=HTTPStatus.NOT_FOUND,
+            media_type="application/json; charset=utf-8",
+            headers=_asgi_common_headers("no-cache"),
+        )
+
+    return app
+
+
+def _asgi_common_headers(cache_control: str) -> dict[str, str]:
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Cache-Control": cache_control,
+    }
 
 
 def build_route_specs() -> tuple[RouteSpec, ...]:
@@ -1705,12 +1863,30 @@ def _fallback_terminal_status_payload(
         "afterpen": {"type": "afterpen", "description": "After penalties"},
         "cancelled": {"type": "cancelled", "description": "Cancelled"},
         "postponed": {"type": "postponed", "description": "Postponed"},
+        "zombie_stale": {"code": 91, "type": "stale_live", "description": "Retired stale live event"},
     }
     fallback = fallback_by_type.get(normalized)
     if fallback is None:
         return base or None
     base.update(fallback)
     return base
+
+
+def _apply_terminal_status_to_event_payload(
+    payload: dict[str, Any],
+    terminal_status: Any,
+) -> dict[str, Any]:
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return payload
+    status_payload = _fallback_terminal_status_payload(terminal_status, event.get("status"))
+    if status_payload is None:
+        return payload
+    updated_event = dict(event)
+    updated_event["status"] = status_payload
+    updated_payload = dict(payload)
+    updated_payload["event"] = updated_event
+    return updated_payload
 
 
 def _load_optional_redis_backend(redis_url: str | None) -> Any | None:

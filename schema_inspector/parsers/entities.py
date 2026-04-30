@@ -167,8 +167,8 @@ def _normalize_entity(
             "status_type": _as_str(status.get("type")) if status is not None else None,
             "detail_id": _as_int(mapping.get("detailId")),
             "start_timestamp": _as_int(mapping.get("startTimestamp")),
-            "has_event_player_heat_map": _as_bool(mapping.get("hasEventPlayerHeatMap")),
             "has_event_player_statistics": _as_bool(mapping.get("hasEventPlayerStatistics")),
+            "has_event_player_heat_map": _as_bool(mapping.get("hasEventPlayerHeatMap")),
             "has_global_highlights": _as_bool(mapping.get("hasGlobalHighlights")),
             "has_xg": _as_bool(mapping.get("hasXg")),
         }

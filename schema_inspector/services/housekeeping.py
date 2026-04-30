@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+import orjson
+
 from ..queue.live_state import (
     LIVE_COLD_ZSET,
     LIVE_HOT_ZSET,
@@ -69,6 +71,13 @@ _ENV_SNAPSHOT_DAYS = _ENV_PREFIX + "RETENTION_PAYLOAD_SNAPSHOT_DAYS"
 _ENV_LIVE_HISTORY_DAYS = _ENV_PREFIX + "RETENTION_LIVE_HISTORY_DAYS"
 _ENV_ZOMBIE_MAX_AGE_MIN = _ENV_PREFIX + "SWEEPER_ZOMBIE_MAX_AGE_MINUTES"
 _ENV_ZOMBIE_MAX_AGE_ALIASES = (_ENV_PREFIX + "HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES",)
+_ENV_STALE_LIVE_ENABLED = _ENV_PREFIX + "HOUSEKEEPING_STALE_LIVE_ENABLED"
+_ENV_STALE_UPDATED_MIN = _ENV_PREFIX + "HOUSEKEEPING_LIVE_UPDATED_STALE_MINUTES"
+_ENV_STALE_BOOTSTRAP_GRACE_MIN = _ENV_PREFIX + "HOUSEKEEPING_BOOTSTRAP_GRACE_MINUTES"
+_ENV_STALE_SURFACE_SUCCESS_LOOKBACK_MIN = _ENV_PREFIX + "HOUSEKEEPING_SURFACE_SUCCESS_LOOKBACK_MINUTES"
+_ENV_STALE_MAX_RETIREMENTS = _ENV_PREFIX + "HOUSEKEEPING_MAX_STALE_RETIREMENTS_PER_TICK"
+
+LIVE_STATUS_CODES: tuple[int, ...] = (6, 7, 8, 9, 30, 31, 32)
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,11 @@ class HousekeepingConfig:
     payload_snapshot_retention_days: int = 7
     live_state_history_retention_days: int = 30
     zombie_max_age_minutes: int = 120
+    stale_live_enabled: bool = True
+    live_updated_stale_minutes: int = 45
+    bootstrap_grace_minutes: int = 15
+    surface_success_lookback_minutes: int = 15
+    max_stale_retirements_per_tick: int = 100
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "HousekeepingConfig":
@@ -110,6 +124,11 @@ class HousekeepingConfig:
                 120,
                 minimum=1,
             ),
+            stale_live_enabled=_env_bool(env, _ENV_STALE_LIVE_ENABLED, True),
+            live_updated_stale_minutes=_env_int(env, _ENV_STALE_UPDATED_MIN, 45, minimum=1),
+            bootstrap_grace_minutes=_env_int(env, _ENV_STALE_BOOTSTRAP_GRACE_MIN, 15, minimum=1),
+            surface_success_lookback_minutes=_env_int(env, _ENV_STALE_SURFACE_SUCCESS_LOOKBACK_MIN, 15, minimum=1),
+            max_stale_retirements_per_tick=_env_int(env, _ENV_STALE_MAX_RETIREMENTS, 100, minimum=1),
         )
 
 
@@ -122,6 +141,8 @@ class HousekeepingTickReport:
     live_state_history_deleted: int = 0
     zombies_found: int = 0
     zombies_cleared: int = 0
+    stale_live_found: int = 0
+    stale_live_cleared: int = 0
     dry_run: bool = False
     # Populated only in dry-run mode — counts of rows that would be deleted.
     would_delete: dict[str, int] = field(default_factory=dict)
@@ -133,6 +154,8 @@ class ZombieCandidate:
     event_id: int
     lane: str
     last_ingested_at: int | None
+    sport_slug: str | None = None
+    reason: str | None = None
 
 
 ExecutorFactory = Callable[[], "AsyncExecutorContext"]
@@ -212,17 +235,17 @@ class HousekeepingLoop:
         if self.config.dry_run:
             await self._fill_dry_run_counts(report)
         else:
-            report.request_log_deleted = await self._run_retention(
+            report.request_log_deleted = await self._run_retention_safely(
                 name="api_request_log",
                 cutoff=self._cutoff(hours=self.config.request_log_retention_hours),
                 delete_batch=self.retention_repository.delete_request_log_batch,
             )
-            report.payload_snapshot_deleted = await self._run_retention(
+            report.payload_snapshot_deleted = await self._run_retention_safely(
                 name="api_payload_snapshot_legacy",
                 cutoff=self._cutoff(days=self.config.payload_snapshot_retention_days),
                 delete_batch=self.retention_repository.delete_legacy_snapshot_batch,
             )
-            report.live_state_history_deleted = await self._run_retention(
+            report.live_state_history_deleted = await self._run_retention_safely(
                 name="event_live_state_history",
                 cutoff=self._cutoff(days=self.config.live_state_history_retention_days),
                 delete_batch=self.retention_repository.delete_live_state_history_batch,
@@ -271,6 +294,19 @@ class HousekeepingLoop:
             logger.info("retention %s deleted=%d cutoff=%s", name, total_deleted, cutoff.isoformat())
         return total_deleted
 
+    async def _run_retention_safely(
+        self,
+        *,
+        name: str,
+        cutoff: datetime,
+        delete_batch: Callable[..., Awaitable[int]],
+    ) -> int:
+        try:
+            return await self._run_retention(name=name, cutoff=cutoff, delete_batch=delete_batch)
+        except Exception:
+            logger.exception("retention step failed: %s", name)
+            return 0
+
     async def _fill_dry_run_counts(self, report: HousekeepingTickReport) -> None:
         request_log_cutoff = self._cutoff(hours=self.config.request_log_retention_hours)
         snapshot_cutoff = self._cutoff(days=self.config.payload_snapshot_retention_days)
@@ -293,29 +329,46 @@ class HousekeepingLoop:
     # ------------------------------------------------------------------
 
     async def _run_zombie_sweep(self, report: HousekeepingTickReport) -> None:
-        if self.live_state_store is None or self.redis_backend is None:
+        if self.redis_backend is None:
             return
-        candidates = self._collect_zombie_candidates()
-        report.zombies_found = len(candidates)
+        lane_candidates = self._collect_zombie_candidates() if self.live_state_store is not None else []
+        stale_live_candidates = await self._collect_stale_live_candidates()
+        report.zombies_found = len(lane_candidates)
+        report.stale_live_found = len(stale_live_candidates)
+        candidates = self._merge_candidates(lane_candidates, stale_live_candidates)
         if not candidates:
             return
         if self.config.dry_run:
             logger.info(
-                "zombie sweep dry-run candidates=%d (first 10: %s)",
+                "zombie sweep dry-run candidates=%d lane=%d stale_live=%d (first 10: %s)",
                 len(candidates),
+                len(lane_candidates),
+                len(stale_live_candidates),
                 [c.event_id for c in candidates[:10]],
             )
             return
         now_iso = self._clock().isoformat()
-        cleared = 0
+        zombie_cleared = 0
+        stale_live_cleared = 0
         for candidate in candidates:
             try:
                 await self._retire_zombie(candidate, finalized_at_iso=now_iso)
-                cleared += 1
+                if candidate.reason == "surface_missing":
+                    stale_live_cleared += 1
+                else:
+                    zombie_cleared += 1
             except Exception:  # pragma: no cover - best effort, continue sweep
                 logger.exception("zombie sweep failed for event_id=%s", candidate.event_id)
-        report.zombies_cleared = cleared
-        logger.info("zombie sweep cleared=%d found=%d", cleared, len(candidates))
+        report.zombies_cleared = zombie_cleared
+        report.stale_live_cleared = stale_live_cleared
+        logger.info(
+            "zombie sweep cleared=%d/%d stale_live=%d/%d found=%d",
+            zombie_cleared,
+            len(lane_candidates),
+            stale_live_cleared,
+            len(stale_live_candidates),
+            len(candidates),
+        )
 
     def _collect_zombie_candidates(self) -> list[ZombieCandidate]:
         assert self.live_state_store is not None
@@ -336,7 +389,14 @@ class HousekeepingLoop:
                 if state is None:
                     # Orphan zset entry: lane has id but no hash. That's
                     # itself a zombie — clear it.
-                    candidates.append(ZombieCandidate(event_id=event_id, lane=lane_name, last_ingested_at=None))
+                    candidates.append(
+                        ZombieCandidate(
+                            event_id=event_id,
+                            lane=lane_name,
+                            last_ingested_at=None,
+                            reason="orphan_live_state",
+                        )
+                    )
                     continue
                 if state.is_finalized:
                     # Should never be in a live lane, but the finalize worker
@@ -348,9 +408,160 @@ class HousekeepingLoop:
                 last = state.last_ingested_at
                 if last is None or last < cutoff_ms:
                     candidates.append(
-                        ZombieCandidate(event_id=event_id, lane=lane_name, last_ingested_at=last)
+                        ZombieCandidate(
+                            event_id=event_id,
+                            lane=lane_name,
+                            last_ingested_at=last,
+                            reason="redis_live_zombie",
+                        )
                     )
         return candidates
+
+    async def _collect_stale_live_candidates(self) -> list[ZombieCandidate]:
+        if not self.config.stale_live_enabled:
+            return []
+        rows = await self._fetch_stale_live_rows()
+        if not rows:
+            return []
+        candidates: list[ZombieCandidate] = []
+        rows_by_sport: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            sport_slug = str(row.get("sport_slug") or "").strip().lower()
+            if not sport_slug:
+                continue
+            rows_by_sport.setdefault(sport_slug, []).append(row)
+        for sport_slug, sport_rows in rows_by_sport.items():
+            if not await self._has_recent_live_surface_success(sport_slug):
+                logger.warning(
+                    "stale-live sweep skipped sport=%s: no recent successful /events/live fetch",
+                    sport_slug,
+                )
+                continue
+            live_surface_ids = await self._fetch_live_surface_event_ids(sport_slug)
+            if live_surface_ids is None:
+                logger.warning(
+                    "stale-live sweep skipped sport=%s: no recent live surface snapshot available",
+                    sport_slug,
+                )
+                continue
+            for row in sport_rows:
+                event_id = int(row["event_id"])
+                if event_id in live_surface_ids:
+                    continue
+                candidates.append(
+                    ZombieCandidate(
+                        event_id=event_id,
+                        lane="stale_live",
+                        last_ingested_at=None,
+                        sport_slug=sport_slug,
+                        reason="surface_missing",
+                    )
+                )
+                if len(candidates) >= self.config.max_stale_retirements_per_tick:
+                    return candidates
+        return candidates
+
+    async def _fetch_stale_live_rows(self) -> list[dict[str, Any]]:
+        updated_cutoff = self._clock() - timedelta(minutes=self.config.live_updated_stale_minutes)
+        bootstrap_cutoff = self._clock() - timedelta(minutes=self.config.bootstrap_grace_minutes)
+        fetch_limit = max(
+            self.config.max_stale_retirements_per_tick * 4,
+            self.config.max_stale_retirements_per_tick,
+        )
+        async with self._connection_factory() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    e.id AS event_id,
+                    s.slug AS sport_slug,
+                    e.updated_at,
+                    e.live_bootstrap_done_at
+                FROM event AS e
+                JOIN tournament AS t
+                    ON t.id = e.tournament_id
+                JOIN category AS cat
+                    ON cat.id = t.category_id
+                JOIN sport AS s
+                    ON s.id = cat.sport_id
+                WHERE e.status_code = ANY($1::int[])
+                  AND (
+                    e.updated_at < $2
+                    OR (
+                        e.live_bootstrap_done_at IS NULL
+                        AND e.updated_at < $3
+                    )
+                  )
+                ORDER BY e.updated_at NULLS FIRST, e.id
+                LIMIT $4
+                """,
+                list(LIVE_STATUS_CODES),
+                updated_cutoff,
+                bootstrap_cutoff,
+                fetch_limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def _has_recent_live_surface_success(self, sport_slug: str) -> bool:
+        cutoff = self._clock() - timedelta(minutes=self.config.surface_success_lookback_minutes)
+        async with self._connection_factory() as connection:
+            value = await connection.fetchval(
+                """
+                SELECT 1
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = $1
+                  AND fetched_at >= $2
+                ORDER BY fetched_at DESC
+                LIMIT 1
+                """,
+                f"/api/v1/sport/{sport_slug}/events/live",
+                cutoff,
+            )
+        return value is not None
+
+    async def _fetch_live_surface_event_ids(self, sport_slug: str) -> set[int] | None:
+        async with self._connection_factory() as connection:
+            payload = await connection.fetchval(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                f"/api/v1/sport/{sport_slug}/events/live",
+            )
+        if payload in (None, ""):
+            return None
+        decoded = _decode_payload(payload)
+        if not isinstance(decoded, dict):
+            return None
+        raw_events = decoded.get("events")
+        if not isinstance(raw_events, list):
+            return set()
+        event_ids: set[int] = set()
+        for item in raw_events:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("id")
+            try:
+                event_ids.add(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        return event_ids
+
+    def _merge_candidates(
+        self,
+        lane_candidates: list[ZombieCandidate],
+        stale_live_candidates: list[ZombieCandidate],
+    ) -> list[ZombieCandidate]:
+        merged: list[ZombieCandidate] = []
+        seen: set[int] = set()
+        for candidate in (*lane_candidates, *stale_live_candidates):
+            if candidate.event_id in seen:
+                continue
+            seen.add(candidate.event_id)
+            merged.append(candidate)
+        return merged
 
     def _zrange_all(self, lane_key: str) -> tuple[Any, ...]:
         """Read every member of a lane's zset. These zsets hold ~thousands of
@@ -385,6 +596,11 @@ class HousekeepingLoop:
                     final_snapshot_id=None,
                 ),
             )
+            await self.live_state_repository.mark_event_stale_live_retired(
+                connection,
+                event_id=candidate.event_id,
+                retired_at=finalized_at_iso,
+            )
 
     # ------------------------------------------------------------------
     # Misc
@@ -411,15 +627,34 @@ def report_to_log(report: HousekeepingTickReport) -> str:
             f"request_log={would.get('api_request_log', 0)} "
             f"snapshot={would.get('api_payload_snapshot_legacy', 0)} "
             f"live_history={would.get('event_live_state_history', 0)} "
-            f"zombies_found={report.zombies_found} duration_ms={report.duration_ms}"
+            f"zombies_found={report.zombies_found} "
+            f"stale_live_found={report.stale_live_found} "
+            f"duration_ms={report.duration_ms}"
         )
     return (
         f"deleted request_log={report.request_log_deleted} "
         f"snapshot={report.payload_snapshot_deleted} "
         f"live_history={report.live_state_history_deleted} "
         f"zombies={report.zombies_cleared}/{report.zombies_found} "
+        f"stale_live={report.stale_live_cleared}/{report.stale_live_found} "
         f"duration_ms={report.duration_ms}"
     )
+
+
+def _decode_payload(payload: Any) -> Any:
+    if payload is None:
+        return None
+    if isinstance(payload, (bytes, bytearray, memoryview)):
+        try:
+            return orjson.loads(bytes(payload))
+        except orjson.JSONDecodeError:
+            return None
+    if isinstance(payload, str):
+        try:
+            return orjson.loads(payload)
+        except orjson.JSONDecodeError:
+            return None
+    return payload
 
 
 # ---------------------------------------------------------------------------

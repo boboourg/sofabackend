@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=/opt/sofascore
 EnvironmentFile=/opt/sofascore/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.local_api_server --host 0.0.0.0 --port 8000
+ExecStart=/opt/sofascore/.venv/bin/uvicorn schema_inspector.local_api_server:create_asgi_app --factory --host 0.0.0.0 --port 8000 --workers 4
 Restart=always
 RestartSec=5
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -101,6 +102,17 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(config.proxy_endpoints), 3)
         self.assertEqual(config.proxy_endpoints[0].url, "http://proxy-1.local:8080")
 
+    def test_challenge_attempts_respect_configured_cap_not_proxy_pool_size(self) -> None:
+        proxy_urls = [f"http://proxy-{index}.local:8080" for index in range(1, 11)]
+
+        config = load_runtime_config(
+            env={"SCHEMA_INSPECTOR_CHALLENGE_MAX_ATTEMPTS": "3"},
+            proxy_urls=proxy_urls,
+        )
+
+        self.assertEqual(len(config.proxy_endpoints), 10)
+        self.assertEqual(config.retry_policy.challenge_max_attempts, 3)
+
     async def test_transport_blocks_direct_http_when_proxy_only_mode_is_enabled(self) -> None:
         config = load_runtime_config(env={"SCHEMA_INSPECTOR_REQUIRE_PROXY": "true"})
         transport = InspectorTransport(config)
@@ -146,8 +158,8 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         ]
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url):
-            del url, headers, timeout
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+            del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             item = responses.pop(0)
             from schema_inspector.transport import _RawResponse
@@ -204,8 +216,8 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         ]
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url):
-            del url, headers, timeout
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+            del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             item = responses.pop(0)
             from schema_inspector.transport import _RawResponse
@@ -263,8 +275,8 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         ]
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url):
-            del url, headers, timeout
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+            del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             item = responses.pop(0)
             from schema_inspector.transport import _RawResponse
@@ -289,12 +301,13 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             proxy_urls=["http://proxy-1.local:8080"],
             max_attempts=1,
         )
+        config = replace(config, fingerprint_profiles=())
         transport = InspectorTransport(config)
 
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url):
-            del url, headers, timeout
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+            del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             from schema_inspector.transport import _RawResponse
 
@@ -338,8 +351,8 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
 
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url):
-            del url, headers, timeout
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+            del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             from schema_inspector.transport import _RawResponse
 

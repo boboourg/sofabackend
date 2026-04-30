@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from .endpoints import (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
     EVENT_AVERAGE_POSITIONS_ENDPOINT,
+    EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_ESPORTS_GAMES_ENDPOINT,
     EVENT_GRAPH_ENDPOINT,
@@ -61,8 +62,8 @@ def build_event_detail_request_specs(
     status_type: str | None,
     team_ids: tuple[int, ...] | list[int] = (),
     provider_ids: tuple[int, ...] | list[int] = (1,),
-    has_event_player_heat_map: bool | None = None,
     has_event_player_statistics: bool | None = None,
+    has_event_player_heat_map: bool | None = None,
     has_global_highlights: bool | None = None,
     has_xg: bool | None = None,
     detail_id: int | None = None,
@@ -127,6 +128,8 @@ def build_event_detail_request_specs(
         add(EVENT_BASEBALL_INNINGS_ENDPOINT)
     if "esports_games" in adapter.special_families:
         add(EVENT_ESPORTS_GAMES_ENDPOINT)
+    if not core_only and has_global_highlights is True:
+        add(EVENT_HIGHLIGHTS_ENDPOINT)
 
     if not is_live_detail:
         return _filter_specs(
@@ -145,6 +148,8 @@ def build_event_detail_request_specs(
     add(EVENT_COMMENTS_ENDPOINT)
     if normalized_sport_slug == "football":
         add(EVENT_OFFICIAL_TWEETS_ENDPOINT)
+    if not core_only and normalized_sport_slug == "football" and has_event_player_statistics is True:
+        add(EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT)
     if football_highlights_allowed(
         sport_slug=normalized_sport_slug,
         detail_id=detail_id,

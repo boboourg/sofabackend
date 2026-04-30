@@ -124,6 +124,37 @@ class LiveStateRepository:
             record.final_snapshot_id,
         )
 
+    async def mark_event_stale_live_retired(
+        self,
+        executor: SqlExecutor,
+        *,
+        event_id: int,
+        retired_at: str,
+    ) -> None:
+        """Move a still-live normalized row out of the live status set.
+
+        The upstream live surface is the source of truth, so this soft-retire
+        only applies to rows that are still marked with an in-progress status.
+        If a later root/event upsert sees the match again, normal ingestion can
+        restore the authoritative status code.
+        """
+
+        await executor.execute(
+            """
+            UPDATE event
+            SET status_code = 91,
+                updated_at = GREATEST(
+                    COALESCE(updated_at, $2::timestamptz),
+                    $2::timestamptz
+                )
+            WHERE id = $1
+              AND status_code = ANY($3::int[])
+            """,
+            event_id,
+            coerce_timestamptz(retired_at),
+            [6, 7, 8, 9, 30, 31, 32],
+        )
+
     async def fetch_latest_live_state_history(
         self,
         executor: SqlFetchExecutor,

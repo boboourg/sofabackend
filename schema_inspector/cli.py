@@ -16,6 +16,7 @@ from pathlib import Path
 from .db import AsyncpgDatabase, load_database_config
 from .coverage_policy import lineup_recheck_window_open
 from .endpoints import hybrid_runtime_registry_entries_for_sport
+from .event_endpoint_negative_cache import EventEndpointNegativeCache, load_event_negative_cache_settings
 from .fetch_executor import FetchExecutor, PrefetchedFetchRecord, build_fetch_task_key
 from .final_sweep_gate import FinalSweepGate
 from .live_bootstrap import LiveBootstrapCoordinator
@@ -54,6 +55,7 @@ from .sources import build_source_adapter
 from .storage.capability_repository import CapabilityRepository
 from .storage.coverage_repository import CoverageRepository
 from .storage.endpoint_negative_cache_repository import EndpointNegativeCacheRepository
+from .storage.event_endpoint_negative_cache_repository import EventEndpointNegativeCacheRepository
 from .storage.live_state_repository import LiveStateRepository
 from .storage.normalize_repository import NormalizeRepository
 from .storage.raw_repository import RawRepository
@@ -85,6 +87,8 @@ class PrefetchedRun:
     initial_capability_rollup: dict[str, str]
     widget_negative_cache_events: tuple[object, ...] = ()
     replay_widget_gate: object | None = None
+    event_negative_cache_events: tuple[object, ...] = ()
+    replay_event_endpoint_gate: object | None = None
 
     @property
     def total_payload_size_bytes(self) -> int:
@@ -205,6 +209,8 @@ class HybridApp:
         self.normalize_repository = NormalizeRepository(redis_backend=redis_backend)
         self.endpoint_negative_cache_repository = EndpointNegativeCacheRepository()
         self.negative_cache_settings = load_negative_cache_settings()
+        self.event_endpoint_negative_cache_repository = EventEndpointNegativeCacheRepository()
+        self.event_negative_cache_settings = load_event_negative_cache_settings()
         self.stage_audit_logger = StageAuditLogger(database=database)
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
@@ -315,12 +321,19 @@ class HybridApp:
             write_mode="deferred",
         )
         season_widget_gate = None
+        event_endpoint_gate = None
         async with self.database.connection() as read_connection:
             if self.negative_cache_settings.enabled:
                 season_widget_gate = SeasonWidgetNegativeCache(
                     repository=self.endpoint_negative_cache_repository,
                     sql_executor=read_connection,
                     settings=self.negative_cache_settings,
+                )
+            if self.event_negative_cache_settings.enabled:
+                event_endpoint_gate = EventEndpointNegativeCache(
+                    repository=self.event_endpoint_negative_cache_repository,
+                    sql_executor=read_connection,
+                    settings=self.event_negative_cache_settings,
                 )
             orchestrator = PilotOrchestrator(
                 fetch_executor=prefetch_executor,
@@ -333,6 +346,7 @@ class HybridApp:
                 live_state_repository=None,
                 stream_queue=None,
                 season_widget_gate=season_widget_gate,
+                event_endpoint_gate=event_endpoint_gate,
                 final_sweep_gate=self.final_sweep_gate,
             )
             await orchestrator.run_event(
@@ -348,6 +362,8 @@ class HybridApp:
             initial_capability_rollup=initial_capability_rollup,
             widget_negative_cache_events=season_widget_gate.events if season_widget_gate is not None else (),
             replay_widget_gate=season_widget_gate.build_replay_gate() if season_widget_gate is not None else None,
+            event_negative_cache_events=event_endpoint_gate.events if event_endpoint_gate is not None else (),
+            replay_event_endpoint_gate=event_endpoint_gate.build_replay_gate() if event_endpoint_gate is not None else None,
         )
 
     async def _commit_prefetched_run(self, prefetched_run: PrefetchedRun) -> PrefetchedRun:
@@ -407,12 +423,18 @@ class HybridApp:
                 live_state_repository=self.live_state_repository,
                 stream_queue=self.stream_queue,
                 season_widget_gate=prefetched_run.replay_widget_gate,
+                event_endpoint_gate=prefetched_run.replay_event_endpoint_gate,
             )
             result = await orchestrator.run_event(
                 event_id=prefetched_run.event_id,
                 sport_slug=prefetched_run.sport_slug,
                 hydration_mode=hydration_mode,
             )
+            if self.event_negative_cache_settings.enabled and prefetched_run.event_negative_cache_events:
+                await self.event_endpoint_negative_cache_repository.apply_events(
+                    connection,
+                    prefetched_run.event_negative_cache_events,
+                )
             if self.negative_cache_settings.enabled and prefetched_run.widget_negative_cache_events:
                 await self.endpoint_negative_cache_repository.apply_events(
                     connection,

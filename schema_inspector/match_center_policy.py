@@ -40,6 +40,7 @@ _FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS = frozenset(
 _FOOTBALL_INPROGRESS_DETAIL_ENDPOINTS = _FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS | {
     "/api/v1/event/{event_id}/graph",
     "/api/v1/event/{event_id}/comments",
+    "/api/v1/event/{event_id}/best-players/summary",
     "/api/v1/event/{event_id}/official-tweets",
     "/api/v1/event/{event_id}/heatmap/{team_id}",
     "/api/v1/event/{event_id}/shotmap",

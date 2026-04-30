@@ -31,6 +31,7 @@ from ..endpoints import (
     unique_tournament_top_teams_endpoint,
 )
 from ..detail_resource_policy import build_event_detail_request_specs
+from ..event_endpoint_negative_cache import normalize_event_status_phase
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
@@ -147,6 +148,7 @@ class PilotOrchestrator:
         stream_queue=None,
         now_ms_factory=None,
         season_widget_gate=None,
+        event_endpoint_gate=None,
         live_bootstrap_coordinator=None,
         final_sweep_gate=None,
     ) -> None:
@@ -164,6 +166,7 @@ class PilotOrchestrator:
         self.live_state_repository = live_state_repository
         self.stream_queue = stream_queue
         self.season_widget_gate = season_widget_gate
+        self.event_endpoint_gate = event_endpoint_gate
         self.live_bootstrap_coordinator = live_bootstrap_coordinator
         self.final_sweep_gate = final_sweep_gate
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
@@ -258,8 +261,8 @@ class PilotOrchestrator:
         away_team_id = None
         detail_id = None
         custom_id = None
-        has_event_player_heat_map = None
         has_event_player_statistics = None
+        has_event_player_heat_map = None
         has_global_highlights = None
         has_xg = None
         tournament_tier = None
@@ -276,8 +279,8 @@ class PilotOrchestrator:
                 away_team_id = _as_int(event_row.get("away_team_id"))
                 detail_id = _as_int(event_row.get("detail_id"))
                 custom_id = event_row.get("custom_id")
-                has_event_player_heat_map = event_row.get("has_event_player_heat_map")
                 has_event_player_statistics = event_row.get("has_event_player_statistics")
+                has_event_player_heat_map = event_row.get("has_event_player_heat_map")
                 has_global_highlights = event_row.get("has_global_highlights")
                 has_xg = event_row.get("has_xg")
             if season_rows:
@@ -287,6 +290,7 @@ class PilotOrchestrator:
                 unique_tournament_id = unique_tournament_row.get("id")
                 tournament_tier = _as_int(unique_tournament_row.get("tier"))
                 tournament_user_count = _as_int(unique_tournament_row.get("user_count"))
+        status_phase = normalize_event_status_phase(status_type)
 
         root_job = JobEnvelope.create(
             job_type=JOB_HYDRATE_EVENT_ROOT,
@@ -320,7 +324,7 @@ class PilotOrchestrator:
             endpoint = _endpoint_for_edge_kind(edge_kind)
             if endpoint is None:
                 continue
-            outcome, parsed = await self._fetch_and_parse(
+            outcome, parsed = await self._fetch_gated_event_endpoint(
                 endpoint=endpoint,
                 sport_slug=sport_slug,
                 path_params={"event_id": event_id},
@@ -328,7 +332,10 @@ class PilotOrchestrator:
                 context_entity_id=event_id,
                 context_event_id=event_id,
                 fetch_reason=edge_job.job_type,
+                status_phase=status_phase,
             )
+            if outcome is None:
+                continue
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
@@ -348,7 +355,10 @@ class PilotOrchestrator:
                             job=followup_job,
                             sport_slug=sport_slug,
                             event_id=event_id,
+                            status_phase=status_phase,
                         )
+                        if special_outcome is None:
+                            continue
                         fetch_outcomes.append(special_outcome)
                         if special_parse is not None:
                             parse_results.append(special_parse)
@@ -398,6 +408,7 @@ class PilotOrchestrator:
                         detail_id=detail_id,
                         status_type=status_type,
                         has_xg=has_xg,
+                        status_phase=status_phase,
                     )
 
                 if self.final_sweep_gate is None:
@@ -545,8 +556,8 @@ class PilotOrchestrator:
             status_type=status_type,
             team_ids=tuple(team_id for team_id in (home_team_id, away_team_id) if isinstance(team_id, int)),
             provider_ids=(1,),
-            has_event_player_heat_map=has_event_player_heat_map,
             has_event_player_statistics=has_event_player_statistics,
+            has_event_player_heat_map=has_event_player_heat_map,
             has_global_highlights=has_global_highlights,
             has_xg=has_xg,
             detail_id=detail_id,
@@ -563,7 +574,7 @@ class PilotOrchestrator:
                 and baseball_seen_at_bats
             ):
                 continue
-            outcome, parsed = await self._fetch_and_parse(
+            outcome, parsed = await self._fetch_gated_event_endpoint(
                 endpoint=endpoint,
                 sport_slug=sport_slug,
                 path_params=request_spec.resolved_path_params(event_id=event_id),
@@ -571,7 +582,10 @@ class PilotOrchestrator:
                 context_entity_id=event_id,
                 context_event_id=event_id,
                 fetch_reason="hydrate_special_route",
+                status_phase=status_phase,
             )
+            if outcome is None:
+                continue
             fetch_outcomes.append(outcome)
             if parsed is not None:
                 parse_results.append(parsed)
@@ -590,6 +604,7 @@ class PilotOrchestrator:
                     event_id=event_id,
                     detail_id=detail_id,
                     has_xg=has_xg,
+                    status_phase=status_phase,
                     parent_endpoint=endpoint,
                     parent_outcome=outcome,
                 )
@@ -655,6 +670,47 @@ class PilotOrchestrator:
                 parsed = self.normalize_worker.handle(snapshot)
         return outcome, parsed
 
+    async def _fetch_gated_event_endpoint(
+        self,
+        *,
+        endpoint: SofascoreEndpoint,
+        sport_slug: str,
+        path_params: dict[str, Any],
+        context_entity_type: str | None,
+        context_entity_id: int | None,
+        context_event_id: int,
+        fetch_reason: str,
+        status_phase: str,
+    ) -> tuple[FetchOutcomeEnvelope | None, object | None]:
+        decision = None
+        if self.event_endpoint_gate is not None:
+            decision = await self.event_endpoint_gate.decide_event_probe(
+                event_id=int(context_event_id),
+                status_phase=status_phase,
+                endpoint_pattern=endpoint.pattern,
+                job_type=fetch_reason,
+            )
+            if not getattr(decision, "should_fetch", True):
+                return None, None
+
+        outcome, parsed = await self._fetch_and_parse(
+            endpoint=endpoint,
+            sport_slug=sport_slug,
+            path_params=path_params,
+            context_entity_type=context_entity_type,
+            context_entity_id=context_entity_id,
+            context_event_id=context_event_id,
+            fetch_reason=fetch_reason,
+        )
+        if self.event_endpoint_gate is not None and decision is not None:
+            await self.event_endpoint_gate.record_event_outcome(
+                decision=decision,
+                endpoint_pattern=endpoint.pattern,
+                outcome=outcome,
+                job_type=fetch_reason,
+            )
+        return outcome, parsed
+
     async def _run_final_sweep(
         self,
         *,
@@ -663,6 +719,7 @@ class PilotOrchestrator:
         detail_id: int | None = None,
         status_type: str | None = None,
         has_xg: bool | None = None,
+        status_phase: str = "unknown",
     ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
         outcomes: list[FetchOutcomeEnvelope] = []
         parses: list[object] = []
@@ -679,7 +736,7 @@ class PilotOrchestrator:
             endpoint = _endpoint_for_edge_kind(edge_kind)
             if endpoint is None:
                 continue
-            outcome, parsed = await self._fetch_and_parse(
+            outcome, parsed = await self._fetch_gated_event_endpoint(
                 endpoint=endpoint,
                 sport_slug=sport_slug,
                 path_params={"event_id": event_id},
@@ -687,7 +744,10 @@ class PilotOrchestrator:
                 context_entity_id=event_id,
                 context_event_id=event_id,
                 fetch_reason=JOB_FINALIZE_EVENT,
+                status_phase=status_phase,
             )
+            if outcome is None:
+                continue
             outcomes.append(outcome)
             if parsed is not None:
                 parses.append(parsed)
@@ -699,7 +759,8 @@ class PilotOrchestrator:
         job,
         sport_slug: str,
         event_id: int,
-    ) -> tuple[FetchOutcomeEnvelope, object | None]:
+        status_phase: str,
+    ) -> tuple[FetchOutcomeEnvelope | None, object | None]:
         special_kind = str(job.params.get("special_kind") or "")
         endpoint = _endpoint_for_special_kind(special_kind)
         if endpoint is None:
@@ -720,7 +781,7 @@ class PilotOrchestrator:
             context_entity_type = "player"
             context_entity_id = player_id
 
-        return await self._fetch_and_parse(
+        return await self._fetch_gated_event_endpoint(
             endpoint=endpoint,
             sport_slug=sport_slug,
             path_params=path_params,
@@ -728,6 +789,7 @@ class PilotOrchestrator:
             context_entity_id=context_entity_id,
             context_event_id=event_id,
             fetch_reason=job.job_type,
+            status_phase=status_phase,
         )
 
     async def _run_baseball_pitch_fanout(
@@ -784,6 +846,7 @@ class PilotOrchestrator:
         event_id: int,
         detail_id: int | None,
         has_xg: bool | None,
+        status_phase: str,
         parent_endpoint: SofascoreEndpoint,
         parent_outcome: FetchOutcomeEnvelope,
     ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
@@ -814,6 +877,7 @@ class PilotOrchestrator:
                 job=_SyntheticSpecialJob("event_player_shotmap", player_id),
                 sport_slug=sport_slug,
                 event_id=event_id,
+                status_phase=status_phase,
             )
             outcomes.append(outcome)
             if parsed is not None:
@@ -833,6 +897,7 @@ class PilotOrchestrator:
                 job=_SyntheticSpecialJob("event_goalkeeper_shotmap", player_id),
                 sport_slug=sport_slug,
                 event_id=event_id,
+                status_phase=status_phase,
             )
             outcomes.append(outcome)
             if parsed is not None:

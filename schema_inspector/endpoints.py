@@ -427,6 +427,13 @@ EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT = SofascoreEndpoint(
     notes="Best-player summary including player of the match / MVP.",
 )
 
+EVENT_HIGHLIGHTS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/highlights",
+    envelope_key="highlights",
+    target_table="api_payload_snapshot",
+    notes="Event highlight clips/media feed when the root payload advertises hasGlobalHighlights.",
+)
+
 EVENT_PLAYER_STATISTICS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/player/{player_id}/statistics",
     envelope_key="player,team,position,statistics,extra",
@@ -616,6 +623,7 @@ EVENT_DETAIL_BASE_ENDPOINTS = (
     EVENT_STATISTICS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_INCIDENTS_ENDPOINT,
+    EVENT_HIGHLIGHTS_ENDPOINT,
     EVENT_MANAGERS_ENDPOINT,
     EVENT_H2H_ENDPOINT,
     EVENT_PREGAME_FORM_ENDPOINT,

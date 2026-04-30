@@ -118,6 +118,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": 15868599,
                             "slug": "fc-porto-sporting-cp",
+                            "detailId": 1,
                             "tournament": {
                                 "id": 100,
                                 "slug": "primeira-liga",
@@ -296,6 +297,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": 15868599,
                             "slug": "team-a-team-b",
+                            "detailId": 1,
                             "tournament": {
                                 "id": 100,
                                 "slug": "premier-league",
@@ -373,6 +375,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": 14083191,
                             "slug": "arsenal-chelsea",
+                            "detailId": 1,
                             "tournament": {
                                 "id": 100,
                                 "slug": "premier-league",
@@ -438,7 +441,6 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
             action_log[:first_capability_index],
             [
                 f"fetch:{event_url}",
-                f"fetch:{statistics_url}",
                 f"fetch:{lineups_url}",
                 f"fetch:{incidents_url}",
             ],
@@ -461,6 +463,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": 14083191,
                             "slug": "arsenal-chelsea",
+                            "detailId": 1,
                             "tournament": {
                                 "id": 100,
                                 "slug": "premier-league",
@@ -543,7 +546,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         report = await orchestrator.run_event(event_id=14083191, sport_slug="football", hydration_mode="core")
 
         self.assertIn(event_url, transport.seen_urls)
-        self.assertIn(statistics_url, transport.seen_urls)
+        self.assertNotIn(statistics_url, transport.seen_urls)
         self.assertIn(lineups_url, transport.seen_urls)
         self.assertIn(incidents_url, transport.seen_urls)
         self.assertNotIn(best_players_url, transport.seen_urls)
@@ -553,7 +556,6 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
             {item.parser_family for item in report.parse_results},
             {
                 "event_root",
-                "event_statistics",
                 "event_lineups",
                 "event_incidents",
             },
@@ -584,6 +586,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": 14083191,
                             "slug": "arsenal-chelsea",
+                            "detailId": 1,
                             "tournament": {
                                 "id": 100,
                                 "slug": "premier-league",
@@ -594,6 +597,7 @@ class FootballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
                             "status": {"type": "inprogress"},
                             "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
                             "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+                            "hasEventPlayerStatistics": True,
                         }
                     },
                 ),

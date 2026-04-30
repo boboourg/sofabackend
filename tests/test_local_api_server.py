@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from schema_inspector.local_api_server import (
     ApiResponse,
     LocalApiApplication,
+    SerializedApiResponse,
     _QUEUE_GROUPS,
     _compile_path_template,
     _decode_snapshot_payload,
@@ -23,6 +24,7 @@ from schema_inspector.local_api_server import (
     _synthesize_team_root_payload,
     _synthesize_unique_tournament_root_payload,
     build_route_specs,
+    create_asgi_app,
     match_route,
 )
 from schema_inspector.local_swagger_builder import SwaggerDataSummary
@@ -387,6 +389,41 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.cache_control, "public, max-age=30")
+
+
+class LocalApiAsgiTests(unittest.IsolatedAsyncioTestCase):
+    def test_asgi_api_route_uses_runtime_serialized_response(self) -> None:
+        from fastapi.testclient import TestClient
+
+        application = _FakeAsgiApplication(
+            api_response=SerializedApiResponse(
+                status_code=200,
+                body=b'{"events":[{"id":1}]}',
+                cache_control="public, max-age=2",
+            )
+        )
+        app = create_asgi_app(application=application)
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1/sport/football/events/live")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"events": [{"id": 1}]})
+        self.assertEqual(response.headers["cache-control"], "public, max-age=2")
+        self.assertEqual(application.api_calls, [("/api/v1/sport/football/events/live", "")])
+        self.assertEqual(application.startup_calls, 1)
+        self.assertEqual(application.shutdown_calls, 1)
+
+    def test_asgi_options_route_returns_cors_headers(self) -> None:
+        from fastapi.testclient import TestClient
+
+        app = create_asgi_app(application=_FakeAsgiApplication())
+
+        with TestClient(app) as client:
+            response = client.options("/api/v1/event/1")
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
 
     async def test_handle_api_get_http_response_uses_static_ttl_for_finished_event_root(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -982,6 +1019,35 @@ class LocalApiEntityRootFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["event"]["tournament"]["id"], 100)
         self.assertEqual(result["event"]["tournament"]["uniqueTournament"]["id"], 17)
 
+    async def test_event_root_overrides_raw_snapshot_with_zombie_terminal_status(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("final_payload", 15994150): {
+                    "terminal_status": "zombie_stale",
+                    "final_payload": None,
+                },
+                ("raw_event_snapshot", 15994150): {
+                    "payload": {
+                        "event": {
+                            "id": 15994150,
+                            "status": {"code": 7, "type": "inprogress"},
+                            "homeTeam": {"id": 10},
+                            "awayTeam": {"id": 11},
+                        }
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_event_root_payload(15994150)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["event"]["id"], 15994150)
+        self.assertEqual(result["event"]["status"]["code"], 91)
+        self.assertEqual(result["event"]["status"]["type"], "stale_live")
+
     async def test_event_root_returns_none_when_nothing_is_ingested(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeFetchRowConnection(rows={})
@@ -1138,6 +1204,25 @@ class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):
     """End-to-end dispatch: ensure ``_fetch_normalized_payload`` wires each
     entity-root route to the correct fallback method without touching the
     database."""
+
+    async def test_event_root_handle_get_uses_fast_path_before_snapshot_scan(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+
+        async def fail_snapshot_lookup(route, path, raw_query, path_params):
+            del route, path, raw_query, path_params
+            raise AssertionError("entity root route should not run generic snapshot lookup")
+
+        async def fake_fetch(event_id: int) -> dict[str, dict[str, int]]:
+            return {"event": {"id": event_id}}
+
+        application._fetch_snapshot_payload = fail_snapshot_lookup
+        application._fetch_event_root_payload = fake_fetch
+
+        response = await application.handle_api_get("/api/v1/event/15994150", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload, {"event": {"id": 15994150}})
 
     async def test_event_root_path_dispatches_to_event_root_fetcher(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -1339,6 +1424,48 @@ class _FakePoolConnectionBackend:
 
     async def close(self):
         self.closed = True
+
+
+class _FakeAsgiApplication:
+    def __init__(
+        self,
+        *,
+        api_response: SerializedApiResponse | None = None,
+        ops_response: ApiResponse | None = None,
+    ) -> None:
+        self.api_response = api_response or SerializedApiResponse(
+            status_code=200,
+            body=b"{}",
+            cache_control="no-cache",
+        )
+        self.ops_response = ops_response or ApiResponse(status_code=200, payload={"ok": True})
+        self.swagger_html = "<html>docs</html>"
+        self.startup_calls = 0
+        self.shutdown_calls = 0
+        self.api_calls: list[tuple[str, str]] = []
+        self.ops_calls: list[tuple[str, str]] = []
+        self.openapi_headers: list[dict[str, str]] = []
+
+    async def startup(self) -> None:
+        self.startup_calls += 1
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    async def run_in_runtime(self, awaitable):
+        return await awaitable
+
+    async def handle_api_get_http_response(self, path: str, raw_query: str) -> SerializedApiResponse:
+        self.api_calls.append((path, raw_query))
+        return self.api_response
+
+    async def handle_ops_get(self, path: str, raw_query: str) -> ApiResponse:
+        self.ops_calls.append((path, raw_query))
+        return self.ops_response
+
+    def openapi_json_for_request(self, request_headers: dict[str, str] | None = None) -> bytes:
+        self.openapi_headers.append(dict(request_headers or {}))
+        return b'{"openapi":"3.1.0"}'
 
 
 async def _return_runtime_value(value):

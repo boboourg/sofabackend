@@ -59,7 +59,12 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         loop = HousekeepingLoop(
-            config=HousekeepingConfig(enabled=True, dry_run=True, zombie_max_age_minutes=120),
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=True,
+                zombie_max_age_minutes=120,
+                stale_live_enabled=False,
+            ),
             connection_factory=lambda: _FakeConnectionContext(),
             retention_repository=retention,
             live_state_store=live_state_store,
@@ -104,7 +109,12 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         loop = HousekeepingLoop(
-            config=HousekeepingConfig(enabled=True, dry_run=False, zombie_max_age_minutes=120),
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                zombie_max_age_minutes=120,
+                stale_live_enabled=False,
+            ),
             connection_factory=lambda: _FakeConnectionContext(),
             retention_repository=_FakeRetentionRepository(),
             live_state_store=live_state_store,
@@ -127,6 +137,86 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.event_id, 8001)
         self.assertEqual(record.terminal_status, ZOMBIE_TERMINAL_STATUS)
         self.assertIsNone(record.final_snapshot_id)
+
+    async def test_housekeeping_loop_retires_db_only_stale_live_rows_missing_from_surface(self) -> None:
+        from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop
+
+        now = datetime(2026, 4, 27, 18, 0, tzinfo=timezone.utc)
+        connection = _FakeStaleLiveConnection(
+            stale_rows=[
+                {
+                    "event_id": 14109894,
+                    "sport_slug": "football",
+                    "updated_at": now,
+                    "created_at": now,
+                    "live_bootstrap_done_at": None,
+                }
+            ],
+            recent_surface_ok=True,
+            live_surface_payload={"events": [{"id": 14109895}]},
+        )
+        live_state_repository = _FakeLiveStateRepository()
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                stale_live_enabled=True,
+                max_stale_retirements_per_tick=5,
+            ),
+            connection_factory=lambda: connection,
+            retention_repository=_FakeRetentionRepository(),
+            live_state_store=_FakeLiveStateStore({}),
+            live_state_repository=live_state_repository,
+            redis_backend=_FakeRedisBackend(zsets={}),
+            clock=lambda: now,
+        )
+
+        report = await loop.run_once()
+
+        self.assertEqual(report.stale_live_found, 1)
+        self.assertEqual(report.stale_live_cleared, 1)
+        self.assertEqual(live_state_repository.marked_event_ids, [14109894])
+        self.assertEqual(live_state_repository.records[0].event_id, 14109894)
+
+    async def test_housekeeping_loop_skips_db_only_stale_live_when_surface_health_is_unknown(self) -> None:
+        from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop
+
+        now = datetime(2026, 4, 27, 18, 0, tzinfo=timezone.utc)
+        connection = _FakeStaleLiveConnection(
+            stale_rows=[
+                {
+                    "event_id": 14109894,
+                    "sport_slug": "football",
+                    "updated_at": now,
+                    "created_at": now,
+                    "live_bootstrap_done_at": None,
+                }
+            ],
+            recent_surface_ok=False,
+            live_surface_payload={"events": []},
+        )
+        live_state_repository = _FakeLiveStateRepository()
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                stale_live_enabled=True,
+                max_stale_retirements_per_tick=5,
+            ),
+            connection_factory=lambda: connection,
+            retention_repository=_FakeRetentionRepository(),
+            live_state_store=_FakeLiveStateStore({}),
+            live_state_repository=live_state_repository,
+            redis_backend=_FakeRedisBackend(zsets={}),
+            clock=lambda: now,
+        )
+
+        report = await loop.run_once()
+
+        self.assertEqual(report.stale_live_found, 0)
+        self.assertEqual(report.stale_live_cleared, 0)
+        self.assertEqual(live_state_repository.records, [])
+        self.assertEqual(live_state_repository.marked_event_ids, [])
 
 
 class MaintenanceHousekeepingIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -182,6 +272,18 @@ class _FakeConnectionContext:
         del exc_type, exc, tb
         return None
 
+    async def fetch(self, query: str, *args):
+        del query, args
+        return []
+
+    async def fetchval(self, query: str, *args):
+        del query, args
+        return None
+
+    async def execute(self, query: str, *args):
+        del query, args
+        return None
+
 
 class _FakeRetentionRepository:
     def __init__(self, *, request_log_count: int = 0, snapshot_count: int = 0, live_history_count: int = 0) -> None:
@@ -217,10 +319,15 @@ class _FakeRetentionRepository:
 class _FakeLiveStateRepository:
     def __init__(self) -> None:
         self.records = []
+        self.marked_event_ids = []
 
     async def insert_terminal_state_if_missing(self, executor, record) -> None:
         del executor
         self.records.append(record)
+
+    async def mark_event_stale_live_retired(self, executor, *, event_id: int, retired_at: str) -> None:
+        del executor, retired_at
+        self.marked_event_ids.append(event_id)
 
 
 class _FakeLiveStateStore:
@@ -252,6 +359,28 @@ class _FakeRedisBackend:
     def delete(self, key: str) -> int:
         self.deleted_keys.append(key)
         return 1
+
+
+class _FakeStaleLiveConnection(_FakeConnectionContext):
+    def __init__(self, *, stale_rows: list[dict], recent_surface_ok: bool, live_surface_payload: dict | None) -> None:
+        self.stale_rows = list(stale_rows)
+        self.recent_surface_ok = recent_surface_ok
+        self.live_surface_payload = live_surface_payload
+
+    async def fetch(self, query: str, *args):
+        del args
+        if "FROM event AS e" in query:
+            return list(self.stale_rows)
+        return []
+
+    async def fetchval(self, query: str, *args):
+        del args
+        normalized = " ".join(str(query).split())
+        if normalized.startswith("SELECT 1 FROM api_payload_snapshot"):
+            return 1 if self.recent_surface_ok else None
+        if "FROM api_payload_snapshot" in normalized:
+            return self.live_surface_payload
+        return None
 
 
 class _FakeHousekeepingLoop:
