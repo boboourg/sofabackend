@@ -93,11 +93,7 @@ class PlannerDaemon:
         else:
             logger.info("Planner paused scheduled planning by backpressure: %s", scheduled_reason)
         await self._publish_due_delayed_jobs(observed_now)
-        live_reason = _blocking_reason(self.live_backpressure)
-        if live_reason is None:
-            await self._publish_live_refreshes(observed_now)
-        else:
-            logger.info("Planner paused live refresh planning by backpressure: %s", live_reason)
+        await self._publish_live_refreshes(observed_now)
 
     async def _publish_scheduled_targets(self, now_ms: int) -> None:
         for target in self.scheduled_targets:
@@ -125,6 +121,8 @@ class PlannerDaemon:
             self._publish_job(_stream_for_job(job), job)
 
     async def _publish_live_refreshes(self, now_ms: int) -> None:
+        skipped_due_backpressure = 0
+        skip_reasons: set[str] = set()
         for lane in ("hot", "warm"):
             for event_id in self.live_state_store.due_events(lane=lane, now_ms=now_ms):
                 state = self.live_state_store.fetch(int(event_id))
@@ -132,6 +130,11 @@ class PlannerDaemon:
                     continue
                 dispatch_tier = normalize_live_dispatch_tier(getattr(state, "dispatch_tier", None))
                 stream = _live_stream_for_lane(lane=lane, dispatch_tier=dispatch_tier)
+                blocking_reason = _blocking_reason_for_stream(self.live_backpressure, stream)
+                if blocking_reason is not None:
+                    skipped_due_backpressure += 1
+                    skip_reasons.add(str(blocking_reason))
+                    continue
                 priority = 1 if lane == "warm" else live_priority_for_dispatch_tier(dispatch_tier)
                 claim_dispatch = getattr(self.live_state_store, "claim_dispatch", None)
                 if callable(claim_dispatch) and not claim_dispatch(
@@ -161,6 +164,12 @@ class PlannerDaemon:
                     if callable(clear_claim):
                         clear_claim(int(event_id))
                     raise
+        if skipped_due_backpressure:
+            logger.info(
+                "Planner skipped live refresh fanout by stream backpressure: skipped=%s reason=%s",
+                skipped_due_backpressure,
+                "; ".join(sorted(skip_reasons)),
+            )
 
     def _scheduled_target_due(self, target: ScheduledPlanningTarget, now_ms: int) -> bool:
         last_planned = self._last_planned_at_ms.get(target.sport_slug)
@@ -240,6 +249,15 @@ def _blocking_reason(backpressure: object | None) -> str | None:
     if not callable(blocking_reason):
         return None
     return blocking_reason()
+
+
+def _blocking_reason_for_stream(backpressure: object | None, stream: str) -> str | None:
+    if backpressure is None:
+        return None
+    targeted_reason = getattr(backpressure, "blocking_reason_for_stream", None)
+    if callable(targeted_reason):
+        return targeted_reason(stream)
+    return _blocking_reason(backpressure)
 
 
 def _live_stream_for_lane(*, lane: str, dispatch_tier: str | None) -> str:

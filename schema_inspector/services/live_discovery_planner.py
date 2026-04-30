@@ -66,13 +66,12 @@ class LiveDiscoveryPlannerDaemon:
         drifted_sports = await self._load_drifted_sports(observed_now)
         blocking_reason = _blocking_reason(self.backpressure)
         published = 0
+        published_under_backpressure = False
         for target in self.targets:
             is_regular_due = self._scheduled_target_due(target, observed_now)
             repair_reason = drifted_sports.get(target.sport_slug)
             is_repair_due = repair_reason is not None and self._repair_due(target.sport_slug, observed_now)
             if not is_regular_due and not is_repair_due:
-                continue
-            if blocking_reason is not None and not is_repair_due:
                 continue
             job = JobEnvelope.create(
                 job_type=JOB_DISCOVER_SPORT_SURFACE,
@@ -102,8 +101,13 @@ class LiveDiscoveryPlannerDaemon:
             if is_repair_due:
                 self._last_repair_planned_at_ms[target.sport_slug] = observed_now
             published += 1
-        if blocking_reason is not None and published == 0:
-            logger.info("Live discovery planner paused publishing because of backpressure: %s", blocking_reason)
+            if blocking_reason is not None and not is_repair_due:
+                published_under_backpressure = True
+        if blocking_reason is not None and published_under_backpressure:
+            logger.info(
+                "Live discovery planner published regular discovery despite downstream backpressure; worker-level tier gates remain active: %s",
+                blocking_reason,
+            )
         return published
 
     def _scheduled_target_due(self, target: LiveDiscoveryPlanningTarget, now_ms: int) -> bool:

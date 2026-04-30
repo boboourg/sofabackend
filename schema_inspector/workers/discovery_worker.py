@@ -96,7 +96,7 @@ class DiscoveryWorker:
 
         published = 0
         corrections = {int(item.event_id): item for item in discovery.corrections}
-        blocking_reason = self._blocking_reason()
+        blocking_reason = None if scope == "live" else self._blocking_reason()
         if blocking_reason is not None:
             non_force_event_count = sum(
                 1
@@ -116,25 +116,15 @@ class DiscoveryWorker:
                     delay_ms=self.admission_delay_ms,
                 )
         skipped_due_backpressure = 0
+        skip_reasons: set[str] = set()
         for surface_event in discovery.events:
             event_id = int(surface_event.event_id)
             correction = corrections.get(int(event_id))
             force_rehydrate = correction is not None and scope != "live"
-            if blocking_reason is not None and not force_rehydrate:
-                skipped_due_backpressure += 1
-                continue
             if scope == "live":
                 resolved_mode = "live_delta"
             else:
                 resolved_mode = "full" if force_rehydrate else hydration_mode
-            if self.freshness_policy is not None and not force_rehydrate:
-                if not self.freshness_policy.claim_event_hydration(
-                    event_id=int(event_id),
-                    hydration_mode=resolved_mode,
-                    force_rehydrate=False,
-                    now_ms=int(self.now_ms_factory()),
-                ):
-                    continue
             params = {"hydration_mode": resolved_mode}
             if scope == "live" and not force_rehydrate:
                 params["live_bootstrap"] = True
@@ -147,6 +137,28 @@ class DiscoveryWorker:
             if correction is not None and force_rehydrate:
                 params["force_rehydrate"] = True
                 params["correction_reason"] = correction.reason
+            target_stream = (
+                _stream_for_live_dispatch_tier(str(params.get("live_dispatch_tier") or LIVE_TIER_3))
+                if scope == "live"
+                else self.hydrate_stream
+            )
+            event_blocking_reason = (
+                self._blocking_reason_for_stream(target_stream)
+                if scope == "live"
+                else blocking_reason
+            )
+            if event_blocking_reason is not None and not force_rehydrate:
+                skipped_due_backpressure += 1
+                skip_reasons.add(str(event_blocking_reason))
+                continue
+            if self.freshness_policy is not None and not force_rehydrate:
+                if not self.freshness_policy.claim_event_hydration(
+                    event_id=int(event_id),
+                    hydration_mode=resolved_mode,
+                    force_rehydrate=False,
+                    now_ms=int(self.now_ms_factory()),
+                ):
+                    continue
             hydrate_job = job.spawn_child(
                 job_type=JOB_HYDRATE_EVENT_ROOT,
                 entity_type="event",
@@ -154,11 +166,6 @@ class DiscoveryWorker:
                 scope=scope,
                 params=params,
                 priority=job.priority,
-            )
-            target_stream = (
-                _stream_for_live_dispatch_tier(str(params.get("live_dispatch_tier") or LIVE_TIER_3))
-                if scope == "live"
-                else self.hydrate_stream
             )
             self.queue.publish(target_stream, encode_stream_job(hydrate_job))
             published += 1
@@ -168,7 +175,7 @@ class DiscoveryWorker:
                 scope,
                 sport_slug,
                 skipped_due_backpressure,
-                blocking_reason,
+                "; ".join(sorted(skip_reasons)) if skip_reasons else blocking_reason,
             )
         return f"published:{published}"
 
@@ -226,6 +233,43 @@ class DiscoveryWorker:
         if not callable(blocking_reason):
             return None
         return blocking_reason()
+
+    def _blocking_reason_for_stream(self, stream: str) -> str | None:
+        backpressure = self.hydrate_backpressure
+        if backpressure is None:
+            return None
+
+        targeted_reason = getattr(backpressure, "blocking_reason_for_stream", None)
+        if callable(targeted_reason):
+            return targeted_reason(stream)
+
+        targeted_reason = getattr(backpressure, "blocking_reason_for", None)
+        if callable(targeted_reason):
+            try:
+                return targeted_reason(stream=stream)
+            except TypeError:
+                pass
+
+        limits = tuple(getattr(backpressure, "limits", ()) or ())
+        queue = getattr(backpressure, "queue", None)
+        group_info = getattr(queue, "group_info", None)
+        if callable(group_info):
+            for limit in limits:
+                limit_stream = getattr(limit, "stream", None)
+                if str(limit_stream or "") != str(stream):
+                    continue
+                info = group_info(limit.stream, limit.group)
+                if info is None:
+                    continue
+                lag = getattr(info, "lag", None)
+                max_lag = getattr(limit, "max_lag", None)
+                if lag is None or max_lag is None:
+                    continue
+                if int(lag) > int(max_lag):
+                    return f"{limit.stream}:{limit.group}:lag={int(lag)}>{int(max_lag)}"
+            return None
+
+        return self._blocking_reason()
 
 
 @dataclass(frozen=True)
