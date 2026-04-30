@@ -288,7 +288,7 @@ class EventEndpointNegativeCache:
         self.settings = settings or EventEndpointNegativeCacheSettings()
         self.lease_owner = lease_owner or f"event-negcache:{os.getpid()}:{id(self)}"
         self._events: list[EventEndpointAvailabilityEvent] = []
-        self._fetched_patterns: set[str] = set()
+        self._fetched_probe_keys: set[tuple[int, str, str, str]] = set()
         self._states: dict[tuple[int, str, str], EventEndpointNegativeCacheState] = {}
 
     @property
@@ -304,8 +304,9 @@ class EventEndpointNegativeCache:
         job_type: str,
     ) -> EventEndpointGateDecision:
         normalized_phase = normalize_event_status_phase(status_phase)
+        replay_key = (int(event_id), normalized_phase, endpoint_pattern, str(job_type))
         if not self.settings.enabled:
-            self._fetched_patterns.add(endpoint_pattern)
+            self._fetched_probe_keys.add(replay_key)
             return EventEndpointGateDecision(
                 should_fetch=True,
                 endpoint_pattern=endpoint_pattern,
@@ -324,7 +325,7 @@ class EventEndpointNegativeCache:
         now = self.now_factory()
 
         if state is None or state.classification == CLASSIFICATION_SUPPORTED or state.next_probe_after is None:
-            self._fetched_patterns.add(endpoint_pattern)
+            self._fetched_probe_keys.add(replay_key)
             return EventEndpointGateDecision(
                 should_fetch=True,
                 endpoint_pattern=endpoint_pattern,
@@ -349,7 +350,7 @@ class EventEndpointNegativeCache:
                         note="cooldown_shadow",
                     )
                 )
-                self._fetched_patterns.add(endpoint_pattern)
+                self._fetched_probe_keys.add(replay_key)
                 return EventEndpointGateDecision(
                     should_fetch=True,
                     endpoint_pattern=endpoint_pattern,
@@ -403,7 +404,7 @@ class EventEndpointNegativeCache:
                         note="lease_blocked_shadow",
                     )
                 )
-                self._fetched_patterns.add(endpoint_pattern)
+                self._fetched_probe_keys.add(replay_key)
                 return EventEndpointGateDecision(
                     should_fetch=True,
                     endpoint_pattern=endpoint_pattern,
@@ -434,7 +435,7 @@ class EventEndpointNegativeCache:
                 status_phase=normalized_phase,
             )
 
-        self._fetched_patterns.add(endpoint_pattern)
+        self._fetched_probe_keys.add(replay_key)
         return EventEndpointGateDecision(
             should_fetch=True,
             endpoint_pattern=endpoint_pattern,
@@ -502,7 +503,7 @@ class EventEndpointNegativeCache:
         )
 
     def build_replay_gate(self):
-        return ReplayEventEndpointNegativeCache(fetched_patterns=tuple(sorted(self._fetched_patterns)))
+        return ReplayEventEndpointNegativeCache(fetched_probe_keys=tuple(sorted(self._fetched_probe_keys)))
 
     async def _prime_states(
         self,
@@ -533,8 +534,8 @@ class EventEndpointNegativeCache:
 
 
 class ReplayEventEndpointNegativeCache:
-    def __init__(self, *, fetched_patterns: tuple[str, ...]) -> None:
-        self._fetched_patterns = set(fetched_patterns)
+    def __init__(self, *, fetched_probe_keys: tuple[tuple[int, str, str, str], ...]) -> None:
+        self._fetched_probe_keys = set(fetched_probe_keys)
 
     async def decide_event_probe(
         self,
@@ -544,14 +545,16 @@ class ReplayEventEndpointNegativeCache:
         endpoint_pattern: str,
         job_type: str,
     ) -> EventEndpointGateDecision:
-        del event_id, status_phase, job_type
+        normalized_phase = normalize_event_status_phase(status_phase)
+        replay_key = (int(event_id), normalized_phase, endpoint_pattern, str(job_type))
+        should_fetch = replay_key in self._fetched_probe_keys
         return EventEndpointGateDecision(
-            should_fetch=endpoint_pattern in self._fetched_patterns,
+            should_fetch=should_fetch,
             endpoint_pattern=endpoint_pattern,
-            decision_type="replay_probe" if endpoint_pattern in self._fetched_patterns else "replay_suppressed",
+            decision_type="replay_probe" if should_fetch else "replay_suppressed",
             classification_before=None,
-            event_id=0,
-            status_phase=PHASE_UNKNOWN,
+            event_id=int(event_id),
+            status_phase=normalized_phase,
         )
 
     async def record_event_outcome(self, *, decision: EventEndpointGateDecision, endpoint_pattern: str, outcome, job_type: str) -> None:

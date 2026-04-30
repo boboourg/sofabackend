@@ -168,6 +168,48 @@ class EventEndpointNegativeCachePolicyTests(unittest.TestCase):
 
         self.assertTrue(decision.should_fetch)
 
+    def test_replay_gate_is_scoped_by_job_type(self) -> None:
+        from schema_inspector.event_endpoint_negative_cache import EventEndpointNegativeCache, EventEndpointNegativeCacheSettings
+
+        now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+        pattern = "/api/v1/event/{event_id}/lineups"
+        gate = EventEndpointNegativeCache(
+            repository=_StaticEventNegativeCacheRepository({}),
+            sql_executor=object(),
+            now_factory=lambda: now,
+            settings=EventEndpointNegativeCacheSettings(mode="enforce"),
+        )
+
+        probe_decision = self.run_async(
+            gate.decide_event_probe(
+                event_id=16077299,
+                status_phase="inprogress",
+                endpoint_pattern=pattern,
+                job_type="hydrate_special_route",
+            )
+        )
+        replay_gate = gate.build_replay_gate()
+        same_job_decision = self.run_async(
+            replay_gate.decide_event_probe(
+                event_id=16077299,
+                status_phase="inprogress",
+                endpoint_pattern=pattern,
+                job_type="hydrate_special_route",
+            )
+        )
+        different_job_decision = self.run_async(
+            replay_gate.decide_event_probe(
+                event_id=16077299,
+                status_phase="inprogress",
+                endpoint_pattern=pattern,
+                job_type="finalize_event",
+            )
+        )
+
+        self.assertTrue(probe_decision.should_fetch)
+        self.assertTrue(same_job_decision.should_fetch)
+        self.assertFalse(different_job_decision.should_fetch)
+
     def run_async(self, awaitable):
         import asyncio
 
