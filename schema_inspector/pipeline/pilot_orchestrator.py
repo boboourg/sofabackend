@@ -31,6 +31,7 @@ from ..endpoints import (
     unique_tournament_top_teams_endpoint,
 )
 from ..detail_resource_policy import build_event_detail_request_specs
+from ..event_endpoint_static_denylist import is_static_dead_event_endpoint
 from ..event_endpoint_negative_cache import normalize_event_status_phase
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
@@ -682,6 +683,8 @@ class PilotOrchestrator:
         fetch_reason: str,
         status_phase: str,
     ) -> tuple[FetchOutcomeEnvelope | None, object | None]:
+        if is_static_dead_event_endpoint(sport_slug, endpoint.pattern):
+            return None, None
         decision = None
         if self.event_endpoint_gate is not None:
             decision = await self.event_endpoint_gate.decide_event_probe(

@@ -102,6 +102,25 @@ class EventDetailResourcePolicyTests(unittest.TestCase):
         self.assertNotIn("/api/v1/event/{event_id}/heatmap/{team_id}", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/shotmap", patterns)
 
+    def test_inprogress_table_tennis_skips_dead_match_center_routes(self) -> None:
+        specs = build_event_detail_request_specs(
+            sport_slug="table-tennis",
+            status_type="inprogress",
+            provider_ids=(1,),
+            has_global_highlights=False,
+            core_only=False,
+        )
+
+        patterns = {item.endpoint.pattern for item in specs}
+
+        self.assertIn("/api/v1/event/{event_id}/h2h", patterns)
+        self.assertIn("/api/v1/event/{event_id}/votes", patterns)
+        self.assertIn("/api/v1/event/{event_id}/odds/{provider_id}/all", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/managers", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/pregame-form", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/comments", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/graph", patterns)
+
     def test_finished_tennis_uses_tennis_specific_match_center_routes(self) -> None:
         specs = build_event_detail_request_specs(
             sport_slug="tennis",

@@ -11,6 +11,7 @@ from ..endpoints import (
     unique_tournament_top_players_per_game_endpoint,
     unique_tournament_top_teams_endpoint,
 )
+from ..event_endpoint_static_denylist import is_static_dead_event_endpoint
 from ..live_delta_policy import live_delta_edge_kinds
 from ..jobs.types import (
     JOB_FINALIZE_EVENT,
@@ -40,12 +41,14 @@ def event_edge_candidates(
 
 
 def should_schedule_edge(edge_kind: str, capability_rollup: dict[str, str] | None, *, sport_slug: str | None) -> bool:
+    pattern = _edge_kind_pattern(edge_kind)
+    if pattern is not None and is_static_dead_event_endpoint(sport_slug, pattern):
+        return False
     adapter = resolve_sport_adapter(str(sport_slug or ""))
     if edge_kind in adapter.core_event_edges:
         return True
     if not capability_rollup:
         return True
-    pattern = _edge_kind_pattern(edge_kind)
     if pattern is None:
         return True
     support_level = capability_rollup.get(pattern, "unknown")

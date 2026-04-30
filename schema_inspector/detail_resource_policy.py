@@ -31,6 +31,7 @@ from .endpoints import (
     EVENT_WINNING_ODDS_ENDPOINT,
     SofascoreEndpoint,
 )
+from .event_endpoint_static_denylist import is_static_dead_event_endpoint
 from .live_delta_policy import live_delta_detail_endpoints
 from .match_center_policy import filter_football_detail_specs, football_highlights_allowed
 from .parsers.sports import resolve_sport_adapter
@@ -81,6 +82,8 @@ def build_event_detail_request_specs(
     seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
 
     def add(endpoint: SofascoreEndpoint, **path_params: Any) -> None:
+        if is_static_dead_event_endpoint(normalized_sport_slug, endpoint.pattern):
+            return
         signature = (endpoint.pattern, tuple(sorted((str(key), repr(value)) for key, value in path_params.items())))
         if signature in seen:
             return

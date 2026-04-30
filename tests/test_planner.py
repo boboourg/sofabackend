@@ -164,6 +164,28 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(edge_kinds, ("meta", "statistics"))
 
+    def test_event_root_skips_dead_optional_graph_for_futsal(self) -> None:
+        planner = Planner(
+            capability_rollup={
+                "/api/v1/event/{event_id}/graph": "supported",
+            }
+        )
+        job = JobEnvelope.create(
+            job_type=JOB_HYDRATE_EVENT_ROOT,
+            sport_slug="futsal",
+            entity_type="event",
+            entity_id=1,
+            scope="live",
+            params={"status_type": "inprogress"},
+            priority=1,
+            trace_id="trace-1",
+        )
+
+        planned = planner.expand(job)
+        edge_kinds = {item.params["edge_kind"] for item in planned if item.job_type == JOB_HYDRATE_EVENT_EDGE}
+
+        self.assertNotIn("graph", edge_kinds)
+
     def test_season_widgets_follow_sport_profile(self) -> None:
         planner = Planner()
 
