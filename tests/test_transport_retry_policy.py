@@ -8,6 +8,114 @@ from schema_inspector.runtime import FingerprintProfile, RuntimeConfig, RetryPol
 from schema_inspector.transport import InspectorTransport
 
 
+class HistoricalRuntimeConfigTests(unittest.TestCase):
+    def _load_loader(self):
+        import schema_inspector.runtime as runtime_module
+
+        loader = getattr(runtime_module, "load_historical_runtime_config", None)
+        self.assertIsNotNone(loader, "schema_inspector.runtime.load_historical_runtime_config is missing")
+        return runtime_module, loader
+
+    def test_load_historical_runtime_config_uses_historical_proxy_urls(self) -> None:
+        runtime_module, loader = self._load_loader()
+
+        self.assertEqual(
+            getattr(runtime_module, "HISTORICAL_PROXY_ENV_KEY", None),
+            "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS",
+        )
+
+        config = loader(
+            env={
+                "SCHEMA_INSPECTOR_PROXY_URLS": "http://live-1.local:8080,http://live-2.local:8080",
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URL": "http://hist-1.local:8080",
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS": "http://hist-2.local:8080,http://hist-3.local:8080",
+            }
+        )
+
+        self.assertEqual(
+            [endpoint.url for endpoint in config.proxy_endpoints],
+            [
+                "http://hist-1.local:8080",
+                "http://hist-2.local:8080",
+                "http://hist-3.local:8080",
+            ],
+        )
+
+    def test_load_historical_runtime_config_default_overrides(self) -> None:
+        _, loader = self._load_loader()
+
+        config = loader(
+            env={
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS": "http://hist-1.local:8080,http://hist-2.local:8080",
+            }
+        )
+
+        self.assertEqual(config.proxy_request_cooldown_seconds, 3.0)
+        self.assertEqual(config.proxy_request_jitter_seconds, 2.0)
+        self.assertEqual(config.retry_policy.max_attempts, 1)
+        self.assertEqual(config.retry_policy.challenge_max_attempts, 1)
+        self.assertEqual(config.retry_policy.network_error_max_attempts, 2)
+        self.assertEqual(config.retry_policy.backoff_seconds, 2.0)
+
+    def test_load_historical_runtime_config_env_overrides(self) -> None:
+        _, loader = self._load_loader()
+
+        config = loader(
+            env={
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS": "http://hist-1.local:8080",
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_REQUEST_COOLDOWN_SECONDS": "4.5",
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_REQUEST_JITTER_SECONDS": "2.5",
+                "SCHEMA_INSPECTOR_HISTORICAL_MAX_ATTEMPTS": "2",
+                "SCHEMA_INSPECTOR_HISTORICAL_CHALLENGE_MAX_ATTEMPTS": "3",
+                "SCHEMA_INSPECTOR_HISTORICAL_NETWORK_ERROR_MAX_ATTEMPTS": "5",
+                "SCHEMA_INSPECTOR_HISTORICAL_BACKOFF_SECONDS": "6.0",
+            }
+        )
+
+        self.assertEqual(config.proxy_request_cooldown_seconds, 4.5)
+        self.assertEqual(config.proxy_request_jitter_seconds, 2.5)
+        self.assertEqual(config.retry_policy.max_attempts, 2)
+        self.assertEqual(config.retry_policy.challenge_max_attempts, 3)
+        self.assertEqual(config.retry_policy.network_error_max_attempts, 5)
+        self.assertEqual(config.retry_policy.backoff_seconds, 6.0)
+
+    def test_load_historical_runtime_config_requires_dedicated_pool(self) -> None:
+        _, loader = self._load_loader()
+
+        with self.assertRaisesRegex(RuntimeError, "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS"):
+            loader(env={})
+
+    def test_load_historical_runtime_config_singular_fallback(self) -> None:
+        _, loader = self._load_loader()
+
+        config = loader(
+            env={
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URL": "http://hist-1.local:8080",
+            }
+        )
+
+        self.assertEqual([endpoint.url for endpoint in config.proxy_endpoints], ["http://hist-1.local:8080"])
+
+    def test_load_historical_runtime_config_isolation_from_live_and_structure(self) -> None:
+        _, loader = self._load_loader()
+
+        config = loader(
+            env={
+                "SCHEMA_INSPECTOR_PROXY_URLS": "http://live-1.local:8080",
+                "SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS": "http://structure-1.local:8080",
+                "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS": "http://historical-1.local:8080,http://historical-2.local:8080",
+            }
+        )
+
+        self.assertEqual(
+            [endpoint.url for endpoint in config.proxy_endpoints],
+            [
+                "http://historical-1.local:8080",
+                "http://historical-2.local:8080",
+            ],
+        )
+
+
 class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
     def test_runtime_fingerprint_profiles_use_supported_impersonation_values(self) -> None:
         config = load_runtime_config(env={})

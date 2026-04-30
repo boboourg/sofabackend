@@ -31,7 +31,13 @@ from .pipeline.pilot_orchestrator import PilotOrchestrator, PilotRunReport
 from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import RedisStreamQueue
-from .runtime import load_runtime_config, load_structure_runtime_config
+from .runtime import (
+    HISTORICAL_PROXY_ENV_KEY,
+    _load_project_env,
+    load_historical_runtime_config,
+    load_runtime_config,
+    load_structure_runtime_config,
+)
 from .season_widget_negative_cache import SeasonWidgetNegativeCache, load_negative_cache_settings
 from .services.historical_archive_service import (
     run_historical_tournament_archive as run_historical_tournament_archive_service,
@@ -865,18 +871,25 @@ _HISTORICAL_COMMANDS = frozenset({
 
 
 async def _dispatch(args) -> int:
-    # Route historical workers to the Proxyline static pool automatically.
-    # Only kicks in when no explicit --proxy flags are passed — explicit always wins.
-    proxy_env_key: str | None = None
-    if getattr(args, "command", None) in _HISTORICAL_COMMANDS and not args.proxy:
-        proxy_env_key = "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS"
-
-    runtime_config = load_runtime_config(
-        proxy_urls=args.proxy or None,
-        proxy_env_key=proxy_env_key,
-        user_agent=args.user_agent,
-        max_attempts=args.max_attempts,
-    )
+    command = getattr(args, "command", None)
+    if command in _HISTORICAL_COMMANDS:
+        historical_env = None
+        if args.proxy:
+            historical_env = _load_project_env()
+            historical_env[HISTORICAL_PROXY_ENV_KEY] = ",".join(args.proxy)
+            singular_key = HISTORICAL_PROXY_ENV_KEY[: -len("_PROXY_URLS")] + "_PROXY_URL"
+            historical_env.pop(singular_key, None)
+        runtime_config = load_historical_runtime_config(
+            env=historical_env,
+            user_agent=args.user_agent,
+            max_attempts=args.max_attempts,
+        )
+    else:
+        runtime_config = load_runtime_config(
+            proxy_urls=args.proxy or None,
+            user_agent=args.user_agent,
+            max_attempts=args.max_attempts,
+        )
     if _normalized_source_slug(getattr(args, "source", None)) is not None:
         runtime_config = replace(runtime_config, source_slug=_normalized_source_slug(args.source))
     database_config = load_database_config(

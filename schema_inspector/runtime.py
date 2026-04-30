@@ -221,6 +221,7 @@ def _read_proxy_urls(env: Mapping[str, str], *, proxy_env_key: str | None = None
 
 
 STRUCTURE_PROXY_ENV_KEY = "SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS"
+HISTORICAL_PROXY_ENV_KEY = "SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS"
 
 
 def load_structure_runtime_config(
@@ -288,6 +289,87 @@ def load_structure_runtime_config(
         raise RuntimeError(
             "structure-sync contour requires a non-residential proxy pool; "
             "set SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS (or SCHEMA_INSPECTOR_STRUCTURE_PROXY_URL)"
+        )
+    return config
+
+
+def load_historical_runtime_config(
+    *,
+    env: Mapping[str, str] | None = None,
+    user_agent: str | None = None,
+    extra_headers: Mapping[str, str] | None = None,
+    max_attempts: int | None = None,
+    require_dedicated_pool: bool = True,
+) -> RuntimeConfig:
+    """Build a RuntimeConfig that routes exclusively through the historical
+    proxy pool, with rate-limit settings calibrated for archival/backfill
+    workloads.
+
+    The historical contour scans deep dated surfaces (event/{id},
+    sport/*/scheduled-events/{date}) which Sofascore's edge treats as
+    higher-suspicion traffic than scaffold queries. To avoid burning out
+    the pool we apply a slower cooldown, larger jitter, and minimal retry
+    policy compared to live.
+
+    The contract: historical workers must NEVER fall back to the live or
+    structure pool. We read only ``SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS``
+    (+ singular variant) via ``proxy_env_key`` so the three pools are
+    mechanically isolated.
+
+    When ``require_dedicated_pool=True`` and no URLs are configured, this
+    function raises. Historical workers must fail-fast rather than silently
+    fall back to direct egress or to another pool.
+    """
+
+    resolved_env = _load_project_env() if env is None else env
+    config = load_runtime_config(
+        env=resolved_env,
+        proxy_env_key=HISTORICAL_PROXY_ENV_KEY,
+        user_agent=user_agent,
+        extra_headers=extra_headers,
+        max_attempts=max_attempts,
+    )
+    config = replace(
+        config,
+        proxy_request_cooldown_seconds=_env_float(
+            resolved_env,
+            "SCHEMA_INSPECTOR_HISTORICAL_PROXY_REQUEST_COOLDOWN_SECONDS",
+            3.0,
+        ),
+        proxy_request_jitter_seconds=_env_float(
+            resolved_env,
+            "SCHEMA_INSPECTOR_HISTORICAL_PROXY_REQUEST_JITTER_SECONDS",
+            2.0,
+        ),
+        retry_policy=replace(
+            config.retry_policy,
+            max_attempts=_env_int(
+                resolved_env,
+                "SCHEMA_INSPECTOR_HISTORICAL_MAX_ATTEMPTS",
+                1,
+            ),
+            challenge_max_attempts=_env_int(
+                resolved_env,
+                "SCHEMA_INSPECTOR_HISTORICAL_CHALLENGE_MAX_ATTEMPTS",
+                1,
+            ),
+            network_error_max_attempts=_env_int(
+                resolved_env,
+                "SCHEMA_INSPECTOR_HISTORICAL_NETWORK_ERROR_MAX_ATTEMPTS",
+                2,
+            ),
+            backoff_seconds=_env_float(
+                resolved_env,
+                "SCHEMA_INSPECTOR_HISTORICAL_BACKOFF_SECONDS",
+                2.0,
+            ),
+        ),
+    )
+    if require_dedicated_pool and not config.proxy_endpoints:
+        raise RuntimeError(
+            "historical contour requires a dedicated proxy pool; "
+            "set SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS "
+            "(or SCHEMA_INSPECTOR_HISTORICAL_PROXY_URL)"
         )
     return config
 
