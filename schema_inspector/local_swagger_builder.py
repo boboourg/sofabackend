@@ -341,7 +341,36 @@ def _build_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
     paths.update(_build_statistics_and_entities_paths(summary))
     paths.update(_build_leaderboard_paths(summary))
     paths.update(_build_operations_paths(summary))
+    for endpoint in local_api_endpoints():
+        paths.setdefault(endpoint.path_template, _build_generic_snapshot_path(endpoint.path_template, summary))
     return paths
+
+
+def _build_generic_snapshot_path(path_template: str, summary: SwaggerDataSummary) -> dict[str, Any]:
+    path_param_names = re.findall(r"{([^{}]+)}", path_template)
+    operation_suffix = re.sub(r"[^a-zA-Z0-9]+", " ", path_template).title().replace(" ", "")
+    snapshot_rows = int(summary.snapshot_counts.get(path_template, 0))
+    return {
+        "get": {
+            "tags": ["Event Detail" if path_template.startswith("/api/v1/event/") else "Special Routes"],
+            "operationId": f"get{operation_suffix}",
+            "summary": f"Snapshot-backed `{path_template}`",
+            "description": (
+                "Generic snapshot-backed local API route generated from the registered endpoint contract.\n\n"
+                f"- Snapshot rows in summary: `{snapshot_rows}`"
+            ),
+            "parameters": [
+                _path_param(name, "string", f"Path parameter `{name}`.")
+                for name in path_param_names
+            ],
+            "responses": {
+                "200": {
+                    "description": "Latest stored payload for this route.",
+                    "content": {"application/json": {"schema": _ref("FreeFormObject")}},
+                }
+            },
+        }
+    }
 
 
 def _build_operations_paths(summary: SwaggerDataSummary) -> dict[str, Any]:

@@ -4,6 +4,7 @@ import json
 import unittest
 
 from schema_inspector.fetch_executor import FetchExecutor
+from schema_inspector.live_dispatch_policy import LIVE_TIER_3, LIVE_TIER_3_POLL_SECONDS
 from schema_inspector.normalizers.worker import NormalizeWorker
 from schema_inspector.parsers.registry import ParserRegistry
 from schema_inspector.pipeline.pilot_orchestrator import PilotOrchestrator
@@ -161,7 +162,8 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         state = live_backend.hashes["live:event:15921219"]
         self.assertEqual(state["poll_profile"], "hot")
         self.assertEqual(state["is_finalized"], 0)
-        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921219"], float(now_ms + 15_000))
+        self.assertEqual(state["dispatch_tier"], LIVE_TIER_3)
+        self.assertEqual(live_backend.zsets[LIVE_HOT_ZSET]["15921219"], float(now_ms + LIVE_TIER_3_POLL_SECONDS * 1000))
         self.assertEqual(stream_backend.streams, {})
 
     async def test_starting_soon_event_is_enqueued_on_warm_lane(self) -> None:

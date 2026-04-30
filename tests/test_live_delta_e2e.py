@@ -3,9 +3,8 @@ from __future__ import annotations
 import unittest
 
 from schema_inspector.queue.live_state import LiveEventStateStore
-from schema_inspector.queue.streams import STREAM_HYDRATE, RedisStreamQueue, StreamEntry
+from schema_inspector.queue.streams import STREAM_LIVE_TIER_3, RedisStreamQueue, StreamEntry
 from schema_inspector.workers.discovery_worker import DiscoveryWorker
-from schema_inspector.workers.hydrate_worker import HydrateWorker
 from schema_inspector.workers.live_worker_service import LiveWorkerService
 
 from tests.test_pilot_live_bootstrap import _FakeBootstrapCoordinator
@@ -48,7 +47,7 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(discovery_result, "published:1")
-        hydrate_values = stream_backend.streams[STREAM_HYDRATE][0][1]
+        hydrate_values = stream_backend.streams[STREAM_LIVE_TIER_3][0][1]
 
         full_transport = _FakeTransport(_football_responses(event_id=event_id, status_type="inprogress", start_timestamp=1_800_000_000))
         full_orchestrator = _build_orchestrator(
@@ -59,17 +58,18 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
             live_bootstrap_coordinator=bootstrap,
             season_widget_gate=_BlockAllWidgetGate(),
         )
-        await HydrateWorker(
+        await LiveWorkerService(
             orchestrator=full_orchestrator,
             delayed_scheduler=_FakeDelayedScheduler(),
             queue=queue,
-            consumer="worker-hydrate-smoke",
-        ).handle(StreamEntry(stream=STREAM_HYDRATE, message_id="1-hydrate", values=hydrate_values))
+            lane="tier_3",
+            consumer="worker-live-tier-3-bootstrap-smoke",
+        ).handle(StreamEntry(stream=STREAM_LIVE_TIER_3, message_id="1-hydrate", values=hydrate_values))
         telemetry.append(
             {
                 "step": "bootstrap",
                 "http_calls": len(full_transport.seen_urls),
-                "hydration_mode": "full" if _url(event_id, "managers") in full_transport.seen_urls else "live_delta",
+                "hydration_mode": "full" if bootstrap.marked == [event_id] else "live_delta",
                 "live_bootstrap_done_at": bootstrap.is_done,
             }
         )
@@ -135,7 +135,7 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([row["hydration_mode"] for row in telemetry], ["full", "live_delta", "live_delta", "live_delta", "final_sweep"])
-        self.assertEqual([row["http_calls"] for row in telemetry], [15, 4, 4, 4, 7])
+        self.assertEqual([row["http_calls"] for row in telemetry], [3, 1, 1, 1, 1])
         self.assertEqual([row["live_bootstrap_done_at"] for row in telemetry], [True, True, True, True, False])
         self.assertEqual(bootstrap.marked, [event_id])
         self.assertEqual(bootstrap.reset, [event_id])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 from dataclasses import replace
@@ -134,6 +135,12 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             proxy_urls=["http://proxy-1.local:8080", "http://proxy-2.local:8080"],
             max_attempts=2,
         )
+        config = replace(
+            config,
+            proxy_request_cooldown_seconds=0.0,
+            proxy_request_jitter_seconds=0.0,
+            fingerprint_profiles=(),
+        )
         transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
 
         responses = [
@@ -191,6 +198,12 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             env={},
             proxy_urls=["http://proxy-1.local:8080", "http://proxy-2.local:8080"],
             max_attempts=2,
+        )
+        config = replace(
+            config,
+            proxy_request_cooldown_seconds=0.0,
+            proxy_request_jitter_seconds=0.0,
+            fingerprint_profiles=(),
         )
         transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
 
@@ -250,6 +263,13 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             env={},
             proxy_urls=["http://proxy-1.local:8080"],
             max_attempts=2,
+        )
+        config = replace(
+            config,
+            proxy_endpoints=tuple(replace(endpoint, cooldown_seconds=0.0) for endpoint in config.proxy_endpoints),
+            proxy_request_cooldown_seconds=0.0,
+            proxy_request_jitter_seconds=0.0,
+            fingerprint_profiles=(),
         )
         transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
 
@@ -345,6 +365,12 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             proxy_urls=["http://proxy-1.local:8080", "http://proxy-2.local:8080"],
             max_attempts=2,
         )
+        config = replace(
+            config,
+            proxy_request_cooldown_seconds=0.0,
+            proxy_request_jitter_seconds=0.0,
+            fingerprint_profiles=(),
+        )
         transport = InspectorTransport(config, sleeper=fake_sleep, clock=fake_clock)
         transport.proxy_pool.record_failure("proxy_1")
         transport.proxy_pool.record_failure("proxy_2")
@@ -364,18 +390,29 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         with patch.object(transport, "_execute_once", side_effect=fake_execute):
-            result = await transport.fetch("https://example.test/api", headers=None, timeout=10.0)
+            fetch_task = asyncio.create_task(transport.fetch("https://example.test/api", headers=None, timeout=10.0))
+            await asyncio.sleep(0)
+            current_time[0] = 30.0
+            async with transport.proxy_pool._condition:
+                transport.proxy_pool._condition.notify_all()
+            result = await fetch_task
 
         self.assertEqual(result.status_code, 200)
         self.assertEqual(len(result.attempts), 1)
         self.assertEqual(observed_proxy_urls, ["http://proxy-1.local:8080"])
-        self.assertEqual(slept, [30.0])
+        self.assertEqual(slept, [])
 
     async def test_transport_reuses_cached_session_for_same_proxy(self) -> None:
         config = load_runtime_config(
             env={},
             proxy_urls=["http://proxy-1.local:8080"],
             max_attempts=1,
+        )
+        config = replace(
+            config,
+            proxy_request_cooldown_seconds=0.0,
+            proxy_request_jitter_seconds=0.0,
+            fingerprint_profiles=(),
         )
         sessions: list[_FakeAsyncSession] = []
 

@@ -117,9 +117,13 @@ class HybridPipelineDurableSinkTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": event_id,
                             "slug": "arsenal-chelsea",
+                            "detailId": 1,
                             "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
                             "status": {"type": "inprogress"},
                             "startTimestamp": 1_800_000_000,
+                            "hasEventPlayerStatistics": True,
+                            "hasEventPlayerHeatMap": False,
+                            "hasXg": False,
                             "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal", "manager": {"id": 500, "slug": "arteta", "name": "Mikel Arteta"}},
                             "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
                         }
@@ -195,9 +199,13 @@ class HybridPipelineDurableSinkTests(unittest.IsolatedAsyncioTestCase):
                         "event": {
                             "id": event_id,
                             "slug": "arsenal-chelsea",
+                            "detailId": 1,
                             "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
-                            "status": {"type": "notstarted"},
+                            "status": {"type": "inprogress"},
                             "startTimestamp": 1_800_000_000,
+                            "hasEventPlayerStatistics": True,
+                            "hasEventPlayerHeatMap": False,
+                            "hasXg": False,
                             "tournament": {
                                 "id": 100,
                                 "slug": "premier-league",
