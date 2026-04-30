@@ -1,6 +1,7 @@
 import unittest
 
 from schema_inspector.detail_resource_policy import build_event_detail_request_specs
+from schema_inspector.parsers.sports import resolve_sport_adapter
 
 
 def test_football_detail_specs_include_custom_id_and_streak_routes() -> None:
@@ -101,27 +102,71 @@ class EventDetailResourcePolicyTests(unittest.TestCase):
         self.assertNotIn("/api/v1/event/{event_id}/heatmap/{team_id}", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/shotmap", patterns)
 
-    def test_finished_tennis_uses_tennis_specific_live_detail_routes(self) -> None:
+    def test_finished_tennis_uses_tennis_specific_match_center_routes(self) -> None:
         specs = build_event_detail_request_specs(
             sport_slug="tennis",
             status_type="finished",
             team_ids=(199527, 199528),
-            provider_ids=(),
+            provider_ids=(1,),
             has_event_player_statistics=False,
             has_event_player_heat_map=False,
-            has_global_highlights=False,
+            has_global_highlights=True,
             has_xg=False,
+            custom_id="vGHbsytkc",
             core_only=False,
         )
 
-        patterns = {item.endpoint.pattern for item in specs}
+        resolved = {(item.endpoint.pattern, tuple(sorted(item.path_params.items()))) for item in specs}
+        patterns = {pattern for pattern, _ in resolved}
 
-        self.assertIn("/api/v1/event/{event_id}/comments", patterns)
+        self.assertIn(
+            ("/api/v1/event/{custom_id}/h2h/events", (("custom_id", "vGHbsytkc"),)),
+            resolved,
+        )
+        self.assertIn("/api/v1/event/{event_id}/odds/{provider_id}/featured", patterns)
+        self.assertIn("/api/v1/event/{event_id}/odds/{provider_id}/all", patterns)
+        self.assertIn("/api/v1/event/{event_id}/provider/{provider_id}/winning-odds", patterns)
+        self.assertIn("/api/v1/event/{event_id}/highlights", patterns)
+        self.assertIn("/api/v1/event/{event_id}/team-streaks", patterns)
         self.assertIn("/api/v1/event/{event_id}/point-by-point", patterns)
         self.assertIn("/api/v1/event/{event_id}/tennis-power", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/comments", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/managers", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/pregame-form", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/votes", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/graph", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/heatmap/{team_id}", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/shotmap", patterns)
+
+    def test_notstarted_tennis_uses_prematch_matrix_without_live_point_feeds(self) -> None:
+        specs = build_event_detail_request_specs(
+            sport_slug="tennis",
+            status_type="notstarted",
+            provider_ids=(1,),
+            has_global_highlights=False,
+            custom_id="vGHbsytkc",
+            core_only=False,
+        )
+
+        resolved = {(item.endpoint.pattern, tuple(sorted(item.path_params.items()))) for item in specs}
+        patterns = {pattern for pattern, _ in resolved}
+
+        self.assertIn(
+            ("/api/v1/event/{custom_id}/h2h/events", (("custom_id", "vGHbsytkc"),)),
+            resolved,
+        )
+        self.assertIn("/api/v1/event/{event_id}/odds/{provider_id}/featured", patterns)
+        self.assertIn("/api/v1/event/{event_id}/odds/{provider_id}/all", patterns)
+        self.assertIn("/api/v1/event/{event_id}/provider/{provider_id}/winning-odds", patterns)
+        self.assertIn("/api/v1/event/{event_id}/team-streaks", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/point-by-point", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/tennis-power", patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/comments", patterns)
+
+    def test_tennis_adapter_core_edges_are_root_and_statistics_only(self) -> None:
+        adapter = resolve_sport_adapter("tennis")
+
+        self.assertEqual(adapter.core_event_edges, ("meta", "statistics"))
 
     def test_core_mode_keeps_lightweight_live_routes_only(self) -> None:
         specs = build_event_detail_request_specs(

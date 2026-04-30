@@ -29,7 +29,8 @@ class PilotLiveBootstrapTests(unittest.IsolatedAsyncioTestCase):
         await orchestrator.run_event(event_id=42, sport_slug="tennis", hydration_mode="live_delta")
 
         self.assertEqual(bootstrap.marked, [42])
-        self.assertIn("https://www.sofascore.com/api/v1/event/42/lineups", transport.seen_urls)
+        self.assertIn("https://www.sofascore.com/api/v1/event/42/team-streaks", transport.seen_urls)
+        self.assertNotIn("https://www.sofascore.com/api/v1/event/42/lineups", transport.seen_urls)
 
     async def test_live_delta_skips_when_single_flight_lock_is_held(self) -> None:
         bootstrap = _FakeBootstrapCoordinator(is_done=False, lock=False)

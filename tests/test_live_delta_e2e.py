@@ -158,7 +158,7 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
             now_ms_factory=lambda: now_ms,
             live_bootstrap_coordinator=bootstrap,
         ).run_event(event_id=event_id, sport_slug="tennis", hydration_mode="live_delta")
-        modes.append("full" if _url(event_id, "lineups") in first_transport.seen_urls else "live_delta")
+        modes.append("full" if _url(event_id, "team-streaks") in first_transport.seen_urls else "live_delta")
 
         for _ in range(3):
             delta_transport = _FakeTransport(
@@ -172,7 +172,7 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 live_bootstrap_coordinator=bootstrap,
             ).run_event(event_id=event_id, sport_slug="tennis", hydration_mode="live_delta")
             delta_seen_urls.extend(delta_transport.seen_urls)
-            modes.append("live_delta" if _url(event_id, "lineups") not in delta_transport.seen_urls else "full")
+            modes.append("live_delta" if _url(event_id, "team-streaks") not in delta_transport.seen_urls else "full")
 
         final_transport = _FakeTransport(
             _tennis_responses(event_id=event_id, status_type="finished", start_timestamp=1_800_000_000)
@@ -189,7 +189,7 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(modes, ["full", "live_delta", "live_delta", "live_delta", "final_sweep"])
         self.assertEqual(bootstrap.marked, [event_id])
         self.assertEqual(bootstrap.reset, [event_id])
-        for suffix in ("lineups", "incidents", "managers", "h2h", "pregame-form", "comments"):
+        for suffix in ("lineups", "incidents", "managers", "h2h", "pregame-form", "comments", "team-streaks"):
             self.assertNotIn(_url(event_id, suffix), delta_seen_urls)
 
 

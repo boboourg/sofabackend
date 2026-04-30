@@ -233,9 +233,13 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         statistics_url = "https://www.sofascore.com/api/v1/event/15921221/statistics"
         lineups_url = "https://www.sofascore.com/api/v1/event/15921221/lineups"
         incidents_url = "https://www.sofascore.com/api/v1/event/15921221/incidents"
+        team_streaks_url = "https://www.sofascore.com/api/v1/event/15921221/team-streaks"
+        h2h_events_url = "https://www.sofascore.com/api/v1/event/vGHbsytkc/h2h/events"
         self.assertEqual(transport.seen_urls.count(statistics_url), 2)
-        self.assertEqual(transport.seen_urls.count(lineups_url), 2)
-        self.assertEqual(transport.seen_urls.count(incidents_url), 2)
+        self.assertEqual(transport.seen_urls.count(lineups_url), 0)
+        self.assertEqual(transport.seen_urls.count(incidents_url), 0)
+        self.assertEqual(transport.seen_urls.count(team_streaks_url), 1)
+        self.assertEqual(transport.seen_urls.count(h2h_events_url), 1)
         self.assertTrue(report.finalized)
         self.assertEqual(final_sweep_gate.calls, 1)
         state = live_backend.hashes["live:event:15921221"]
@@ -389,6 +393,11 @@ def _tennis_responses(*, event_id: int, status_type: str, start_timestamp: int) 
     incidents_url = f"https://www.sofascore.com/api/v1/event/{event_id}/incidents"
     point_by_point_url = f"https://www.sofascore.com/api/v1/event/{event_id}/point-by-point"
     tennis_power_url = f"https://www.sofascore.com/api/v1/event/{event_id}/tennis-power"
+    team_streaks_url = f"https://www.sofascore.com/api/v1/event/{event_id}/team-streaks"
+    odds_all_url = f"https://www.sofascore.com/api/v1/event/{event_id}/odds/1/all"
+    odds_featured_url = f"https://www.sofascore.com/api/v1/event/{event_id}/odds/1/featured"
+    winning_odds_url = f"https://www.sofascore.com/api/v1/event/{event_id}/provider/1/winning-odds"
+    h2h_events_url = "https://www.sofascore.com/api/v1/event/vGHbsytkc/h2h/events"
     return {
         event_url: _json_result(
             event_url,
@@ -396,6 +405,7 @@ def _tennis_responses(*, event_id: int, status_type: str, start_timestamp: int) 
                 "event": {
                     "id": event_id,
                     "slug": "sinner-alcaraz",
+                    "customId": "vGHbsytkc",
                     "tournament": {
                         "id": 300,
                         "slug": "wimbledon",
@@ -415,6 +425,11 @@ def _tennis_responses(*, event_id: int, status_type: str, start_timestamp: int) 
         incidents_url: _json_result(incidents_url, {"incidents": []}),
         point_by_point_url: _json_result(point_by_point_url, {"pointByPoint": []}),
         tennis_power_url: _json_result(tennis_power_url, {"tennisPowerRankings": {"home": {"current": 0.61}, "away": {"current": 0.39}}}),
+        team_streaks_url: _json_result(team_streaks_url, {"general": [], "head2head": []}),
+        odds_all_url: _json_result(odds_all_url, {"markets": []}),
+        odds_featured_url: _json_result(odds_featured_url, {"featured": []}),
+        winning_odds_url: _json_result(winning_odds_url, {"home": {}, "away": {}}),
+        h2h_events_url: _json_result(h2h_events_url, {"events": []}),
     }
 
 

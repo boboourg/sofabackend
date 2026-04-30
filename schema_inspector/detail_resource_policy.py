@@ -106,17 +106,22 @@ def build_event_detail_request_specs(
         )
 
     if not core_only:
-        for endpoint in (
-            EVENT_MANAGERS_ENDPOINT,
-            EVENT_H2H_ENDPOINT,
-            EVENT_PREGAME_FORM_ENDPOINT,
-            EVENT_VOTES_ENDPOINT,
-        ):
-            add(endpoint)
-        if normalized_sport_slug == "football":
+        if normalized_sport_slug == "tennis":
             if custom_id:
                 add(EVENT_H2H_EVENTS_ENDPOINT, custom_id=str(custom_id))
             add(EVENT_TEAM_STREAKS_ENDPOINT)
+        else:
+            for endpoint in (
+                EVENT_MANAGERS_ENDPOINT,
+                EVENT_H2H_ENDPOINT,
+                EVENT_PREGAME_FORM_ENDPOINT,
+                EVENT_VOTES_ENDPOINT,
+            ):
+                add(endpoint)
+            if normalized_sport_slug == "football":
+                if custom_id:
+                    add(EVENT_H2H_EVENTS_ENDPOINT, custom_id=str(custom_id))
+                add(EVENT_TEAM_STREAKS_ENDPOINT)
         for provider_id in _dedupe_ints(provider_ids):
             add(EVENT_ODDS_ALL_ENDPOINT, provider_id=provider_id)
             add(EVENT_ODDS_FEATURED_ENDPOINT, provider_id=provider_id)
@@ -145,7 +150,8 @@ def build_event_detail_request_specs(
             now_timestamp=now_timestamp,
         )
 
-    add(EVENT_COMMENTS_ENDPOINT)
+    if normalized_sport_slug != "tennis":
+        add(EVENT_COMMENTS_ENDPOINT)
     if normalized_sport_slug == "football":
         add(EVENT_OFFICIAL_TWEETS_ENDPOINT)
     if not core_only and normalized_sport_slug == "football" and has_event_player_statistics is True:
