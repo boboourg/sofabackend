@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
-from dataclasses import replace
+from pathlib import Path
 
 from schema_inspector.proxy_health import (
     ProxyHealthResult,
@@ -12,6 +14,19 @@ from schema_inspector.runtime import ProxyEndpoint, RuntimeConfig, TransportAtte
 
 
 class ProxyHealthTests(unittest.IsolatedAsyncioTestCase):
+    def test_proxy_health_script_bootstraps_repo_imports(self) -> None:
+        script_path = Path(__file__).resolve().parent.parent / "scripts" / "ops" / "proxy_health_check.py"
+
+        completed = subprocess.run(
+            [sys.executable, str(script_path), "--help"],
+            cwd=script_path.parents[2],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--pool", completed.stdout)
+
     def test_load_pool_runtime_config_reads_live_pool_by_default(self) -> None:
         config = load_pool_runtime_config(
             "live",
