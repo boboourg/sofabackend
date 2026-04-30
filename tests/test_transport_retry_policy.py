@@ -4,7 +4,7 @@ import asyncio
 import time
 import unittest
 
-from schema_inspector.runtime import RuntimeConfig, RetryPolicy, TlsPolicy, load_runtime_config
+from schema_inspector.runtime import FingerprintProfile, RuntimeConfig, RetryPolicy, TlsPolicy, load_runtime_config
 from schema_inspector.transport import InspectorTransport
 
 
@@ -133,6 +133,90 @@ class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
             ["proxy_1", "proxy_2", "proxy_3", "proxy_4", "proxy_5"],
         )
         self.assertEqual(result.status_code, 403)
+
+    def test_session_kwargs_include_only_explicit_tls_overrides(self) -> None:
+        transport = InspectorTransport(
+            RuntimeConfig(
+                tls_policy=TlsPolicy(
+                    impersonate="chrome110",
+                    verify=True,
+                    http_version="2",
+                ),
+            )
+        )
+
+        kwargs = transport._session_kwargs(None)
+
+        self.assertEqual(kwargs["impersonate"], "chrome110")
+        self.assertEqual(kwargs["verify"], True)
+        self.assertEqual(kwargs["http_version"], "2")
+        self.assertNotIn("ja3", kwargs)
+        self.assertNotIn("akamai", kwargs)
+        self.assertNotIn("extra_fp", kwargs)
+
+    def test_session_kwargs_prefer_profile_tls_overrides_and_preserve_false(self) -> None:
+        transport = InspectorTransport(
+            RuntimeConfig(
+                tls_policy=TlsPolicy(
+                    impersonate="chrome110",
+                    verify=True,
+                    http_version="2",
+                    ja3="policy-ja3",
+                ),
+            )
+        )
+        profile = FingerprintProfile(
+            name="profile-a",
+            impersonate="chrome107",
+            user_agent="ua",
+            accept_language="en-US",
+            sec_ch_ua='"Chromium";v="107"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Windows"',
+            referer="https://www.sofascore.com/",
+            verify=False,
+            akamai="profile-akamai",
+        )
+
+        kwargs = transport._session_kwargs("http://proxy-1.local:8080", fingerprint_profile=profile)
+
+        self.assertEqual(kwargs["impersonate"], "chrome107")
+        self.assertEqual(kwargs["verify"], False)
+        self.assertEqual(kwargs["http_version"], "2")
+        self.assertEqual(kwargs["ja3"], "policy-ja3")
+        self.assertEqual(kwargs["akamai"], "profile-akamai")
+        self.assertEqual(
+            kwargs["proxies"],
+            {"http": "http://proxy-1.local:8080", "https": "http://proxy-1.local:8080"},
+        )
+
+    def test_session_key_distinguishes_profiles_with_same_impersonate(self) -> None:
+        transport = InspectorTransport(RuntimeConfig())
+        first = FingerprintProfile(
+            name="profile-a",
+            impersonate="chrome110",
+            user_agent="ua-a",
+            accept_language="en-US",
+            sec_ch_ua='"Chromium";v="110"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Windows"',
+            referer="https://www.sofascore.com/",
+        )
+        second = FingerprintProfile(
+            name="profile-b",
+            impersonate="chrome110",
+            user_agent="ua-b",
+            accept_language="en-GB",
+            sec_ch_ua='"Chromium";v="110"',
+            sec_ch_ua_mobile="?0",
+            sec_ch_ua_platform='"Windows"',
+            referer="https://www.sofascore.com/football",
+        )
+
+        self.assertNotEqual(
+            transport._session_key("http://proxy-1.local:8080", fingerprint_profile=first),
+            transport._session_key("http://proxy-1.local:8080", fingerprint_profile=second),
+        )
 
 
 class _FakeTransport(InspectorTransport):

@@ -6,7 +6,7 @@ import os
 import ssl
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,16 @@ class ProxyEndpoint:
 
 @dataclass(frozen=True)
 class FingerprintProfile:
-    """A lightweight browser fingerprint template for one outbound request."""
+    """A lightweight browser fingerprint template for one outbound request.
+
+    The ``name`` field is the stable identifier used by the transport layer
+    in its session-cache key — it must be unique across all profiles in a
+    given :class:`RuntimeConfig`.
+
+    The optional TLS / HTTP-fingerprint fields override the matching values
+    from :class:`TlsPolicy` on a per-profile basis. ``None`` means "not set,
+    fall through to the next layer".
+    """
 
     name: str
     impersonate: str
@@ -30,6 +39,11 @@ class FingerprintProfile:
     sec_ch_ua_mobile: str
     sec_ch_ua_platform: str
     referer: str
+    verify: bool | None = None
+    http_version: Any | None = None
+    ja3: str | None = None
+    akamai: str | None = None
+    extra_fp: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -45,12 +59,22 @@ class RetryPolicy:
 
 @dataclass(frozen=True)
 class TlsPolicy:
-    """Verified TLS policy for outbound HTTPS requests."""
+    """Verified TLS policy for outbound HTTPS requests.
+
+    Optional curl_cffi overrides are passed through to ``AsyncSession`` only
+    when explicitly set. ``None`` preserves the defaults associated with the
+    chosen ``impersonate`` profile.
+    """
 
     minimum_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2
     maximum_version: ssl.TLSVersion | None = ssl.TLSVersion.TLSv1_3
     check_hostname: bool = True
     impersonate: str = "chrome110"
+    verify: bool | None = None
+    http_version: Any | None = None
+    ja3: str | None = None
+    akamai: str | None = None
+    extra_fp: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

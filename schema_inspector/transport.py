@@ -8,7 +8,7 @@ import inspect
 import sys
 import time
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -18,6 +18,15 @@ from curl_cffi.requests import AsyncSession, RequestsError
 from .challenge import detect_challenge
 from .proxy import ProxyPool
 from .runtime import FingerprintProfile, RuntimeConfig, TransportAttempt, TransportResult
+
+
+_SESSION_TLS_FIELDS: tuple[str, ...] = (
+    "verify",
+    "http_version",
+    "ja3",
+    "akamai",
+    "extra_fp",
+)
 
 
 if sys.platform == "win32":
@@ -366,8 +375,22 @@ class InspectorTransport:
         *,
         fingerprint_profile: FingerprintProfile | None = None,
     ) -> str:
-        profile_key = fingerprint_profile.impersonate if fingerprint_profile is not None else "__default__"
+        profile_key = fingerprint_profile.name if fingerprint_profile is not None else "__default__"
         return f"{proxy_url or '__direct__'}|{profile_key}"
+
+    def _resolve_tls_field(
+        self,
+        name: str,
+        fingerprint_profile: FingerprintProfile | None,
+    ) -> Any:
+        if fingerprint_profile is not None:
+            value = getattr(fingerprint_profile, name, None)
+            if value is not None:
+                return value
+        tls_policy = getattr(self.runtime_config, "tls_policy", None)
+        if tls_policy is not None:
+            return getattr(tls_policy, name, None)
+        return None
 
     def _session_kwargs(
         self,
@@ -388,6 +411,10 @@ class InspectorTransport:
         }
         if proxies is not None:
             kwargs["proxies"] = proxies
+        for field_name in _SESSION_TLS_FIELDS:
+            value = self._resolve_tls_field(field_name, fingerprint_profile)
+            if value is not None:
+                kwargs[field_name] = value
         return kwargs
 
     @staticmethod
