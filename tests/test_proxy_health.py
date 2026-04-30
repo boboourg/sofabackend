@@ -103,6 +103,34 @@ class ProxyHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.status_code)
         self.assertEqual(result.error, "boom")
 
+    async def test_probe_proxy_endpoint_uses_single_attempt_probe_budget(self) -> None:
+        endpoint = ProxyEndpoint(name="proxy_4", url="http://proxy-4.local:8080")
+        base_config = RuntimeConfig(proxy_endpoints=(endpoint,))
+
+        observed = {}
+
+        def _factory(runtime_config: RuntimeConfig) -> _FakeTransport:
+            observed["max_attempts"] = runtime_config.retry_policy.max_attempts
+            observed["challenge_max_attempts"] = runtime_config.retry_policy.challenge_max_attempts
+            observed["network_error_max_attempts"] = runtime_config.retry_policy.network_error_max_attempts
+            observed["backoff_seconds"] = runtime_config.retry_policy.backoff_seconds
+            return _FakeTransport(runtime_config, status_code=200, challenge_reason=None)
+
+        await probe_proxy_endpoint(
+            endpoint=endpoint,
+            base_config=base_config,
+            url="https://www.sofascore.com/api/v1/sport/football/events/live",
+            timeout=5.0,
+            transport_factory=_factory,
+        )
+
+        self.assertEqual(observed, {
+            "max_attempts": 1,
+            "challenge_max_attempts": 1,
+            "network_error_max_attempts": 1,
+            "backoff_seconds": 0.0,
+        })
+
 
 class _FakeTransport:
     def __init__(self, runtime_config: RuntimeConfig, *, status_code: int, challenge_reason: str | None, error: str | None = None) -> None:

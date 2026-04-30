@@ -54,6 +54,13 @@ async def probe_proxy_endpoint(
         proxy_endpoints=(endpoint,),
         proxy_request_cooldown_seconds=0.0,
         proxy_request_jitter_seconds=0.0,
+        retry_policy=replace(
+            base_config.retry_policy,
+            max_attempts=1,
+            challenge_max_attempts=1,
+            network_error_max_attempts=1,
+            backoff_seconds=0.0,
+        ),
     )
     transport = transport_factory(single_proxy_config)
     started = time.monotonic()
