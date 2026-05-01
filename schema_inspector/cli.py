@@ -437,6 +437,7 @@ class HybridApp:
                 stream_queue=self.stream_queue,
                 season_widget_gate=prefetched_run.replay_widget_gate,
                 event_endpoint_gate=prefetched_run.replay_event_endpoint_gate,
+                freshness_store=self.freshness_store,
             )
             result = await orchestrator.run_event(
                 event_id=prefetched_run.event_id,

@@ -1508,6 +1508,41 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         )
         warn_mock.assert_called_once_with(prefetched_run)
 
+    async def test_hybrid_app_replay_orchestrator_receives_freshness_store_for_deterministic_skips(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        app = hybrid_cli.HybridApp(
+            database=_FakeDatabase(),
+            runtime_config=RuntimeConfig(require_proxy=False),
+            redis_backend=_FakeRedisBackend(),
+        )
+        prefetched = hybrid_cli.PrefetchedRun(
+            event_id=99,
+            sport_slug="football",
+            fetch_records=(),
+            snapshot_store=object(),
+            initial_capability_rollup={},
+        )
+        captured_kwargs: list[dict[str, object]] = []
+
+        class _CapturingPilotOrchestrator:
+            def __init__(self, **kwargs) -> None:
+                captured_kwargs.append(kwargs)
+
+            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str):
+                return types.SimpleNamespace(
+                    event_id=event_id,
+                    sport_slug=sport_slug,
+                    hydration_mode=hydration_mode,
+                )
+
+        with mock.patch.object(hybrid_cli, "PilotOrchestrator", _CapturingPilotOrchestrator):
+            result = await app._persist_prefetched_run(prefetched, hydration_mode="full")
+
+        self.assertEqual(result.event_id, 99)
+        self.assertIs(captured_kwargs[0]["freshness_store"], app.freshness_store)
+
     async def test_hybrid_app_warns_when_prefetched_run_exceeds_limit(self) -> None:
         from schema_inspector.cli import HybridApp, HybridSnapshotStore, PrefetchedRun
         from schema_inspector.fetch_executor import PrefetchedFetchRecord
