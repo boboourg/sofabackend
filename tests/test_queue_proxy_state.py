@@ -56,6 +56,30 @@ class QueueProxyStateTests(unittest.TestCase):
         self.assertTrue(store.is_available("proxy_1", now_ms=31_001))
         self.assertEqual(recovered.recent_successes, 1)
 
+    def test_proxy_state_store_serializes_none_values_for_real_redis(self) -> None:
+        backend = _StrictRedisLikeBackend()
+        store = ProxyStateStore(backend)
+
+        store.record_failure(
+            "10.0.0.1:8080",
+            status_code=None,
+            challenge_reason=None,
+            observed_at_ms=1_000,
+            cooldown_ms=30_000,
+        )
+
+        stored = backend.hashes["proxy:10.0.0.1:8080"]
+        self.assertEqual(stored["last_status_code"], "")
+        self.assertEqual(stored["last_challenge_reason"], "")
+        self.assertEqual(stored["avg_latency_ms"], "")
+
+
+class _StrictRedisLikeBackend(_FakeProxyBackend):
+    def hset(self, key: str, mapping: dict[str, object]) -> None:
+        if any(value is None for value in mapping.values()):
+            raise TypeError("redis does not accept None values")
+        super().hset(key, mapping)
+
 
 if __name__ == "__main__":
     unittest.main()

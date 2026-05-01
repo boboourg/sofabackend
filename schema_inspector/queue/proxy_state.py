@@ -137,7 +137,12 @@ def _average_latency(previous: int | None, latest: int | None) -> int | None:
 
 
 def _hset_mapping(backend: Any, name: str, mapping: dict[str, object]) -> None:
+    serialized = {key: _redis_scalar(value) for key, value in mapping.items()}
     try:
-        backend.hset(name, mapping=mapping)
+        backend.hset(name, mapping=serialized)
     except TypeError:
-        backend.hset(name, mapping)
+        backend.hset(name, serialized)
+
+
+def _redis_scalar(value: object) -> object:
+    return "" if value is None else value
