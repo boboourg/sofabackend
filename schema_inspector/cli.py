@@ -30,6 +30,7 @@ from .parsers.registry import ParserRegistry
 from .pipeline.pilot_orchestrator import PilotOrchestrator, PilotRunReport
 from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
+from .queue.proxy_state import ProxyStateStore
 from .queue.streams import RedisStreamQueue
 from .runtime import (
     HISTORICAL_PROXY_ENV_KEY,
@@ -51,6 +52,7 @@ from .services.historical_archive_service import (
 from .services.historical_archive_service import (
     run_historical_tournament_enrichment as run_historical_tournament_enrichment_service,
 )
+from .services.proxy_health_monitor import ProxyHealthMonitor, ProxyHealthMonitorConfig
 from .services.stage_audit_logger import StageAuditLogger
 from .services.structure_sync_service import (
     run_structure_sync_for_tournament as run_structure_sync_service,
@@ -64,6 +66,7 @@ from .storage.endpoint_negative_cache_repository import EndpointNegativeCacheRep
 from .storage.event_endpoint_negative_cache_repository import EventEndpointNegativeCacheRepository
 from .storage.live_state_repository import LiveStateRepository
 from .storage.normalize_repository import NormalizeRepository
+from .storage.proxy_health_repository import ProxyHealthRepository
 from .storage.raw_repository import RawRepository
 from .transport import InspectorTransport
 
@@ -899,13 +902,22 @@ async def _dispatch(args) -> int:
         command_timeout=args.db_timeout,
     )
     async with AsyncpgDatabase(database_config) as database:
+        redis_backend = _load_redis_backend(
+            args.redis_url,
+            allow_memory_fallback=bool(getattr(args, "allow_memory_redis", False)),
+        )
+        if args.command == "proxy-health-monitor":
+            monitor = ProxyHealthMonitor(
+                repository=ProxyHealthRepository(),
+                state_store=ProxyStateStore(redis_backend),
+                config=ProxyHealthMonitorConfig.from_env(_load_project_env()),
+            )
+            await monitor.run_forever(database.connection)
+            return 0
         app = HybridApp(
             database=database,
             runtime_config=runtime_config,
-            redis_backend=_load_redis_backend(
-                args.redis_url,
-                allow_memory_fallback=bool(getattr(args, "allow_memory_redis", False)),
-            ),
+            redis_backend=redis_backend,
         )
         logger.info("Redis backend ready: backend=%s", type(app.redis_backend).__name__)
         try:
@@ -1250,6 +1262,7 @@ def _build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--event-id", type=int, action="append", required=True, help="Repeatable hydrated event id.")
 
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
+    subparsers.add_parser("proxy-health-monitor", help="Continuously mark unhealthy proxy endpoints from api_request_log traffic.")
     subparsers.add_parser("recover-live-state", help="Rebuild Redis live-state indexes from PostgreSQL history.")
 
     planner_daemon = subparsers.add_parser("planner-daemon", help="Run the continuous planner loop.")

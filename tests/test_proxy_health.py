@@ -4,6 +4,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from schema_inspector.proxy_health import (
     ProxyHealthResult,
@@ -46,6 +47,18 @@ class ProxyHealthTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([item.url for item in config.proxy_endpoints], ["http://hist-1.local:8080", "http://hist-2.local:8080"])
+
+    def test_load_pool_runtime_config_uses_historical_factory(self) -> None:
+        with patch("schema_inspector.proxy_health.load_historical_runtime_config") as loader:
+            loader.return_value = RuntimeConfig()
+
+            config = load_pool_runtime_config(
+                "historical",
+                env={"SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS": "http://hist.local:8080"},
+            )
+
+        self.assertIs(config, loader.return_value)
+        loader.assert_called_once()
 
     async def test_probe_proxy_endpoint_marks_healthy_for_clean_200(self) -> None:
         endpoint = ProxyEndpoint(name="proxy_1", url="http://proxy-1.local:8080")

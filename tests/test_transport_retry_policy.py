@@ -147,6 +147,24 @@ class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
         await lease.release(success=False)
         self.assertIsNone(pool.try_acquire_nowait())
 
+    async def test_proxy_pool_skips_unhealthy_proxy_address_from_state_store(self) -> None:
+        from schema_inspector.proxy import ProxyPool
+        from schema_inspector.runtime import ProxyEndpoint
+
+        pool = ProxyPool(
+            (
+                ProxyEndpoint(name="proxy-1", url="http://user:pass@10.0.0.1:8080"),
+                ProxyEndpoint(name="proxy-2", url="http://user:pass@10.0.0.2:8080"),
+            ),
+            proxy_state_store=_FakeProxyStateStore(unavailable={"10.0.0.1:8080"}),
+            proxy_health_cache_ttl_seconds=0.0,
+        )
+
+        lease = await pool.acquire()
+
+        self.assertEqual(lease.endpoint.name, "proxy-2")
+        await lease.release(success=True)
+
     async def test_proxy_pool_serializes_requests_per_proxy_and_applies_post_use_cooldown(self) -> None:
         from schema_inspector.proxy import ProxyPool
         from schema_inspector.runtime import ProxyEndpoint
@@ -389,6 +407,15 @@ class _RecordingTransport(InspectorTransport):
                 "body_bytes": b"{}",
             },
         )()
+
+
+class _FakeProxyStateStore:
+    def __init__(self, *, unavailable: set[str]) -> None:
+        self.unavailable = unavailable
+
+    def is_available(self, proxy_id: str, *, now_ms: int) -> bool:
+        del now_ms
+        return proxy_id not in self.unavailable
 
 
 if __name__ == "__main__":

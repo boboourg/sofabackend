@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -17,7 +19,10 @@ from curl_cffi.requests import AsyncSession, RequestsError
 
 from .challenge import detect_challenge
 from .proxy import ProxyPool
+from .queue.proxy_state import ProxyStateStore
 from .runtime import FingerprintProfile, RuntimeConfig, TransportAttempt, TransportResult
+
+logger = logging.getLogger(__name__)
 
 
 _SESSION_TLS_FIELDS: tuple[str, ...] = (
@@ -50,7 +55,7 @@ class ProxyRequiredError(RuntimeError):
 class InspectorTransport:
     """All outbound requests for the inspector pass through this class."""
 
-    def __init__(self, runtime_config: RuntimeConfig, *, sleeper=None, clock=None) -> None:
+    def __init__(self, runtime_config: RuntimeConfig, *, sleeper=None, clock=None, proxy_state_store=None) -> None:
         self.runtime_config = runtime_config
         self.sleeper = sleeper or asyncio.sleep
         self.clock = clock or time.monotonic
@@ -59,6 +64,7 @@ class InspectorTransport:
             clock=self.clock,
             default_success_cooldown_seconds=runtime_config.proxy_request_cooldown_seconds,
             jitter_seconds=runtime_config.proxy_request_jitter_seconds,
+            proxy_state_store=proxy_state_store if proxy_state_store is not None else _load_proxy_state_store_from_env(),
         )
         self._session_cache: dict[str, AsyncSession] = {}
         self._session_lock = asyncio.Lock()
@@ -471,3 +477,23 @@ def _proxy_address_from_url(proxy_url: str | None) -> str | None:
     if parsed.port is None:
         return host
     return f"{host}:{parsed.port}"
+
+
+def _load_proxy_state_store_from_env():
+    enabled = os.environ.get("SOFASCORE_PROXY_HEALTH_POOL_FILTER_ENABLED", "true").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return None
+    redis_url = os.environ.get("REDIS_URL") or os.environ.get("SOFASCORE_REDIS_URL")
+    if not redis_url:
+        return None
+    try:
+        import redis  # type: ignore
+    except ImportError:  # pragma: no cover - optional production dependency
+        logger.warning("Proxy health pool filter disabled because python package `redis` is unavailable.")
+        return None
+    try:
+        backend = redis.Redis.from_url(redis_url, decode_responses=True)
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.warning("Proxy health pool filter disabled because Redis backend could not be created: %s", exc)
+        return None
+    return ProxyStateStore(backend)

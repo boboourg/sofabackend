@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Callable, Literal
 
-from .runtime import ProxyEndpoint, RuntimeConfig, load_runtime_config, load_structure_runtime_config
+from .runtime import ProxyEndpoint, RuntimeConfig, load_historical_runtime_config, load_runtime_config, load_structure_runtime_config
 from .transport import InspectorTransport
 
 
@@ -34,7 +34,7 @@ def load_pool_runtime_config(pool: ProxyPoolName, *, env: dict[str, str] | None 
     if normalized == "live":
         return load_runtime_config(env=env)
     if normalized == "historical":
-        return load_runtime_config(env=env, proxy_env_key="SCHEMA_INSPECTOR_HISTORICAL_PROXY_URLS")
+        return load_historical_runtime_config(env=env)
     if normalized == "structure":
         return load_structure_runtime_config(env=env)
     raise ValueError(f"Unsupported proxy pool: {pool}")
