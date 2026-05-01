@@ -209,6 +209,25 @@ class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Sec-Ch-Ua", first["headers"])
         self.assertIn("Referer", first["headers"])
 
+    async def test_transport_result_records_proxy_address_without_credentials(self) -> None:
+        transport = _RecordingTransport(
+            load_runtime_config(
+                env={
+                    "SCHEMA_INSPECTOR_PROXY_URLS": "http://user:secret@10.10.10.10:12345",
+                    "SCHEMA_INSPECTOR_PROXY_REQUEST_COOLDOWN_SECONDS": "0",
+                    "SCHEMA_INSPECTOR_PROXY_REQUEST_JITTER_SECONDS": "0",
+                }
+            ),
+            sleeper=lambda delay: None,
+        )
+
+        result = await transport.fetch("https://www.sofascore.com/api/v1/event/1", timeout=5.0)
+
+        self.assertEqual(result.final_proxy_name, "proxy_1")
+        self.assertEqual(result.final_proxy_address, "10.10.10.10:12345")
+        self.assertEqual(result.attempts[0].proxy_address, "10.10.10.10:12345")
+        self.assertNotIn("secret", result.final_proxy_address)
+
     async def test_transport_retries_access_denied_across_extended_proxy_budget(self) -> None:
         transport = _FakeTransport(
             RuntimeConfig(

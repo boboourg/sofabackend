@@ -312,6 +312,7 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 attempts_json=[{"attempt_number": 1, "proxy_name": "proxy_1", "status_code": 200}],
                 payload_bytes=18,
                 error_message=None,
+                proxy_address="10.10.10.10:12345",
             ),
         )
         await repository.insert_payload_snapshot(
@@ -359,10 +360,11 @@ class RawRepositoryTests(unittest.IsolatedAsyncioTestCase):
         request_args = executor.execute_calls[0][1]
         snapshot_args = executor.execute_calls[1][1]
         head_args = executor.execute_calls[2][1]
-        self.assertIsInstance(request_args[13], datetime)
+        self.assertEqual(request_args[10], "10.10.10.10:12345")
         self.assertIsInstance(request_args[14], datetime)
-        self.assertEqual(request_args[16], '[{"attempt_number":1,"proxy_name":"proxy_1","status_code":200}]')
-        self.assertEqual(request_args[17], 18)
+        self.assertIsInstance(request_args[15], datetime)
+        self.assertEqual(request_args[17], '[{"attempt_number":1,"proxy_name":"proxy_1","status_code":200}]')
+        self.assertEqual(request_args[18], 18)
         self.assertIsInstance(snapshot_args[10], datetime)
         self.assertIsInstance(head_args[6], datetime)
 

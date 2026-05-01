@@ -94,6 +94,7 @@ class FetchExecutor:
                 request_headers_redacted=task.request_headers,
                 query_params=task.query_params,
                 proxy_id=None,
+                proxy_address=None,
                 transport_attempt=None,
                 http_status=None,
                 challenge_reason=None,
@@ -150,6 +151,7 @@ class FetchExecutor:
             request_headers_redacted=task.request_headers,
             query_params=task.query_params,
             proxy_id=transport_result.final_proxy_name,
+            proxy_address=transport_result.final_proxy_address,
             transport_attempt=len(transport_result.attempts),
             http_status=transport_result.status_code,
             challenge_reason=transport_result.challenge_reason,
@@ -286,6 +288,7 @@ def _attempts_json(attempts: tuple[TransportAttempt, ...]) -> list[dict[str, obj
         {
             "attempt_number": int(item.attempt_number),
             "proxy_name": item.proxy_name,
+            "proxy_address": item.proxy_address,
             "status_code": item.status_code,
             "error": item.error,
             "challenge_reason": item.challenge_reason,

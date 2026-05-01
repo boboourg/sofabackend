@@ -64,8 +64,9 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
                 status_code=200,
                 headers={"Content-Type": "application/json"},
                 body_bytes=b'{"event":{"id":1,"slug":"match"}}',
-                attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+                attempts=(TransportAttempt(1, "proxy_1", 200, None, None, "10.10.10.10:12345"),),
                 final_proxy_name="proxy_1",
+                final_proxy_address="10.10.10.10:12345",
                 challenge_reason=None,
             )
         )
@@ -99,7 +100,9 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(raw_repository.snapshot_heads), 1)
         self.assertEqual(transport.calls[0][2], 12.5)
         self.assertEqual(raw_repository.request_logs[0].payload_bytes, len(b'{"event":{"id":1,"slug":"match"}}'))
+        self.assertEqual(raw_repository.request_logs[0].proxy_address, "10.10.10.10:12345")
         self.assertEqual(raw_repository.request_logs[0].attempts_json[0]["proxy_name"], "proxy_1")
+        self.assertEqual(raw_repository.request_logs[0].attempts_json[0]["proxy_address"], "10.10.10.10:12345")
         self.assertIsNone(raw_repository.request_logs[0].error_message)
 
     async def test_executor_can_defer_raw_writes_and_collect_prefetched_record(self) -> None:

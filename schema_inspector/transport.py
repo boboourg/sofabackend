@@ -107,6 +107,7 @@ class InspectorTransport:
 
             proxy_name = lease.endpoint.name if lease is not None else None
             proxy_url = lease.endpoint.url if lease is not None else None
+            proxy_address = _proxy_address_from_url(proxy_url)
             if proxy_required and proxy_url is None:
                 error_msg = self._proxy_required_message()
                 attempts.append(
@@ -116,6 +117,7 @@ class InspectorTransport:
                         status_code=None,
                         error=error_msg,
                         challenge_reason=None,
+                        proxy_address=None,
                     )
                 )
                 raise ProxyRequiredError(error_msg)
@@ -145,6 +147,7 @@ class InspectorTransport:
                             status_code=304,
                             error=None,
                             challenge_reason=None,
+                            proxy_address=proxy_address,
                         )
                     )
                     return TransportResult(
@@ -155,6 +158,7 @@ class InspectorTransport:
                         attempts=tuple(attempts),
                         final_proxy_name=proxy_name,
                         challenge_reason=None,
+                        final_proxy_address=proxy_address,
                     )
 
                 challenge_reason = detect_challenge(
@@ -170,6 +174,7 @@ class InspectorTransport:
                         status_code=raw.status_code,
                         error=None,
                         challenge_reason=challenge_reason,
+                        proxy_address=proxy_address,
                     )
                 )
 
@@ -209,6 +214,7 @@ class InspectorTransport:
                     attempts=tuple(attempts),
                     final_proxy_name=proxy_name,
                     challenge_reason=challenge_reason,
+                    final_proxy_address=proxy_address,
                 )
 
             except (URLError, RequestsError) as exc:
@@ -221,6 +227,7 @@ class InspectorTransport:
                         status_code=None,
                         error=error_msg,
                         challenge_reason=None,
+                        proxy_address=proxy_address,
                     )
                 )
                 if lease is not None:
@@ -447,3 +454,20 @@ def _extract_etag(headers: Mapping[str, str]) -> str | None:
         if key.lower() == "etag":
             return value.strip()
     return None
+
+
+def _proxy_address_from_url(proxy_url: str | None) -> str | None:
+    if not proxy_url:
+        return None
+    parsed = urlparse(proxy_url)
+    host = parsed.hostname
+    if not host:
+        netloc = parsed.netloc or parsed.path
+        if "@" in netloc:
+            netloc = netloc.rsplit("@", 1)[1]
+        return netloc or None
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is None:
+        return host
+    return f"{host}:{parsed.port}"

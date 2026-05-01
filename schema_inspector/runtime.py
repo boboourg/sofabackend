@@ -110,6 +110,7 @@ class TransportAttempt:
     status_code: int | None
     error: str | None
     challenge_reason: str | None
+    proxy_address: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class TransportResult:
     attempts: tuple[TransportAttempt, ...]
     final_proxy_name: str | None
     challenge_reason: str | None
+    final_proxy_address: str | None = None
 
 
 def load_runtime_config(

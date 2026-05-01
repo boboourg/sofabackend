@@ -52,6 +52,7 @@ class ApiRequestLogRecord:
     attempts_json: object | None = None
     payload_bytes: int | None = None
     error_message: str | None = None
+    proxy_address: str | None = None
 
 
 @dataclass(frozen=True)
@@ -248,6 +249,7 @@ class RawRepository:
                 request_headers_redacted,
                 query_params,
                 proxy_id,
+                proxy_address,
                 transport_attempt,
                 http_status,
                 challenge_reason,
@@ -261,7 +263,7 @@ class RawRepository:
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15, $16,
-                $17::jsonb, $18, $19
+                $17, $18::jsonb, $19, $20
             )
             """,
             record.trace_id,
@@ -274,6 +276,7 @@ class RawRepository:
             _jsonb(record.request_headers_redacted),
             _jsonb(record.query_params),
             record.proxy_id,
+            record.proxy_address,
             record.transport_attempt,
             record.http_status,
             record.challenge_reason,
