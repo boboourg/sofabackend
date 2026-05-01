@@ -2,6 +2,7 @@
 
 from .dedupe import DedupeStore
 from .delayed import DELAYED_JOBS_KEY, DelayedJob, DelayedJobScheduler
+from .freshness import FreshnessStore
 from .leases import Lease, LeaseManager
 from .proxy_state import PROXY_COOLDOWN_ZSET, ProxyState, ProxyStateStore
 from .ratelimit_state import RateLimitState, RateLimitStateStore
@@ -79,6 +80,7 @@ __all__ = [
     "Lease",
     "LeaseManager",
     "DedupeStore",
+    "FreshnessStore",
     "PROXY_COOLDOWN_ZSET",
     "ProxyState",
     "ProxyStateStore",

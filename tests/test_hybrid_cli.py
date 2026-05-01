@@ -1137,12 +1137,14 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         fake_app = _FakeDispatchHybridApp()
         fake_service_app = _FakeServiceApp()
         original_load_runtime_config = hybrid_cli.load_runtime_config
+        original_load_historical_runtime_config = hybrid_cli.load_historical_runtime_config
         original_load_database_config = hybrid_cli.load_database_config
         original_database_class = hybrid_cli.AsyncpgDatabase
         original_hybrid_app = hybrid_cli.HybridApp
         original_service_app = hybrid_cli.ServiceApp
         try:
             hybrid_cli.load_runtime_config = lambda **kwargs: object()
+            hybrid_cli.load_historical_runtime_config = lambda **kwargs: object()
             hybrid_cli.load_database_config = lambda **kwargs: object()
             hybrid_cli.AsyncpgDatabase = _FakeAsyncpgDatabaseContext
             hybrid_cli.HybridApp = lambda **kwargs: fake_app
@@ -1229,6 +1231,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             hybrid_cli.load_runtime_config = original_load_runtime_config
+            hybrid_cli.load_historical_runtime_config = original_load_historical_runtime_config
             hybrid_cli.load_database_config = original_load_database_config
             hybrid_cli.AsyncpgDatabase = original_database_class
             hybrid_cli.HybridApp = original_hybrid_app

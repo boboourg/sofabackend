@@ -56,6 +56,14 @@ class _FakeSnapshotStore:
         return snapshot_id
 
 
+class _FakeFreshnessStore:
+    def __init__(self) -> None:
+        self.marked: list[tuple[str, int]] = []
+
+    def mark_fetched(self, key: str, ttl_seconds: int) -> None:
+        self.marked.append((key, ttl_seconds))
+
+
 class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_executor_fetches_classifies_and_writes_snapshot(self) -> None:
         transport = _FakeTransport(
@@ -269,6 +277,97 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(raw_repository.request_logs), 1)
         self.assertEqual(raw_repository.request_logs[0].error_message, "transport timed out")
         self.assertIsNone(raw_repository.request_logs[0].attempts_json)
+
+    async def test_executor_marks_freshness_after_successful_200(self) -> None:
+        freshness_store = _FakeFreshnessStore()
+        executor = FetchExecutor(
+            transport=_FakeTransport(_transport_result(status_code=200)),
+            raw_repository=_FakeRawRepository(),
+            sql_executor=object(),
+            freshness_store=freshness_store,
+        )
+
+        await executor.execute(
+            _fetch_task(
+                freshness_key="freshness:player:10",
+                freshness_ttl_seconds=86_400,
+            )
+        )
+
+        self.assertEqual(freshness_store.marked, [("freshness:player:10", 86_400)])
+
+    async def test_executor_does_not_mark_freshness_for_non_200_statuses(self) -> None:
+        for status_code in (403, 404, 500):
+            with self.subTest(status_code=status_code):
+                freshness_store = _FakeFreshnessStore()
+                executor = FetchExecutor(
+                    transport=_FakeTransport(_transport_result(status_code=status_code)),
+                    raw_repository=_FakeRawRepository(),
+                    sql_executor=object(),
+                    freshness_store=freshness_store,
+                )
+
+                await executor.execute(
+                    _fetch_task(
+                        freshness_key="freshness:player:10",
+                        freshness_ttl_seconds=86_400,
+                    )
+                )
+
+                self.assertEqual(freshness_store.marked, [])
+
+    async def test_executor_does_not_mark_freshness_without_freshness_fields(self) -> None:
+        freshness_store = _FakeFreshnessStore()
+        executor = FetchExecutor(
+            transport=_FakeTransport(_transport_result(status_code=200)),
+            raw_repository=_FakeRawRepository(),
+            sql_executor=object(),
+            freshness_store=freshness_store,
+        )
+
+        await executor.execute(_fetch_task())
+
+        self.assertEqual(freshness_store.marked, [])
+
+    def test_build_fetch_task_key_ignores_freshness_fields(self) -> None:
+        from schema_inspector.fetch_executor import build_fetch_task_key
+
+        baseline = _fetch_task()
+        with_freshness = _fetch_task(
+            freshness_key="freshness:player:10",
+            freshness_ttl_seconds=86_400,
+        )
+
+        self.assertEqual(build_fetch_task_key(baseline), build_fetch_task_key(with_freshness))
+
+
+def _transport_result(*, status_code: int) -> TransportResult:
+    return TransportResult(
+        resolved_url="https://www.sofascore.com/api/v1/player/10",
+        status_code=status_code,
+        headers={"Content-Type": "application/json"},
+        body_bytes=b'{"player":{"id":10}}',
+        attempts=(TransportAttempt(1, "proxy_1", status_code, None, None, "10.10.10.10:12345"),),
+        final_proxy_name="proxy_1",
+        final_proxy_address="10.10.10.10:12345",
+        challenge_reason=None,
+    )
+
+
+def _fetch_task(**overrides) -> FetchTask:
+    values = {
+        "trace_id": "trace-player",
+        "job_id": "job-player",
+        "sport_slug": "football",
+        "endpoint_pattern": "/api/v1/player/{player_id}",
+        "source_url": "https://www.sofascore.com/api/v1/player/10",
+        "timeout_profile": "pilot",
+        "context_entity_type": "player",
+        "context_entity_id": 10,
+        "fetch_reason": "hydrate_entity_profile",
+    }
+    values.update(overrides)
+    return FetchTask(**values)
 
 
 if __name__ == "__main__":

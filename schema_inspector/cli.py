@@ -30,6 +30,7 @@ from .parsers.registry import ParserRegistry
 from .pipeline.pilot_orchestrator import PilotOrchestrator, PilotRunReport
 from .planner.planner import Planner
 from .queue.live_state import LiveEventStateStore
+from .queue.freshness import FreshnessStore
 from .queue.proxy_state import ProxyStateStore
 from .queue.streams import RedisStreamQueue
 from .runtime import (
@@ -223,6 +224,7 @@ class HybridApp:
         self.stage_audit_logger = StageAuditLogger(database=database)
         self.live_state_store = LiveEventStateStore(redis_backend) if redis_backend is not None else None
         self.stream_queue = RedisStreamQueue(redis_backend) if redis_backend is not None else None
+        self.freshness_store = FreshnessStore(redis_backend) if redis_backend is not None else None
         self.live_bootstrap_coordinator = (
             LiveBootstrapCoordinator(redis_backend=redis_backend, worker_id="hybrid-app")
             if redis_backend is not None
@@ -328,6 +330,7 @@ class HybridApp:
             sql_executor=None,
             snapshot_store=snapshot_store,
             write_mode="deferred",
+            freshness_store=self.freshness_store,
         )
         season_widget_gate = None
         event_endpoint_gate = None
@@ -357,6 +360,7 @@ class HybridApp:
                 season_widget_gate=season_widget_gate,
                 event_endpoint_gate=event_endpoint_gate,
                 final_sweep_gate=self.final_sweep_gate,
+                freshness_store=self.freshness_store,
             )
             await orchestrator.run_event(
                 event_id=event_id,

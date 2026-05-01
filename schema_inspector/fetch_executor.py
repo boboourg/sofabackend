@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from .fetch_models import FetchOutcomeEnvelope, FetchTask
 from .parsers.base import RawSnapshot
 from .runtime import TransportAttempt
 from .storage.raw_repository import ApiRequestLogRecord, ApiSnapshotHeadRecord, PayloadSnapshotRecord, RawRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,7 @@ class FetchExecutor:
         snapshot_store=None,
         write_mode: str = "immediate",
         clock=None,
+        freshness_store=None,
     ) -> None:
         self.transport = transport
         self.raw_repository = raw_repository
@@ -48,6 +52,7 @@ class FetchExecutor:
         self.snapshot_store = snapshot_store
         self.write_mode = str(write_mode or "immediate").strip().lower()
         self.clock = clock or time.monotonic
+        self.freshness_store = freshness_store
         self._prefetched_records: list[PrefetchedFetchRecord] = []
 
     @property
@@ -245,6 +250,7 @@ class FetchExecutor:
             fetched_at=finished_at,
             error_message=None,
         )
+        self._mark_freshness_if_success(task, outcome)
         if self.write_mode == "deferred":
             self._prefetched_records.append(
                 PrefetchedFetchRecord(
@@ -256,6 +262,19 @@ class FetchExecutor:
                 )
             )
         return outcome
+
+    def _mark_freshness_if_success(self, task: FetchTask, outcome: FetchOutcomeEnvelope) -> None:
+        if (
+            self.freshness_store is None
+            or outcome.http_status != 200
+            or not task.freshness_key
+            or task.freshness_ttl_seconds is None
+        ):
+            return
+        try:
+            self.freshness_store.mark_fetched(task.freshness_key, task.freshness_ttl_seconds)
+        except Exception as exc:
+            logger.warning("FreshnessStore.mark_fetched failed from FetchExecutor: %s", exc)
 
 
 def build_fetch_task_key(task: FetchTask) -> tuple[object, ...]:

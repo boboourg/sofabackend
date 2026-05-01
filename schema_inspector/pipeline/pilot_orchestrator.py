@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,6 +46,9 @@ from ..workers.live_worker import LiveWorker
 MISSING_ROOT_TERMINAL_STATUS = "not_found"
 MISSING_ROOT_RETIRE_THRESHOLD = 3
 MISSING_ROOT_RETIRE_LOOKBACK = 20
+PLAYER_PROFILE_FRESHNESS_TTL_SECONDS = 86_400
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,8 @@ class PilotOrchestrator:
         event_endpoint_gate=None,
         live_bootstrap_coordinator=None,
         final_sweep_gate=None,
+        freshness_store=None,
+        player_profile_freshness_ttl_seconds: int = PLAYER_PROFILE_FRESHNESS_TTL_SECONDS,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -170,6 +176,8 @@ class PilotOrchestrator:
         self.event_endpoint_gate = event_endpoint_gate
         self.live_bootstrap_coordinator = live_bootstrap_coordinator
         self.final_sweep_gate = final_sweep_gate
+        self.freshness_store = freshness_store
+        self.player_profile_freshness_ttl_seconds = int(player_profile_freshness_ttl_seconds)
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
@@ -480,6 +488,17 @@ class PilotOrchestrator:
                     break
                 for entity_endpoint, entity_type, entity_id in next_targets:
                     hydrated_entities.add((entity_type, entity_id))
+                    freshness_key = None
+                    freshness_ttl_seconds = None
+                    if entity_type == "player" and entity_endpoint is PLAYER_ENDPOINT:
+                        freshness_key = _player_profile_freshness_key(entity_id)
+                        freshness_ttl_seconds = self.player_profile_freshness_ttl_seconds
+                        if self._is_resource_fresh(freshness_key):
+                            logger.debug(
+                                "Skipping fresh player profile fan-out: player_id=%s",
+                                entity_id,
+                            )
+                            continue
                     outcome, parsed = await self._fetch_and_parse(
                         endpoint=entity_endpoint,
                         sport_slug=sport_slug,
@@ -488,6 +507,8 @@ class PilotOrchestrator:
                         context_entity_id=entity_id,
                         context_event_id=event_id,
                         fetch_reason="hydrate_entity_profile",
+                        freshness_key=freshness_key,
+                        freshness_ttl_seconds=freshness_ttl_seconds,
                     )
                     fetch_outcomes.append(outcome)
                     if parsed is not None:
@@ -643,6 +664,8 @@ class PilotOrchestrator:
         context_unique_tournament_id: int | None = None,
         context_season_id: int | None = None,
         fetch_reason: str,
+        freshness_key: str | None = None,
+        freshness_ttl_seconds: int | None = None,
     ) -> tuple[FetchOutcomeEnvelope, object | None]:
         task = FetchTask(
             trace_id=f"pilot:{sport_slug}:{context_entity_type}:{context_entity_id}",
@@ -657,6 +680,8 @@ class PilotOrchestrator:
             context_season_id=context_season_id,
             context_event_id=context_event_id,
             fetch_reason=fetch_reason,
+            freshness_key=freshness_key,
+            freshness_ttl_seconds=freshness_ttl_seconds,
         )
         outcome = await self.fetch_executor.execute(task)
         await self._record_capability(sport_slug=sport_slug, outcome=outcome, context_type=context_entity_type)
@@ -670,6 +695,18 @@ class PilotOrchestrator:
             else:
                 parsed = self.normalize_worker.handle(snapshot)
         return outcome, parsed
+
+    def _is_resource_fresh(self, freshness_key: str) -> bool:
+        if self.freshness_store is None:
+            return False
+        try:
+            return bool(self.freshness_store.is_fresh(freshness_key))
+        except Exception as exc:
+            logger.warning(
+                "FreshnessStore.is_fresh failed in PilotOrchestrator (fail-open): %s",
+                exc,
+            )
+            return False
 
     async def _fetch_gated_event_endpoint(
         self,
@@ -1109,6 +1146,10 @@ def _entity_profile_targets(
                 seen.add(("manager", manager_id))
                 planned.append((MANAGER_ENDPOINT, "manager", manager_id))
     return tuple(planned)
+
+
+def _player_profile_freshness_key(player_id: int) -> str:
+    return f"freshness:player:{int(player_id)}"
 
 
 def _minutes_to_start(*, start_timestamp: object, now_ms: int) -> int | None:

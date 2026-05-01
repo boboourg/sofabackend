@@ -27,6 +27,8 @@ class FetchTask:
     context_event_id: int | None = None
     expected_content_type: str | None = "application/json"
     fetch_reason: str | None = None
+    freshness_key: str | None = None
+    freshness_ttl_seconds: int | None = None
 
 
 @dataclass(frozen=True)
