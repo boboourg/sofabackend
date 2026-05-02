@@ -1162,6 +1162,13 @@ class LocalApiApplication:
         return payload
 
     async def _fetch_sport_live_events_payload(self, sport_slug: str) -> dict[str, Any]:
+        # Sofascore's /events/live returns events that are ACTUALLY in flight
+        # right now. Our DB carries a long tail of stale 'interrupted' /
+        # 'inprogress' rows from 2019+ that were never finalised. To match
+        # upstream semantics:
+        #   * limit to events whose start_timestamp is within the last 12h,
+        #   * skip events that already have an event_terminal_state row,
+        #   * order by start_timestamp DESC so the freshest match comes first.
         active_statuses = (
             "inprogress",
             "live",
@@ -1209,7 +1216,11 @@ class LocalApiApplication:
                 JOIN sport AS sp ON sp.id = cat.sport_id
                 WHERE sp.slug = $1
                   AND es.type = ANY($2::text[])
-                ORDER BY e.start_timestamp ASC NULLS LAST, e.id ASC
+                  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 hours')::bigint
+                  AND NOT EXISTS (
+                      SELECT 1 FROM event_terminal_state ets WHERE ets.event_id = e.id
+                  )
+                ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
                 LIMIT 500
                 """,
                 sport_slug,
