@@ -1180,10 +1180,7 @@ class LocalApiApplication:
                     continue
                 envelope_key = _generic_envelope_key(route)
                 return {
-                    envelope_key: [
-                        _serialize_generic_row(dict(row["row"]) if "row" in row else dict(row))
-                        for row in rows
-                    ]
+                    envelope_key: [_serialize_generic_row(_generic_row_mapping(row)) for row in rows]
                 }
         finally:
             await connection.close()
@@ -2386,6 +2383,15 @@ async def _fetch_generic_rows(connection: Any, table_name: str, filters: dict[st
         ) AS t
     """
     return list(await connection.fetch(query, *args))
+
+
+def _generic_row_mapping(row: Any) -> dict[str, Any]:
+    value = row["row"] if "row" in row else row
+    if isinstance(value, str | bytes | bytearray):
+        value = orjson.loads(value)
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
 
 
 def _generic_envelope_key(route: RouteSpec) -> str:

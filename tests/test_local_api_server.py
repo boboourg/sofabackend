@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import concurrent.futures
+import orjson
 import unittest
 from unittest.mock import AsyncMock, patch
 import threading
@@ -485,6 +486,55 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
                 ]
             },
         )
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_uses_generic_fallback_when_jsonb_row_is_text(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeGenericNormalizedConnection(
+            table_columns={
+                "player_transfer_history": {
+                    "id",
+                    "player_id",
+                    "transfer_from_team_id",
+                    "transfer_to_team_id",
+                    "from_team_name",
+                    "to_team_name",
+                    "transfer_date_timestamp",
+                    "transfer_fee",
+                    "transfer_fee_description",
+                    "transfer_fee_raw",
+                    "type",
+                }
+            },
+            table_rows={
+                "player_transfer_history": [
+                    {
+                        "id": 2467532,
+                        "player_id": 233338,
+                        "transfer_from_team_id": 10,
+                        "transfer_to_team_id": 20,
+                        "from_team_name": "Old Club",
+                        "to_team_name": "New Club",
+                        "transfer_date_timestamp": 1711929600,
+                        "transfer_fee": 0,
+                        "transfer_fee_description": "Free transfer",
+                        "transfer_fee_raw": {"value": 0, "currency": "EUR"},
+                        "type": 3,
+                    }
+                ]
+            },
+            jsonb_rows_as_text=True,
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/player/233338/transfer-history", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["transferHistory"][0]["playerId"], 233338)
+        self.assertEqual(response.payload["transferHistory"][0]["transferFeeRaw"], {"value": 0, "currency": "EUR"})
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
@@ -1876,9 +1926,11 @@ class _FakeGenericNormalizedConnection:
         *,
         table_columns: dict[str, set[str]],
         table_rows: dict[str, list[dict[str, object]]],
+        jsonb_rows_as_text: bool = False,
     ) -> None:
         self.table_columns = table_columns
         self.table_rows = table_rows
+        self.jsonb_rows_as_text = jsonb_rows_as_text
         self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
         self.closed = False
 
@@ -1889,6 +1941,8 @@ class _FakeGenericNormalizedConnection:
             return [{"column_name": column_name} for column_name in sorted(self.table_columns.get(table_name, set()))]
         for table_name, rows in self.table_rows.items():
             if f"FROM {table_name}" in query:
+                if self.jsonb_rows_as_text:
+                    return [{"row": orjson.dumps(row).decode()} for row in rows]
                 return [{"row": row} for row in rows]
         return []
 
