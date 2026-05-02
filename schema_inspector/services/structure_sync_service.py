@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_MISSING_ROUNDS = 2
 _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS = 3
-_MAX_SEASON_EVENT_PAGES = 50
+_MAX_SEASON_EVENT_PAGES = 250
 _SEASON_EVENT_SURFACE_REFRESH_TTL_SECONDS = 24 * 3600
 _SEASON_LAST_ENDPOINT_PATTERN = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}"
 _SEASON_NEXT_ENDPOINT_PATTERN = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}"

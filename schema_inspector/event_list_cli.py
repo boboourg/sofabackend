@@ -50,12 +50,14 @@ def main() -> int:
     team_last = subparsers.add_parser("team-last", help="Load /team/{id}/events/last/{page}")
     team_last.add_argument("--team-id", type=int, required=True)
     team_last.add_argument("--page", type=int, default=0)
+    team_last.add_argument("--until-end", action="store_true", help="Continue pages until hasNextPage=false.")
+    team_last.add_argument("--max-pages", type=int, default=250, help="Safety cap for --until-end pagination.")
 
     team_next = subparsers.add_parser("team-next", help="Load /team/{id}/events/next/{page}")
     team_next.add_argument("--team-id", type=int, required=True)
     team_next.add_argument("--page", type=int, default=0)
     team_next.add_argument("--until-end", action="store_true", help="Continue pages until hasNextPage=false.")
-    team_next.add_argument("--max-pages", type=int, default=50, help="Safety cap for --until-end pagination.")
+    team_next.add_argument("--max-pages", type=int, default=250, help="Safety cap for --until-end pagination.")
 
     team_surfaces = subparsers.add_parser(
         "team-surfaces",
@@ -126,12 +128,22 @@ async def _run(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
             )
         elif args.command == "team-last":
-            result = await job.run_team_last(
-                args.team_id,
-                args.page,
-                sport_slug=args.sport_slug,
-                timeout=args.timeout,
-            )
+            if args.until_end:
+                result = await _run_paginated(
+                    job.run_team_last,
+                    args.team_id,
+                    start_page=args.page,
+                    max_pages=args.max_pages,
+                    sport_slug=args.sport_slug,
+                    timeout=args.timeout,
+                )
+            else:
+                result = await job.run_team_last(
+                    args.team_id,
+                    args.page,
+                    sport_slug=args.sport_slug,
+                    timeout=args.timeout,
+                )
         elif args.command == "team-next":
             if args.until_end:
                 result = await _run_paginated(

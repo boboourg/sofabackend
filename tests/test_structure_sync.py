@@ -675,6 +675,28 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
             timeout=20.0,
         )
 
+    async def test_season_surface_pagination_supports_more_than_one_hundred_pages(self) -> None:
+        from schema_inspector.services.structure_sync_service import _run_paginated_season_surface
+
+        page_results = [
+            _event_result_with_has_next((10_000 + page,), has_next=page < 119)
+            for page in range(120)
+        ]
+        runner = mock.AsyncMock(side_effect=page_results)
+
+        result = await _run_paginated_season_surface(
+            runner,
+            surface_name="last",
+            unique_tournament_id=17,
+            season_id=76986,
+            sport_slug="football",
+            timeout=20.0,
+        )
+
+        self.assertTrue(result.complete)
+        self.assertEqual(len(result.event_ids), 120)
+        self.assertEqual(runner.await_count, 120)
+
     async def test_structure_sync_does_not_mark_season_surfaces_fresh_after_partial_page_failure(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament

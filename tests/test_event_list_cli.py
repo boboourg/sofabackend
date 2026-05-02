@@ -87,6 +87,29 @@ class EventListCliRunTests(unittest.IsolatedAsyncioTestCase):
             timeout=15.0,
         )
 
+    async def test_run_team_last_until_end_supports_more_than_one_hundred_pages(self) -> None:
+        fake_adapter = _FakeEventListAdapter()
+        fake_adapter.event_list_job.run_team_last = AsyncMock(
+            side_effect=[
+                _result(f"team_last:2817:{page}", has_next=page < 119)
+                for page in range(120)
+            ]
+        )
+
+        with (
+            patch("schema_inspector.event_list_cli.load_runtime_config", return_value=SimpleNamespace(source_slug="sofascore")),
+            patch("schema_inspector.event_list_cli.load_database_config", return_value=object()),
+            patch(
+                "schema_inspector.event_list_cli.AsyncpgDatabase",
+                return_value=_FakeAsyncpgDatabaseContext(object()),
+            ),
+            patch("schema_inspector.event_list_cli.build_source_adapter", return_value=fake_adapter),
+        ):
+            exit_code = await _run(_build_args(command="team-last", team_id=2817, page=0, until_end=True))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_adapter.event_list_job.run_team_last.await_count, 120)
+
     async def test_run_team_next_until_end_follows_has_next_page(self) -> None:
         fake_adapter = _FakeEventListAdapter()
         fake_adapter.event_list_job.run_team_next = AsyncMock(
@@ -283,7 +306,7 @@ def _build_args(**overrides):
         team_id=2817,
         page=0,
         until_end=False,
-        max_pages=50,
+        max_pages=250,
         timeout=15.0,
         proxy=[],
         user_agent=None,
