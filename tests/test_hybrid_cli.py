@@ -1566,12 +1566,14 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             runtime_config=RuntimeConfig(require_proxy=False),
             redis_backend=_FakeRedisBackend(),
         )
+        skip_keys = frozenset({"freshness:event-player:99:42:/api/v1/event/{event_id}/player/{player_id}/heatmap"})
         prefetched = hybrid_cli.PrefetchedRun(
             event_id=99,
             sport_slug="football",
             fetch_records=(),
             snapshot_store=object(),
             initial_capability_rollup={},
+            freshness_skip_keys=skip_keys,
         )
         captured_kwargs: list[dict[str, object]] = []
 
@@ -1591,7 +1593,11 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
                 result = await app._persist_prefetched_run(prefetched, hydration_mode="full")
 
         self.assertEqual(result.event_id, 99)
-        self.assertIs(captured_kwargs[0]["freshness_store"], app.freshness_store)
+        replay_store = captured_kwargs[0]["freshness_store"]
+        self.assertIsInstance(replay_store, hybrid_cli._ReplayFreshnessStore)
+        self.assertIsNot(replay_store, app.freshness_store)
+        for key in skip_keys:
+            self.assertTrue(replay_store.is_fresh(key))
         self.assertEqual(captured_kwargs[0]["fanout_max_inflight"], 1)
 
     async def test_hybrid_app_prefetch_uses_live_delta_fanout_env_only_for_live_delta(self) -> None:
@@ -1603,6 +1609,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         captured_kwargs: list[dict[str, object]] = []
 
         class _CapturingPilotOrchestrator:
+            freshness_skip_keys: frozenset[str] = frozenset()
+
             def __init__(self, **kwargs) -> None:
                 captured_kwargs.append(kwargs)
 

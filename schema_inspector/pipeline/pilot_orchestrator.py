@@ -220,6 +220,11 @@ class PilotOrchestrator:
         self._event_endpoint_gate_decision_lock = asyncio.Lock()
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
+        self._freshness_skip_keys: set[str] = set()
+
+    @property
+    def freshness_skip_keys(self) -> frozenset[str]:
+        return frozenset(self._freshness_skip_keys)
 
     async def run_event(
         self,
@@ -569,6 +574,7 @@ class PilotOrchestrator:
                         player_ttl_seconds=self.player_profile_freshness_ttl_seconds,
                     )
                     if freshness_key is not None and self._is_resource_fresh(freshness_key):
+                        self._freshness_skip_keys.add(freshness_key)
                         logger.debug(
                             "Skipping fresh entity profile fan-out: entity_type=%s entity_id=%s endpoint=%s",
                             entity_type,
@@ -847,6 +853,7 @@ class PilotOrchestrator:
             return None, None
         freshness_key, freshness_ttl_seconds = _event_detail_freshness_fields(endpoint, path_params)
         if freshness_key is not None and self._is_resource_fresh(freshness_key):
+            self._freshness_skip_keys.add(freshness_key)
             logger.debug(
                 "Skipping fresh event detail resource: event_id=%s endpoint=%s",
                 context_event_id,

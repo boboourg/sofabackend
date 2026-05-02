@@ -114,6 +114,7 @@ class PrefetchedRun:
     replay_widget_gate: object | None = None
     event_negative_cache_events: tuple[object, ...] = ()
     replay_event_endpoint_gate: object | None = None
+    freshness_skip_keys: frozenset[str] = frozenset()
 
     @property
     def total_payload_size_bytes(self) -> int:
@@ -206,6 +207,23 @@ class HybridSnapshotStore:
         snapshot = await self.repository.fetch_payload_snapshot(self.sql_executor, snapshot_id)
         self._cache[snapshot_id] = snapshot
         return snapshot
+
+
+class _ReplayFreshnessStore:
+    """Replays prefetch's freshness-skip decisions deterministically.
+
+    The live FreshnessStore is backed by Redis with a TTL. Between prefetch
+    and replay phases the TTL can expire, which would cause replay to attempt
+    a fetch that prefetch had skipped — and ReplayFetchExecutor would raise
+    "No prefetched fetch outcome available". Snapshotting prefetch's skip set
+    and consulting it from replay decouples replay from live TTL state.
+    """
+
+    def __init__(self, fresh_keys: frozenset[str]) -> None:
+        self._fresh_keys = frozenset(fresh_keys or ())
+
+    def is_fresh(self, key: str) -> bool:
+        return key in self._fresh_keys
 
 
 class ReplayFetchExecutor:
@@ -389,6 +407,7 @@ class HybridApp:
             replay_widget_gate=season_widget_gate.build_replay_gate() if season_widget_gate is not None else None,
             event_negative_cache_events=event_endpoint_gate.events if event_endpoint_gate is not None else (),
             replay_event_endpoint_gate=event_endpoint_gate.build_replay_gate() if event_endpoint_gate is not None else None,
+            freshness_skip_keys=orchestrator.freshness_skip_keys,
         )
 
     async def _commit_prefetched_run(self, prefetched_run: PrefetchedRun) -> PrefetchedRun:
@@ -449,7 +468,7 @@ class HybridApp:
                 stream_queue=self.stream_queue,
                 season_widget_gate=prefetched_run.replay_widget_gate,
                 event_endpoint_gate=prefetched_run.replay_event_endpoint_gate,
-                freshness_store=self.freshness_store,
+                freshness_store=_ReplayFreshnessStore(prefetched_run.freshness_skip_keys),
                 fanout_max_inflight=1,
             )
             result = await orchestrator.run_event(
