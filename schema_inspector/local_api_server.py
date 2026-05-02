@@ -1205,7 +1205,8 @@ class LocalApiApplication:
                 LEFT JOIN tournament AS t ON t.id = e.tournament_id
                 LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
                 LEFT JOIN season AS s ON s.id = e.season_id
-                JOIN sport AS sp ON sp.id = t.sport_id
+                JOIN category AS cat ON cat.id = t.category_id
+                JOIN sport AS sp ON sp.id = cat.sport_id
                 WHERE sp.slug = $1
                   AND es.type = ANY($2::text[])
                 ORDER BY e.start_timestamp ASC NULLS LAST, e.id ASC
