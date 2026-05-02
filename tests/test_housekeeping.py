@@ -44,6 +44,7 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
             request_log_count=11,
             snapshot_count=22,
             live_history_count=33,
+            capability_observation_count=44,
         )
         live_state_repository = _FakeLiveStateRepository()
         redis_backend = _FakeRedisBackend(
@@ -82,6 +83,7 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
                 "api_request_log": 11,
                 "api_payload_snapshot_legacy": 22,
                 "event_live_state_history": 33,
+                "endpoint_capability_observation": 44,
             },
         )
         self.assertEqual(report.zombies_found, 2)
@@ -286,10 +288,18 @@ class _FakeConnectionContext:
 
 
 class _FakeRetentionRepository:
-    def __init__(self, *, request_log_count: int = 0, snapshot_count: int = 0, live_history_count: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        request_log_count: int = 0,
+        snapshot_count: int = 0,
+        live_history_count: int = 0,
+        capability_observation_count: int = 0,
+    ) -> None:
         self.request_log_count = request_log_count
         self.snapshot_count = snapshot_count
         self.live_history_count = live_history_count
+        self.capability_observation_count = capability_observation_count
 
     async def count_expired_request_logs(self, executor, *, cutoff: datetime) -> int:
         del executor, cutoff
@@ -303,6 +313,10 @@ class _FakeRetentionRepository:
         del executor, cutoff
         return self.live_history_count
 
+    async def count_expired_capability_observations(self, executor, *, cutoff: datetime) -> int:
+        del executor, cutoff
+        return self.capability_observation_count
+
     async def delete_request_log_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:
         del executor, cutoff, batch_size
         return 0
@@ -312,6 +326,10 @@ class _FakeRetentionRepository:
         return 0
 
     async def delete_live_state_history_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:
+        del executor, cutoff, batch_size
+        return 0
+
+    async def delete_capability_observation_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:
         del executor, cutoff, batch_size
         return 0
 

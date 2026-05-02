@@ -139,6 +139,49 @@ class RetentionRepository:
         return _parse_delete_tag(command_tag)
 
     # ------------------------------------------------------------------
+    # endpoint_capability_observation — append-only probe log
+    # ------------------------------------------------------------------
+    #
+    # Aggregates roll up into endpoint_capability_rollup; the raw
+    # observation row is only useful for short-term debugging.
+
+    async def count_expired_capability_observations(
+        self,
+        executor: SqlExecutor,
+        *,
+        cutoff: datetime,
+    ) -> int:
+        value = await executor.fetchval(
+            "SELECT count(*) FROM endpoint_capability_observation WHERE observed_at < $1",
+            cutoff,
+        )
+        return int(value or 0)
+
+    async def delete_capability_observation_batch(
+        self,
+        executor: SqlExecutor,
+        *,
+        cutoff: datetime,
+        batch_size: int,
+    ) -> int:
+        command_tag = await executor.execute(
+            """
+            WITH victims AS (
+                SELECT id FROM endpoint_capability_observation
+                WHERE observed_at < $1
+                ORDER BY id
+                LIMIT $2
+            )
+            DELETE FROM endpoint_capability_observation
+            USING victims
+            WHERE endpoint_capability_observation.id = victims.id
+            """,
+            cutoff,
+            int(batch_size),
+        )
+        return _parse_delete_tag(command_tag)
+
+    # ------------------------------------------------------------------
     # event_live_state_history — rolling observation log
     # ------------------------------------------------------------------
 

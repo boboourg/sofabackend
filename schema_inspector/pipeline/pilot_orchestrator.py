@@ -307,6 +307,20 @@ class PilotOrchestrator:
         if root_parse is not None:
             parse_results.append(root_parse)
 
+        # Mark bootstrap state as soon as the root response is in. Subsequent
+        # poll ticks for the same event will then see is_bootstrapped=True
+        # and run as live_delta instead of being promoted to full again,
+        # even if the fan-out from THIS tick is still in flight.
+        if (
+            should_mark_live_bootstrap
+            and self.live_bootstrap_coordinator is not None
+            and root_outcome.classification in {"success_json", "success_empty_json"}
+        ):
+            await self.live_bootstrap_coordinator.mark_bootstrapped(
+                self.sql_executor, event_id=event_id
+            )
+            should_mark_live_bootstrap = False
+
         status_type = None
         season_id = None
         unique_tournament_id = None

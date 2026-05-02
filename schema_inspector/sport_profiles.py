@@ -77,7 +77,7 @@ SUPPORTED_SPORT_SLUGS = (
 
 FOOTBALL_PROFILE = SportProfile(
     sport_slug="football",
-    live_discovery_interval_seconds=30.0,
+    live_discovery_interval_seconds=15.0,
     hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("home", "away", "total"),

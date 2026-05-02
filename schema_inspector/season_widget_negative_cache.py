@@ -33,6 +33,7 @@ SEASONAL_BYPASS_BEFORE_END = timedelta(days=3)
 SEASONAL_BYPASS_AFTER_END = timedelta(days=14)
 
 _C_PROBATION_BASE_INTERVALS = (
+    timedelta(hours=1),
     timedelta(hours=6),
     timedelta(hours=24),
     timedelta(hours=72),

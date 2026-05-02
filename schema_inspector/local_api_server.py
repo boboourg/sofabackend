@@ -414,6 +414,10 @@ class LocalApiApplication:
         if raw_query:
             return False, None
 
+        live_sport_slug = _extract_sport_slug_from_live_events_path(path)
+        if live_sport_slug is not None:
+            return True, await self._fetch_sport_live_events_payload(live_sport_slug)
+
         event_root_id = _extract_event_id_from_entity_root_path(path, "event")
         if event_root_id is not None:
             return True, await self._fetch_event_root_payload(event_root_id)
@@ -862,6 +866,12 @@ class LocalApiApplication:
     ) -> Any | None:
         del path
         template = route.endpoint.path_template
+        if template == "/api/v1/event/{event_id}/statistics":
+            return await self._fetch_event_statistics_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/incidents":
+            return await self._fetch_event_incidents_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/lineups":
+            return await self._fetch_event_lineups_payload(int(path_params["event_id"]))
         if template == "/api/v1/event/{event_id}/player/{player_id}/statistics":
             return await self._fetch_event_player_statistics_payload(
                 int(path_params["event_id"]),
@@ -977,6 +987,236 @@ class LocalApiApplication:
             ],
             "hasNextPage": has_next_page,
         }
+
+    async def _fetch_event_statistics_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT period, group_name, stat_name,
+                       home_value_numeric, home_value_text, home_value_json,
+                       away_value_numeric, away_value_text, away_value_json,
+                       compare_code, statistics_type
+                FROM event_statistic
+                WHERE event_id = $1
+                ORDER BY period, group_name, stat_name
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        periods: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for r in rows:
+            period = str(r["period"])
+            group = str(r["group_name"])
+            home = _first_not_none(
+                _serialize_scalar(r["home_value_json"]),
+                _serialize_scalar(r["home_value_numeric"]),
+                _serialize_scalar(r["home_value_text"]),
+            )
+            away = _first_not_none(
+                _serialize_scalar(r["away_value_json"]),
+                _serialize_scalar(r["away_value_numeric"]),
+                _serialize_scalar(r["away_value_text"]),
+            )
+            item: dict[str, Any] = {"name": str(r["stat_name"])}
+            if home is not None:
+                item["home"] = home
+            if away is not None:
+                item["away"] = away
+            if r["compare_code"] is not None:
+                item["compareCode"] = str(r["compare_code"])
+            if r["statistics_type"] is not None:
+                item["statisticsType"] = str(r["statistics_type"])
+            periods.setdefault(period, {}).setdefault(group, []).append(item)
+
+        statistics_list = [
+            {
+                "period": period,
+                "groups": [
+                    {"groupName": group_name, "statisticsItems": items}
+                    for group_name, items in groups.items()
+                ],
+            }
+            for period, groups in periods.items()
+        ]
+        return {"statistics": statistics_list}
+
+    async def _fetch_event_incidents_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT ordinal, incident_id, incident_type, minute,
+                       home_score_text, away_score_text, text_value
+                FROM event_incident
+                WHERE event_id = $1
+                ORDER BY ordinal
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        incidents: list[dict[str, Any]] = []
+        for r in rows:
+            item: dict[str, Any] = {}
+            if r["incident_id"] is not None:
+                item["id"] = int(r["incident_id"])
+            if r["incident_type"] is not None:
+                item["incidentType"] = str(r["incident_type"])
+            if r["minute"] is not None:
+                item["time"] = int(r["minute"])
+            if r["home_score_text"] is not None:
+                item["homeScore"] = str(r["home_score_text"])
+            if r["away_score_text"] is not None:
+                item["awayScore"] = str(r["away_score_text"])
+            if r["text_value"] is not None:
+                item["text"] = str(r["text_value"])
+            incidents.append(item)
+        return {"incidents": incidents}
+
+    async def _fetch_event_lineups_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            lineup_rows = await connection.fetch(
+                """
+                SELECT side, formation, player_color, goalkeeper_color, support_staff
+                FROM event_lineup
+                WHERE event_id = $1
+                """,
+                event_id,
+            )
+            player_rows = await connection.fetch(
+                """
+                SELECT elp.side, elp.player_id, elp.team_id,
+                       elp.position, elp.substitute, elp.shirt_number,
+                       elp.jersey_number, elp.avg_rating,
+                       p.slug AS player_slug, p.name AS player_name,
+                       p.short_name AS player_short_name
+                FROM event_lineup_player AS elp
+                LEFT JOIN player AS p ON p.id = elp.player_id
+                WHERE elp.event_id = $1
+                ORDER BY elp.side,
+                         elp.substitute NULLS LAST,
+                         elp.shirt_number NULLS LAST,
+                         elp.player_id
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if not lineup_rows and not player_rows:
+            return None
+
+        sides: dict[str, dict[str, Any]] = {}
+        for r in lineup_rows:
+            side = str(r["side"])
+            block: dict[str, Any] = {"players": []}
+            if r["formation"] is not None:
+                block["formation"] = str(r["formation"])
+            if r["player_color"] is not None:
+                block["playerColor"] = _serialize_scalar(r["player_color"])
+            if r["goalkeeper_color"] is not None:
+                block["goalkeeperColor"] = _serialize_scalar(r["goalkeeper_color"])
+            if r["support_staff"] is not None:
+                block["supportStaff"] = _serialize_scalar(r["support_staff"])
+            sides[side] = block
+
+        for r in player_rows:
+            side = str(r["side"])
+            entry: dict[str, Any] = {
+                "player": _minimal_entity_payload(
+                    r["player_id"],
+                    slug=r["player_slug"],
+                    name=r["player_name"],
+                    short_name=r["player_short_name"],
+                ),
+            }
+            if r["team_id"] is not None:
+                entry["teamId"] = int(r["team_id"])
+            if r["shirt_number"] is not None:
+                entry["shirtNumber"] = int(r["shirt_number"])
+            if r["jersey_number"] is not None:
+                entry["jerseyNumber"] = str(r["jersey_number"])
+            if r["position"] is not None:
+                entry["position"] = str(r["position"])
+            if r["substitute"] is not None:
+                entry["substitute"] = bool(r["substitute"])
+            if r["avg_rating"] is not None:
+                entry["avgRating"] = _serialize_scalar(r["avg_rating"])
+            sides.setdefault(side, {"players": []}).setdefault("players", []).append(entry)
+
+        if not sides:
+            return None
+        payload: dict[str, Any] = {}
+        if "home" in sides:
+            payload["home"] = sides["home"]
+        if "away" in sides:
+            payload["away"] = sides["away"]
+        return payload
+
+    async def _fetch_sport_live_events_payload(self, sport_slug: str) -> dict[str, Any]:
+        active_statuses = (
+            "inprogress",
+            "live",
+            "overtime",
+            "extra",
+            "awaitingextra",
+            "awaitingpenalties",
+            "penalties",
+            "interrupted",
+            "halftime",
+            "paused",
+            "pause",
+            "break",
+        )
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    e.id, e.slug, e.custom_id, e.start_timestamp,
+                    e.status_code, e.winner_code, e.aggregated_winner_code,
+                    e.coverage, e.home_red_cards, e.away_red_cards,
+                    es.type AS status_type,
+                    es.description AS status_description,
+                    e.home_team_id,
+                    ht.slug AS home_team_slug, ht.name AS home_team_name,
+                    ht.short_name AS home_team_short_name,
+                    e.away_team_id,
+                    at.slug AS away_team_slug, at.name AS away_team_name,
+                    at.short_name AS away_team_short_name,
+                    e.tournament_id,
+                    t.slug AS tournament_slug, t.name AS tournament_name,
+                    e.unique_tournament_id,
+                    ut.slug AS unique_tournament_slug, ut.name AS unique_tournament_name,
+                    e.season_id,
+                    s.name AS season_name, s.year AS season_year
+                FROM event AS e
+                JOIN event_status AS es ON es.code = e.status_code
+                LEFT JOIN team AS ht ON ht.id = e.home_team_id
+                LEFT JOIN team AS at ON at.id = e.away_team_id
+                LEFT JOIN tournament AS t ON t.id = e.tournament_id
+                LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
+                LEFT JOIN season AS s ON s.id = e.season_id
+                JOIN sport AS sp ON sp.id = t.sport_id
+                WHERE sp.slug = $1
+                  AND es.type = ANY($2::text[])
+                ORDER BY e.start_timestamp ASC NULLS LAST, e.id ASC
+                LIMIT 500
+                """,
+                sport_slug,
+                list(active_statuses),
+            )
+        finally:
+            await connection.close()
+        return {"events": [_serialize_season_event_row(row) for row in rows]}
 
     async def _fetch_event_player_statistics_payload(
         self,
@@ -2606,6 +2846,13 @@ def _serialize_category_row(row: Any) -> dict[str, Any]:
 
 def _extract_sport_slug_from_categories_path(path: str) -> str | None:
     match = re.fullmatch(r"/api/v1/sport/(?P<sport_slug>[^/]+)/categories(?:/all)?", path)
+    if match is None:
+        return None
+    return str(match.group("sport_slug"))
+
+
+def _extract_sport_slug_from_live_events_path(path: str) -> str | None:
+    match = re.fullmatch(r"/api/v1/sport/(?P<sport_slug>[^/]+)/events/live", path)
     if match is None:
         return None
     return str(match.group("sport_slug"))

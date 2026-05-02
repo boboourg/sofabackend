@@ -69,6 +69,7 @@ _ENV_BATCH_SLEEP_MS = _ENV_PREFIX + "RETENTION_BATCH_SLEEP_MS"
 _ENV_REQUEST_LOG_HOURS = _ENV_PREFIX + "RETENTION_REQUEST_LOG_HOURS"
 _ENV_SNAPSHOT_DAYS = _ENV_PREFIX + "RETENTION_PAYLOAD_SNAPSHOT_DAYS"
 _ENV_LIVE_HISTORY_DAYS = _ENV_PREFIX + "RETENTION_LIVE_HISTORY_DAYS"
+_ENV_CAPABILITY_OBS_DAYS = _ENV_PREFIX + "RETENTION_CAPABILITY_OBSERVATION_DAYS"
 _ENV_ZOMBIE_MAX_AGE_MIN = _ENV_PREFIX + "SWEEPER_ZOMBIE_MAX_AGE_MINUTES"
 _ENV_ZOMBIE_MAX_AGE_ALIASES = (_ENV_PREFIX + "HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES",)
 _ENV_STALE_LIVE_ENABLED = _ENV_PREFIX + "HOUSEKEEPING_STALE_LIVE_ENABLED"
@@ -98,6 +99,7 @@ class HousekeepingConfig:
     request_log_retention_hours: int = 48
     payload_snapshot_retention_days: int = 7
     live_state_history_retention_days: int = 30
+    capability_observation_retention_days: int = 7
     zombie_max_age_minutes: int = 120
     stale_live_enabled: bool = True
     live_updated_stale_minutes: int = 45
@@ -118,6 +120,7 @@ class HousekeepingConfig:
             request_log_retention_hours=_env_int(env, _ENV_REQUEST_LOG_HOURS, 48, minimum=1),
             payload_snapshot_retention_days=_env_int(env, _ENV_SNAPSHOT_DAYS, 7, minimum=1),
             live_state_history_retention_days=_env_int(env, _ENV_LIVE_HISTORY_DAYS, 30, minimum=1),
+            capability_observation_retention_days=_env_int(env, _ENV_CAPABILITY_OBS_DAYS, 7, minimum=1),
             zombie_max_age_minutes=_env_int_any(
                 env,
                 (_ENV_ZOMBIE_MAX_AGE_MIN, *_ENV_ZOMBIE_MAX_AGE_ALIASES),
@@ -139,6 +142,7 @@ class HousekeepingTickReport:
     request_log_deleted: int = 0
     payload_snapshot_deleted: int = 0
     live_state_history_deleted: int = 0
+    capability_observation_deleted: int = 0
     zombies_found: int = 0
     zombies_cleared: int = 0
     stale_live_found: int = 0
@@ -250,6 +254,11 @@ class HousekeepingLoop:
                 cutoff=self._cutoff(days=self.config.live_state_history_retention_days),
                 delete_batch=self.retention_repository.delete_live_state_history_batch,
             )
+            report.capability_observation_deleted = await self._run_retention_safely(
+                name="endpoint_capability_observation",
+                cutoff=self._cutoff(days=self.config.capability_observation_retention_days),
+                delete_batch=self.retention_repository.delete_capability_observation_batch,
+            )
         await self._run_zombie_sweep(report)
         report.duration_ms = int((time.perf_counter() - started_perf) * 1000)
         return report
@@ -311,6 +320,7 @@ class HousekeepingLoop:
         request_log_cutoff = self._cutoff(hours=self.config.request_log_retention_hours)
         snapshot_cutoff = self._cutoff(days=self.config.payload_snapshot_retention_days)
         history_cutoff = self._cutoff(days=self.config.live_state_history_retention_days)
+        capability_cutoff = self._cutoff(days=self.config.capability_observation_retention_days)
         async with self._connection_factory() as connection:
             report.would_delete = {
                 "api_request_log": await self.retention_repository.count_expired_request_logs(
@@ -321,6 +331,9 @@ class HousekeepingLoop:
                 ),
                 "event_live_state_history": await self.retention_repository.count_expired_live_state_history(
                     connection, cutoff=history_cutoff
+                ),
+                "endpoint_capability_observation": await self.retention_repository.count_expired_capability_observations(
+                    connection, cutoff=capability_cutoff
                 ),
             }
 
