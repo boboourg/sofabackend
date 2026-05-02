@@ -227,6 +227,20 @@ class _ReplayFreshnessStore:
 
 
 class ReplayFetchExecutor:
+    """Replays committed prefetch outcomes by task key.
+
+    For ``hydrate_special_route`` reasons (player heatmap / rating-breakdown /
+    statistics / shotmap-derived followups), the prefetch and replay sides
+    occasionally schedule slightly different sets of player IDs because the
+    decision depends on rollup state that mutates across the run. When that
+    happens we soft-skip with a synthetic ``replay_skipped_missing`` outcome
+    instead of cascading into a full replay failure that would re-trigger a
+    bootstrap upgrade and another full-mode burst on the next tick. Other
+    reasons (root, edges, finalize_event) still raise — they are mandatory.
+    """
+
+    _SOFT_SKIP_REASONS = frozenset({"hydrate_special_route", "hydrate_entity_profile"})
+
     def __init__(self, prefetched_run: PrefetchedRun) -> None:
         self._records_by_key: dict[tuple[object, ...], deque[PrefetchedFetchRecord]] = {}
         for record in prefetched_run.fetch_records:
@@ -235,9 +249,31 @@ class ReplayFetchExecutor:
     async def execute(self, task) -> object:
         key = build_fetch_task_key(task)
         queued = self._records_by_key.get(key)
-        if not queued:
-            raise RuntimeError(f"No prefetched fetch outcome available for task={key!r}")
-        return queued.popleft().outcome
+        if queued:
+            return queued.popleft().outcome
+        fetch_reason = getattr(task, "fetch_reason", None)
+        if fetch_reason in self._SOFT_SKIP_REASONS:
+            from .fetch_models import FetchOutcomeEnvelope
+
+            logger.warning(
+                "ReplayFetchExecutor soft-skipping %s task without prefetched record: %s",
+                fetch_reason,
+                key,
+            )
+            return FetchOutcomeEnvelope(
+                trace_id=getattr(task, "trace_id", None),
+                job_id=getattr(task, "job_id", None),
+                endpoint_pattern=getattr(task, "endpoint_pattern", ""),
+                source_url=getattr(task, "source_url", ""),
+                resolved_url=None,
+                http_status=None,
+                classification="replay_skipped_missing",
+                proxy_id=None,
+                challenge_reason=None,
+                snapshot_id=None,
+                payload_hash=None,
+            )
+        raise RuntimeError(f"No prefetched fetch outcome available for task={key!r}")
 
 
 class HybridApp:
