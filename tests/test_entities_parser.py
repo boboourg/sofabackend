@@ -326,6 +326,13 @@ class EntitiesParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bundle.entity_statistics_seasons), 2)
         self.assertEqual(len(bundle.entity_statistics_types), 4)
         self.assertEqual(len(bundle.season_statistics_types), 2)
+        self.assertEqual(len(bundle.team_player_statistics_seasons), 1)
+        self.assertEqual(len(bundle.team_player_statistics_types), 2)
+        self.assertEqual(bundle.team_player_statistics_seasons[0].team_id, team_id)
+        self.assertEqual(
+            {item.stat_type for item in bundle.team_player_statistics_types},
+            {"passing", "summary"},
+        )
         self.assertEqual(len(bundle.unique_tournament_seasons), 1)
         self.assertEqual(
             fake_client.seen_urls,

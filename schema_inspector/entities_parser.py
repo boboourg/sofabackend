@@ -154,6 +154,21 @@ class SeasonStatisticsTypeRecord:
 
 
 @dataclass(frozen=True)
+class TeamPlayerStatisticsSeasonRecord:
+    team_id: int
+    unique_tournament_id: int
+    season_id: int
+
+
+@dataclass(frozen=True)
+class TeamPlayerStatisticsTypeRecord:
+    team_id: int
+    unique_tournament_id: int
+    season_id: int
+    stat_type: str
+
+
+@dataclass(frozen=True)
 class PlayerOverallRequest:
     player_id: int
     unique_tournament_id: int
@@ -203,6 +218,8 @@ class EntitiesBundle:
     entity_statistics_seasons: tuple[EntityStatisticsSeasonRecord, ...]
     entity_statistics_types: tuple[EntityStatisticsTypeRecord, ...]
     season_statistics_types: tuple[SeasonStatisticsTypeRecord, ...]
+    team_player_statistics_seasons: tuple[TeamPlayerStatisticsSeasonRecord, ...]
+    team_player_statistics_types: tuple[TeamPlayerStatisticsTypeRecord, ...]
 
 
 class EntitiesParserError(RuntimeError):
@@ -659,6 +676,11 @@ class EntitiesParser:
             unique_tournament_seasons=_iter_mappings(root.get("uniqueTournamentSeasons")),
             types_map=_as_mapping(root.get("typesMap")),
         )
+        state.ingest_team_player_statistics_seasons(
+            team_id=team_id,
+            unique_tournament_seasons=_iter_mappings(root.get("uniqueTournamentSeasons")),
+            types_map=_as_mapping(root.get("typesMap")),
+        )
 
     async def _fetch_player_overall(
         self,
@@ -809,6 +831,8 @@ class _EntitiesAccumulator:
         self.entity_statistics_seasons: dict[tuple[str, int, int, int], dict[str, Any]] = {}
         self.entity_statistics_types: set[tuple[str, int, int, int, str]] = set()
         self.season_statistics_types: set[tuple[str, int, int, str]] = set()
+        self.team_player_statistics_seasons: set[tuple[int, int, int]] = set()
+        self.team_player_statistics_types: set[tuple[int, int, int, str]] = set()
 
     def add_payload_snapshot(
         self,
@@ -963,6 +987,27 @@ class _EntitiesAccumulator:
         for unique_tournament_id, season_id, stat_type in _iter_types_map(types_map):
             self.season_statistics_types.add((subject_type, unique_tournament_id, season_id, stat_type))
 
+    def ingest_team_player_statistics_seasons(
+        self,
+        *,
+        team_id: int,
+        unique_tournament_seasons: Sequence[Mapping[str, Any]],
+        types_map: Mapping[str, Any] | None,
+    ) -> None:
+        for item in unique_tournament_seasons:
+            unique_tournament_id = self.core.ingest_unique_tournament(_as_mapping(item.get("uniqueTournament")))
+            if unique_tournament_id is None:
+                continue
+            for season_payload in _iter_mappings(item.get("seasons")):
+                season_id = self.core.ingest_season(season_payload)
+                if season_id is None:
+                    continue
+                self.unique_tournament_seasons.add((unique_tournament_id, season_id))
+                self.team_player_statistics_seasons.add((team_id, unique_tournament_id, season_id))
+
+        for unique_tournament_id, season_id, stat_type in _iter_types_map(types_map):
+            self.team_player_statistics_types.add((team_id, unique_tournament_id, season_id, stat_type))
+
     def _collect_transfer_periods_from_team(self, team_payload: Mapping[str, Any]) -> None:
         self._collect_transfer_periods_from_category(_as_mapping(team_payload.get("category")))
         tournament = _as_mapping(team_payload.get("tournament"))
@@ -1047,6 +1092,23 @@ class _EntitiesAccumulator:
                     stat_type=stat_type,
                 )
                 for subject_type, unique_tournament_id, season_id, stat_type in sorted(self.season_statistics_types)
+            ),
+            team_player_statistics_seasons=tuple(
+                TeamPlayerStatisticsSeasonRecord(
+                    team_id=team_id,
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                )
+                for team_id, unique_tournament_id, season_id in sorted(self.team_player_statistics_seasons)
+            ),
+            team_player_statistics_types=tuple(
+                TeamPlayerStatisticsTypeRecord(
+                    team_id=team_id,
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                    stat_type=stat_type,
+                )
+                for team_id, unique_tournament_id, season_id, stat_type in sorted(self.team_player_statistics_types)
             ),
         )
 

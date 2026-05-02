@@ -1221,7 +1221,13 @@ def _build_statistics_and_entities_paths(summary: SwaggerDataSummary) -> dict[st
             description="Tournament/season availability map for player statistics under one team context.",
             response_schema=_ref("EntityStatisticsSeasonsEnvelope"),
             parameters=[_path_param("team_id", "integer", "Sofascore team ID.")],
-            source_tables=["season_statistics_type", "unique_tournament", "season"],
+            source_tables=[
+                "team_player_statistics_season",
+                "team_player_statistics_type",
+                "season_statistics_type",
+                "unique_tournament",
+                "season",
+            ],
         ),
         "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall": op(
             path_template="/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall",

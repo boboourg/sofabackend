@@ -25,7 +25,13 @@ import orjson
 from fastapi import FastAPI, Request, Response
 
 from .db import DatabaseConfig, create_pool_with_fallback, load_database_config
-from .endpoints import SPORT_ALL_EVENT_COUNT_ENDPOINT, SofascoreEndpoint, local_api_endpoints
+from .endpoints import (
+    SPORT_ALL_EVENT_COUNT_ENDPOINT,
+    TEAM_PLAYER_STATISTICS_SEASONS_ENDPOINT,
+    TEAM_TEAM_STATISTICS_SEASONS_ENDPOINT,
+    SofascoreEndpoint,
+    local_api_endpoints,
+)
 from .ops.health import collect_health_report
 from .ops.queue_summary import collect_queue_summary
 from .queue.live_state import LiveEventStateStore
@@ -649,6 +655,12 @@ class LocalApiApplication:
                 timezone_offset_seconds=timezone_offset_seconds,
             )
 
+        if route.endpoint.path_template == TEAM_TEAM_STATISTICS_SEASONS_ENDPOINT.path_template:
+            return await self._fetch_team_statistics_seasons_payload(int(path_params["team_id"]))
+
+        if route.endpoint.path_template == TEAM_PLAYER_STATISTICS_SEASONS_ENDPOINT.path_template:
+            return await self._fetch_team_player_statistics_seasons_payload(int(path_params["team_id"]))
+
         # Entity-root routes used to return a false 404 whenever the specific
         # raw snapshot for ``/api/v1/event/{id}``, ``/api/v1/team/{id}``,
         # ``/api/v1/player/{id}``, etc. was absent — even when child snapshots
@@ -727,6 +739,106 @@ class LocalApiApplication:
             }
             for row in rows
         }
+
+    async def _fetch_team_statistics_seasons_payload(self, team_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            season_rows = await connection.fetch(
+                """
+                SELECT
+                    ess.unique_tournament_id,
+                    ut.slug AS unique_tournament_slug,
+                    ut.name AS unique_tournament_name,
+                    c.id AS category_id,
+                    c.slug AS category_slug,
+                    c.name AS category_name,
+                    s.id AS sport_id,
+                    s.slug AS sport_slug,
+                    s.name AS sport_name,
+                    ess.season_id,
+                    season.name AS season_name,
+                    season.year AS season_year,
+                    ess.all_time_season_id
+                FROM entity_statistics_season AS ess
+                JOIN unique_tournament AS ut
+                    ON ut.id = ess.unique_tournament_id
+                LEFT JOIN category AS c
+                    ON c.id = ut.category_id
+                LEFT JOIN sport AS s
+                    ON s.id = c.sport_id
+                JOIN season
+                    ON season.id = ess.season_id
+                WHERE ess.subject_type = 'team'
+                  AND ess.subject_id = $1
+                ORDER BY ut.name NULLS LAST, ess.unique_tournament_id, season.year DESC NULLS LAST, ess.season_id DESC
+                """,
+                team_id,
+            )
+            type_rows = await connection.fetch(
+                """
+                SELECT unique_tournament_id, season_id, stat_type
+                FROM entity_statistics_type
+                WHERE subject_type = 'team'
+                  AND subject_id = $1
+                ORDER BY unique_tournament_id, season_id, stat_type
+                """,
+                team_id,
+            )
+        finally:
+            await connection.close()
+
+        if not season_rows and not type_rows:
+            return None
+        return _build_statistics_seasons_payload(season_rows, type_rows)
+
+    async def _fetch_team_player_statistics_seasons_payload(self, team_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            season_rows = await connection.fetch(
+                """
+                SELECT
+                    tps.unique_tournament_id,
+                    ut.slug AS unique_tournament_slug,
+                    ut.name AS unique_tournament_name,
+                    c.id AS category_id,
+                    c.slug AS category_slug,
+                    c.name AS category_name,
+                    s.id AS sport_id,
+                    s.slug AS sport_slug,
+                    s.name AS sport_name,
+                    tps.season_id,
+                    season.name AS season_name,
+                    season.year AS season_year,
+                    NULL::bigint AS all_time_season_id
+                FROM team_player_statistics_season AS tps
+                JOIN unique_tournament AS ut
+                    ON ut.id = tps.unique_tournament_id
+                LEFT JOIN category AS c
+                    ON c.id = ut.category_id
+                LEFT JOIN sport AS s
+                    ON s.id = c.sport_id
+                JOIN season
+                    ON season.id = tps.season_id
+                WHERE tps.team_id = $1
+                ORDER BY ut.name NULLS LAST, tps.unique_tournament_id, season.year DESC NULLS LAST, tps.season_id DESC
+                """,
+                team_id,
+            )
+            type_rows = await connection.fetch(
+                """
+                SELECT unique_tournament_id, season_id, stat_type
+                FROM team_player_statistics_type
+                WHERE team_id = $1
+                ORDER BY unique_tournament_id, season_id, stat_type
+                """,
+                team_id,
+            )
+        finally:
+            await connection.close()
+
+        if not season_rows and not type_rows:
+            return None
+        return _build_statistics_seasons_payload(season_rows, type_rows)
 
     async def _fetch_sport_categories_payload(self, sport_slug: str) -> dict[str, Any] | None:
         connection = await self._connect()
@@ -1837,6 +1949,73 @@ def _synthesize_unique_tournament_root_payload(row: Any) -> dict[str, Any]:
     if row["country_alpha2"] is not None:
         ut_payload["country"] = {"alpha2": str(row["country_alpha2"])}
     return {"uniqueTournament": ut_payload}
+
+
+def _build_statistics_seasons_payload(season_rows: list[Any], type_rows: list[Any]) -> dict[str, Any]:
+    grouped: dict[int, dict[str, Any]] = {}
+    for row in season_rows:
+        unique_tournament_id = int(row["unique_tournament_id"])
+        item = grouped.setdefault(
+            unique_tournament_id,
+            {
+                "uniqueTournament": _statistics_unique_tournament_payload(row),
+                "seasons": [],
+            },
+        )
+        all_time_season_id = row["all_time_season_id"]
+        if all_time_season_id is not None and "allTimeSeasonId" not in item:
+            item["allTimeSeasonId"] = int(all_time_season_id)
+        item["seasons"].append(_statistics_season_payload(row))
+
+    types_map: dict[str, dict[str, list[str]]] = {}
+    for row in type_rows:
+        unique_tournament_id = str(int(row["unique_tournament_id"]))
+        season_id = str(int(row["season_id"]))
+        types_map.setdefault(unique_tournament_id, {}).setdefault(season_id, []).append(str(row["stat_type"]))
+    for season_map in types_map.values():
+        for stat_types in season_map.values():
+            stat_types.sort()
+
+    return {
+        "uniqueTournamentSeasons": list(grouped.values()),
+        "typesMap": types_map,
+    }
+
+
+def _statistics_unique_tournament_payload(row: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"id": int(row["unique_tournament_id"])}
+    if row["unique_tournament_slug"] is not None:
+        payload["slug"] = str(row["unique_tournament_slug"])
+    if row["unique_tournament_name"] is not None:
+        payload["name"] = str(row["unique_tournament_name"])
+    category_payload: dict[str, Any] = {}
+    if row["category_id"] is not None:
+        category_payload["id"] = int(row["category_id"])
+    if row["category_slug"] is not None:
+        category_payload["slug"] = str(row["category_slug"])
+    if row["category_name"] is not None:
+        category_payload["name"] = str(row["category_name"])
+    sport_payload: dict[str, Any] = {}
+    if row["sport_id"] is not None:
+        sport_payload["id"] = int(row["sport_id"])
+    if row["sport_slug"] is not None:
+        sport_payload["slug"] = str(row["sport_slug"])
+    if row["sport_name"] is not None:
+        sport_payload["name"] = str(row["sport_name"])
+    if sport_payload:
+        category_payload["sport"] = sport_payload
+    if category_payload:
+        payload["category"] = category_payload
+    return payload
+
+
+def _statistics_season_payload(row: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"id": int(row["season_id"])}
+    if row["season_name"] is not None:
+        payload["name"] = str(row["season_name"])
+    if row["season_year"] is not None:
+        payload["year"] = str(row["season_year"])
+    return payload
 
 
 def _extract_terminal_status_payload(final_payload: Any) -> dict[str, Any] | None:

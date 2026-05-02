@@ -382,6 +382,24 @@ CREATE TABLE season_statistics_type (
     PRIMARY KEY (subject_type, unique_tournament_id, season_id, stat_type)
 );
 
+CREATE TABLE team_player_statistics_season (
+    team_id BIGINT NOT NULL REFERENCES team(id),
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT NOT NULL REFERENCES season(id),
+    PRIMARY KEY (team_id, unique_tournament_id, season_id)
+);
+
+CREATE TABLE team_player_statistics_type (
+    team_id BIGINT NOT NULL,
+    unique_tournament_id BIGINT NOT NULL,
+    season_id BIGINT NOT NULL,
+    stat_type TEXT NOT NULL,
+    PRIMARY KEY (team_id, unique_tournament_id, season_id, stat_type),
+    FOREIGN KEY (team_id, unique_tournament_id, season_id)
+        REFERENCES team_player_statistics_season(team_id, unique_tournament_id, season_id)
+        ON DELETE CASCADE
+);
+
 CREATE TABLE season_statistics_config (
     unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
     season_id BIGINT NOT NULL REFERENCES season(id),

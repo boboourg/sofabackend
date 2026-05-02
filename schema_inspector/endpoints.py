@@ -784,7 +784,7 @@ TEAM_TEAM_STATISTICS_SEASONS_ENDPOINT = SofascoreEndpoint(
 TEAM_PLAYER_STATISTICS_SEASONS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/team/{team_id}/player-statistics/seasons",
     envelope_key="uniqueTournamentSeasons,typesMap",
-    target_table="season_statistics_type",
+    target_table="team_player_statistics_season",
 )
 
 PLAYER_SEASON_OVERALL_STATISTICS_ENDPOINT = SofascoreEndpoint(

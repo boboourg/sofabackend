@@ -32,6 +32,8 @@ class EntitiesWriteResult:
     entity_statistics_season_rows: int
     entity_statistics_type_rows: int
     season_statistics_type_rows: int
+    team_player_statistics_season_rows: int = 0
+    team_player_statistics_type_rows: int = 0
 
 
 class EntitiesRepository(EventDetailRepository):
@@ -58,6 +60,8 @@ class EntitiesRepository(EventDetailRepository):
         await self._upsert_entity_statistics_seasons(executor, bundle)
         await self._upsert_entity_statistics_types(executor, bundle)
         await self._upsert_season_statistics_types(executor, bundle)
+        await self._upsert_team_player_statistics_seasons(executor, bundle)
+        await self._upsert_team_player_statistics_types(executor, bundle)
         await self._insert_payload_snapshots(executor, bundle)
 
         return EntitiesWriteResult(
@@ -81,6 +85,8 @@ class EntitiesRepository(EventDetailRepository):
             entity_statistics_season_rows=len(bundle.entity_statistics_seasons),
             entity_statistics_type_rows=len(bundle.entity_statistics_types),
             season_statistics_type_rows=len(bundle.season_statistics_types),
+            team_player_statistics_season_rows=len(bundle.team_player_statistics_seasons),
+            team_player_statistics_type_rows=len(bundle.team_player_statistics_types),
         )
 
     async def _upsert_category_transfer_periods(self, executor: SqlExecutor, bundle: EntitiesBundle) -> None:
@@ -347,6 +353,49 @@ class EntitiesRepository(EventDetailRepository):
             )
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (subject_type, unique_tournament_id, season_id, stat_type) DO NOTHING
+            """,
+            rows,
+        )
+
+    async def _upsert_team_player_statistics_seasons(self, executor: SqlExecutor, bundle: EntitiesBundle) -> None:
+        rows = [
+            (
+                item.team_id,
+                item.unique_tournament_id,
+                item.season_id,
+            )
+            for item in bundle.team_player_statistics_seasons
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO team_player_statistics_season (
+                team_id, unique_tournament_id, season_id
+            )
+            VALUES ($1, $2, $3)
+            ON CONFLICT (team_id, unique_tournament_id, season_id) DO NOTHING
+            """,
+            rows,
+        )
+
+    async def _upsert_team_player_statistics_types(self, executor: SqlExecutor, bundle: EntitiesBundle) -> None:
+        rows = [
+            (
+                item.team_id,
+                item.unique_tournament_id,
+                item.season_id,
+                item.stat_type,
+            )
+            for item in bundle.team_player_statistics_types
+        ]
+        await _executemany(
+            executor,
+            """
+            INSERT INTO team_player_statistics_type (
+                team_id, unique_tournament_id, season_id, stat_type
+            )
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (team_id, unique_tournament_id, season_id, stat_type) DO NOTHING
             """,
             rows,
         )

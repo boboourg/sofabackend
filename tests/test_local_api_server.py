@@ -252,6 +252,55 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(connection.closed)
 
+    async def test_handle_api_get_rebuilds_team_player_statistics_seasons_from_normalized_tables(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeStatisticsSeasonsConnection(
+            season_rows=[
+                {
+                    "unique_tournament_id": 17,
+                    "unique_tournament_slug": "premier-league",
+                    "unique_tournament_name": "Premier League",
+                    "category_id": 1,
+                    "category_slug": "england",
+                    "category_name": "England",
+                    "sport_id": 1,
+                    "sport_slug": "football",
+                    "sport_name": "Football",
+                    "season_id": 76986,
+                    "season_name": "Premier League 25/26",
+                    "season_year": "25/26",
+                    "all_time_season_id": None,
+                }
+            ],
+            type_rows=[
+                {
+                    "unique_tournament_id": 17,
+                    "season_id": 76986,
+                    "stat_type": "overall",
+                },
+                {
+                    "unique_tournament_id": 17,
+                    "season_id": 76986,
+                    "stat_type": "home",
+                },
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/team/41/player-statistics/seasons", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.payload["typesMap"],
+            {"17": {"76986": ["home", "overall"]}},
+        )
+        self.assertEqual(response.payload["uniqueTournamentSeasons"][0]["uniqueTournament"]["id"], 17)
+        self.assertEqual(response.payload["uniqueTournamentSeasons"][0]["seasons"][0]["id"], 76986)
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
     async def test_fetch_ops_health_payload_keeps_drift_coverage_and_alert_summaries_in_payload(self) -> None:
         from schema_inspector.ops.health import (
             CoverageAlert,
@@ -1378,6 +1427,17 @@ def _make_fake_connector(connection):
     return _connect
 
 
+def _make_sequence_connector(connections):
+    pending = list(connections)
+
+    async def _connect():
+        if not pending:
+            raise AssertionError("No fake connection left")
+        return pending.pop(0)
+
+    return _connect
+
+
 class _FakeClosablePool:
     def __init__(self) -> None:
         self.closed = False
@@ -1477,6 +1537,23 @@ class _FakeSnapshotConnection:
             return self.rows
         expected_source_slug = args[1]
         return [row for row in self.rows if row.get("source_slug") == expected_source_slug]
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeStatisticsSeasonsConnection:
+    def __init__(self, *, season_rows: list[dict[str, object]], type_rows: list[dict[str, object]]) -> None:
+        self.season_rows = season_rows
+        self.type_rows = type_rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        if "stat_type" in query:
+            return self.type_rows
+        return self.season_rows
 
     async def close(self):
         self.closed = True

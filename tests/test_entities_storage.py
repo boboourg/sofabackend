@@ -20,6 +20,8 @@ from schema_inspector.entities_parser import (
     PlayerSeasonStatisticsRecord,
     PlayerTransferHistoryRecord,
     SeasonStatisticsTypeRecord,
+    TeamPlayerStatisticsSeasonRecord,
+    TeamPlayerStatisticsTypeRecord,
 )
 from schema_inspector.entities_repository import EntitiesRepository, EntitiesWriteResult
 from schema_inspector.event_detail_parser import EventDetailTeamRecord, EventDetailTournamentRecord, ManagerRecord, ManagerTeamMembershipRecord, PlayerRecord, VenueRecord
@@ -179,6 +181,13 @@ def _build_bundle() -> EntitiesBundle:
         season_statistics_types=(
             SeasonStatisticsTypeRecord(subject_type="player", unique_tournament_id=17, season_id=76986, stat_type="summary"),
         ),
+        team_player_statistics_seasons=(
+            TeamPlayerStatisticsSeasonRecord(team_id=41, unique_tournament_id=17, season_id=76986),
+        ),
+        team_player_statistics_types=(
+            TeamPlayerStatisticsTypeRecord(team_id=41, unique_tournament_id=17, season_id=76986, stat_type="summary"),
+            TeamPlayerStatisticsTypeRecord(team_id=41, unique_tournament_id=17, season_id=76986, stat_type="passing"),
+        ),
     )
 
 
@@ -221,6 +230,8 @@ class EntitiesStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.transfer_history_rows, 1)
         self.assertEqual(result.player_season_statistics_rows, 1)
         self.assertEqual(result.entity_statistics_season_rows, 2)
+        self.assertEqual(result.team_player_statistics_season_rows, 1)
+        self.assertEqual(result.team_player_statistics_type_rows, 2)
         statements = [sql for sql, _ in executor.executemany_calls]
         endpoint_registry_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO endpoint_registry" in sql)
         self.assertEqual(endpoint_registry_rows[0][6], "sofascore")
@@ -232,6 +243,8 @@ class EntitiesStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO entity_statistics_season" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO entity_statistics_type" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO season_statistics_type" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO team_player_statistics_season" in sql for sql in statements))
+        self.assertTrue(any("INSERT INTO team_player_statistics_type" in sql for sql in statements))
 
     async def test_entities_ingest_job_uses_transaction_and_repository(self) -> None:
         bundle = _build_bundle()
@@ -257,6 +270,8 @@ class EntitiesStorageTests(unittest.IsolatedAsyncioTestCase):
             entity_statistics_season_rows=2,
             entity_statistics_type_rows=2,
             season_statistics_type_rows=1,
+            team_player_statistics_season_rows=1,
+            team_player_statistics_type_rows=2,
         )
         repository = _FakeRepository(repository_result)
         connection = object()
