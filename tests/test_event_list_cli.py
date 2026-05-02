@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from schema_inspector.event_list_cli import _run
 
@@ -65,6 +65,57 @@ class EventListCliRunTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await _run(_build_args())
 
+    async def test_run_team_last_fetches_requested_page_only(self) -> None:
+        fake_adapter = _FakeEventListAdapter()
+
+        with (
+            patch("schema_inspector.event_list_cli.load_runtime_config", return_value=SimpleNamespace(source_slug="sofascore")),
+            patch("schema_inspector.event_list_cli.load_database_config", return_value=object()),
+            patch(
+                "schema_inspector.event_list_cli.AsyncpgDatabase",
+                return_value=_FakeAsyncpgDatabaseContext(object()),
+            ),
+            patch("schema_inspector.event_list_cli.build_source_adapter", return_value=fake_adapter),
+        ):
+            exit_code = await _run(_build_args(command="team-last", team_id=2817, page=0))
+
+        self.assertEqual(exit_code, 0)
+        fake_adapter.event_list_job.run_team_last.assert_awaited_once_with(
+            2817,
+            0,
+            sport_slug="football",
+            timeout=15.0,
+        )
+
+    async def test_run_team_next_until_end_follows_has_next_page(self) -> None:
+        fake_adapter = _FakeEventListAdapter()
+        fake_adapter.event_list_job.run_team_next = AsyncMock(
+            side_effect=[
+                _result("team_next:2817:0", has_next=True),
+                _result("team_next:2817:1", has_next=False),
+            ]
+        )
+
+        with (
+            patch("schema_inspector.event_list_cli.load_runtime_config", return_value=SimpleNamespace(source_slug="sofascore")),
+            patch("schema_inspector.event_list_cli.load_database_config", return_value=object()),
+            patch(
+                "schema_inspector.event_list_cli.AsyncpgDatabase",
+                return_value=_FakeAsyncpgDatabaseContext(object()),
+            ),
+            patch("schema_inspector.event_list_cli.build_source_adapter", return_value=fake_adapter),
+        ):
+            exit_code = await _run(_build_args(command="team-next", team_id=2817, page=0, until_end=True))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            fake_adapter.event_list_job.run_team_next.await_args_list,
+            [
+                call(2817, 0, sport_slug="football", timeout=15.0),
+                call(2817, 1, sport_slug="football", timeout=15.0),
+            ],
+        )
+
 
 class _FakeAsyncpgDatabaseContext:
     def __init__(self, database) -> None:
@@ -99,26 +150,37 @@ class _UnsupportedEventListAdapter:
 
 class _FakeEventListJob:
     def __init__(self) -> None:
-        result = SimpleNamespace(
-            job_name="scheduled",
-            written=SimpleNamespace(
-                event_rows=5,
-                tournament_rows=2,
-                team_rows=3,
-                payload_snapshot_rows=4,
-            ),
-        )
+        result = _result("scheduled", has_next=False)
         self.run_scheduled = AsyncMock(return_value=result)
+        self.run_team_last = AsyncMock(return_value=_result("team_last:2817:0", has_next=True))
+        self.run_team_next = AsyncMock(return_value=_result("team_next:2817:0", has_next=False))
 
 
-def _build_args():
+def _result(job_name: str, *, has_next: bool) -> SimpleNamespace:
     return SimpleNamespace(
+        job_name=job_name,
+        parsed=SimpleNamespace(payload_snapshots=(SimpleNamespace(payload={"hasNextPage": has_next}),)),
+        written=SimpleNamespace(
+            event_rows=5,
+            tournament_rows=2,
+            team_rows=3,
+            payload_snapshot_rows=4,
+        ),
+    )
+
+
+def _build_args(**overrides):
+    values = dict(
         command="scheduled",
         date="2026-04-21",
         sport_slug="football",
         unique_tournament_id=17,
         season_id=7001,
         round_number=1,
+        team_id=2817,
+        page=0,
+        until_end=False,
+        max_pages=50,
         timeout=15.0,
         proxy=[],
         user_agent=None,
@@ -127,6 +189,10 @@ def _build_args():
         db_min_size=None,
         db_max_size=None,
         db_timeout=None,
+    )
+    values.update(overrides)
+    return SimpleNamespace(
+        **values,
     )
 
 

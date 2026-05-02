@@ -555,7 +555,7 @@ async def _sync_current_season_event_surfaces(
     event_list_job: EventListIngestJob,
     timeout: float,
 ) -> _SeasonSurfaceSyncResult:
-    last_result = await _run_paginated_season_surface(
+    last_result = await _run_single_season_surface_page(
         event_list_job.run_season_last,
         surface_name="last",
         unique_tournament_id=unique_tournament_id,
@@ -574,6 +574,38 @@ async def _sync_current_season_event_surfaces(
     return _SeasonSurfaceSyncResult(
         event_ids=_dedupe_event_ids((*last_result.event_ids, *next_result.event_ids)),
         complete=last_result.complete and next_result.complete,
+    )
+
+
+async def _run_single_season_surface_page(
+    runner,
+    *,
+    surface_name: str,
+    unique_tournament_id: int,
+    season_id: int,
+    sport_slug: str,
+    timeout: float,
+) -> _SeasonSurfaceSyncResult:
+    try:
+        result = await runner(
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            page=0,
+            sport_slug=sport_slug,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning(
+            "structure-sync season %s-events failed tournament=%s season=%s page=0: %s",
+            surface_name,
+            unique_tournament_id,
+            season_id,
+            exc,
+        )
+        return _SeasonSurfaceSyncResult(event_ids=(), complete=False)
+    return _SeasonSurfaceSyncResult(
+        event_ids=_dedupe_event_ids(int(event.id) for event in getattr(result.parsed, "events", ())),
+        complete=True,
     )
 
 

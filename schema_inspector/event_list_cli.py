@@ -41,6 +41,16 @@ def main() -> int:
     round_parser.add_argument("--season-id", type=int, required=True)
     round_parser.add_argument("--round-number", type=int, required=True)
 
+    team_last = subparsers.add_parser("team-last", help="Load /team/{id}/events/last/{page}")
+    team_last.add_argument("--team-id", type=int, required=True)
+    team_last.add_argument("--page", type=int, default=0)
+
+    team_next = subparsers.add_parser("team-next", help="Load /team/{id}/events/next/{page}")
+    team_next.add_argument("--team-id", type=int, required=True)
+    team_next.add_argument("--page", type=int, default=0)
+    team_next.add_argument("--until-end", action="store_true", help="Continue pages until hasNextPage=false.")
+    team_next.add_argument("--max-pages", type=int, default=50, help="Safety cap for --until-end pagination.")
+
     parser.add_argument("--timeout", type=float, default=20.0, help="Request timeout in seconds.")
     parser.add_argument("--proxy", action="append", default=[], help="Optional proxy URL. Can be passed multiple times.")
     parser.add_argument("--user-agent", default=None, help="Override User-Agent for the transport layer.")
@@ -94,7 +104,7 @@ async def _run(args: argparse.Namespace) -> int:
                 sport_slug=args.sport_slug,
                 timeout=args.timeout,
             )
-        else:
+        elif args.command == "round":
             result = await job.run_round(
                 args.unique_tournament_id,
                 args.season_id,
@@ -102,6 +112,32 @@ async def _run(args: argparse.Namespace) -> int:
                 sport_slug=args.sport_slug,
                 timeout=args.timeout,
             )
+        elif args.command == "team-last":
+            result = await job.run_team_last(
+                args.team_id,
+                args.page,
+                sport_slug=args.sport_slug,
+                timeout=args.timeout,
+            )
+        elif args.command == "team-next":
+            if args.until_end:
+                result = await _run_paginated(
+                    job.run_team_next,
+                    args.team_id,
+                    start_page=args.page,
+                    max_pages=args.max_pages,
+                    sport_slug=args.sport_slug,
+                    timeout=args.timeout,
+                )
+            else:
+                result = await job.run_team_next(
+                    args.team_id,
+                    args.page,
+                    sport_slug=args.sport_slug,
+                    timeout=args.timeout,
+                )
+        else:  # pragma: no cover - argparse prevents this branch.
+            raise RuntimeError(f"Unsupported event-list command: {args.command}")
 
     print(
         "event_list_ingest "
@@ -112,6 +148,36 @@ async def _run(args: argparse.Namespace) -> int:
         f"snapshots={result.written.payload_snapshot_rows}"
     )
     return 0
+
+
+async def _run_paginated(
+    runner,
+    *runner_args,
+    start_page: int,
+    max_pages: int,
+    sport_slug: str,
+    timeout: float,
+):
+    result = None
+    for page in range(start_page, start_page + max_pages):
+        result = await runner(
+            *runner_args,
+            page,
+            sport_slug=sport_slug,
+            timeout=timeout,
+        )
+        if not _result_has_next_page(result):
+            return result
+    return result
+
+
+def _result_has_next_page(result) -> bool:
+    snapshots = getattr(getattr(result, "parsed", None), "payload_snapshots", ())
+    for snapshot in snapshots:
+        payload = getattr(snapshot, "payload", None)
+        if isinstance(payload, dict):
+            return bool(payload.get("hasNextPage"))
+    return False
 
 
 if __name__ == "__main__":

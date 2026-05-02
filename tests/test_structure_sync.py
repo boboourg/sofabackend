@@ -525,7 +525,7 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_round.assert_awaited()
         event_list_job.run_brackets.assert_not_awaited()
 
-    async def test_structure_sync_refreshes_season_last_and_next_pages_until_has_next_false(self) -> None:
+    async def test_structure_sync_refreshes_only_first_season_last_page_but_all_next_pages(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
 
@@ -564,12 +564,14 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured = mock.AsyncMock()
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
         event_list_job.run_season_last = mock.AsyncMock(
+            return_value=_event_result_with_has_next((201,), has_next=True)
+        )
+        event_list_job.run_season_next = mock.AsyncMock(
             side_effect=[
-                _event_result_with_has_next((201,), has_next=True),
-                _event_result_with_has_next((202,), has_next=False),
+                _event_result_with_has_next((301,), has_next=True),
+                _event_result_with_has_next((302,), has_next=False),
             ]
         )
-        event_list_job.run_season_next = mock.AsyncMock(return_value=_event_result_with_has_next((301,), has_next=False))
 
         with mock.patch(
             "schema_inspector.services.structure_sync_service.build_source_adapter",
@@ -584,20 +586,19 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.mode, "rounds")
-        self.assertEqual(result.event_ids, (101, 201, 202, 301))
+        self.assertEqual(result.event_ids, (101, 201, 301, 302))
         self.assertEqual(
             event_list_job.run_season_last.await_args_list,
             [
                 mock.call(unique_tournament_id=17, season_id=76986, page=0, sport_slug="football", timeout=20.0),
-                mock.call(unique_tournament_id=17, season_id=76986, page=1, sport_slug="football", timeout=20.0),
             ],
         )
-        event_list_job.run_season_next.assert_awaited_once_with(
-            unique_tournament_id=17,
-            season_id=76986,
-            page=0,
-            sport_slug="football",
-            timeout=20.0,
+        self.assertEqual(
+            event_list_job.run_season_next.await_args_list,
+            [
+                mock.call(unique_tournament_id=17, season_id=76986, page=0, sport_slug="football", timeout=20.0),
+                mock.call(unique_tournament_id=17, season_id=76986, page=1, sport_slug="football", timeout=20.0),
+            ],
         )
 
     async def test_structure_sync_does_not_mark_season_surfaces_fresh_after_partial_page_failure(self) -> None:
@@ -638,13 +639,8 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_brackets = mock.AsyncMock()
         event_list_job.run_featured = mock.AsyncMock()
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
-        event_list_job.run_season_last = mock.AsyncMock(
-            side_effect=[
-                _event_result_with_has_next((201,), has_next=True),
-                RuntimeError("page failed"),
-            ]
-        )
-        event_list_job.run_season_next = mock.AsyncMock(return_value=_event_result_with_has_next((301,), has_next=False))
+        event_list_job.run_season_last = mock.AsyncMock(return_value=_event_result_with_has_next((201,), has_next=True))
+        event_list_job.run_season_next = mock.AsyncMock(side_effect=RuntimeError("page failed"))
         app = _FakeStructureApp()
         app.redis_backend = _FakeFreshnessRedis()
 
@@ -660,7 +656,7 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
                 transport=object(),
             )
 
-        self.assertEqual(result.event_ids, (101, 201, 301))
+        self.assertEqual(result.event_ids, (101, 201))
         self.assertEqual(app.redis_backend.set_calls, [])
 
     async def test_structure_sync_auto_chooses_brackets_when_rounds_absent_but_playoff_capability_present(self) -> None:
