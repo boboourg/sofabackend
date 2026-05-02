@@ -1453,6 +1453,8 @@ def _infer_context_entity_type(path_template: str) -> str | None:
         return "season"
     if path_template.startswith("/api/v1/unique-tournament/"):
         return "unique_tournament"
+    if path_template.startswith("/api/v1/category/"):
+        return "category"
     return None
 
 
@@ -1471,6 +1473,8 @@ def _infer_context_param_name(path_template: str) -> str | None:
         return "season_id"
     if path_template.startswith("/api/v1/unique-tournament/"):
         return "unique_tournament_id"
+    if path_template.startswith("/api/v1/category/"):
+        return "category_id"
     return None
 
 
