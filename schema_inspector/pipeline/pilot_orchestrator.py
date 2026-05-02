@@ -217,6 +217,7 @@ class PilotOrchestrator:
         self.freshness_store = freshness_store
         self.player_profile_freshness_ttl_seconds = int(player_profile_freshness_ttl_seconds)
         self._fanout_max_inflight = max(1, int(fanout_max_inflight or 1))
+        self._event_endpoint_gate_decision_lock = asyncio.Lock()
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
@@ -854,12 +855,13 @@ class PilotOrchestrator:
             return None, None
         decision = None
         if self.event_endpoint_gate is not None:
-            decision = await self.event_endpoint_gate.decide_event_probe(
-                event_id=int(context_event_id),
-                status_phase=status_phase,
-                endpoint_pattern=endpoint.pattern,
-                job_type=fetch_reason,
-            )
+            async with self._event_endpoint_gate_decision_lock:
+                decision = await self.event_endpoint_gate.decide_event_probe(
+                    event_id=int(context_event_id),
+                    status_phase=status_phase,
+                    endpoint_pattern=endpoint.pattern,
+                    job_type=fetch_reason,
+                )
             if not getattr(decision, "should_fetch", True):
                 return None, None
 
