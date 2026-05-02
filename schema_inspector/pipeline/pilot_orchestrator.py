@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -84,6 +85,18 @@ class PilotRunReport:
     live_lane: str | None = None
     live_stream: str | None = None
     finalized: bool = False
+
+
+@dataclass(frozen=True)
+class _EventEndpointFetchSpec:
+    endpoint: Any
+    sport_slug: str
+    path_params: dict[str, Any]
+    context_entity_type: str | None
+    context_entity_id: int | None
+    context_event_id: int
+    fetch_reason: str
+    status_phase: str
 
 
 @dataclass
@@ -182,6 +195,7 @@ class PilotOrchestrator:
         final_sweep_gate=None,
         freshness_store=None,
         player_profile_freshness_ttl_seconds: int = PLAYER_PROFILE_FRESHNESS_TTL_SECONDS,
+        fanout_max_inflight: int = 1,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -202,6 +216,7 @@ class PilotOrchestrator:
         self.final_sweep_gate = final_sweep_gate
         self.freshness_store = freshness_store
         self.player_profile_freshness_ttl_seconds = int(player_profile_freshness_ttl_seconds)
+        self._fanout_max_inflight = max(1, int(fanout_max_inflight or 1))
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
 
@@ -344,66 +359,100 @@ class PilotOrchestrator:
             trace_id=f"pilot:{sport_slug}:{event_id}",
         )
         planned_jobs = self.planner.expand(root_job)
-        for edge_job in planned_jobs:
-            edge_kind = str(edge_job.params.get("edge_kind") or "")
-            if not football_edge_allowed(
-                sport_slug=sport_slug,
-                edge_kind=edge_kind,
-                detail_id=detail_id,
-                status_type=status_type,
-                has_xg=has_xg,
-            ):
-                continue
-            endpoint = _endpoint_for_edge_kind(edge_kind)
-            if endpoint is None:
-                continue
-            outcome, parsed = await self._fetch_gated_event_endpoint(
-                endpoint=endpoint,
-                sport_slug=sport_slug,
-                path_params={"event_id": event_id},
-                context_entity_type="event",
-                context_entity_id=event_id,
-                context_event_id=event_id,
-                fetch_reason=edge_job.job_type,
-                status_phase=status_phase,
-            )
-            if outcome is None:
-                continue
-            fetch_outcomes.append(outcome)
-            if parsed is not None:
-                parse_results.append(parsed)
-                if not lightweight_only:
-                    followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
-                    for followup_job in followup_jobs:
-                        if not football_special_allowed(
-                            sport_slug=sport_slug,
-                            special_kind=str(followup_job.params.get("special_kind") or ""),
-                            detail_id=detail_id,
-                            has_event_player_statistics=has_event_player_statistics,
-                            has_event_player_heat_map=has_event_player_heat_map,
-                            has_xg=has_xg,
-                        ):
-                            continue
-                        special_outcome, special_parse = await self._run_special_job(
-                            job=followup_job,
-                            sport_slug=sport_slug,
-                            event_id=event_id,
-                            status_phase=status_phase,
-                        )
-                        if special_outcome is None:
-                            continue
-                        fetch_outcomes.append(special_outcome)
-                        if special_parse is not None:
-                            parse_results.append(special_parse)
-            child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
-                sport_slug=sport_slug,
-                event_id=event_id,
-                parent_endpoint=endpoint,
-                parent_outcome=outcome,
-                seen_at_bats=baseball_seen_at_bats,
-            )
-            fetch_outcomes.extend(child_outcomes)
-            parse_results.extend(child_parses)
+        if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
+            edge_specs: list[_EventEndpointFetchSpec] = []
+            for edge_job in planned_jobs:
+                edge_kind = str(edge_job.params.get("edge_kind") or "")
+                if not football_edge_allowed(
+                    sport_slug=sport_slug,
+                    edge_kind=edge_kind,
+                    detail_id=detail_id,
+                    status_type=status_type,
+                    has_xg=has_xg,
+                ):
+                    continue
+                endpoint = _endpoint_for_edge_kind(edge_kind)
+                if endpoint is None:
+                    continue
+                edge_specs.append(
+                    _EventEndpointFetchSpec(
+                        endpoint=endpoint,
+                        sport_slug=sport_slug,
+                        path_params={"event_id": event_id},
+                        context_entity_type="event",
+                        context_entity_id=event_id,
+                        context_event_id=event_id,
+                        fetch_reason=edge_job.job_type,
+                        status_phase=status_phase,
+                    )
+                )
+            for outcome, parsed in await self._fetch_event_endpoint_specs_bounded(edge_specs, phase_name="edges"):
+                if outcome is None:
+                    continue
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
+        else:
+            for edge_job in planned_jobs:
+                edge_kind = str(edge_job.params.get("edge_kind") or "")
+                if not football_edge_allowed(
+                    sport_slug=sport_slug,
+                    edge_kind=edge_kind,
+                    detail_id=detail_id,
+                    status_type=status_type,
+                    has_xg=has_xg,
+                ):
+                    continue
+                endpoint = _endpoint_for_edge_kind(edge_kind)
+                if endpoint is None:
+                    continue
+                outcome, parsed = await self._fetch_gated_event_endpoint(
+                    endpoint=endpoint,
+                    sport_slug=sport_slug,
+                    path_params={"event_id": event_id},
+                    context_entity_type="event",
+                    context_entity_id=event_id,
+                    context_event_id=event_id,
+                    fetch_reason=edge_job.job_type,
+                    status_phase=status_phase,
+                )
+                if outcome is None:
+                    continue
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
+                    if not lightweight_only:
+                        followup_jobs = self.planner.plan_lineup_followups(edge_job, parsed)
+                        for followup_job in followup_jobs:
+                            if not football_special_allowed(
+                                sport_slug=sport_slug,
+                                special_kind=str(followup_job.params.get("special_kind") or ""),
+                                detail_id=detail_id,
+                                has_event_player_statistics=has_event_player_statistics,
+                                has_event_player_heat_map=has_event_player_heat_map,
+                                has_xg=has_xg,
+                            ):
+                                continue
+                            special_outcome, special_parse = await self._run_special_job(
+                                job=followup_job,
+                                sport_slug=sport_slug,
+                                event_id=event_id,
+                                status_phase=status_phase,
+                            )
+                            if special_outcome is None:
+                                continue
+                            fetch_outcomes.append(special_outcome)
+                            if special_parse is not None:
+                                parse_results.append(special_parse)
+                child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    parent_endpoint=endpoint,
+                    parent_outcome=outcome,
+                    seen_at_bats=baseball_seen_at_bats,
+                )
+                fetch_outcomes.extend(child_outcomes)
+                parse_results.extend(child_parses)
 
         minutes_to_start = _minutes_to_start(
             start_timestamp=start_timestamp,
@@ -600,7 +649,7 @@ class PilotOrchestrator:
                     if parsed is not None:
                         parse_results.append(parsed)
 
-        for request_spec in build_event_detail_request_specs(
+        event_detail_request_specs = build_event_detail_request_specs(
             sport_slug=sport_slug,
             status_type=status_type,
             team_ids=tuple(team_id for team_id in (home_team_id, away_team_id) if isinstance(team_id, int)),
@@ -615,50 +664,96 @@ class PilotOrchestrator:
             now_timestamp=int(self.now_ms_factory()) // 1000,
             core_only=core_only,
             hydration_mode=effective_hydration_mode,
-        ):
-            endpoint = request_spec.endpoint
-            if (
-                sport_slug == "baseball"
-                and endpoint.pattern == "/api/v1/event/{event_id}/comments"
-                and baseball_seen_at_bats
-            ):
-                continue
-            outcome, parsed = await self._fetch_gated_event_endpoint(
-                endpoint=endpoint,
-                sport_slug=sport_slug,
-                path_params=request_spec.resolved_path_params(event_id=event_id),
-                context_entity_type="event",
-                context_entity_id=event_id,
-                context_event_id=event_id,
-                fetch_reason="hydrate_special_route",
-                status_phase=status_phase,
+        )
+        if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
+            detail_specs: list[tuple[SofascoreEndpoint, _EventEndpointFetchSpec]] = []
+            for request_spec in event_detail_request_specs:
+                endpoint = request_spec.endpoint
+                if (
+                    sport_slug == "baseball"
+                    and endpoint.pattern == "/api/v1/event/{event_id}/comments"
+                    and baseball_seen_at_bats
+                ):
+                    continue
+                detail_specs.append(
+                    (
+                        endpoint,
+                        _EventEndpointFetchSpec(
+                            endpoint=endpoint,
+                            sport_slug=sport_slug,
+                            path_params=request_spec.resolved_path_params(event_id=event_id),
+                            context_entity_type="event",
+                            context_entity_id=event_id,
+                            context_event_id=event_id,
+                            fetch_reason="hydrate_special_route",
+                            status_phase=status_phase,
+                        ),
+                    )
+                )
+            detail_results = await self._fetch_event_endpoint_specs_bounded(
+                [spec for _, spec in detail_specs],
+                phase_name="details",
             )
-            if outcome is None:
-                continue
-            fetch_outcomes.append(outcome)
-            if parsed is not None:
-                parse_results.append(parsed)
-            child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
-                sport_slug=sport_slug,
-                event_id=event_id,
-                parent_endpoint=endpoint,
-                parent_outcome=outcome,
-                seen_at_bats=baseball_seen_at_bats,
-            )
-            fetch_outcomes.extend(child_outcomes)
-            parse_results.extend(child_parses)
-            if not lightweight_only:
-                shotmap_outcomes, shotmap_parses = await self._run_football_shotmap_fanout(
+            for (endpoint, _), (outcome, parsed) in zip(detail_specs, detail_results, strict=True):
+                if outcome is None:
+                    continue
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
+                child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
                     sport_slug=sport_slug,
                     event_id=event_id,
-                    detail_id=detail_id,
-                    has_xg=has_xg,
-                    status_phase=status_phase,
                     parent_endpoint=endpoint,
                     parent_outcome=outcome,
+                    seen_at_bats=baseball_seen_at_bats,
                 )
-                fetch_outcomes.extend(shotmap_outcomes)
-                parse_results.extend(shotmap_parses)
+                fetch_outcomes.extend(child_outcomes)
+                parse_results.extend(child_parses)
+        else:
+            for request_spec in event_detail_request_specs:
+                endpoint = request_spec.endpoint
+                if (
+                    sport_slug == "baseball"
+                    and endpoint.pattern == "/api/v1/event/{event_id}/comments"
+                    and baseball_seen_at_bats
+                ):
+                    continue
+                outcome, parsed = await self._fetch_gated_event_endpoint(
+                    endpoint=endpoint,
+                    sport_slug=sport_slug,
+                    path_params=request_spec.resolved_path_params(event_id=event_id),
+                    context_entity_type="event",
+                    context_entity_id=event_id,
+                    context_event_id=event_id,
+                    fetch_reason="hydrate_special_route",
+                    status_phase=status_phase,
+                )
+                if outcome is None:
+                    continue
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
+                child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    parent_endpoint=endpoint,
+                    parent_outcome=outcome,
+                    seen_at_bats=baseball_seen_at_bats,
+                )
+                fetch_outcomes.extend(child_outcomes)
+                parse_results.extend(child_parses)
+                if not lightweight_only:
+                    shotmap_outcomes, shotmap_parses = await self._run_football_shotmap_fanout(
+                        sport_slug=sport_slug,
+                        event_id=event_id,
+                        detail_id=detail_id,
+                        has_xg=has_xg,
+                        status_phase=status_phase,
+                        parent_endpoint=endpoint,
+                        parent_outcome=outcome,
+                    )
+                    fetch_outcomes.extend(shotmap_outcomes)
+                    parse_results.extend(shotmap_parses)
 
         if should_mark_live_bootstrap and not finalized and root_outcome.classification in {"success_json", "success_empty_json"}:
             await self.live_bootstrap_coordinator.mark_bootstrapped(self.sql_executor, event_id=event_id)
@@ -788,6 +883,59 @@ class PilotOrchestrator:
             )
         return outcome, parsed
 
+    async def _fetch_event_endpoint_specs_bounded(
+        self,
+        specs: list[_EventEndpointFetchSpec] | tuple[_EventEndpointFetchSpec, ...],
+        *,
+        phase_name: str,
+    ) -> list[tuple[FetchOutcomeEnvelope | None, object | None]]:
+        if not specs:
+            return []
+        if self._fanout_max_inflight <= 1:
+            results: list[tuple[FetchOutcomeEnvelope | None, object | None]] = []
+            for spec in specs:
+                results.append(await self._fetch_event_endpoint_spec(spec))
+            return results
+
+        started = time.monotonic()
+        semaphore = asyncio.Semaphore(self._fanout_max_inflight)
+
+        async def run_one(spec: _EventEndpointFetchSpec):
+            async with semaphore:
+                return await self._fetch_event_endpoint_spec(spec)
+
+        gathered = await asyncio.gather(*(run_one(spec) for spec in specs), return_exceptions=True)
+        errors = [item for item in gathered if isinstance(item, Exception)]
+        results = [item for item in gathered if not isinstance(item, Exception)]
+        duration_ms = int((time.monotonic() - started) * 1000)
+        ok_count = sum(1 for outcome, _ in results if outcome is not None)
+        logger.info(
+            "live_delta phase=%s endpoints=%s max_inflight=%s duration_ms=%s ok=%s errors=%s",
+            phase_name,
+            len(specs),
+            self._fanout_max_inflight,
+            duration_ms,
+            ok_count,
+            len(errors),
+        )
+        if errors:
+            raise errors[0]
+        return results
+
+    async def _fetch_event_endpoint_spec(
+        self, spec: _EventEndpointFetchSpec
+    ) -> tuple[FetchOutcomeEnvelope | None, object | None]:
+        return await self._fetch_gated_event_endpoint(
+            endpoint=spec.endpoint,
+            sport_slug=spec.sport_slug,
+            path_params=spec.path_params,
+            context_entity_type=spec.context_entity_type,
+            context_entity_id=spec.context_entity_id,
+            context_event_id=spec.context_event_id,
+            fetch_reason=spec.fetch_reason,
+            status_phase=spec.status_phase,
+        )
+
     async def _run_final_sweep(
         self,
         *,
@@ -902,7 +1050,9 @@ class PilotOrchestrator:
         parses: list[object] = []
         for at_bat_id in discovered_at_bats:
             seen_at_bats.add(at_bat_id)
-            outcome, parsed = await self._fetch_and_parse(
+
+        async def fetch_pitch(at_bat_id: int):
+            return await self._fetch_and_parse(
                 endpoint=EVENT_BASEBALL_PITCHES_ENDPOINT,
                 sport_slug=sport_slug,
                 path_params={"event_id": event_id, "at_bat_id": at_bat_id},
@@ -911,6 +1061,37 @@ class PilotOrchestrator:
                 context_event_id=event_id,
                 fetch_reason="hydrate_special_route",
             )
+
+        if self._fanout_max_inflight <= 1:
+            pitch_results = [await fetch_pitch(at_bat_id) for at_bat_id in discovered_at_bats]
+        else:
+            started = time.monotonic()
+            semaphore = asyncio.Semaphore(self._fanout_max_inflight)
+
+            async def bounded_fetch(at_bat_id: int):
+                async with semaphore:
+                    return await fetch_pitch(at_bat_id)
+
+            gathered = await asyncio.gather(
+                *(bounded_fetch(at_bat_id) for at_bat_id in discovered_at_bats),
+                return_exceptions=True,
+            )
+            errors = [item for item in gathered if isinstance(item, Exception)]
+            pitch_results = [item for item in gathered if not isinstance(item, Exception)]
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "live_delta phase=%s endpoints=%s max_inflight=%s duration_ms=%s ok=%s errors=%s",
+                "baseball_pitches",
+                len(discovered_at_bats),
+                self._fanout_max_inflight,
+                duration_ms,
+                len(pitch_results),
+                len(errors),
+            )
+            if errors:
+                raise errors[0]
+
+        for outcome, parsed in pitch_results:
             outcomes.append(outcome)
             if parsed is not None:
                 parses.append(parsed)

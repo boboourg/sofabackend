@@ -341,6 +341,31 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/lineups", transport.seen_urls)
         self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/incidents", transport.seen_urls)
 
+    async def test_live_delta_parallel_tennis_preserves_planner_and_detail_policy(self) -> None:
+        now_ms = 1_800_000_000_000
+        transport = _FakeTransport(
+            _tennis_responses(
+                event_id=15921219,
+                status_type="inprogress",
+                start_timestamp=(now_ms // 1000) - 300,
+            )
+        )
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(_FakeLiveBackend()),
+            stream_queue=RedisStreamQueue(_FakeStreamBackend()),
+            now_ms_factory=lambda: now_ms,
+            fanout_max_inflight=4,
+        )
+
+        await orchestrator.run_event(event_id=15921219, sport_slug="tennis", hydration_mode="live_delta")
+
+        self.assertIn("https://www.sofascore.com/api/v1/event/15921219/statistics", transport.seen_urls)
+        self.assertIn("https://www.sofascore.com/api/v1/event/15921219/point-by-point", transport.seen_urls)
+        self.assertIn("https://www.sofascore.com/api/v1/event/15921219/tennis-power", transport.seen_urls)
+        self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/lineups", transport.seen_urls)
+        self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/incidents", transport.seen_urls)
+
 
 def _build_orchestrator(
     *,
@@ -352,6 +377,7 @@ def _build_orchestrator(
     live_bootstrap_coordinator=None,
     final_sweep_gate=None,
     season_widget_gate=None,
+    fanout_max_inflight=1,
 ):
     raw_store = _FakeRawSnapshotStore()
     sql_executor = sql_executor or object()
@@ -374,6 +400,7 @@ def _build_orchestrator(
         season_widget_gate=season_widget_gate,
         live_bootstrap_coordinator=live_bootstrap_coordinator,
         final_sweep_gate=final_sweep_gate,
+        fanout_max_inflight=fanout_max_inflight,
     )
 
 

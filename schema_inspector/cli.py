@@ -76,6 +76,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_EVENT_COVERAGE_SURFACES = ("event_core", "statistics", "incidents", "lineups")
 
 
+def _live_fanout_max_inflight_from_env(hydration_mode: str) -> int:
+    if str(hydration_mode or "").strip().lower() != "live_delta":
+        return 1
+    raw_value = os.getenv("SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT", "1")
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT=%r; falling back to sequential fan-out",
+            raw_value,
+        )
+        return 1
+    return max(1, value)
+
+
 @dataclass(frozen=True)
 class HydrationBatchReport:
     processed_event_ids: tuple[int, ...]
@@ -357,6 +372,7 @@ class HybridApp:
                 event_endpoint_gate=event_endpoint_gate,
                 final_sweep_gate=self.final_sweep_gate,
                 freshness_store=self.freshness_store,
+                fanout_max_inflight=_live_fanout_max_inflight_from_env(hydration_mode),
             )
             await orchestrator.run_event(
                 event_id=event_id,
@@ -434,6 +450,7 @@ class HybridApp:
                 season_widget_gate=prefetched_run.replay_widget_gate,
                 event_endpoint_gate=prefetched_run.replay_event_endpoint_gate,
                 freshness_store=self.freshness_store,
+                fanout_max_inflight=1,
             )
             result = await orchestrator.run_event(
                 event_id=prefetched_run.event_id,

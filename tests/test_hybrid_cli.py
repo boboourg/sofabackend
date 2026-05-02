@@ -1586,11 +1586,68 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
                     hydration_mode=hydration_mode,
                 )
 
-        with mock.patch.object(hybrid_cli, "PilotOrchestrator", _CapturingPilotOrchestrator):
-            result = await app._persist_prefetched_run(prefetched, hydration_mode="full")
+        with mock.patch.dict("os.environ", {"SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT": "4"}):
+            with mock.patch.object(hybrid_cli, "PilotOrchestrator", _CapturingPilotOrchestrator):
+                result = await app._persist_prefetched_run(prefetched, hydration_mode="full")
 
         self.assertEqual(result.event_id, 99)
         self.assertIs(captured_kwargs[0]["freshness_store"], app.freshness_store)
+        self.assertEqual(captured_kwargs[0]["fanout_max_inflight"], 1)
+
+    async def test_hybrid_app_prefetch_uses_live_delta_fanout_env_only_for_live_delta(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        database = _FakeConnectionDatabase()
+        app = hybrid_cli.HybridApp(database=database, runtime_config=RuntimeConfig(require_proxy=False), redis_backend=None)
+        captured_kwargs: list[dict[str, object]] = []
+
+        class _CapturingPilotOrchestrator:
+            def __init__(self, **kwargs) -> None:
+                captured_kwargs.append(kwargs)
+
+            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str) -> None:
+                del event_id, sport_slug, hydration_mode
+
+        with mock.patch.dict("os.environ", {"SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT": "4"}):
+            with mock.patch.object(hybrid_cli, "PilotOrchestrator", _CapturingPilotOrchestrator):
+                await app._prefetch_event_run(event_id=99, sport_slug="football", hydration_mode="live_delta")
+                await app._prefetch_event_run(event_id=99, sport_slug="football", hydration_mode="full")
+
+        self.assertEqual(captured_kwargs[0]["fanout_max_inflight"], 4)
+        self.assertEqual(captured_kwargs[1]["fanout_max_inflight"], 1)
+
+    async def test_hybrid_app_replay_orchestrator_always_sequential_for_live_delta(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+
+        app = hybrid_cli.HybridApp(
+            database=_FakeDatabase(),
+            runtime_config=RuntimeConfig(require_proxy=False),
+            redis_backend=_FakeRedisBackend(),
+        )
+        prefetched = hybrid_cli.PrefetchedRun(
+            event_id=99,
+            sport_slug="football",
+            fetch_records=(),
+            snapshot_store=object(),
+            initial_capability_rollup={},
+        )
+        captured_kwargs: list[dict[str, object]] = []
+
+        class _CapturingPilotOrchestrator:
+            def __init__(self, **kwargs) -> None:
+                captured_kwargs.append(kwargs)
+
+            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str):
+                return types.SimpleNamespace(event_id=event_id, sport_slug=sport_slug, hydration_mode=hydration_mode)
+
+        with mock.patch.dict("os.environ", {"SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT": "4"}):
+            with mock.patch.object(hybrid_cli, "PilotOrchestrator", _CapturingPilotOrchestrator):
+                result = await app._persist_prefetched_run(prefetched, hydration_mode="live_delta")
+
+        self.assertEqual(result.event_id, 99)
+        self.assertEqual(captured_kwargs[0]["fanout_max_inflight"], 1)
 
     async def test_hybrid_app_warns_when_prefetched_run_exceeds_limit(self) -> None:
         from schema_inspector.cli import HybridApp, HybridSnapshotStore, PrefetchedRun
@@ -1874,6 +1931,17 @@ class _FakeDatabase:
     def transaction(self):
         self.transaction_calls += 1
         return _FakeTransaction(self.connection)
+
+
+class _FakeConnectionDatabase:
+    def __init__(self) -> None:
+        self.connection_obj = object()
+
+    def connection(self):
+        return _FakeTransaction(self.connection_obj)
+
+    def transaction(self):
+        return _FakeTransaction(self.connection_obj)
 
 
 class _FakeCoverageSelectionDatabase:
