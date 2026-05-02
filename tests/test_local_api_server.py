@@ -488,6 +488,83 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
+    async def test_handle_api_get_rebuilds_season_next_events_with_pagination(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeSeasonEventsConnection(
+            rows=[
+                {
+                    "id": 1001,
+                    "slug": "sample-home-sample-away",
+                    "custom_id": "abc",
+                    "start_timestamp": 1770000000,
+                    "status_code": 0,
+                    "status_type": "notstarted",
+                    "status_description": "Not started",
+                    "home_team_id": 10,
+                    "home_team_slug": "sample-home",
+                    "home_team_name": "Sample Home",
+                    "home_team_short_name": "Home",
+                    "away_team_id": 11,
+                    "away_team_slug": "sample-away",
+                    "away_team_name": "Sample Away",
+                    "away_team_short_name": "Away",
+                    "tournament_id": 20,
+                    "tournament_slug": "laliga",
+                    "tournament_name": "LaLiga",
+                    "unique_tournament_id": 8,
+                    "unique_tournament_slug": "laliga",
+                    "unique_tournament_name": "LaLiga",
+                    "season_id": 77559,
+                    "season_name": "LaLiga 25/26",
+                    "season_year": "25/26",
+                }
+            ],
+            has_extra=True,
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/8/season/77559/events/next/1",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["hasNextPage"], True)
+        self.assertEqual(len(response.payload["events"]), 30)
+        event = response.payload["events"][0]
+        self.assertEqual(event["id"], 1001)
+        self.assertEqual(event["status"], {"code": 0, "type": "notstarted", "description": "Not started"})
+        self.assertEqual(event["homeTeam"], {"id": 10, "slug": "sample-home", "name": "Sample Home", "shortName": "Home"})
+        self.assertEqual(event["awayTeam"]["id"], 11)
+        self.assertEqual(event["tournament"]["uniqueTournament"]["id"], 8)
+        self.assertEqual(event["season"]["id"], 77559)
+        self.assertIn("es.type = 'notstarted'", normalized_connection.fetch_calls[0][0])
+        self.assertEqual(normalized_connection.fetch_calls[0][1], (8, 77559, 30, 31))
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_season_last_events_with_pagination(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeSeasonEventsConnection(rows=[], has_extra=False)
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/8/season/77559/events/last/2",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload, {"events": [], "hasNextPage": False})
+        self.assertIn("es.type IN", normalized_connection.fetch_calls[0][0])
+        self.assertIn("ORDER BY e.start_timestamp DESC", normalized_connection.fetch_calls[0][0])
+        self.assertEqual(normalized_connection.fetch_calls[0][1], (8, 77559, 60, 31))
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
     async def test_fetch_ops_health_payload_keeps_drift_coverage_and_alert_summaries_in_payload(self) -> None:
         from schema_inspector.ops.health import (
             CoverageAlert,
@@ -1814,6 +1891,29 @@ class _FakeGenericNormalizedConnection:
             if f"FROM {table_name}" in query:
                 return [{"row": row} for row in rows]
         return []
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeSeasonEventsConnection:
+    def __init__(self, *, rows: list[dict[str, object]], has_extra: bool) -> None:
+        self.rows = rows
+        self.has_extra = has_extra
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        if self.has_extra:
+            extras = []
+            template = self.rows[-1] if self.rows else {"id": 9999}
+            for index in range(30):
+                extra = dict(template)
+                extra["id"] = 9000 + index
+                extras.append(extra)
+            return [*self.rows, *extras]
+        return self.rows
 
     async def close(self):
         self.closed = True

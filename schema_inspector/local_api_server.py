@@ -66,6 +66,9 @@ logger = logging.getLogger(__name__)
 
 _SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _SOURCE_TABLES_BY_PATH_TEMPLATE: dict[str, tuple[str, ...]] | None = None
+_SEASON_EVENTS_PAGE_SIZE = 30
+_SEASON_EVENTS_LAST_TEMPLATE = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}"
+_SEASON_EVENTS_NEXT_TEMPLATE = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}"
 
 
 @dataclass(frozen=True)
@@ -728,11 +731,106 @@ class LocalApiApplication:
                 int(path_params["event_id"]),
                 int(path_params["team_id"]),
             )
+        if template in {_SEASON_EVENTS_LAST_TEMPLATE, _SEASON_EVENTS_NEXT_TEMPLATE}:
+            return await self._fetch_season_events_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+                season_id=int(path_params["season_id"]),
+                page=max(int(path_params["page"]), 0),
+                direction="last" if template == _SEASON_EVENTS_LAST_TEMPLATE else "next",
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
             return await self._fetch_top_team_payload(route, path_params)
         return None
+
+    async def _fetch_season_events_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int,
+        page: int,
+        direction: str,
+    ) -> dict[str, Any]:
+        offset = page * _SEASON_EVENTS_PAGE_SIZE
+        limit = _SEASON_EVENTS_PAGE_SIZE + 1
+        if direction == "last":
+            status_filter = """
+                  AND es.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
+                  AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
+            """
+            order_by = "e.start_timestamp DESC NULLS LAST, e.id DESC"
+        else:
+            status_filter = """
+                  AND es.type = 'notstarted'
+                  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW())::bigint
+            """
+            order_by = "e.start_timestamp ASC NULLS LAST, e.id ASC"
+
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                f"""
+                SELECT
+                    e.id,
+                    e.slug,
+                    e.custom_id,
+                    e.start_timestamp,
+                    e.status_code,
+                    e.winner_code,
+                    e.aggregated_winner_code,
+                    e.coverage,
+                    e.home_red_cards,
+                    e.away_red_cards,
+                    es.type AS status_type,
+                    es.description AS status_description,
+                    e.home_team_id,
+                    ht.slug AS home_team_slug,
+                    ht.name AS home_team_name,
+                    ht.short_name AS home_team_short_name,
+                    e.away_team_id,
+                    at.slug AS away_team_slug,
+                    at.name AS away_team_name,
+                    at.short_name AS away_team_short_name,
+                    e.tournament_id,
+                    t.slug AS tournament_slug,
+                    t.name AS tournament_name,
+                    e.unique_tournament_id,
+                    ut.slug AS unique_tournament_slug,
+                    ut.name AS unique_tournament_name,
+                    e.season_id,
+                    s.name AS season_name,
+                    s.year AS season_year
+                FROM event AS e
+                LEFT JOIN event_status AS es ON es.code = e.status_code
+                LEFT JOIN team AS ht ON ht.id = e.home_team_id
+                LEFT JOIN team AS at ON at.id = e.away_team_id
+                LEFT JOIN tournament AS t ON t.id = e.tournament_id
+                LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
+                LEFT JOIN season AS s ON s.id = e.season_id
+                WHERE e.unique_tournament_id = $1
+                  AND e.season_id = $2
+                  {status_filter}
+                ORDER BY {order_by}
+                OFFSET $3
+                LIMIT $4
+                """,
+                unique_tournament_id,
+                season_id,
+                offset,
+                limit,
+            )
+        finally:
+            await connection.close()
+
+        has_next_page = len(rows) > _SEASON_EVENTS_PAGE_SIZE
+        return {
+            "events": [
+                _serialize_season_event_row(row)
+                for row in rows[:_SEASON_EVENTS_PAGE_SIZE]
+            ],
+            "hasNextPage": has_next_page,
+        }
 
     async def _fetch_event_player_statistics_payload(
         self,
@@ -2444,6 +2542,88 @@ def _synthesize_event_root_payload(row: Any) -> dict[str, Any]:
     if season_id is not None:
         event_payload["season"] = {"id": int(season_id)}
     return {"event": event_payload}
+
+
+def _serialize_season_event_row(row: Any) -> dict[str, Any]:
+    event_payload: dict[str, Any] = {"id": int(row["id"])}
+    for source_key, dest_key in (
+        ("slug", "slug"),
+        ("custom_id", "customId"),
+    ):
+        value = row.get(source_key)
+        if value is not None:
+            event_payload[dest_key] = str(value)
+    start_timestamp = row.get("start_timestamp")
+    if start_timestamp is not None:
+        event_payload["startTimestamp"] = int(start_timestamp)
+
+    status_code = row.get("status_code")
+    if status_code is not None:
+        status_payload: dict[str, Any] = {"code": int(status_code)}
+        if row.get("status_type") is not None:
+            status_payload["type"] = str(row["status_type"])
+        if row.get("status_description") is not None:
+            status_payload["description"] = str(row["status_description"])
+        event_payload["status"] = status_payload
+
+    home_team = _minimal_entity_payload(
+        row["home_team_id"],
+        slug=row.get("home_team_slug"),
+        name=row.get("home_team_name"),
+        short_name=row.get("home_team_short_name"),
+    ) if row.get("home_team_id") is not None else None
+    if home_team is not None:
+        event_payload["homeTeam"] = home_team
+
+    away_team = _minimal_entity_payload(
+        row["away_team_id"],
+        slug=row.get("away_team_slug"),
+        name=row.get("away_team_name"),
+        short_name=row.get("away_team_short_name"),
+    ) if row.get("away_team_id") is not None else None
+    if away_team is not None:
+        event_payload["awayTeam"] = away_team
+
+    tournament_id = row.get("tournament_id")
+    unique_tournament_id = row.get("unique_tournament_id")
+    if tournament_id is not None or unique_tournament_id is not None:
+        tournament_payload: dict[str, Any] = {}
+        if tournament_id is not None:
+            tournament_payload.update(
+                _minimal_entity_payload(
+                    tournament_id,
+                    slug=row.get("tournament_slug"),
+                    name=row.get("tournament_name"),
+                )
+            )
+        if unique_tournament_id is not None:
+            tournament_payload["uniqueTournament"] = _minimal_entity_payload(
+                unique_tournament_id,
+                slug=row.get("unique_tournament_slug"),
+                name=row.get("unique_tournament_name"),
+            )
+        event_payload["tournament"] = tournament_payload
+
+    season_id = row.get("season_id")
+    if season_id is not None:
+        season_payload: dict[str, Any] = {"id": int(season_id)}
+        if row.get("season_name") is not None:
+            season_payload["name"] = str(row["season_name"])
+        if row.get("season_year") is not None:
+            season_payload["year"] = str(row["season_year"])
+        event_payload["season"] = season_payload
+
+    for source_key, dest_key in (
+        ("winner_code", "winnerCode"),
+        ("aggregated_winner_code", "aggregatedWinnerCode"),
+        ("coverage", "coverage"),
+        ("home_red_cards", "homeRedCards"),
+        ("away_red_cards", "awayRedCards"),
+    ):
+        value = row.get(source_key)
+        if value is not None:
+            event_payload[dest_key] = int(value)
+    return event_payload
 
 
 def _synthesize_team_root_payload(row: Any) -> dict[str, Any]:
