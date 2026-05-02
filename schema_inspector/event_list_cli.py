@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
+from types import SimpleNamespace
 
 from .db import AsyncpgDatabase, load_database_config
 from .runtime import load_runtime_config
 from .sources import build_source_adapter
+
+_TEAM_LAST_ENDPOINT_PATTERN = "/api/v1/team/{team_id}/events/last/{page}"
+_TEAM_NEXT_ENDPOINT_PATTERN = "/api/v1/team/{team_id}/events/next/{page}"
+logger = logging.getLogger(__name__)
 
 
 def main() -> int:
@@ -50,6 +56,13 @@ def main() -> int:
     team_next.add_argument("--page", type=int, default=0)
     team_next.add_argument("--until-end", action="store_true", help="Continue pages until hasNextPage=false.")
     team_next.add_argument("--max-pages", type=int, default=50, help="Safety cap for --until-end pagination.")
+
+    team_surfaces = subparsers.add_parser(
+        "team-surfaces",
+        help="Load team last/next surfaces. Full crawl once, then refresh page 0 only after completion.",
+    )
+    team_surfaces.add_argument("--team-id", type=int, required=True)
+    team_surfaces.add_argument("--max-pages", type=int, default=250, help="Safety cap for initial pagination.")
 
     parser.add_argument("--timeout", type=float, default=20.0, help="Request timeout in seconds.")
     parser.add_argument("--proxy", action="append", default=[], help="Optional proxy URL. Can be passed multiple times.")
@@ -136,6 +149,15 @@ async def _run(args: argparse.Namespace) -> int:
                     sport_slug=args.sport_slug,
                     timeout=args.timeout,
                 )
+        elif args.command == "team-surfaces":
+            result = await _run_team_surfaces(
+                database,
+                job,
+                team_id=args.team_id,
+                max_pages=args.max_pages,
+                sport_slug=args.sport_slug,
+                timeout=args.timeout,
+            )
         else:  # pragma: no cover - argparse prevents this branch.
             raise RuntimeError(f"Unsupported event-list command: {args.command}")
 
@@ -148,6 +170,45 @@ async def _run(args: argparse.Namespace) -> int:
         f"snapshots={result.written.payload_snapshot_rows}"
     )
     return 0
+
+
+async def _run_team_surfaces(
+    database,
+    job,
+    *,
+    team_id: int,
+    max_pages: int,
+    sport_slug: str,
+    timeout: float,
+):
+    if await _has_complete_team_event_surfaces(database, team_id=team_id):
+        results = [
+            await job.run_team_last(team_id, 0, sport_slug=sport_slug, timeout=timeout),
+            await job.run_team_next(team_id, 0, sport_slug=sport_slug, timeout=timeout),
+        ]
+    else:
+        results = []
+        results.extend(
+            await _run_paginated_collect(
+                job.run_team_last,
+                team_id,
+                start_page=0,
+                max_pages=max_pages,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            )
+        )
+        results.extend(
+            await _run_paginated_collect(
+                job.run_team_next,
+                team_id,
+                start_page=0,
+                max_pages=max_pages,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            )
+        )
+    return _combine_results(f"team_surfaces:{team_id}", results)
 
 
 async def _run_paginated(
@@ -169,6 +230,75 @@ async def _run_paginated(
         if not _result_has_next_page(result):
             return result
     return result
+
+
+async def _run_paginated_collect(
+    runner,
+    *runner_args,
+    start_page: int,
+    max_pages: int,
+    sport_slug: str,
+    timeout: float,
+):
+    results = []
+    for page in range(start_page, start_page + max_pages):
+        result = await runner(
+            *runner_args,
+            page,
+            sport_slug=sport_slug,
+            timeout=timeout,
+        )
+        results.append(result)
+        if not _result_has_next_page(result):
+            break
+    return results
+
+
+async def _has_complete_team_event_surfaces(database, *, team_id: int) -> bool:
+    connection_factory = getattr(database, "connection", None)
+    if not callable(connection_factory):
+        return False
+    try:
+        async with connection_factory() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT
+                    EXISTS (
+                        SELECT 1
+                        FROM api_payload_snapshot
+                        WHERE endpoint_pattern = $1
+                          AND context_entity_type = 'team'
+                          AND context_entity_id = $3
+                          AND payload->>'hasNextPage' = 'false'
+                    ) AS last_complete,
+                    EXISTS (
+                        SELECT 1
+                        FROM api_payload_snapshot
+                        WHERE endpoint_pattern = $2
+                          AND context_entity_type = 'team'
+                          AND context_entity_id = $3
+                          AND payload->>'hasNextPage' = 'false'
+                    ) AS next_complete
+                """,
+                _TEAM_LAST_ENDPOINT_PATTERN,
+                _TEAM_NEXT_ENDPOINT_PATTERN,
+                int(team_id),
+            )
+    except Exception as exc:
+        logger.warning("team surface completion check failed team=%s: %s", team_id, exc)
+        return False
+    return bool(row and row["last_complete"] and row["next_complete"])
+
+
+def _combine_results(job_name: str, results):
+    written = SimpleNamespace(
+        event_rows=sum(int(getattr(result.written, "event_rows", 0)) for result in results),
+        tournament_rows=sum(int(getattr(result.written, "tournament_rows", 0)) for result in results),
+        team_rows=sum(int(getattr(result.written, "team_rows", 0)) for result in results),
+        payload_snapshot_rows=sum(int(getattr(result.written, "payload_snapshot_rows", 0)) for result in results),
+    )
+    parsed = getattr(results[-1], "parsed", None) if results else SimpleNamespace(payload_snapshots=())
+    return SimpleNamespace(job_name=job_name, parsed=parsed, written=written)
 
 
 def _result_has_next_page(result) -> bool:

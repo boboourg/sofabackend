@@ -525,7 +525,7 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_round.assert_awaited()
         event_list_job.run_brackets.assert_not_awaited()
 
-    async def test_structure_sync_refreshes_only_first_season_last_page_but_all_next_pages(self) -> None:
+    async def test_structure_sync_crawls_season_last_and_next_until_complete_before_edge_refresh_mode(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
 
@@ -564,7 +564,10 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured = mock.AsyncMock()
         event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
         event_list_job.run_season_last = mock.AsyncMock(
-            return_value=_event_result_with_has_next((201,), has_next=True)
+            side_effect=[
+                _event_result_with_has_next((201,), has_next=True),
+                _event_result_with_has_next((202,), has_next=False),
+            ]
         )
         event_list_job.run_season_next = mock.AsyncMock(
             side_effect=[
@@ -586,11 +589,12 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.mode, "rounds")
-        self.assertEqual(result.event_ids, (101, 201, 301, 302))
+        self.assertEqual(result.event_ids, (101, 201, 202, 301, 302))
         self.assertEqual(
             event_list_job.run_season_last.await_args_list,
             [
                 mock.call(unique_tournament_id=17, season_id=76986, page=0, sport_slug="football", timeout=20.0),
+                mock.call(unique_tournament_id=17, season_id=76986, page=1, sport_slug="football", timeout=20.0),
             ],
         )
         self.assertEqual(
@@ -599,6 +603,76 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
                 mock.call(unique_tournament_id=17, season_id=76986, page=0, sport_slug="football", timeout=20.0),
                 mock.call(unique_tournament_id=17, season_id=76986, page=1, sport_slug="football", timeout=20.0),
             ],
+        )
+
+    async def test_structure_sync_refreshes_only_first_season_pages_after_has_next_false_seen(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(76986,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(76986,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(side_effect=[_event_result((101,)), _event_result(())])
+        event_list_job.run_brackets = mock.AsyncMock()
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+        event_list_job.run_season_last = mock.AsyncMock(return_value=_event_result_with_has_next((201,), has_next=True))
+        event_list_job.run_season_next = mock.AsyncMock(return_value=_event_result_with_has_next((301,), has_next=True))
+        app = _FakeStructureApp(database=_FakeDatabase(surface_last_complete=True, surface_next_complete=True))
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
+                transport=object(),
+            )
+
+        self.assertEqual(result.event_ids, (101, 201, 301))
+        event_list_job.run_season_last.assert_awaited_once_with(
+            unique_tournament_id=17,
+            season_id=76986,
+            page=0,
+            sport_slug="football",
+            timeout=20.0,
+        )
+        event_list_job.run_season_next.assert_awaited_once_with(
+            unique_tournament_id=17,
+            season_id=76986,
+            page=0,
+            sport_slug="football",
+            timeout=20.0,
         )
 
     async def test_structure_sync_does_not_mark_season_surfaces_fresh_after_partial_page_failure(self) -> None:
@@ -1116,6 +1190,7 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
             resolve_sport_profile("tennis"),
             structure_sync_mode="auto",
             structure_calendar_forward_months=1,
+            structure_calendar_backward_months=1,
         )
 
         with (
@@ -1131,11 +1206,23 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
                 sport_slug="tennis",
                 runtime_config=SimpleNamespace(source_slug="sofascore"),
                 transport=object(),
+                now_factory=lambda: datetime(2025, 1, 15, tzinfo=timezone.utc),
             )
 
         self.assertEqual(result.mode, "calendar")
-        self.assertEqual(result.calendar_dates_probed, 3)
-        self.assertEqual(event_list_job.run_unique_tournament_scheduled.await_count, 3)
+        self.assertEqual(result.calendar_dates_probed, 6)
+        self.assertEqual(event_list_job.run_unique_tournament_scheduled.await_count, 6)
+        self.assertEqual(
+            [call.kwargs["date"] for call in event_list_job.run_unique_tournament_scheduled.await_args_list],
+            [
+                "2025-01-15",
+                "2025-01-16",
+                "2025-01-17",
+                "2025-01-14",
+                "2025-01-13",
+                "2025-01-12",
+            ],
+        )
 
     async def test_structure_sync_returns_reason_when_upstream_reports_no_seasons(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
@@ -1423,10 +1510,10 @@ class _FakeStreamQueue:
 
 
 class _FakeStructureApp:
-    def __init__(self) -> None:
+    def __init__(self, *, database=None) -> None:
         self.runtime_config = object()
         self.transport = object()
-        self.database = object()
+        self.database = database if database is not None else object()
 
 
 class _FakeFreshnessRedis:
@@ -1474,16 +1561,33 @@ class _UnsupportedStructureSourceAdapter:
 
 
 class _FakeDatabaseConnection:
+    def __init__(self, *, surface_last_complete: bool = False, surface_next_complete: bool = False) -> None:
+        self.surface_last_complete = surface_last_complete
+        self.surface_next_complete = surface_next_complete
+
     async def __aenter__(self):
-        return object()
+        return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         del exc_type, exc, tb
 
+    async def fetchrow(self, *args, **kwargs):
+        del args, kwargs
+        return {
+            "last_complete": self.surface_last_complete,
+            "next_complete": self.surface_next_complete,
+        }
 
 class _FakeDatabase:
+    def __init__(self, *, surface_last_complete: bool = False, surface_next_complete: bool = False) -> None:
+        self.surface_last_complete = surface_last_complete
+        self.surface_next_complete = surface_next_complete
+
     def connection(self):
-        return _FakeDatabaseConnection()
+        return _FakeDatabaseConnection(
+            surface_last_complete=self.surface_last_complete,
+            surface_next_complete=self.surface_next_complete,
+        )
 
 
 def _structure_entry(*, job_type: str, entity_id: int | None) -> StreamEntry:

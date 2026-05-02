@@ -40,6 +40,8 @@ _MAX_CONSECUTIVE_MISSING_ROUNDS = 2
 _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS = 3
 _MAX_SEASON_EVENT_PAGES = 50
 _SEASON_EVENT_SURFACE_REFRESH_TTL_SECONDS = 24 * 3600
+_SEASON_LAST_ENDPOINT_PATTERN = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}"
+_SEASON_NEXT_ENDPOINT_PATTERN = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}"
 
 
 @dataclass(frozen=True)
@@ -368,9 +370,11 @@ async def _run_calendar_mode(
     timeout: float,
 ) -> StructureSyncResult:
     forward_months = max(1, int(profile.structure_calendar_forward_months))
+    backward_months = max(0, int(profile.structure_calendar_backward_months))
     resolved_now = (now_factory or _default_now_utc)()
     start_date = resolved_now.date()
-    total_days = forward_months * 30
+    forward_days = forward_months * 30
+    backward_days = backward_months * 30
 
     collected_event_ids: list[int] = []
     dates_probed = 0
@@ -392,37 +396,41 @@ async def _run_calendar_mode(
 
     # Daily scheduled scan — capped forward window, skip consecutive empty days
     # after a reasonable warm-up to save API calls on quiet tournaments.
-    empty_streak = 0
-    for offset in range(total_days):
-        probe_date = start_date + timedelta(days=offset)
-        iso = probe_date.isoformat()
-        dates_probed += 1
-        try:
-            daily = await event_list_job.run_unique_tournament_scheduled(
-                unique_tournament_id=unique_tournament_id,
-                date=iso,
-                sport_slug=sport_slug,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            logger.warning(
-                "structure-sync scheduled failed tournament=%s date=%s: %s",
-                unique_tournament_id,
-                iso,
-                exc,
-            )
-            empty_streak += 1
-            if empty_streak >= _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS:
-                break
-            continue
-        event_count = len(daily.parsed.events)
-        if event_count == 0:
-            empty_streak += 1
-            if empty_streak >= _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS:
-                break
-            continue
+    for offsets in (
+        range(forward_days),
+        range(-1, -(backward_days + 1), -1),
+    ):
         empty_streak = 0
-        collected_event_ids.extend(int(event.id) for event in daily.parsed.events)
+        for offset in offsets:
+            probe_date = start_date + timedelta(days=offset)
+            iso = probe_date.isoformat()
+            dates_probed += 1
+            try:
+                daily = await event_list_job.run_unique_tournament_scheduled(
+                    unique_tournament_id=unique_tournament_id,
+                    date=iso,
+                    sport_slug=sport_slug,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "structure-sync scheduled failed tournament=%s date=%s: %s",
+                    unique_tournament_id,
+                    iso,
+                    exc,
+                )
+                empty_streak += 1
+                if empty_streak >= _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS:
+                    break
+                continue
+            event_count = len(daily.parsed.events)
+            if event_count == 0:
+                empty_streak += 1
+                if empty_streak >= _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS:
+                    break
+                continue
+            empty_streak = 0
+            collected_event_ids.extend(int(event.id) for event in daily.parsed.events)
 
     return StructureSyncResult(
         unique_tournament_id=unique_tournament_id,
@@ -532,12 +540,17 @@ async def _append_current_season_event_surfaces(
     if _is_season_event_surface_fresh(redis_backend, freshness_key):
         return result
 
+    first_page_only = await _has_complete_season_event_surfaces(
+        getattr(app, "database", None),
+        season_id=current_season_id,
+    )
     surface_result = await _sync_current_season_event_surfaces(
         unique_tournament_id=unique_tournament_id,
         season_id=current_season_id,
         sport_slug=sport_slug,
         event_list_job=event_list_job,
         timeout=timeout,
+        first_page_only=first_page_only,
     )
     if surface_result.complete:
         _mark_season_event_surface_fresh(redis_backend, freshness_key)
@@ -554,8 +567,10 @@ async def _sync_current_season_event_surfaces(
     sport_slug: str,
     event_list_job: EventListIngestJob,
     timeout: float,
+    first_page_only: bool = False,
 ) -> _SeasonSurfaceSyncResult:
-    last_result = await _run_single_season_surface_page(
+    surface_runner = _run_single_season_surface_page if first_page_only else _run_paginated_season_surface
+    last_result = await surface_runner(
         event_list_job.run_season_last,
         surface_name="last",
         unique_tournament_id=unique_tournament_id,
@@ -563,7 +578,7 @@ async def _sync_current_season_event_surfaces(
         sport_slug=sport_slug,
         timeout=timeout,
     )
-    next_result = await _run_paginated_season_surface(
+    next_result = await surface_runner(
         event_list_job.run_season_next,
         surface_name="next",
         unique_tournament_id=unique_tournament_id,
@@ -664,6 +679,46 @@ def _has_season_event_surface_runners(event_list_job: EventListIngestJob) -> boo
     return _is_async_callable(getattr(event_list_job, "run_season_last", None)) and _is_async_callable(
         getattr(event_list_job, "run_season_next", None)
     )
+
+
+async def _has_complete_season_event_surfaces(database, *, season_id: int) -> bool:
+    connection_factory = getattr(database, "connection", None)
+    if not callable(connection_factory):
+        return False
+    try:
+        async with connection_factory() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT
+                    EXISTS (
+                        SELECT 1
+                        FROM api_payload_snapshot
+                        WHERE endpoint_pattern = $1
+                          AND context_entity_type = 'season'
+                          AND context_entity_id = $3
+                          AND payload->>'hasNextPage' = 'false'
+                    ) AS last_complete,
+                    EXISTS (
+                        SELECT 1
+                        FROM api_payload_snapshot
+                        WHERE endpoint_pattern = $2
+                          AND context_entity_type = 'season'
+                          AND context_entity_id = $3
+                          AND payload->>'hasNextPage' = 'false'
+                    ) AS next_complete
+                """,
+                _SEASON_LAST_ENDPOINT_PATTERN,
+                _SEASON_NEXT_ENDPOINT_PATTERN,
+                int(season_id),
+            )
+    except Exception as exc:
+        logger.warning(
+            "structure-sync season event completion check failed season=%s: %s",
+            season_id,
+            exc,
+        )
+        return False
+    return bool(row and row["last_complete"] and row["next_complete"])
 
 
 def _is_async_callable(candidate: Any) -> bool:

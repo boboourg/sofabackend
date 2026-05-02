@@ -52,6 +52,8 @@ class SportProfile:
     structure_refresh_interval_seconds: float = 6 * 3600.0
     # Calendar mode: how many months forward to expand via calendar/scheduled endpoints.
     structure_calendar_forward_months: int = 3
+    # Calendar mode: how many months backward to expand for browsing recent past days.
+    structure_calendar_backward_months: int = 1
     # Rounds mode: if a season lacks round metadata, optionally fall back to calendar.
     structure_rounds_fallback_calendar: bool = True
 
@@ -453,5 +455,6 @@ def resolve_sport_profile(sport_slug: str) -> SportProfile:
         managed_unique_tournament_ids=GENERIC_PROFILE.managed_unique_tournament_ids,
         structure_refresh_interval_seconds=GENERIC_PROFILE.structure_refresh_interval_seconds,
         structure_calendar_forward_months=GENERIC_PROFILE.structure_calendar_forward_months,
+        structure_calendar_backward_months=GENERIC_PROFILE.structure_calendar_backward_months,
         structure_rounds_fallback_calendar=GENERIC_PROFILE.structure_rounds_fallback_calendar,
     )

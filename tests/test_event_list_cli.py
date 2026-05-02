@@ -116,6 +116,78 @@ class EventListCliRunTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_run_team_surfaces_crawls_last_and_next_until_complete_when_missing_completion_snapshots(self) -> None:
+        fake_adapter = _FakeEventListAdapter()
+        fake_adapter.event_list_job.run_team_last = AsyncMock(
+            side_effect=[
+                _result("team_last:2817:0", has_next=True),
+                _result("team_last:2817:1", has_next=False),
+            ]
+        )
+        fake_adapter.event_list_job.run_team_next = AsyncMock(
+            side_effect=[
+                _result("team_next:2817:0", has_next=True),
+                _result("team_next:2817:1", has_next=False),
+            ]
+        )
+
+        with (
+            patch("schema_inspector.event_list_cli.load_runtime_config", return_value=SimpleNamespace(source_slug="sofascore")),
+            patch("schema_inspector.event_list_cli.load_database_config", return_value=object()),
+            patch(
+                "schema_inspector.event_list_cli.AsyncpgDatabase",
+                return_value=_FakeAsyncpgDatabaseContext(_FakeDatabase(last_complete=False, next_complete=False)),
+            ),
+            patch("schema_inspector.event_list_cli.build_source_adapter", return_value=fake_adapter),
+        ):
+            exit_code = await _run(_build_args(command="team-surfaces", team_id=2817, max_pages=10))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            fake_adapter.event_list_job.run_team_last.await_args_list,
+            [
+                call(2817, 0, sport_slug="football", timeout=15.0),
+                call(2817, 1, sport_slug="football", timeout=15.0),
+            ],
+        )
+        self.assertEqual(
+            fake_adapter.event_list_job.run_team_next.await_args_list,
+            [
+                call(2817, 0, sport_slug="football", timeout=15.0),
+                call(2817, 1, sport_slug="football", timeout=15.0),
+            ],
+        )
+
+    async def test_run_team_surfaces_refreshes_only_page_zero_after_completion_snapshots_exist(self) -> None:
+        fake_adapter = _FakeEventListAdapter()
+        fake_adapter.event_list_job.run_team_last = AsyncMock(return_value=_result("team_last:2817:0", has_next=True))
+        fake_adapter.event_list_job.run_team_next = AsyncMock(return_value=_result("team_next:2817:0", has_next=True))
+
+        with (
+            patch("schema_inspector.event_list_cli.load_runtime_config", return_value=SimpleNamespace(source_slug="sofascore")),
+            patch("schema_inspector.event_list_cli.load_database_config", return_value=object()),
+            patch(
+                "schema_inspector.event_list_cli.AsyncpgDatabase",
+                return_value=_FakeAsyncpgDatabaseContext(_FakeDatabase(last_complete=True, next_complete=True)),
+            ),
+            patch("schema_inspector.event_list_cli.build_source_adapter", return_value=fake_adapter),
+        ):
+            exit_code = await _run(_build_args(command="team-surfaces", team_id=2817, max_pages=10))
+
+        self.assertEqual(exit_code, 0)
+        fake_adapter.event_list_job.run_team_last.assert_awaited_once_with(
+            2817,
+            0,
+            sport_slug="football",
+            timeout=15.0,
+        )
+        fake_adapter.event_list_job.run_team_next.assert_awaited_once_with(
+            2817,
+            0,
+            sport_slug="football",
+            timeout=15.0,
+        )
+
 
 class _FakeAsyncpgDatabaseContext:
     def __init__(self, database) -> None:
@@ -126,6 +198,37 @@ class _FakeAsyncpgDatabaseContext:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         del exc_type, exc, tb
+
+
+class _FakeDatabaseConnection:
+    def __init__(self, *, last_complete: bool, next_complete: bool) -> None:
+        self.last_complete = last_complete
+        self.next_complete = next_complete
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+    async def fetchrow(self, *args, **kwargs):
+        del args, kwargs
+        return {
+            "last_complete": self.last_complete,
+            "next_complete": self.next_complete,
+        }
+
+
+class _FakeDatabase:
+    def __init__(self, *, last_complete: bool, next_complete: bool) -> None:
+        self.last_complete = last_complete
+        self.next_complete = next_complete
+
+    def connection(self):
+        return _FakeDatabaseConnection(
+            last_complete=self.last_complete,
+            next_complete=self.next_complete,
+        )
 
 
 class _FakeEventListAdapter:
