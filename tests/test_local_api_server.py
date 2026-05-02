@@ -615,6 +615,116 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
+    async def test_handle_api_get_serves_season_events_raw_snapshot_with_live_overlay(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeEventListSnapshotConnection(
+            rows=[
+                {
+                    "source_url": "https://www.sofascore.com/api/v1/unique-tournament/17/season/76986/events/last/0",
+                    "source_slug": "sofascore",
+                    "payload": {
+                        "events": [
+                            {
+                                "id": 14023940,
+                                "customId": "gsJ",
+                                "status": {"code": 0, "type": "notstarted", "description": "Not started"},
+                                "homeScore": {},
+                                "awayScore": {},
+                                "eventState": {"statusIndicator": "raw"},
+                                "venue": {"id": 2223, "name": "Raw Venue"},
+                            }
+                        ],
+                        "hasNextPage": True,
+                    },
+                }
+            ],
+            surface_rows=[
+                {
+                    "event_id": 14023940,
+                    "custom_id": "gsJ",
+                    "status_code": 100,
+                    "status_type": "finished",
+                    "status_description": "Ended",
+                    "winner_code": 1,
+                    "scores": {
+                        "home": {"current": 3, "display": 3, "period1": 1, "period2": 2, "normaltime": 3},
+                        "away": {"current": 1, "display": 1, "period1": 0, "period2": 1, "normaltime": 1},
+                    },
+                    "time_payload": {"currentPeriodStartTimestamp": 1777665748},
+                    "changes_payload": {"changes": ["homeScore.current"], "changeTimestamp": 1777667000},
+                    "event_filters_payload": {"level": ["top-competitions"]},
+                    "has_xg": True,
+                }
+            ],
+        )
+        application._connect = _make_fake_connector(connection)
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/season/76986/events/last/0",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = response.payload["events"][0]
+        self.assertEqual(event["status"], {"code": 100, "type": "finished", "description": "Ended"})
+        self.assertEqual(event["homeScore"]["current"], 3)
+        self.assertEqual(event["awayScore"]["current"], 1)
+        self.assertEqual(event["time"], {"currentPeriodStartTimestamp": 1777665748})
+        self.assertEqual(event["changes"], {"changes": ["homeScore.current"], "changeTimestamp": 1777667000})
+        self.assertEqual(event["eventFilters"], {"level": ["top-competitions"]})
+        self.assertEqual(event["hasXg"], True)
+        self.assertEqual(event["eventState"], {"statusIndicator": "raw"})
+        self.assertEqual(event["venue"], {"id": 2223, "name": "Raw Venue"})
+        self.assertTrue(connection.closed)
+
+    async def test_handle_api_get_serves_team_events_raw_snapshot_with_live_overlay(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeEventListSnapshotConnection(
+            rows=[
+                {
+                    "source_url": "https://www.sofascore.com/api/v1/team/2817/events/last/0",
+                    "source_slug": "sofascore",
+                    "payload": {
+                        "events": [
+                            {
+                                "id": 14083245,
+                                "customId": "team-match",
+                                "status": {"code": 0, "type": "notstarted", "description": "Not started"},
+                                "homeScore": {},
+                                "awayScore": {},
+                            }
+                        ],
+                        "hasNextPage": False,
+                    },
+                }
+            ],
+            surface_rows=[
+                {
+                    "event_id": 14083245,
+                    "custom_id": "team-match",
+                    "status_code": 100,
+                    "status_type": "finished",
+                    "status_description": "Ended",
+                    "scores": {
+                        "home": {"current": 0, "display": 0},
+                        "away": {"current": 2, "display": 2},
+                    },
+                }
+            ],
+        )
+        application._connect = _make_fake_connector(connection)
+
+        response = await application.handle_api_get("/api/v1/team/2817/events/last/0", "")
+
+        self.assertEqual(response.status_code, 200)
+        event = response.payload["events"][0]
+        self.assertEqual(event["status"]["type"], "finished")
+        self.assertEqual(event["homeScore"], {"current": 0, "display": 0})
+        self.assertEqual(event["awayScore"], {"current": 2, "display": 2})
+        self.assertTrue(connection.closed)
+
     async def test_fetch_ops_health_payload_keeps_drift_coverage_and_alert_summaries_in_payload(self) -> None:
         from schema_inspector.ops.health import (
             CoverageAlert,
@@ -1854,6 +1964,26 @@ class _FakeSnapshotConnection:
 
     async def close(self):
         self.closed = True
+
+
+class _FakeEventListSnapshotConnection(_FakeSnapshotConnection):
+    def __init__(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        surface_rows: list[dict[str, object]],
+    ) -> None:
+        super().__init__(rows)
+        self.surface_rows = surface_rows
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        normalized = " ".join(query.split())
+        if "FROM event_terminal_state" in normalized:
+            return []
+        if "FROM event AS e" in normalized and "event_score" in normalized:
+            return self.surface_rows
+        return await super().fetch(query, *args)
 
 
 class _FakeStatisticsSeasonsConnection:

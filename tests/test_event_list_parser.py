@@ -14,6 +14,8 @@ from schema_inspector.endpoints import (
     season_next_events_endpoint,
     sport_live_events_endpoint,
     sport_scheduled_events_endpoint,
+    team_last_events_endpoint,
+    team_next_events_endpoint,
 )
 from schema_inspector.runtime import RuntimeConfig, TransportAttempt
 from schema_inspector.sofascore_client import SofascoreClient, SofascoreResponse
@@ -79,6 +81,14 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             season_next_events_endpoint().build_url(unique_tournament_id=17, season_id=76986, page=0),
             "https://www.sofascore.com/api/v1/unique-tournament/17/season/76986/events/next/0",
+        )
+        self.assertEqual(
+            team_last_events_endpoint().build_url(team_id=2817, page=0),
+            "https://www.sofascore.com/api/v1/team/2817/events/last/0",
+        )
+        self.assertEqual(
+            team_next_events_endpoint().build_url(team_id=2817, page=0),
+            "https://www.sofascore.com/api/v1/team/2817/events/next/0",
         )
         self.assertEqual(
             sport_scheduled_events_endpoint("basketball").build_url(date="2026-04-10"),
@@ -243,7 +253,7 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         bundle = await parser.fetch_scheduled_events("2026-04-10")
 
         self.assertEqual(fake_client.seen_urls, [scheduled_url])
-        self.assertEqual(len(bundle.registry_entries), 8)
+        self.assertEqual(len(bundle.registry_entries), 10)
         self.assertIn(
             UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT.path_template,
             {item.path_template for item in bundle.registry_entries},
@@ -592,6 +602,34 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next_bundle.payload_snapshots[0].context_entity_id, 76986)
         self.assertEqual(next_bundle.payload_snapshots[0].payload["hasNextPage"], False)
         self.assertEqual({event.id for event in next_bundle.events}, {15726261})
+
+    async def test_event_list_parser_fetches_paginated_team_last_and_next_events(self) -> None:
+        last_endpoint = team_last_events_endpoint()
+        next_endpoint = team_next_events_endpoint()
+        last_url = last_endpoint.build_url(team_id=2817, page=0)
+        next_url = next_endpoint.build_url(team_id=2817, page=1)
+        fake_client = _FakeSofascoreClient(
+            {
+                last_url: {"events": [_minimal_event_payload(14023940, status_type="finished")], "hasNextPage": True},
+                next_url: {"events": [_minimal_event_payload(14083495, status_type="notstarted")], "hasNextPage": False},
+            }
+        )
+
+        parser = EventListParser(fake_client)
+        last_bundle = await parser.fetch_team_last_events(2817, page=0)
+        next_bundle = await parser.fetch_team_next_events(2817, page=1)
+
+        self.assertEqual(fake_client.seen_urls, [last_url, next_url])
+        self.assertEqual(last_bundle.payload_snapshots[0].endpoint_pattern, last_endpoint.path_template)
+        self.assertEqual(last_bundle.payload_snapshots[0].context_entity_type, "team")
+        self.assertEqual(last_bundle.payload_snapshots[0].context_entity_id, 2817)
+        self.assertEqual(last_bundle.payload_snapshots[0].payload["hasNextPage"], True)
+        self.assertEqual({event.id for event in last_bundle.events}, {14023940})
+        self.assertEqual(next_bundle.payload_snapshots[0].endpoint_pattern, next_endpoint.path_template)
+        self.assertEqual(next_bundle.payload_snapshots[0].context_entity_type, "team")
+        self.assertEqual(next_bundle.payload_snapshots[0].context_entity_id, 2817)
+        self.assertEqual(next_bundle.payload_snapshots[0].payload["hasNextPage"], False)
+        self.assertEqual({event.id for event in next_bundle.events}, {14083495})
 
 
 def _minimal_event_payload(event_id: int, *, status_type: str) -> dict[str, object]:

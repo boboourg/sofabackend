@@ -105,6 +105,28 @@ class _FakeParser:
         self.calls.append(("season_next", (unique_tournament_id, season_id, page), sport_slug, timeout))
         return self.bundle
 
+    async def fetch_team_last_events(
+        self,
+        team_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        self.calls.append(("team_last", (team_id, page), sport_slug, timeout))
+        return self.bundle
+
+    async def fetch_team_next_events(
+        self,
+        team_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        self.calls.append(("team_next", (team_id, page), sport_slug, timeout))
+        return self.bundle
+
 
 class _FakeRepository:
     def __init__(self, result: EventListWriteResult) -> None:
@@ -804,6 +826,49 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(database.transaction_calls, 2)
         self.assertEqual(last_result.job_name, "season_last:17:76986:0")
         self.assertEqual(next_result.job_name, "season_next:17:76986:1")
+
+    async def test_event_list_ingest_job_runs_team_last_and_next_pages(self) -> None:
+        bundle = _build_bundle()
+        parser = _FakeParser(bundle)
+        repository_result = EventListWriteResult(
+            endpoint_registry_rows=4,
+            payload_snapshot_rows=1,
+            sport_rows=1,
+            country_rows=1,
+            category_rows=1,
+            team_rows=3,
+            unique_tournament_rows=1,
+            season_rows=1,
+            tournament_rows=1,
+            event_status_rows=1,
+            event_rows=1,
+            event_round_info_rows=1,
+            event_status_time_rows=1,
+            event_time_rows=1,
+            event_var_in_progress_rows=1,
+            event_score_rows=2,
+            event_filter_value_rows=1,
+            event_change_item_rows=1,
+        )
+        repository = _FakeRepository(repository_result)
+        connection = object()
+        database = _FakeDatabase(connection)
+        job = EventListIngestJob(parser, repository, database)
+
+        last_result = await job.run_team_last(2817, 0, sport_slug="football", timeout=12.5)
+        next_result = await job.run_team_next(2817, 1, sport_slug="football", timeout=12.5)
+
+        self.assertEqual(
+            parser.calls,
+            [
+                ("team_last", (2817, 0), "football", 12.5),
+                ("team_next", (2817, 1), "football", 12.5),
+            ],
+        )
+        self.assertEqual(repository.calls, [(connection, bundle), (connection, bundle)])
+        self.assertEqual(database.transaction_calls, 2)
+        self.assertEqual(last_result.job_name, "team_last:2817:0")
+        self.assertEqual(next_result.job_name, "team_next:2817:1")
 
     async def test_event_list_ingest_job_prefers_bundle_aware_surface_loader(self) -> None:
         bundle = _build_bundle()

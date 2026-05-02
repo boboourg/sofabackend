@@ -1153,6 +1153,52 @@ def _build_statistics_and_entities_paths(summary: SwaggerDataSummary) -> dict[st
             parameters=[_path_param("team_id", "integer", "Sofascore team ID.")],
             source_tables=["team"],
         ),
+        "/api/v1/team/{team_id}/events/last/{page}": op(
+            path_template="/api/v1/team/{team_id}/events/last/{page}",
+            tag="Event List",
+            operation_id="getTeamLastEventsPage",
+            summary_text="Team result events page",
+            description=(
+                "Paginated completed/recent events feed for one team. "
+                "Serves the latest raw Sofascore list snapshot when available and reconciles mutable event fields from PostgreSQL."
+            ),
+            response_schema=_envelope("events", _array(_ref("EventSummary"))),
+            parameters=[
+                _path_param("team_id", "integer", "Sofascore team ID."),
+                _path_param("page", "integer", "Zero-based Sofascore page."),
+            ],
+            source_tables=[
+                "api_payload_snapshot",
+                "event",
+                "event_score",
+                "event_time",
+                "event_change_item",
+                "event_filter_value",
+            ],
+        ),
+        "/api/v1/team/{team_id}/events/next/{page}": op(
+            path_template="/api/v1/team/{team_id}/events/next/{page}",
+            tag="Event List",
+            operation_id="getTeamNextEventsPage",
+            summary_text="Team upcoming events page",
+            description=(
+                "Paginated upcoming events feed for one team. "
+                "Serves the latest raw Sofascore list snapshot when available and reconciles mutable event fields from PostgreSQL."
+            ),
+            response_schema=_envelope("events", _array(_ref("EventSummary"))),
+            parameters=[
+                _path_param("team_id", "integer", "Sofascore team ID."),
+                _path_param("page", "integer", "Zero-based Sofascore page."),
+            ],
+            source_tables=[
+                "api_payload_snapshot",
+                "event",
+                "event_score",
+                "event_time",
+                "event_change_item",
+                "event_filter_value",
+            ],
+        ),
         "/api/v1/player/{player_id}": op(
             path_template="/api/v1/player/{player_id}",
             tag="Entities",

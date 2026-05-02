@@ -142,6 +142,42 @@ class EventListIngestJob:
             ),
         )
 
+    async def run_team_last(
+        self,
+        team_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"team_last:{team_id}:{page}",
+            self.parser.fetch_team_last_events(
+                team_id,
+                page,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
+        )
+
+    async def run_team_next(
+        self,
+        team_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"team_next:{team_id}:{page}",
+            self.parser.fetch_team_next_events(
+                team_id,
+                page,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
+        )
+
     async def run_brackets(
         self,
         unique_tournament_id: int,

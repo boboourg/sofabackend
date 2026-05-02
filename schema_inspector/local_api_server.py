@@ -539,7 +539,146 @@ class LocalApiApplication:
         if not event_ids and not event_custom_ids:
             return payload
 
-        rows = await executor.fetch(
+        surface_rows = await executor.fetch(
+            """
+            SELECT
+                e.id AS event_id,
+                e.custom_id,
+                e.start_timestamp,
+                e.home_team_id,
+                e.away_team_id,
+                e.status_code,
+                es.type AS status_type,
+                es.description AS status_description,
+                e.winner_code,
+                e.aggregated_winner_code,
+                e.coverage,
+                e.home_red_cards,
+                e.away_red_cards,
+                e.detail_id,
+                e.correct_ai_insight,
+                e.correct_halftime_ai_insight,
+                e.feed_locked,
+                e.is_editor,
+                e.crowdsourcing_data_display_enabled,
+                e.final_result_only,
+                e.has_event_player_statistics,
+                e.has_event_player_heat_map,
+                e.has_global_highlights,
+                e.has_xg,
+                score_payload.scores,
+                round_payload.round_info_payload,
+                status_time_payload.status_time_payload,
+                time_payload.time_payload,
+                changes_payload.changes_payload,
+                filters_payload.event_filters_payload
+            FROM event AS e
+            LEFT JOIN event_status AS es ON es.code = e.status_code
+            LEFT JOIN LATERAL (
+                SELECT jsonb_object_agg(
+                    sc.side,
+                    jsonb_strip_nulls(jsonb_build_object(
+                        'current', sc.current,
+                        'display', sc.display,
+                        'aggregated', sc.aggregated,
+                        'normaltime', sc.normaltime,
+                        'overtime', sc.overtime,
+                        'penalties', sc.penalties,
+                        'period1', sc.period1,
+                        'period2', sc.period2,
+                        'period3', sc.period3,
+                        'period4', sc.period4,
+                        'extra1', sc.extra1,
+                        'extra2', sc.extra2,
+                        'series', sc.series
+                    ))
+                    ORDER BY sc.side
+                ) AS scores
+                FROM event_score AS sc
+                WHERE sc.event_id = e.id
+                  AND sc.side IN ('home', 'away')
+            ) AS score_payload ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT jsonb_strip_nulls(jsonb_build_object(
+                    'round', eri.round_number,
+                    'slug', eri.slug,
+                    'name', eri.name,
+                    'cupRoundType', eri.cup_round_type
+                )) AS round_info_payload
+                FROM event_round_info AS eri
+                WHERE eri.event_id = e.id
+                LIMIT 1
+            ) AS round_payload ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT jsonb_strip_nulls(jsonb_build_object(
+                    'prefix', est.prefix,
+                    'timestamp', est.timestamp,
+                    'initial', est.initial,
+                    'max', est.max,
+                    'extra', est.extra
+                )) AS status_time_payload
+                FROM event_status_time AS est
+                WHERE est.event_id = e.id
+                LIMIT 1
+            ) AS status_time_payload ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT jsonb_strip_nulls(jsonb_build_object(
+                    'currentPeriodStartTimestamp', et.current_period_start_timestamp,
+                    'initial', et.initial,
+                    'max', et.max,
+                    'extra', et.extra,
+                    'injuryTime1', et.injury_time1,
+                    'injuryTime2', et.injury_time2,
+                    'injuryTime3', et.injury_time3,
+                    'injuryTime4', et.injury_time4,
+                    'overtimeLength', et.overtime_length,
+                    'periodLength', et.period_length,
+                    'totalPeriodCount', et.total_period_count
+                )) AS time_payload
+                FROM event_time AS et
+                WHERE et.event_id = e.id
+                LIMIT 1
+            ) AS time_payload ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    CASE
+                        WHEN count(*) = 0 THEN NULL
+                        ELSE jsonb_strip_nulls(jsonb_build_object(
+                            'changes', jsonb_agg(eci.change_value ORDER BY eci.ordinal),
+                            'changeTimestamp', max(eci.change_timestamp)
+                        ))
+                    END AS changes_payload
+                FROM event_change_item AS eci
+                WHERE eci.event_id = e.id
+            ) AS changes_payload ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT jsonb_object_agg(grouped.filter_name, grouped.filter_values ORDER BY grouped.filter_name) AS event_filters_payload
+                FROM (
+                    SELECT
+                        efv.filter_name,
+                        jsonb_agg(efv.filter_value ORDER BY efv.ordinal) AS filter_values
+                    FROM event_filter_value AS efv
+                    WHERE efv.event_id = e.id
+                    GROUP BY efv.filter_name
+                ) AS grouped
+            ) AS filters_payload ON TRUE
+            WHERE e.id = ANY($1::bigint[])
+               OR (cardinality($2::text[]) > 0 AND e.custom_id = ANY($2::text[]))
+            """,
+            event_ids,
+            event_custom_ids,
+        )
+        surface_by_event: dict[int, dict[str, Any]] = {}
+        surface_by_custom_id: dict[str, dict[str, Any]] = {}
+        for row in surface_rows:
+            row_dict = dict(row)
+            event_id = int(row_dict["event_id"])
+            surface_by_event[event_id] = row_dict
+            custom_id = row_dict.get("custom_id")
+            if custom_id is not None:
+                surface_by_custom_id[str(custom_id)] = row_dict
+
+        terminal_rows = await executor.fetch(
             """
             SELECT
                 ets.event_id,
@@ -561,12 +700,10 @@ class LocalApiApplication:
             event_ids,
             event_custom_ids,
         )
-        if not rows:
-            return payload
 
         terminal_by_event: dict[int, dict[str, Any]] = {}
         terminal_by_custom_id: dict[str, dict[str, Any]] = {}
-        for row in rows:
+        for row in terminal_rows:
             event_id = int(row["event_id"])
             terminal_status_raw = row.get("terminal_status")
             # Housekeeping's zombie-sweeper stamps ``zombie_stale`` for events
@@ -597,7 +734,7 @@ class LocalApiApplication:
                     if existing_by_custom_id is None or _terminal_candidate_sort_key(candidate) > _terminal_candidate_sort_key(existing_by_custom_id):
                         terminal_by_custom_id[str(custom_id)] = candidate
 
-        if not terminal_by_event and not terminal_by_custom_id:
+        if not surface_by_event and not surface_by_custom_id and not terminal_by_event and not terminal_by_custom_id:
             return payload
 
         # Previously this branch unconditionally dropped every event that had
@@ -620,6 +757,16 @@ class LocalApiApplication:
                 reconciled_items.append(item)
                 continue
             event_id = int(event_id)
+            updated = dict(item)
+            surface_row = surface_by_event.get(event_id)
+            if surface_row is None:
+                custom_id = item.get("customId")
+                if custom_id is not None:
+                    by_custom_id_surface = surface_by_custom_id.get(str(custom_id))
+                    if by_custom_id_surface is not None and _event_item_identity_matches_terminal_row(item, by_custom_id_surface):
+                        surface_row = by_custom_id_surface
+            if surface_row is not None:
+                updated = _apply_event_surface_overlay(updated, surface_row)
             terminal_candidate = terminal_by_event.get(event_id)
             if terminal_candidate is None:
                 custom_id = item.get("customId")
@@ -628,9 +775,8 @@ class LocalApiApplication:
                     if by_custom_id is not None and _event_item_identity_matches_terminal_row(item, by_custom_id["row"]):
                         terminal_candidate = by_custom_id
             if terminal_candidate is None:
-                reconciled_items.append(item)
+                reconciled_items.append(updated)
                 continue
-            updated = dict(item)
             updated["status"] = terminal_candidate["status"]
             reconciled_items.append(updated)
 
@@ -2772,6 +2918,80 @@ def _statistics_season_payload(row: Any) -> dict[str, Any]:
     if row["season_year"] is not None:
         payload["year"] = str(row["season_year"])
     return payload
+
+
+def _apply_event_surface_overlay(item: dict[str, Any], row: Mapping[str, Any]) -> dict[str, Any]:
+    updated = dict(item)
+
+    status_code = row.get("status_code")
+    if status_code is not None:
+        status_payload: dict[str, Any] = {"code": int(status_code)}
+        if row.get("status_type") is not None:
+            status_payload["type"] = str(row["status_type"])
+        if row.get("status_description") is not None:
+            status_payload["description"] = str(row["status_description"])
+        updated["status"] = status_payload
+
+    for source_key, dest_key in (
+        ("start_timestamp", "startTimestamp"),
+        ("winner_code", "winnerCode"),
+        ("aggregated_winner_code", "aggregatedWinnerCode"),
+        ("coverage", "coverage"),
+        ("home_red_cards", "homeRedCards"),
+        ("away_red_cards", "awayRedCards"),
+        ("detail_id", "detailId"),
+    ):
+        value = row.get(source_key)
+        if value is not None:
+            updated[dest_key] = _serialize_scalar(value)
+
+    for source_key, dest_key in (
+        ("correct_ai_insight", "correctAiInsight"),
+        ("correct_halftime_ai_insight", "correctHalftimeAiInsight"),
+        ("feed_locked", "feedLocked"),
+        ("is_editor", "isEditor"),
+        ("crowdsourcing_data_display_enabled", "crowdsourcingDataDisplayEnabled"),
+        ("final_result_only", "finalResultOnly"),
+        ("has_event_player_statistics", "hasEventPlayerStatistics"),
+        ("has_event_player_heat_map", "hasEventPlayerHeatMap"),
+        ("has_global_highlights", "hasGlobalHighlights"),
+        ("has_xg", "hasXg"),
+    ):
+        value = row.get(source_key)
+        if value is not None:
+            updated[dest_key] = bool(value)
+
+    scores = _decoded_mapping(row.get("scores"))
+    home_score = _decoded_mapping(scores.get("home") if scores else None)
+    away_score = _decoded_mapping(scores.get("away") if scores else None)
+    if home_score is not None:
+        updated["homeScore"] = _strip_none_mapping(home_score)
+    if away_score is not None:
+        updated["awayScore"] = _strip_none_mapping(away_score)
+
+    for source_key, dest_key in (
+        ("round_info_payload", "roundInfo"),
+        ("status_time_payload", "statusTime"),
+        ("time_payload", "time"),
+        ("changes_payload", "changes"),
+        ("event_filters_payload", "eventFilters"),
+    ):
+        payload = _decoded_mapping(row.get(source_key))
+        if payload:
+            updated[dest_key] = payload
+
+    return updated
+
+
+def _decoded_mapping(value: Any) -> dict[str, Any] | None:
+    decoded = _decode_snapshot_payload(value)
+    if isinstance(decoded, Mapping):
+        return {str(key): _serialize_scalar(item) for key, item in decoded.items()}
+    return None
+
+
+def _strip_none_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _serialize_scalar(item) for key, item in value.items() if item is not None}
 
 
 def _extract_terminal_status_payload(final_payload: Any) -> dict[str, Any] | None:

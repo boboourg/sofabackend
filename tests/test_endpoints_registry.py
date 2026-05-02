@@ -15,6 +15,8 @@ from schema_inspector.endpoints import (
     sport_live_categories_endpoint,
     sport_live_tournaments_endpoint,
     sport_trending_top_players_endpoint,
+    team_last_events_endpoint,
+    team_next_events_endpoint,
 )
 
 
@@ -49,6 +51,14 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertEqual(
             season_next_events_endpoint().path_template,
             "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}",
+        )
+        self.assertEqual(
+            team_last_events_endpoint().path_template,
+            "/api/v1/team/{team_id}/events/last/{page}",
+        )
+        self.assertEqual(
+            team_next_events_endpoint().path_template,
+            "/api/v1/team/{team_id}/events/next/{page}",
         )
 
     def test_calendar_and_category_count_endpoints_are_available(self) -> None:

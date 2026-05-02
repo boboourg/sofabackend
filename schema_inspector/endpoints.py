@@ -308,6 +308,22 @@ def season_next_events_endpoint() -> SofascoreEndpoint:
     )
 
 
+def team_last_events_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/team/{team_id}/events/last/{page}",
+        envelope_key="events",
+        target_table="event",
+    )
+
+
+def team_next_events_endpoint() -> SofascoreEndpoint:
+    return SofascoreEndpoint(
+        path_template="/api/v1/team/{team_id}/events/next/{page}",
+        envelope_key="events",
+        target_table="event",
+    )
+
+
 def calendar_months_with_events_endpoint() -> SofascoreEndpoint:
     return SofascoreEndpoint(
         path_template="/api/v1/calendar/unique-tournament/{unique_tournament_id}/season/{season_id}/months-with-events",
@@ -342,6 +358,8 @@ def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoin
         UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
         season_last_events_endpoint(),
         season_next_events_endpoint(),
+        team_last_events_endpoint(),
+        team_next_events_endpoint(),
     )
 
 

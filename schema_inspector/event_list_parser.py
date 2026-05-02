@@ -18,6 +18,8 @@ from .endpoints import (
     season_next_events_endpoint,
     sport_live_events_endpoint,
     sport_scheduled_events_endpoint,
+    team_last_events_endpoint,
+    team_next_events_endpoint,
 )
 from .sofascore_client import SofascoreClient, SofascoreResponse
 
@@ -337,6 +339,42 @@ class EventListParser:
             sport_slug=sport_slug,
             unique_tournament_id=unique_tournament_id,
             season_id=season_id,
+            page=page,
+        )
+
+    async def fetch_team_last_events(
+        self,
+        team_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        return await self._fetch_event_collection(
+            team_last_events_endpoint(),
+            timeout=timeout,
+            context_entity_type="team",
+            context_entity_id=team_id,
+            sport_slug=sport_slug,
+            team_id=team_id,
+            page=page,
+        )
+
+    async def fetch_team_next_events(
+        self,
+        team_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        return await self._fetch_event_collection(
+            team_next_events_endpoint(),
+            timeout=timeout,
+            context_entity_type="team",
+            context_entity_id=team_id,
+            sport_slug=sport_slug,
+            team_id=team_id,
             page=page,
         )
 
