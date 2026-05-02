@@ -91,12 +91,59 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("QueueSummary", document["components"]["schemas"])
         self.assertIn("JobRunEntry", document["components"]["schemas"])
         self.assertIn("CoverageSummary", document["components"]["schemas"])
-        self.assertIn("Coverage ledger rows in summary: `11`", document["paths"]["/ops/coverage/summary"]["get"]["description"])
+        self.assertIn("coverage ledger rows: `11`", document["paths"]["/ops/coverage/summary"]["get"]["description"])
         operational_health = document["components"]["schemas"]["OperationalHealth"]["properties"]
         self.assertEqual(operational_health["drift_summary"]["$ref"], "#/components/schemas/DriftSummary")
         self.assertEqual(operational_health["coverage_summary"]["$ref"], "#/components/schemas/CoverageRollupSummary")
         self.assertEqual(operational_health["coverage_alert_summary"]["$ref"], "#/components/schemas/CoverageAlertSummary")
         self.assertEqual(operational_health["reconcile_policy_summary"]["$ref"], "#/components/schemas/ReconcilePolicySummary")
+
+    def test_document_is_russian_frontend_contract_with_standard_responses(self) -> None:
+        summary = SwaggerDataSummary(
+            generated_at="2026-05-02T18:00:00+00:00",
+            table_counts={"event": 10, "api_payload_snapshot": 20},
+            snapshot_counts={"/api/v1/team/{team_id}/events/last/{page}": 3},
+        )
+
+        document = build_openapi_document(summary)
+
+        self.assertEqual(document["info"]["title"], "VAR11 API для спортивного фронтенда")
+        self.assertIn("Документация описывает только реально поддержанные backend routes", document["info"]["description"])
+        self.assertTrue(all(any("а" <= char.lower() <= "я" for char in tag["description"]) for tag in document["tags"]))
+
+        season_last = document["paths"]["/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}"]["get"]
+        self.assertIn("Результаты сезона", season_last["summary"])
+        self.assertIn("Когда использовать", season_last["description"])
+        self.assertIn("Источник данных", season_last["description"])
+
+        for path, path_item in document["paths"].items():
+            with self.subTest(path=path):
+                operation = path_item["get"]
+                self.assertEqual(set(operation["responses"]), {"200", "404", "500"})
+                self.assertIn("Успешный ответ", operation["responses"]["200"]["description"])
+                self.assertIn("не найден", operation["responses"]["404"]["description"])
+                self.assertIn("Внутренняя ошибка", operation["responses"]["500"]["description"])
+
+    def test_document_does_not_invent_paths(self) -> None:
+        summary = SwaggerDataSummary(
+            generated_at="2026-05-02T18:00:00+00:00",
+            table_counts={},
+            snapshot_counts={},
+        )
+
+        document = build_openapi_document(summary)
+
+        expected_paths = {endpoint.path_template for endpoint in local_api_endpoints()}
+        expected_paths.update(
+            {
+                "/ops/health",
+                "/ops/snapshots/summary",
+                "/ops/queues/summary",
+                "/ops/jobs/runs",
+                "/ops/coverage/summary",
+            }
+        )
+        self.assertEqual(set(document["paths"]), expected_paths)
 
     def test_document_contains_all_supported_sports_and_special_routes(self) -> None:
         summary = SwaggerDataSummary(

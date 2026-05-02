@@ -63,17 +63,127 @@ _OPENAPI_CACHE_INPUTS = (
     PROJECT_ROOT / "schema_inspector" / "sport_profiles.py",
 )
 _LOCAL_API_TAGS = (
-    ("Operations", "Operational monitoring endpoints for the Hybrid ETL control plane and Autopilot services."),
-    ("Event List", "Sport-specific scheduled/live/tournament event feeds."),
-    ("Event Detail", "Event detail, lineups, odds, managers, h2h and other event subresources."),
-    ("Special Routes", "Sport-specific specialist payloads such as tennis power, baseball innings, pitches, shotmaps and esports games."),
-    ("Categories", "Sport-specific category and tournament discovery endpoints."),
-    ("Competition", "Unique tournament and season metadata."),
-    ("Standings", "Standings and standings rows by unique tournament or tournament."),
-    ("Statistics", "Season statistics config and leaderboard-style snapshot results."),
-    ("Entities", "Player/team entities, player season statistics and enrichment endpoints."),
-    ("Leaderboards", "Top players, top teams, venues, groups, team-of-the-week and related season widgets."),
+    ("Operations", "Технические ручки состояния backend: health, очереди, job runs, snapshots и coverage."),
+    ("Event List", "Списки матчей для UI: live, календарь на дату, матчи турнира, результаты и будущие матчи команды или сезона."),
+    ("Event Detail", "Карточка матча и связанные блоки: составы, статистика, инциденты, комментарии, коэффициенты, графики и игроки."),
+    ("Special Routes", "Спортивные спец-ручки: tennis power, point-by-point, baseball innings/pitches, shotmap, esports games."),
+    ("Categories", "Справочники стран, категорий и турниров для выбора спорта, страны и лиги."),
+    ("Competition", "Метаданные турниров и сезонов: сезоны, раунды, cup tree, brackets и season info."),
+    ("Standings", "Турнирные таблицы total/home/away по uniqueTournament или tournament."),
+    ("Statistics", "Сезонная статистика и конфиги статистики турнира."),
+    ("Entities", "Сущности и профили: команды, игроки, тренеры, трансферы и доступные сезоны статистики."),
+    ("Leaderboards", "Виджеты сезона: топ игроки, топ команды, team of the week, player of the season и похожие списки."),
 )
+
+_RU_PATH_SUMMARIES = {
+    "/ops/health": "Состояние backend",
+    "/ops/snapshots/summary": "Сводка raw snapshots",
+    "/ops/queues/summary": "Сводка Redis-очередей",
+    "/ops/jobs/runs": "Последние ETL job runs",
+    "/ops/coverage/summary": "Сводка coverage ledger",
+    "/api/v1/sport/0/event-count": "Счётчик матчей на сегодня по видам спорта",
+    "/api/v1/category/{category_id}/unique-tournaments": "Турниры категории",
+    "/api/v1/unique-tournament/{unique_tournament_id}": "Профиль турнира",
+    "/api/v1/unique-tournament/{unique_tournament_id}/seasons": "Сезоны турнира",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/info": "Информация о сезоне",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds": "Раунды сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees": "Cup tree / playoff сетка сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/brackets": "Brackets сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}": "Матчи турнира на дату",
+    "/api/v1/unique-tournament/{unique_tournament_id}/featured-events": "Избранные матчи турнира",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}": "Матчи раунда сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}": "Результаты сезона, страница",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}": "Будущие матчи сезона, страница",
+    "/api/v1/event/{event_id}": "Карточка матча",
+    "/api/v1/event/{event_id}/statistics": "Статистика матча",
+    "/api/v1/event/{event_id}/lineups": "Составы матча",
+    "/api/v1/event/{event_id}/incidents": "Инциденты матча",
+    "/api/v1/event/{event_id}/comments": "Комментарии матча",
+    "/api/v1/event/{event_id}/managers": "Тренеры матча",
+    "/api/v1/event/{event_id}/h2h": "Очные встречи матча",
+    "/api/v1/event/{event_id}/pregame-form": "Форма команд перед матчем",
+    "/api/v1/event/{event_id}/votes": "Голосование по матчу",
+    "/api/v1/event/{event_id}/graph": "График давления матча",
+    "/api/v1/event/{event_id}/graph/sequence": "Raw graph sequence матча",
+    "/api/v1/event/{event_id}/heatmap/{team_id}": "Heatmap команды в матче",
+    "/api/v1/event/{event_id}/odds/{provider_id}/all": "Все рынки коэффициентов матча",
+    "/api/v1/event/{event_id}/odds/{provider_id}/featured": "Избранные коэффициенты матча",
+    "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds": "Winning odds матча",
+    "/api/v1/event/{event_id}/best-players/summary": "Лучшие игроки матча",
+    "/api/v1/event/{event_id}/player/{player_id}/statistics": "Статистика игрока в матче",
+    "/api/v1/event/{event_id}/player/{player_id}/rating-breakdown": "Расшифровка рейтинга игрока",
+    "/api/v1/event/{event_id}/player/{player_id}/heatmap": "Heatmap игрока в матче",
+    "/api/v1/event/{event_id}/point-by-point": "Tennis point-by-point",
+    "/api/v1/event/{event_id}/tennis-power": "Tennis power",
+    "/api/v1/event/{event_id}/innings": "Baseball innings",
+    "/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches": "Baseball pitches",
+    "/api/v1/event/{event_id}/shotmap": "Shotmap матча",
+    "/api/v1/event/{event_id}/weather": "Погода матча",
+    "/api/v1/event/{event_id}/esports-games": "Esports games матча",
+    "/api/v1/team/{team_id}": "Профиль команды",
+    "/api/v1/team/{team_id}/events/last/{page}": "Результаты команды, страница",
+    "/api/v1/team/{team_id}/events/next/{page}": "Будущие матчи команды, страница",
+    "/api/v1/player/{player_id}": "Профиль игрока",
+    "/api/v1/manager/{manager_id}": "Профиль тренера",
+    "/api/v1/player/{player_id}/statistics": "Карьерная статистика игрока",
+    "/api/v1/player/{player_id}/transfer-history": "История трансферов игрока",
+    "/api/v1/player/{player_id}/statistics/seasons": "Сезоны статистики игрока",
+    "/api/v1/team/{team_id}/team-statistics/seasons": "Сезоны командной статистики",
+    "/api/v1/team/{team_id}/player-statistics/seasons": "Сезоны статистики игроков команды",
+    "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall": "Статистика игрока за сезон",
+    "/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall": "Статистика команды за сезон",
+    "/api/v1/player/{player_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/heatmap/overall": "Season heatmap игрока",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team/{team_id}/team-performance-graph-data": "График формы команды за сезон",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}": "Таблица турнира",
+    "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}": "Таблица tournament",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/info": "Конфиг сезонной статистики",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics": "Сезонная статистика",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/overall": "Топ игроков сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-ratings/overall": "Топ рейтингов сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/regularSeason": "Топ игроков regular season",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/overall": "Топ игроков per game",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players-per-game/all/regularSeason": "Топ игроков per game regular season",
+    "/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/top-players/overall": "Топ игроков команды за сезон",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season-race": "Гонка player of the season",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/overall": "Топ команд сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/venues": "Стадионы сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/top-teams/regularSeason": "Топ команд regular season",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups": "Группы сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season": "Player of the season",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/periods": "Периоды team of the week",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/{period_id}": "Team of the week",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-statistics/types": "Типы статистики игроков",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-statistics/types": "Типы статистики команд",
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-events/{scope}": "Матчи команд сезона",
+}
+
+_RU_PARAM_DESCRIPTIONS = {
+    "sport": "Вид спорта в slug-формате, например `football`, `tennis`, `basketball`, `ice-hockey`.",
+    "date": "Дата в формате `YYYY-MM-DD`.",
+    "timezone_offset_seconds": "Смещение часового пояса в секундах. Для Киева летом обычно `10800`.",
+    "page": "Номер страницы Sofascore, начинается с `0`.",
+    "event_id": "ID матча Sofascore.",
+    "custom_id": "Custom ID пары команд Sofascore для H2H events.",
+    "player_id": "ID игрока Sofascore.",
+    "team_id": "ID команды Sofascore.",
+    "manager_id": "ID тренера Sofascore.",
+    "category_id": "ID категории/страны Sofascore.",
+    "tournament_id": "ID конкретного tournament Sofascore.",
+    "unique_tournament_id": "ID uniqueTournament Sofascore: стабильная сущность лиги/кубка.",
+    "season_id": "ID сезона Sofascore.",
+    "round_number": "Номер раунда сезона.",
+    "scope": "Срез таблицы или списка. Обычно `total`, `home`, `away`.",
+    "provider_id": "ID провайдера коэффициентов.",
+    "at_bat_id": "ID baseball at-bat внутри матча.",
+    "period_id": "ID периода team-of-the-week.",
+    "limit": "Размер страницы результата.",
+    "offset": "Смещение результата, как в оригинальном Sofascore query.",
+    "order": "Сортировка Sofascore, например `-rating`.",
+    "accumulation": "Режим агрегации статистики, например `total` или `per90`.",
+    "group": "Группа статистики Sofascore.",
+    "fields": "Список точных полей статистики Sofascore.",
+    "filters": "Список фильтров Sofascore.",
+}
 
 _SUPPORTED_TABLES = (
     "api_request_log",
@@ -314,18 +424,22 @@ def build_openapi_document(
     total_tables = len([name for name, count in summary.table_counts.items() if count > 0]) if summary.table_counts else 0
 
     info_description = (
-        "Local OpenAPI contract for the multi-sport read API backed by the current PostgreSQL dataset. "
-        "Paths mirror Sofascore-style templates already used by the ingestion layer. "
-        "Normalized endpoints expose typed schemas where we have stable tables, while snapshot-first endpoints remain intentionally flexible.\n\n"
-        f"Generated at: {summary.generated_at}\n"
-        f"Tables with data in summary: {total_tables}\n"
+        "Документация описывает только реально поддержанные backend routes текущего локального API. "
+        "Новые пути здесь не придумываются: список берётся из endpoint registry и существующих operations routes. "
+        "Часть ручек отдаёт нормализованные таблицы PostgreSQL, часть отдаёт последний сохранённый raw snapshot Sofascore.\n\n"
+        "Как читать Swagger фронтендеру:\n"
+        "- `200` значит данные найдены и формат ответа смотри в schema ниже.\n"
+        "- `404` значит для этих параметров в локальной базе или raw snapshot нет данных.\n"
+        "- `500` значит внутренняя ошибка backend при сборке ответа.\n\n"
+        f"Сгенерировано: {summary.generated_at}\n"
+        f"Таблиц с данными в summary: {total_tables}\n"
         f"Raw snapshot rows: {total_snapshot_rows}"
     )
 
-    return {
+    document = {
         "openapi": "3.0.3",
         "info": {
-            "title": "Sofascore Local Multi-Sport API",
+            "title": "VAR11 API для спортивного фронтенда",
             "version": "1.0.0",
             "description": info_description,
         },
@@ -333,6 +447,183 @@ def build_openapi_document(
         "tags": [{"name": name, "description": description} for name, description in _LOCAL_API_TAGS],
         "paths": paths,
         "components": components,
+    }
+    _localize_operations_for_frontend(document)
+    return document
+
+
+def _localize_operations_for_frontend(document: dict[str, Any]) -> None:
+    """Make the generated OpenAPI useful for frontend developers without changing routes."""
+
+    for path, path_item in document["paths"].items():
+        operation = path_item.get("get")
+        if not isinstance(operation, dict):
+            continue
+        operation["summary"] = _russian_operation_summary(path, operation)
+        operation["description"] = _russian_operation_description(path, operation)
+        operation["parameters"] = [_localize_parameter(param) for param in operation.get("parameters", [])]
+        operation["responses"] = _standard_russian_responses(operation)
+
+
+def _russian_operation_summary(path: str, operation: Mapping[str, Any]) -> str:
+    if path in _RU_PATH_SUMMARIES:
+        return _RU_PATH_SUMMARIES[path]
+    sport_match = re.match(r"^/api/v1/sport/([^/]+)/(.*)$", path)
+    if sport_match:
+        sport_slug, suffix = sport_match.groups()
+        if suffix == "events/live":
+            return f"Live-матчи: {sport_slug}"
+        if suffix == "scheduled-events/{date}":
+            return f"Матчи {sport_slug} на дату"
+        if suffix == "scheduled-tournaments/{date}/page/{page}":
+            return f"Турниры {sport_slug} на дату, страница"
+        if suffix == "categories":
+            return f"Категории спорта: {sport_slug}"
+        if suffix == "categories/all":
+            return f"Полный список категорий: {sport_slug}"
+        if suffix == "{date}/{timezone_offset_seconds}/categories":
+            return f"Категории {sport_slug} на дату"
+        if suffix == "trending-top-players":
+            return f"Trending top players: {sport_slug}"
+    tag = (operation.get("tags") or ["API"])[0]
+    if tag == "Event Detail":
+        return f"Данные матча: {path}"
+    if tag == "Special Routes":
+        return f"Спец-данные Sofascore: {path}"
+    if tag == "Leaderboards":
+        return f"Виджет сезона: {path}"
+    if tag == "Entities":
+        return f"Профиль/статистика сущности: {path}"
+    if tag == "Competition":
+        return f"Данные турнира или сезона: {path}"
+    if tag == "Categories":
+        return f"Справочник категорий: {path}"
+    return f"Backend route: {path}"
+
+
+def _russian_operation_description(path: str, operation: Mapping[str, Any]) -> str:
+    tag = (operation.get("tags") or ["API"])[0]
+    source_tables = list(operation.get("x-source-tables") or [])
+    upstream_pattern = operation.get("x-upstream-pattern")
+    summary = _russian_operation_summary(path, operation)
+    usage = _frontend_usage_note(path, tag)
+    source_note = _source_note(source_tables=source_tables, upstream_pattern=upstream_pattern)
+    data_note = _runtime_data_note(str(operation.get("description") or ""))
+    data_section = f"\n\nДанные на момент генерации Swagger:\n{data_note}" if data_note else ""
+    return (
+        f"{summary}.\n\n"
+        f"Когда использовать: {usage}\n\n"
+        f"Источник данных: {source_note}{data_section}\n\n"
+        "Коды ответа:\n"
+        "- `200`: данные найдены и возвращены в формате, описанном в schema.\n"
+        "- `404`: данных для такой комбинации параметров нет в локальной БД или raw snapshot.\n"
+        "- `500`: внутренняя ошибка backend при чтении/сборке ответа."
+    )
+
+
+def _frontend_usage_note(path: str, tag: str) -> str:
+    if path == "/api/v1/sport/0/event-count":
+        return "главная страница спорта, чтобы показать сколько матчей сегодня всего и сколько сейчас live."
+    if "/events/live" in path:
+        return "live-страница выбранного спорта; данные обновляются из live-контура backend."
+    if "/scheduled-events/{date}" in path:
+        return "календарь матчей на выбранную дату."
+    if "/scheduled-tournaments/{date}/page/{page}" in path:
+        return "страница Games/Main со списком турниров на дату; `page` начинается с 0."
+    if "/events/last/{page}" in path:
+        return "экран результатов; листай `page` с 0 до ответа с `hasNextPage=false`."
+    if "/events/next/{page}" in path:
+        return "экран будущих матчей; листай `page` с 0 до ответа с `hasNextPage=false`."
+    if "/events/round/{round_number}" in path:
+        return "экран турнира по раундам, когда UI уже знает `round_number`."
+    if path.endswith("/standings/{scope}"):
+        return "`scope=total|home|away` для таблицы турнира."
+    if "/top-players" in path or "/top-ratings" in path:
+        return "виджеты бомбардиров, рейтингов и топ-игроков сезона."
+    if "/top-teams" in path:
+        return "виджет топ-команд сезона."
+    if path == "/api/v1/event/{event_id}":
+        return "карточка матча; это основной источник статуса, счёта и команд."
+    if path.endswith("/lineups"):
+        return "вкладка состава матча."
+    if path.endswith("/incidents"):
+        return "лента событий матча: голы, карточки, замены и похожие события."
+    if path.endswith("/comments"):
+        return "текстовая трансляция/комментарии матча."
+    if path.endswith("/statistics"):
+        return "статистика матча или игрока, когда backend уже сохранил такие данные."
+    if "/transfer-history" in path:
+        return "вкладка Transfers в профиле игрока."
+    if "/statistics/seasons" in path:
+        return "выбор доступного турнира/сезона для статистики игрока или команды."
+    if tag == "Operations":
+        return "операционная диагностика backend; обычно не нужна публичному спортивному UI."
+    if tag == "Categories":
+        return "выбор страны/категории/лиги и discovery турниров."
+    if tag == "Competition":
+        return "страницы турнира: сезоны, раунды, сетки и метаданные сезона."
+    if tag == "Entities":
+        return "профили игроков, команд, тренеров и связанные с ними статистические страницы."
+    if tag == "Special Routes":
+        return "спортивные дополнительные блоки; вызывай только когда UI показывает соответствующий виджет."
+    return "используй только если такой путь уже нужен UI и есть данные в backend."
+
+
+def _source_note(*, source_tables: list[str], upstream_pattern: object) -> str:
+    parts: list[str] = []
+    if source_tables:
+        parts.append("таблицы `" + "`, `".join(source_tables) + "`")
+    if upstream_pattern:
+        parts.append(f"upstream pattern `{upstream_pattern}`")
+    if not parts:
+        return "локальный backend route."
+    return "; ".join(parts) + "."
+
+
+def _runtime_data_note(original_description: str) -> str:
+    translations = (
+        ("Snapshot rows in summary", "raw snapshot rows"),
+        ("Raw snapshot rows now", "raw snapshot rows"),
+        ("Live history rows in summary", "live history rows"),
+        ("Job run rows in summary", "job run rows"),
+        ("Coverage ledger rows in summary", "coverage ledger rows"),
+        ("Target table rows now", "строк в target table"),
+        ("Target table", "target table"),
+    )
+    notes: list[str] = []
+    for raw_line in original_description.splitlines():
+        line = raw_line.strip().lstrip("-").strip()
+        if not line:
+            continue
+        for english_prefix, russian_prefix in translations:
+            if line.startswith(f"{english_prefix}:"):
+                value = line.split(":", 1)[1].strip()
+                notes.append(f"- {russian_prefix}: {value}")
+                break
+    return "\n".join(notes)
+
+
+def _localize_parameter(parameter: dict[str, Any]) -> dict[str, Any]:
+    localized = dict(parameter)
+    name = str(localized.get("name", ""))
+    if name in _RU_PARAM_DESCRIPTIONS:
+        localized["description"] = _RU_PARAM_DESCRIPTIONS[name]
+    return localized
+
+
+def _standard_russian_responses(operation: Mapping[str, Any]) -> dict[str, Any]:
+    existing_200 = dict((operation.get("responses") or {}).get("200") or {})
+    existing_200["description"] = "Успешный ответ. Данные найдены, формат ответа описан в schema ниже."
+    return {
+        "200": existing_200,
+        "404": {
+            "description": "Данные не найдены: в локальной БД или raw snapshot нет записи для переданных параметров.",
+            "content": {"application/json": {"schema": _ref("FreeFormObject")}},
+        },
+        "500": {
+            "description": "Внутренняя ошибка backend при чтении данных или сборке ответа.",
+            "content": {"application/json": {"schema": _ref("FreeFormObject")}},
+        },
     }
 
 
@@ -2455,11 +2746,11 @@ def _build_statistics_result_schema() -> dict[str, Any]:
 
 def _build_viewer_html(openapi_file_name: str) -> str:
     return f"""<!doctype html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sofascore Local Swagger</title>
+    <title>VAR11 API Swagger</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
     <style>
       body {{
