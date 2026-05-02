@@ -18,7 +18,7 @@ from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 import orjson
@@ -63,6 +63,9 @@ _QUEUE_GROUPS = ALL_CONSUMER_GROUPS
 _OPENAPI_WARMUP_DELAY_SECONDS = 120.0
 
 logger = logging.getLogger(__name__)
+
+_SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+_SOURCE_TABLES_BY_PATH_TEMPLATE: dict[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -692,6 +695,400 @@ class LocalApiApplication:
         if unique_tournament_root_id is not None:
             return await self._fetch_unique_tournament_root_payload(unique_tournament_root_id)
 
+        specialized_payload = await self._fetch_specialized_normalized_payload(route, path, path_params)
+        if specialized_payload is not None:
+            return specialized_payload
+
+        generic_payload = await self._fetch_generic_normalized_payload(route, path_params)
+        if generic_payload is not None:
+            return generic_payload
+
+        return None
+
+    async def _fetch_specialized_normalized_payload(
+        self,
+        route: RouteSpec,
+        path: str,
+        path_params: dict[str, str],
+    ) -> Any | None:
+        del path
+        template = route.endpoint.path_template
+        if template == "/api/v1/event/{event_id}/player/{player_id}/statistics":
+            return await self._fetch_event_player_statistics_payload(
+                int(path_params["event_id"]),
+                int(path_params["player_id"]),
+            )
+        if template == "/api/v1/event/{event_id}/player/{player_id}/rating-breakdown":
+            return await self._fetch_event_player_rating_breakdown_payload(
+                int(path_params["event_id"]),
+                int(path_params["player_id"]),
+            )
+        if template == "/api/v1/event/{event_id}/heatmap/{team_id}":
+            return await self._fetch_event_team_heatmap_payload(
+                int(path_params["event_id"]),
+                int(path_params["team_id"]),
+            )
+        if route.endpoint.target_table == "top_player_snapshot":
+            return await self._fetch_top_player_payload(route, path_params)
+        if route.endpoint.target_table == "top_team_snapshot":
+            return await self._fetch_top_team_payload(route, path_params)
+        return None
+
+    async def _fetch_event_player_statistics_payload(
+        self,
+        event_id: int,
+        player_id: int,
+    ) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            summary = await connection.fetchrow(
+                """
+                SELECT
+                    eps.event_id,
+                    eps.player_id,
+                    eps.team_id,
+                    eps.position,
+                    eps.rating,
+                    eps.rating_original,
+                    eps.rating_alternative,
+                    eps.statistics_type,
+                    eps.sport_slug,
+                    eps.extra_json,
+                    p.slug AS player_slug,
+                    p.name AS player_name,
+                    p.short_name AS player_short_name,
+                    t.slug AS team_slug,
+                    t.name AS team_name,
+                    t.short_name AS team_short_name
+                FROM event_player_statistics AS eps
+                LEFT JOIN player AS p ON p.id = eps.player_id
+                LEFT JOIN team AS t ON t.id = eps.team_id
+                WHERE eps.event_id = $1
+                  AND eps.player_id = $2
+                """,
+                event_id,
+                player_id,
+            )
+            if summary is None:
+                return None
+            value_rows = await connection.fetch(
+                """
+                SELECT stat_name, stat_value_numeric, stat_value_text, stat_value_json
+                FROM event_player_stat_value
+                WHERE event_id = $1
+                  AND player_id = $2
+                ORDER BY stat_name
+                """,
+                event_id,
+                player_id,
+            )
+        finally:
+            await connection.close()
+
+        statistics: dict[str, Any] = {}
+        if summary["rating"] is not None:
+            statistics["rating"] = _serialize_scalar(summary["rating"])
+        rating_versions: dict[str, Any] = {}
+        if summary["rating_original"] is not None:
+            rating_versions["original"] = _serialize_scalar(summary["rating_original"])
+        if summary["rating_alternative"] is not None:
+            rating_versions["alternative"] = _serialize_scalar(summary["rating_alternative"])
+        if rating_versions:
+            statistics["ratingVersions"] = rating_versions
+        statistics_type: dict[str, Any] = {}
+        if summary["statistics_type"] is not None:
+            statistics_type["statisticsType"] = str(summary["statistics_type"])
+        if summary["sport_slug"] is not None:
+            statistics_type["sportSlug"] = str(summary["sport_slug"])
+        if statistics_type:
+            statistics["statisticsType"] = statistics_type
+        for row in value_rows:
+            statistics[str(row["stat_name"])] = _first_not_none(
+                _serialize_scalar(row["stat_value_json"]),
+                _serialize_scalar(row["stat_value_numeric"]),
+                _serialize_scalar(row["stat_value_text"]),
+            )
+
+        payload: dict[str, Any] = {
+            "player": _minimal_entity_payload(
+                summary["player_id"],
+                slug=summary["player_slug"],
+                name=summary["player_name"],
+                short_name=summary["player_short_name"],
+            ),
+            "statistics": statistics,
+        }
+        if summary["team_id"] is not None:
+            payload["team"] = _minimal_entity_payload(
+                summary["team_id"],
+                slug=summary["team_slug"],
+                name=summary["team_name"],
+                short_name=summary["team_short_name"],
+            )
+        if summary["position"] is not None:
+            payload["position"] = str(summary["position"])
+        if summary["extra_json"] is not None:
+            payload["extra"] = _serialize_scalar(summary["extra_json"])
+        return payload
+
+    async def _fetch_event_player_rating_breakdown_payload(
+        self,
+        event_id: int,
+        player_id: int,
+    ) -> dict[str, list[dict[str, Any]]] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    action_group,
+                    ordinal,
+                    event_action_type,
+                    is_home,
+                    keypass,
+                    outcome,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y
+                FROM event_player_rating_breakdown_action
+                WHERE event_id = $1
+                  AND player_id = $2
+                ORDER BY action_group, ordinal
+                """,
+                event_id,
+                player_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        payload: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item: dict[str, Any] = {}
+            if row["event_action_type"] is not None:
+                item["eventActionType"] = str(row["event_action_type"])
+            if row["is_home"] is not None:
+                item["isHome"] = bool(row["is_home"])
+            if row["keypass"] is not None:
+                item["keypass"] = bool(row["keypass"])
+            if row["outcome"] is not None:
+                item["outcome"] = bool(row["outcome"])
+            if row["start_x"] is not None or row["start_y"] is not None:
+                item["playerCoordinates"] = {
+                    "x": _serialize_scalar(row["start_x"]),
+                    "y": _serialize_scalar(row["start_y"]),
+                }
+            if row["end_x"] is not None or row["end_y"] is not None:
+                item["passEndCoordinates"] = {
+                    "x": _serialize_scalar(row["end_x"]),
+                    "y": _serialize_scalar(row["end_y"]),
+                }
+            payload.setdefault(str(row["action_group"]), []).append(item)
+        return payload
+
+    async def _fetch_event_team_heatmap_payload(
+        self,
+        event_id: int,
+        team_id: int,
+    ) -> dict[str, list[dict[str, Any]]] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT point_type, ordinal, x, y
+                FROM event_team_heatmap_point
+                WHERE event_id = $1
+                  AND team_id = $2
+                ORDER BY point_type, ordinal
+                """,
+                event_id,
+                team_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        payload = {"playerPoints": [], "goalkeeperPoints": []}
+        for row in rows:
+            point = {"x": _serialize_scalar(row["x"]), "y": _serialize_scalar(row["y"])}
+            if row["point_type"] == "goalkeeper":
+                payload["goalkeeperPoints"].append(point)
+            else:
+                payload["playerPoints"].append(point)
+        return payload
+
+    async def _fetch_top_player_payload(
+        self,
+        route: RouteSpec,
+        path_params: dict[str, str],
+    ) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            snapshot = await connection.fetchrow(
+                _top_snapshot_query("top_player_snapshot", path_params),
+                route.endpoint.pattern,
+                int(path_params["unique_tournament_id"]),
+                int(path_params["season_id"]),
+                _optional_int_path_param(path_params, "team_id"),
+            )
+            if snapshot is None:
+                return None
+            rows = await connection.fetch(
+                """
+                SELECT
+                    e.metric_name,
+                    e.ordinal,
+                    e.player_id,
+                    p.slug AS player_slug,
+                    p.name AS player_name,
+                    p.short_name AS player_short_name,
+                    e.team_id,
+                    t.slug AS team_slug,
+                    t.name AS team_name,
+                    t.short_name AS team_short_name,
+                    e.event_id,
+                    e.played_enough,
+                    e.statistic,
+                    e.statistics_id,
+                    e.statistics_payload
+                FROM top_player_entry AS e
+                LEFT JOIN player AS p ON p.id = e.player_id
+                LEFT JOIN team AS t ON t.id = e.team_id
+                WHERE e.snapshot_id = $1
+                ORDER BY e.metric_name, e.ordinal
+                """,
+                int(snapshot["id"]),
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        top_players: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item: dict[str, Any] = {}
+            if row["player_id"] is not None:
+                item["player"] = _minimal_entity_payload(
+                    row["player_id"],
+                    slug=row["player_slug"],
+                    name=row["player_name"],
+                    short_name=row["player_short_name"],
+                )
+            if row["team_id"] is not None:
+                item["team"] = _minimal_entity_payload(
+                    row["team_id"],
+                    slug=row["team_slug"],
+                    name=row["team_name"],
+                    short_name=row["team_short_name"],
+                )
+            if row["event_id"] is not None:
+                item["event"] = {"id": int(row["event_id"])}
+            if row["played_enough"] is not None:
+                item["playedEnough"] = bool(row["played_enough"])
+            if row["statistic"] is not None:
+                item["statistic"] = _serialize_scalar(row["statistic"])
+            if row["statistics_id"] is not None:
+                item["statisticsId"] = int(row["statistics_id"])
+            if row["statistics_payload"] is not None:
+                item["statistics"] = _serialize_scalar(row["statistics_payload"])
+            top_players.setdefault(str(row["metric_name"]), []).append(item)
+
+        payload: dict[str, Any] = {"topPlayers": top_players}
+        if snapshot["statistics_type"] is not None:
+            payload["statisticsType"] = _serialize_scalar(snapshot["statistics_type"])
+        return payload
+
+    async def _fetch_top_team_payload(
+        self,
+        route: RouteSpec,
+        path_params: dict[str, str],
+    ) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            snapshot = await connection.fetchrow(
+                _top_snapshot_query("top_team_snapshot", path_params),
+                route.endpoint.pattern,
+                int(path_params["unique_tournament_id"]),
+                int(path_params["season_id"]),
+                None,
+            )
+            if snapshot is None:
+                return None
+            rows = await connection.fetch(
+                """
+                SELECT
+                    e.metric_name,
+                    e.ordinal,
+                    e.team_id,
+                    t.slug AS team_slug,
+                    t.name AS team_name,
+                    t.short_name AS team_short_name,
+                    e.statistics_id,
+                    e.statistics_payload
+                FROM top_team_entry AS e
+                LEFT JOIN team AS t ON t.id = e.team_id
+                WHERE e.snapshot_id = $1
+                ORDER BY e.metric_name, e.ordinal
+                """,
+                int(snapshot["id"]),
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        top_teams: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item: dict[str, Any] = {
+                "team": _minimal_entity_payload(
+                    row["team_id"],
+                    slug=row["team_slug"],
+                    name=row["team_name"],
+                    short_name=row["team_short_name"],
+                )
+            }
+            if row["statistics_id"] is not None:
+                item["statisticsId"] = int(row["statistics_id"])
+            if row["statistics_payload"] is not None:
+                item["statistics"] = _serialize_scalar(row["statistics_payload"])
+            top_teams.setdefault(str(row["metric_name"]), []).append(item)
+        return {"topTeams": top_teams}
+
+    async def _fetch_generic_normalized_payload(
+        self,
+        route: RouteSpec,
+        path_params: dict[str, str],
+    ) -> dict[str, Any] | None:
+        candidate_tables = _generic_fallback_candidate_tables(route)
+        if not candidate_tables:
+            return None
+
+        connection = await self._connect()
+        try:
+            for table_name in candidate_tables:
+                columns = await _fetch_table_columns(connection, table_name)
+                if not columns:
+                    continue
+                filters = _generic_filters_for_columns(path_params, columns)
+                if "endpoint_pattern" in columns:
+                    filters["endpoint_pattern"] = route.endpoint.pattern
+                if not filters:
+                    continue
+                rows = await _fetch_generic_rows(connection, table_name, filters)
+                if not rows:
+                    continue
+                envelope_key = _generic_envelope_key(route)
+                return {
+                    envelope_key: [
+                        _serialize_generic_row(dict(row["row"]) if "row" in row else dict(row))
+                        for row in rows
+                    ]
+                }
+        finally:
+            await connection.close()
         return None
 
     async def _fetch_sport_event_count_payload(self) -> dict[str, dict[str, int]]:
@@ -1749,7 +2146,180 @@ def _query_int(raw_query: str, name: str, *, default: int, minimum: int, maximum
 def _serialize_scalar(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Mapping):
+        return {str(key): _serialize_scalar(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_serialize_scalar(item) for item in value]
+    if isinstance(value, tuple):
+        return [_serialize_scalar(item) for item in value]
     return value
+
+
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _minimal_entity_payload(
+    entity_id: Any,
+    *,
+    slug: Any = None,
+    name: Any = None,
+    short_name: Any = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"id": int(entity_id)}
+    if slug is not None:
+        payload["slug"] = str(slug)
+    if name is not None:
+        payload["name"] = str(name)
+    if short_name is not None:
+        payload["shortName"] = str(short_name)
+    return payload
+
+
+def _optional_int_path_param(path_params: dict[str, str], name: str) -> int | None:
+    raw_value = path_params.get(name)
+    if raw_value is None:
+        return None
+    try:
+        return int(raw_value)
+    except ValueError:
+        return None
+
+
+def _top_snapshot_query(table_name: str, path_params: dict[str, str]) -> str:
+    if table_name not in {"top_player_snapshot", "top_team_snapshot"}:
+        raise ValueError(f"Unsupported top snapshot table: {table_name}")
+    statistics_type_expression = "statistics_type" if table_name == "top_player_snapshot" else "NULL::jsonb AS statistics_type"
+    team_filter = "AND ($4::bigint IS NULL OR source_url LIKE '%/team/' || $4::text || '/%')"
+    return f"""
+        SELECT id, {statistics_type_expression}
+        FROM {table_name}
+        WHERE endpoint_pattern = $1
+          AND unique_tournament_id = $2
+          AND season_id = $3
+          {team_filter}
+        ORDER BY fetched_at DESC NULLS LAST, id DESC
+        LIMIT 1
+    """
+
+
+def _source_tables_by_path_template() -> dict[str, tuple[str, ...]]:
+    global _SOURCE_TABLES_BY_PATH_TEMPLATE
+    if _SOURCE_TABLES_BY_PATH_TEMPLATE is None:
+        document = build_openapi_document(_empty_summary())
+        values: dict[str, tuple[str, ...]] = {}
+        for path_template, operations in document.get("paths", {}).items():
+            get_operation = operations.get("get") if isinstance(operations, dict) else None
+            if not isinstance(get_operation, dict):
+                continue
+            source_tables = get_operation.get("x-source-tables")
+            if isinstance(source_tables, list):
+                values[str(path_template)] = tuple(str(item) for item in source_tables)
+        _SOURCE_TABLES_BY_PATH_TEMPLATE = values
+    return _SOURCE_TABLES_BY_PATH_TEMPLATE
+
+
+def _generic_fallback_candidate_tables(route: RouteSpec) -> tuple[str, ...]:
+    candidates: list[str] = []
+    target_table = route.endpoint.target_table
+    if target_table and target_table != "api_payload_snapshot":
+        candidates.append(target_table)
+    for table_name in _source_tables_by_path_template().get(route.endpoint.path_template, ()):
+        if table_name == "api_payload_snapshot":
+            continue
+        if table_name not in candidates:
+            candidates.append(table_name)
+    return tuple(table_name for table_name in candidates if _is_safe_sql_identifier(table_name))
+
+
+def _is_safe_sql_identifier(value: str) -> bool:
+    return bool(_SAFE_SQL_IDENTIFIER_RE.fullmatch(value))
+
+
+async def _fetch_table_columns(connection: Any, table_name: str) -> frozenset[str]:
+    rows = await connection.fetch(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = $1
+        """,
+        table_name,
+    )
+    return frozenset(str(row["column_name"]) for row in rows)
+
+
+def _generic_filters_for_columns(path_params: dict[str, str], columns: frozenset[str]) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    for name, raw_value in path_params.items():
+        if name in {"page", "date", "timezone_offset_seconds"}:
+            continue
+        if name not in columns:
+            continue
+        try:
+            filters[name] = int(raw_value)
+        except ValueError:
+            filters[name] = raw_value
+    return filters
+
+
+async def _fetch_generic_rows(connection: Any, table_name: str, filters: dict[str, Any]) -> list[Any]:
+    where_parts: list[str] = []
+    args: list[Any] = []
+    for column_name, value in filters.items():
+        if not _is_safe_sql_identifier(column_name):
+            continue
+        args.append(value)
+        where_parts.append(f"{column_name} = ${len(args)}")
+    if not where_parts:
+        return []
+    query = f"""
+        SELECT to_jsonb(t) AS row
+        FROM (
+            SELECT *
+            FROM {table_name}
+            WHERE {' AND '.join(where_parts)}
+            LIMIT 500
+        ) AS t
+    """
+    return list(await connection.fetch(query, *args))
+
+
+def _generic_envelope_key(route: RouteSpec) -> str:
+    envelope_key = route.endpoint.envelope_key
+    if envelope_key and "," not in envelope_key:
+        return envelope_key
+    target_table = route.endpoint.target_table
+    if target_table and target_table != "api_payload_snapshot":
+        return _snake_to_camel(_pluralize_table_name(target_table))
+    return "rows"
+
+
+def _serialize_generic_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        _snake_to_camel(str(key)): _serialize_scalar(value)
+        for key, value in row.items()
+    }
+
+
+def _snake_to_camel(value: str) -> str:
+    pieces = value.split("_")
+    if not pieces:
+        return value
+    return pieces[0] + "".join(piece[:1].upper() + piece[1:] for piece in pieces[1:])
+
+
+def _pluralize_table_name(value: str) -> str:
+    if value.endswith("y"):
+        return value[:-1] + "ies"
+    if value.endswith("s"):
+        return value
+    return value + "s"
 
 
 def _serialize_optional_int(value: Any) -> int | None:

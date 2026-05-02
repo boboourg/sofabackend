@@ -301,6 +301,193 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
+    async def test_handle_api_get_rebuilds_event_player_statistics_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeNormalizedFallbackConnection(
+            event_player_statistics=[
+                {
+                    "event_id": 44801,
+                    "player_id": 292,
+                    "team_id": 10,
+                    "position": "F",
+                    "rating": 7.4,
+                    "rating_original": 7.35,
+                    "rating_alternative": 7.5,
+                    "statistics_type": "overall",
+                    "sport_slug": "football",
+                    "extra_json": {"shirtNumber": 9},
+                    "player_slug": "sample-player",
+                    "player_name": "Sample Player",
+                    "player_short_name": "S. Player",
+                    "team_slug": "sample-team",
+                    "team_name": "Sample Team",
+                    "team_short_name": "Sample",
+                }
+            ],
+            event_player_stat_values=[
+                {
+                    "stat_name": "goals",
+                    "stat_value_numeric": 2,
+                    "stat_value_text": None,
+                    "stat_value_json": None,
+                },
+                {
+                    "stat_name": "accuratePass",
+                    "stat_value_numeric": None,
+                    "stat_value_text": "18/20",
+                    "stat_value_json": None,
+                },
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/44801/player/292/statistics", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["player"], {"id": 292, "slug": "sample-player", "name": "Sample Player", "shortName": "S. Player"})
+        self.assertEqual(response.payload["team"]["id"], 10)
+        self.assertEqual(response.payload["position"], "F")
+        self.assertEqual(response.payload["statistics"]["rating"], 7.4)
+        self.assertEqual(response.payload["statistics"]["ratingVersions"], {"original": 7.35, "alternative": 7.5})
+        self.assertEqual(response.payload["statistics"]["statisticsType"], {"statisticsType": "overall", "sportSlug": "football"})
+        self.assertEqual(response.payload["statistics"]["goals"], 2)
+        self.assertEqual(response.payload["statistics"]["accuratePass"], "18/20")
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_rating_breakdown_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeNormalizedFallbackConnection(
+            rating_breakdown=[
+                {
+                    "action_group": "passes",
+                    "ordinal": 0,
+                    "event_action_type": "pass",
+                    "is_home": True,
+                    "keypass": False,
+                    "outcome": True,
+                    "start_x": 12.5,
+                    "start_y": 44.0,
+                    "end_x": 55.0,
+                    "end_y": 12.0,
+                }
+            ]
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/13873923/player/10710/rating-breakdown", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["passes"][0]["eventActionType"], "pass")
+        self.assertEqual(response.payload["passes"][0]["playerCoordinates"], {"x": 12.5, "y": 44.0})
+        self.assertEqual(response.payload["passes"][0]["passEndCoordinates"], {"x": 55.0, "y": 12.0})
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_team_heatmap_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeNormalizedFallbackConnection(
+            heatmap_points=[
+                {"point_type": "player", "ordinal": 0, "x": 1.25, "y": 2.5},
+                {"point_type": "goalkeeper", "ordinal": 0, "x": 9.5, "y": 8.5},
+            ]
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/94957/heatmap/4704", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload, {"playerPoints": [{"x": 1.25, "y": 2.5}], "goalkeeperPoints": [{"x": 9.5, "y": 8.5}]})
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_top_players_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeNormalizedFallbackConnection(
+            top_player_snapshot={
+                "id": 500,
+                "statistics_type": {"name": "overall"},
+            },
+            top_player_entries=[
+                {
+                    "metric_name": "goals",
+                    "ordinal": 0,
+                    "player_id": 292,
+                    "player_slug": "sample-player",
+                    "player_name": "Sample Player",
+                    "player_short_name": "S. Player",
+                    "team_id": 10,
+                    "team_slug": "sample-team",
+                    "team_name": "Sample Team",
+                    "team_short_name": "Sample",
+                    "event_id": None,
+                    "played_enough": True,
+                    "statistic": 12,
+                    "statistics_id": 900,
+                    "statistics_payload": {"goals": 12},
+                }
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/unique-tournament/17/season/76986/top-players/overall", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["statisticsType"], {"name": "overall"})
+        self.assertEqual(response.payload["topPlayers"]["goals"][0]["player"]["id"], 292)
+        self.assertEqual(response.payload["topPlayers"]["goals"][0]["team"]["id"], 10)
+        self.assertEqual(response.payload["topPlayers"]["goals"][0]["statistics"], {"goals": 12})
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_uses_generic_normalized_fallback_for_remaining_source_table_routes(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeGenericNormalizedConnection(
+            table_columns={"event_statistic": {"event_id", "period", "group_name", "stat_name", "home_value_numeric"}},
+            table_rows={
+                "event_statistic": [
+                    {
+                        "event_id": 14083191,
+                        "period": "ALL",
+                        "group_name": "Match overview",
+                        "stat_name": "Ball possession",
+                        "home_value_numeric": 62,
+                    }
+                ]
+            },
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/14083191/statistics", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.payload,
+            {
+                "statistics": [
+                    {
+                        "eventId": 14083191,
+                        "period": "ALL",
+                        "groupName": "Match overview",
+                        "statName": "Ball possession",
+                        "homeValueNumeric": 62,
+                    }
+                ]
+            },
+        )
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
     async def test_fetch_ops_health_payload_keeps_drift_coverage_and_alert_summaries_in_payload(self) -> None:
         from schema_inspector.ops.health import (
             CoverageAlert,
@@ -1554,6 +1741,79 @@ class _FakeStatisticsSeasonsConnection:
         if "stat_type" in query:
             return self.type_rows
         return self.season_rows
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeNormalizedFallbackConnection:
+    def __init__(
+        self,
+        *,
+        event_player_statistics: list[dict[str, object]] | None = None,
+        event_player_stat_values: list[dict[str, object]] | None = None,
+        rating_breakdown: list[dict[str, object]] | None = None,
+        heatmap_points: list[dict[str, object]] | None = None,
+        top_player_snapshot: dict[str, object] | None = None,
+        top_player_entries: list[dict[str, object]] | None = None,
+    ) -> None:
+        self.event_player_statistics = event_player_statistics or []
+        self.event_player_stat_values = event_player_stat_values or []
+        self.rating_breakdown = rating_breakdown or []
+        self.heatmap_points = heatmap_points or []
+        self.top_player_snapshot = top_player_snapshot
+        self.top_player_entries = top_player_entries or []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args):
+        self.fetchrow_calls.append((query, args))
+        normalized = " ".join(query.split())
+        if "FROM event_player_statistics" in normalized:
+            return self.event_player_statistics[0] if self.event_player_statistics else None
+        if "FROM top_player_snapshot" in normalized:
+            return self.top_player_snapshot
+        return None
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        normalized = " ".join(query.split())
+        if "FROM event_player_stat_value" in normalized:
+            return self.event_player_stat_values
+        if "FROM event_player_rating_breakdown_action" in normalized:
+            return self.rating_breakdown
+        if "FROM event_team_heatmap_point" in normalized:
+            return self.heatmap_points
+        if "FROM top_player_entry" in normalized:
+            return self.top_player_entries
+        return []
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeGenericNormalizedConnection:
+    def __init__(
+        self,
+        *,
+        table_columns: dict[str, set[str]],
+        table_rows: dict[str, list[dict[str, object]]],
+    ) -> None:
+        self.table_columns = table_columns
+        self.table_rows = table_rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        if "information_schema.columns" in query:
+            table_name = str(args[0])
+            return [{"column_name": column_name} for column_name in sorted(self.table_columns.get(table_name, set()))]
+        for table_name, rows in self.table_rows.items():
+            if f"FROM {table_name}" in query:
+                return [{"row": row} for row in rows]
+        return []
 
     async def close(self):
         self.closed = True
