@@ -23,8 +23,11 @@ some skeleton no matter the structure).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import inspect
+import time
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from typing import Any, Mapping
 
 from ..competition_parser import UniqueTournamentRecord
 from ..event_list_job import EventListIngestJob
@@ -35,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_MISSING_ROUNDS = 2
 _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS = 3
+_MAX_SEASON_EVENT_PAGES = 50
+_SEASON_EVENT_SURFACE_REFRESH_TTL_SECONDS = 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,12 @@ class StructureSyncResult:
     event_ids: tuple[int, ...] = field(default_factory=tuple)
     success: bool = True
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _SeasonSurfaceSyncResult:
+    event_ids: tuple[int, ...]
+    complete: bool
 
 
 async def run_structure_sync_for_tournament(
@@ -122,7 +133,7 @@ async def run_structure_sync_for_tournament(
     mode = _resolve_mode(profile, tournament_record)
 
     if mode == "rounds":
-        return await _run_rounds_mode(
+        result = await _run_rounds_mode(
             unique_tournament_id=int(unique_tournament_id),
             sport_slug=normalized_sport,
             profile=profile,
@@ -134,9 +145,8 @@ async def run_structure_sync_for_tournament(
             max_rounds_probe=max_rounds_probe,
             timeout=timeout,
         )
-
-    if mode == "brackets":
-        return await _run_brackets_mode(
+    elif mode == "brackets":
+        result = await _run_brackets_mode(
             unique_tournament_id=int(unique_tournament_id),
             sport_slug=normalized_sport,
             profile=profile,
@@ -146,15 +156,25 @@ async def run_structure_sync_for_tournament(
             now_factory=now_factory,
             timeout=timeout,
         )
+    else:
+        # calendar mode (either explicit or auto fallback)
+        result = await _run_calendar_mode(
+            unique_tournament_id=int(unique_tournament_id),
+            sport_slug=normalized_sport,
+            profile=profile,
+            season_ids=season_ids,
+            event_list_job=event_list_job,
+            now_factory=now_factory,
+            timeout=timeout,
+        )
 
-    # calendar mode (either explicit or auto fallback)
-    return await _run_calendar_mode(
+    return await _append_current_season_event_surfaces(
+        result,
+        app=app,
         unique_tournament_id=int(unique_tournament_id),
         sport_slug=normalized_sport,
-        profile=profile,
-        season_ids=season_ids,
+        current_season_id=current_season_id,
         event_list_job=event_list_job,
-        now_factory=now_factory,
         timeout=timeout,
     )
 
@@ -490,6 +510,185 @@ async def _run_brackets_mode(
         success=True,
         reason="brackets empty; fell back to calendar",
     )
+
+
+async def _append_current_season_event_surfaces(
+    result: StructureSyncResult,
+    *,
+    app,
+    unique_tournament_id: int,
+    sport_slug: str,
+    current_season_id: int,
+    event_list_job: EventListIngestJob,
+    timeout: float,
+) -> StructureSyncResult:
+    if not result.success:
+        return result
+    if not _has_season_event_surface_runners(event_list_job):
+        return result
+
+    freshness_key = _season_event_surface_freshness_key(sport_slug, unique_tournament_id, current_season_id)
+    redis_backend = getattr(app, "redis_backend", None)
+    if _is_season_event_surface_fresh(redis_backend, freshness_key):
+        return result
+
+    surface_result = await _sync_current_season_event_surfaces(
+        unique_tournament_id=unique_tournament_id,
+        season_id=current_season_id,
+        sport_slug=sport_slug,
+        event_list_job=event_list_job,
+        timeout=timeout,
+    )
+    if surface_result.complete:
+        _mark_season_event_surface_fresh(redis_backend, freshness_key)
+    if not surface_result.event_ids:
+        return result
+
+    return replace(result, event_ids=_dedupe_event_ids((*result.event_ids, *surface_result.event_ids)))
+
+
+async def _sync_current_season_event_surfaces(
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+    sport_slug: str,
+    event_list_job: EventListIngestJob,
+    timeout: float,
+) -> _SeasonSurfaceSyncResult:
+    last_result = await _run_paginated_season_surface(
+        event_list_job.run_season_last,
+        surface_name="last",
+        unique_tournament_id=unique_tournament_id,
+        season_id=season_id,
+        sport_slug=sport_slug,
+        timeout=timeout,
+    )
+    next_result = await _run_paginated_season_surface(
+        event_list_job.run_season_next,
+        surface_name="next",
+        unique_tournament_id=unique_tournament_id,
+        season_id=season_id,
+        sport_slug=sport_slug,
+        timeout=timeout,
+    )
+    return _SeasonSurfaceSyncResult(
+        event_ids=_dedupe_event_ids((*last_result.event_ids, *next_result.event_ids)),
+        complete=last_result.complete and next_result.complete,
+    )
+
+
+async def _run_paginated_season_surface(
+    runner,
+    *,
+    surface_name: str,
+    unique_tournament_id: int,
+    season_id: int,
+    sport_slug: str,
+    timeout: float,
+) -> _SeasonSurfaceSyncResult:
+    collected: list[int] = []
+    for page in range(_MAX_SEASON_EVENT_PAGES):
+        try:
+            result = await runner(
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                page=page,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "structure-sync season %s-events failed tournament=%s season=%s page=%s: %s",
+                surface_name,
+                unique_tournament_id,
+                season_id,
+                page,
+                exc,
+            )
+            return _SeasonSurfaceSyncResult(event_ids=_dedupe_event_ids(collected), complete=False)
+        collected.extend(int(event.id) for event in getattr(result.parsed, "events", ()))
+        if not _result_has_next_page(result):
+            return _SeasonSurfaceSyncResult(event_ids=_dedupe_event_ids(collected), complete=True)
+    logger.warning(
+        "structure-sync season %s-events reached max page limit tournament=%s season=%s max_pages=%s",
+        surface_name,
+        unique_tournament_id,
+        season_id,
+        _MAX_SEASON_EVENT_PAGES,
+    )
+    return _SeasonSurfaceSyncResult(event_ids=_dedupe_event_ids(collected), complete=False)
+
+
+def _result_has_next_page(result) -> bool:
+    snapshots = getattr(getattr(result, "parsed", None), "payload_snapshots", ())
+    for snapshot in snapshots:
+        payload = getattr(snapshot, "payload", None)
+        if isinstance(payload, Mapping):
+            return bool(payload.get("hasNextPage"))
+    return False
+
+
+def _has_season_event_surface_runners(event_list_job: EventListIngestJob) -> bool:
+    return _is_async_callable(getattr(event_list_job, "run_season_last", None)) and _is_async_callable(
+        getattr(event_list_job, "run_season_next", None)
+    )
+
+
+def _is_async_callable(candidate: Any) -> bool:
+    return bool(candidate is not None and inspect.iscoroutinefunction(candidate))
+
+
+def _dedupe_event_ids(event_ids) -> tuple[int, ...]:
+    seen: set[int] = set()
+    output: list[int] = []
+    for raw_event_id in event_ids:
+        event_id = int(raw_event_id)
+        if event_id in seen:
+            continue
+        seen.add(event_id)
+        output.append(event_id)
+    return tuple(output)
+
+
+def _season_event_surface_freshness_key(sport_slug: str, unique_tournament_id: int, season_id: int) -> str:
+    return f"freshness:season-events:{sport_slug}:{int(unique_tournament_id)}:{int(season_id)}"
+
+
+def _is_season_event_surface_fresh(redis_backend, key: str) -> bool:
+    if redis_backend is None:
+        return False
+    try:
+        return bool(_call_redis(redis_backend.exists, key, now_ms=_now_ms()))
+    except Exception as exc:
+        logger.warning("structure-sync season event freshness check failed key=%s: %s", key, exc)
+        return False
+
+
+def _mark_season_event_surface_fresh(redis_backend, key: str) -> None:
+    if redis_backend is None:
+        return
+    try:
+        _call_redis(
+            redis_backend.set,
+            key,
+            "1",
+            px=_SEASON_EVENT_SURFACE_REFRESH_TTL_SECONDS * 1000,
+            now_ms=_now_ms(),
+        )
+    except Exception as exc:
+        logger.warning("structure-sync season event freshness mark failed key=%s: %s", key, exc)
+
+
+def _call_redis(method, *args, **kwargs):
+    try:
+        return method(*args, **kwargs)
+    except TypeError:
+        filtered_kwargs = {key: value for key, value in kwargs.items() if key != "now_ms"}
+        return method(*args, **filtered_kwargs)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _has_bracket_capability(tournament: UniqueTournamentRecord | None) -> bool:

@@ -10,6 +10,8 @@ from schema_inspector.endpoints import (
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
     UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
+    season_last_events_endpoint,
+    season_next_events_endpoint,
     sport_live_events_endpoint,
     sport_scheduled_events_endpoint,
 )
@@ -69,6 +71,14 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
                 round_number=32,
             ),
             "https://www.sofascore.com/api/v1/unique-tournament/17/season/76986/events/round/32",
+        )
+        self.assertEqual(
+            season_last_events_endpoint().build_url(unique_tournament_id=17, season_id=76986, page=0),
+            "https://www.sofascore.com/api/v1/unique-tournament/17/season/76986/events/last/0",
+        )
+        self.assertEqual(
+            season_next_events_endpoint().build_url(unique_tournament_id=17, season_id=76986, page=0),
+            "https://www.sofascore.com/api/v1/unique-tournament/17/season/76986/events/next/0",
         )
         self.assertEqual(
             sport_scheduled_events_endpoint("basketball").build_url(date="2026-04-10"),
@@ -233,7 +243,7 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         bundle = await parser.fetch_scheduled_events("2026-04-10")
 
         self.assertEqual(fake_client.seen_urls, [scheduled_url])
-        self.assertEqual(len(bundle.registry_entries), 6)
+        self.assertEqual(len(bundle.registry_entries), 8)
         self.assertIn(
             UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT.path_template,
             {item.path_template for item in bundle.registry_entries},
@@ -555,6 +565,43 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         child_parent_map = {item.id: item.parent_team_id for item in bundle.teams}
         self.assertEqual(child_parent_map[41475], 1210041)
         self.assertEqual(child_parent_map[59324], 1210103)
+
+    async def test_event_list_parser_fetches_paginated_season_last_and_next_events(self) -> None:
+        last_endpoint = season_last_events_endpoint()
+        next_endpoint = season_next_events_endpoint()
+        last_url = last_endpoint.build_url(unique_tournament_id=17, season_id=76986, page=0)
+        next_url = next_endpoint.build_url(unique_tournament_id=17, season_id=76986, page=1)
+        fake_client = _FakeSofascoreClient(
+            {
+                last_url: {"events": [_minimal_event_payload(15726260, status_type="finished")], "hasNextPage": True},
+                next_url: {"events": [_minimal_event_payload(15726261, status_type="notstarted")], "hasNextPage": False},
+            }
+        )
+
+        parser = EventListParser(fake_client)
+        last_bundle = await parser.fetch_season_last_events(17, 76986, page=0)
+        next_bundle = await parser.fetch_season_next_events(17, 76986, page=1)
+
+        self.assertEqual(fake_client.seen_urls, [last_url, next_url])
+        self.assertEqual(last_bundle.payload_snapshots[0].endpoint_pattern, last_endpoint.path_template)
+        self.assertEqual(last_bundle.payload_snapshots[0].context_entity_type, "season")
+        self.assertEqual(last_bundle.payload_snapshots[0].context_entity_id, 76986)
+        self.assertEqual(last_bundle.payload_snapshots[0].payload["hasNextPage"], True)
+        self.assertEqual({event.id for event in last_bundle.events}, {15726260})
+        self.assertEqual(next_bundle.payload_snapshots[0].endpoint_pattern, next_endpoint.path_template)
+        self.assertEqual(next_bundle.payload_snapshots[0].context_entity_id, 76986)
+        self.assertEqual(next_bundle.payload_snapshots[0].payload["hasNextPage"], False)
+        self.assertEqual({event.id for event in next_bundle.events}, {15726261})
+
+
+def _minimal_event_payload(event_id: int, *, status_type: str) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "slug": f"event-{event_id}",
+        "status": {"code": 100 if status_type == "finished" else 0, "description": status_type, "type": status_type},
+        "season": {"id": 76986, "name": "Premier League 25/26"},
+        "startTimestamp": 1775779200,
+    }
 
 
 if __name__ == "__main__":

@@ -323,6 +323,15 @@ def category_live_events_count_endpoint() -> SofascoreEndpoint:
         target_table="api_payload_snapshot",
     )
 
+
+SPORT_ALL_EVENT_COUNT_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/sport/0/event-count",
+    envelope_key="sports",
+    target_table="event",
+    notes="Local synthetic route: current-day total/live event counts grouped by sport from PostgreSQL.",
+)
+
+
 def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoint, ...]:
     return (
         sport_scheduled_events_endpoint(sport_slug),
@@ -331,6 +340,8 @@ def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoin
         UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
         UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
         UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
+        season_last_events_endpoint(),
+        season_next_events_endpoint(),
     )
 
 
@@ -390,6 +401,7 @@ def local_api_endpoints(sport_slugs: tuple[str, ...] = LOCAL_API_SUPPORTED_SPORT
         for endpoint in sport_local_leaderboard_endpoints(sport_slug):
             add(endpoint)
 
+    add(SPORT_ALL_EVENT_COUNT_ENDPOINT)
     add(CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT)
 
     for endpoint in COMPETITION_ENDPOINTS + STANDINGS_ENDPOINTS + STATISTICS_ENDPOINTS + ENTITIES_ENDPOINTS:

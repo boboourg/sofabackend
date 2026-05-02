@@ -26,6 +26,7 @@ from .endpoints import (
     EVENT_LIST_ENDPOINTS,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_SHOTMAP_ENDPOINT,
+    SPORT_ALL_EVENT_COUNT_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
     LEADERBOARDS_ENDPOINTS,
     LOCAL_API_SUPPORTED_SPORTS,
@@ -599,6 +600,19 @@ def _build_sport_specific_core_paths(op) -> dict[str, Any]:
             parameters=[],
             source_tables=["event", "event_score", "event_round_info", "event_status_time", "event_time"],
         )
+    paths[SPORT_ALL_EVENT_COUNT_ENDPOINT.path_template] = op(
+        path_template=SPORT_ALL_EVENT_COUNT_ENDPOINT.path_template,
+        tag="Event List",
+        operation_id="getCurrentDaySportEventCount",
+        summary_text="Current-day event counts by sport",
+        description=(
+            "Synthetic local route computed from PostgreSQL. Returns current-day total events and "
+            "currently in-progress events per sport slug."
+        ),
+        response_schema=_ref("SportEventCountEnvelope"),
+        parameters=[],
+        source_tables=["sport", "category", "unique_tournament", "tournament", "event", "event_status"],
+    )
     return paths
 
 
@@ -750,6 +764,34 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
                 _path_param("round_number", "integer", "Tournament round number."),
             ],
             source_tables=["event", "event_round_info", "event_score"],
+        ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}",
+            tag="Event List",
+            operation_id="getSeasonLastEventsPage",
+            summary_text="Season result events page",
+            description="Paginated completed/recent events feed for one tournament season.",
+            response_schema=_envelope("events", _array(_ref("EventSummary"))),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+                _path_param("page", "integer", "Zero-based Sofascore page."),
+            ],
+            source_tables=["event", "event_round_info", "event_score", "api_payload_snapshot"],
+        ),
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}": op(
+            path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}",
+            tag="Event List",
+            operation_id="getSeasonNextEventsPage",
+            summary_text="Season upcoming events page",
+            description="Paginated upcoming events feed for one tournament season.",
+            response_schema=_envelope("events", _array(_ref("EventSummary"))),
+            parameters=[
+                _path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID."),
+                _path_param("season_id", "integer", "Sofascore season ID."),
+                _path_param("page", "integer", "Zero-based Sofascore page."),
+            ],
+            source_tables=["event", "event_round_info", "event_score", "api_payload_snapshot"],
         ),
         "/api/v1/event/{event_id}": op(
             path_template="/api/v1/event/{event_id}",
@@ -1474,6 +1516,11 @@ def _build_leaderboard_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
 def _build_schemas() -> dict[str, Any]:
     schemas: dict[str, Any] = {
         "FreeFormObject": {"type": "object", "additionalProperties": True},
+        "SportEventCount": _obj({"live": _int32(), "total": _int32()}),
+        "SportEventCountEnvelope": {
+            "type": "object",
+            "additionalProperties": _ref("SportEventCount"),
+        },
         "TeamColors": _obj(
             {
                 "primary": {"type": "string"},

@@ -25,7 +25,7 @@ import orjson
 from fastapi import FastAPI, Request, Response
 
 from .db import DatabaseConfig, create_pool_with_fallback, load_database_config
-from .endpoints import SofascoreEndpoint, local_api_endpoints
+from .endpoints import SPORT_ALL_EVENT_COUNT_ENDPOINT, SofascoreEndpoint, local_api_endpoints
 from .ops.health import collect_health_report
 from .ops.queue_summary import collect_queue_summary
 from .queue.live_state import LiveEventStateStore
@@ -373,6 +373,10 @@ class LocalApiApplication:
             )
 
         route, path_params = route_match
+        if route.endpoint.path_template == SPORT_ALL_EVENT_COUNT_ENDPOINT.path_template:
+            payload = await self._fetch_sport_event_count_payload()
+            return ApiResponse(status_code=HTTPStatus.OK, payload=payload)
+
         fast_path_handled, payload = await self._fetch_entity_root_fast_path(path, raw_query)
         if not fast_path_handled:
             payload = await self._fetch_snapshot_payload(route, path, raw_query, path_params)
@@ -677,6 +681,52 @@ class LocalApiApplication:
             return await self._fetch_unique_tournament_root_payload(unique_tournament_root_id)
 
         return None
+
+    async def _fetch_sport_event_count_payload(self) -> dict[str, dict[str, int]]:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                WITH daily_events AS (
+                    SELECT
+                        e.id,
+                        COALESCE(unique_category.sport_id, tournament_category.sport_id) AS sport_id,
+                        es.type AS status_type
+                    FROM event AS e
+                    LEFT JOIN unique_tournament AS ut
+                        ON ut.id = e.unique_tournament_id
+                    LEFT JOIN category AS unique_category
+                        ON unique_category.id = ut.category_id
+                    LEFT JOIN tournament AS t
+                        ON t.id = e.tournament_id
+                    LEFT JOIN category AS tournament_category
+                        ON tournament_category.id = t.category_id
+                    LEFT JOIN event_status AS es
+                        ON es.code = e.status_code
+                    WHERE e.start_timestamp >= EXTRACT(EPOCH FROM CURRENT_DATE::timestamptz)::bigint
+                      AND e.start_timestamp < EXTRACT(EPOCH FROM (CURRENT_DATE + INTERVAL '1 day')::timestamptz)::bigint
+                )
+                SELECT
+                    s.slug AS sport_slug,
+                    COUNT(daily_events.id)::bigint AS total_events,
+                    COUNT(daily_events.id) FILTER (WHERE daily_events.status_type = 'inprogress')::bigint AS live_events
+                FROM sport AS s
+                LEFT JOIN daily_events
+                    ON daily_events.sport_id = s.id
+                GROUP BY s.slug
+                ORDER BY s.slug
+                """
+            )
+        finally:
+            await connection.close()
+
+        return {
+            str(row["sport_slug"]): {
+                "live": int(row["live_events"] or 0),
+                "total": int(row["total_events"] or 0),
+            }
+            for row in rows
+        }
 
     async def _fetch_sport_categories_payload(self, sport_slug: str) -> dict[str, Any] | None:
         connection = await self._connect()

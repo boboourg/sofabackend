@@ -102,6 +102,46 @@ class EventListIngestJob:
             ),
         )
 
+    async def run_season_last(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"season_last:{unique_tournament_id}:{season_id}:{page}",
+            self.parser.fetch_season_last_events(
+                unique_tournament_id,
+                season_id,
+                page,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
+        )
+
+    async def run_season_next(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        return await self._run(
+            f"season_next:{unique_tournament_id}:{season_id}:{page}",
+            self.parser.fetch_season_next_events(
+                unique_tournament_id,
+                season_id,
+                page,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
+        )
+
     async def run_brackets(
         self,
         unique_tournament_id: int,

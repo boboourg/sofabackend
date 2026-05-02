@@ -14,6 +14,8 @@ from .endpoints import (
     UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
     UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
     event_list_registry_entries,
+    season_last_events_endpoint,
+    season_next_events_endpoint,
     sport_live_events_endpoint,
     sport_scheduled_events_endpoint,
 )
@@ -296,6 +298,46 @@ class EventListParser:
             unique_tournament_id=unique_tournament_id,
             season_id=season_id,
             round_number=round_number,
+        )
+
+    async def fetch_season_last_events(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        return await self._fetch_event_collection(
+            season_last_events_endpoint(),
+            timeout=timeout,
+            context_entity_type="season",
+            context_entity_id=season_id,
+            sport_slug=sport_slug,
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            page=page,
+        )
+
+    async def fetch_season_next_events(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        page: int,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        return await self._fetch_event_collection(
+            season_next_events_endpoint(),
+            timeout=timeout,
+            context_entity_type="season",
+            context_entity_id=season_id,
+            sport_slug=sport_slug,
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            page=page,
         )
 
     async def fetch_bracket_events(

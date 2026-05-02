@@ -57,6 +57,7 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertIn("/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches", patterns)
         self.assertIn("/api/v1/event/{event_id}/shotmap", patterns)
         self.assertIn("/api/v1/event/{event_id}/esports-games", patterns)
+        self.assertIn("/api/v1/sport/0/event-count", patterns)
 
     def test_compile_path_template_extracts_named_params(self) -> None:
         regex = _compile_path_template(
@@ -227,6 +228,29 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
                 ]
             },
         )
+
+    async def test_handle_api_get_computes_sport_zero_event_count_from_database(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeCoverageConnection(
+            [
+                {"sport_slug": "football", "live_events": 4, "total_events": 35},
+                {"sport_slug": "ice-hockey", "live_events": 0, "total_events": 34},
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+
+        response = await application.handle_api_get("/api/v1/sport/0/event-count", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.payload,
+            {
+                "football": {"live": 4, "total": 35},
+                "ice-hockey": {"live": 0, "total": 34},
+            },
+        )
+        self.assertTrue(connection.closed)
 
     async def test_fetch_ops_health_payload_keeps_drift_coverage_and_alert_summaries_in_payload(self) -> None:
         from schema_inspector.ops.health import (

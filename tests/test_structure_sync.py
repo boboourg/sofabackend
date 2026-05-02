@@ -525,6 +525,144 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_round.assert_awaited()
         event_list_job.run_brackets.assert_not_awaited()
 
+    async def test_structure_sync_refreshes_season_last_and_next_pages_until_has_next_false(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(76986,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(76986,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(side_effect=[_event_result((101,)), _event_result(())])
+        event_list_job.run_brackets = mock.AsyncMock()
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+        event_list_job.run_season_last = mock.AsyncMock(
+            side_effect=[
+                _event_result_with_has_next((201,), has_next=True),
+                _event_result_with_has_next((202,), has_next=False),
+            ]
+        )
+        event_list_job.run_season_next = mock.AsyncMock(return_value=_event_result_with_has_next((301,), has_next=False))
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=17,
+                sport_slug="football",
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
+                transport=object(),
+            )
+
+        self.assertEqual(result.mode, "rounds")
+        self.assertEqual(result.event_ids, (101, 201, 202, 301))
+        self.assertEqual(
+            event_list_job.run_season_last.await_args_list,
+            [
+                mock.call(unique_tournament_id=17, season_id=76986, page=0, sport_slug="football", timeout=20.0),
+                mock.call(unique_tournament_id=17, season_id=76986, page=1, sport_slug="football", timeout=20.0),
+            ],
+        )
+        event_list_job.run_season_next.assert_awaited_once_with(
+            unique_tournament_id=17,
+            season_id=76986,
+            page=0,
+            sport_slug="football",
+            timeout=20.0,
+        )
+
+    async def test_structure_sync_does_not_mark_season_surfaces_fresh_after_partial_page_failure(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(76986,),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=17,
+                            slug="premier-league",
+                            name="Premier League",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(76986,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(side_effect=[_event_result((101,)), _event_result(())])
+        event_list_job.run_brackets = mock.AsyncMock()
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+        event_list_job.run_season_last = mock.AsyncMock(
+            side_effect=[
+                _event_result_with_has_next((201,), has_next=True),
+                RuntimeError("page failed"),
+            ]
+        )
+        event_list_job.run_season_next = mock.AsyncMock(return_value=_event_result_with_has_next((301,), has_next=False))
+        app = _FakeStructureApp()
+        app.redis_backend = _FakeFreshnessRedis()
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                app,
+                unique_tournament_id=17,
+                sport_slug="football",
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
+                transport=object(),
+            )
+
+        self.assertEqual(result.event_ids, (101, 201, 301))
+        self.assertEqual(app.redis_backend.set_calls, [])
+
     async def test_structure_sync_auto_chooses_brackets_when_rounds_absent_but_playoff_capability_present(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
@@ -1295,6 +1433,20 @@ class _FakeStructureApp:
         self.database = object()
 
 
+class _FakeFreshnessRedis:
+    def __init__(self) -> None:
+        self.keys: set[str] = set()
+        self.set_calls: list[tuple[str, object, dict[str, object]]] = []
+
+    def exists(self, key: str, **kwargs) -> bool:
+        del kwargs
+        return key in self.keys
+
+    def set(self, key: str, value: object, **kwargs) -> None:
+        self.keys.add(key)
+        self.set_calls.append((key, value, kwargs))
+
+
 class _FakeStructureSourceAdapter:
     def __init__(self, competition_job, event_list_job) -> None:
         self.competition_job = competition_job
@@ -1367,6 +1519,13 @@ def _competition_result(*, tournaments, season_ids: tuple[int, ...]):
 def _event_result(event_ids: tuple[int, ...]):
     events = tuple(SimpleNamespace(id=event_id) for event_id in event_ids)
     parsed = SimpleNamespace(events=events)
+    return SimpleNamespace(parsed=parsed)
+
+
+def _event_result_with_has_next(event_ids: tuple[int, ...], *, has_next: bool):
+    events = tuple(SimpleNamespace(id=event_id) for event_id in event_ids)
+    snapshot = SimpleNamespace(payload={"hasNextPage": has_next})
+    parsed = SimpleNamespace(events=events, payload_snapshots=(snapshot,))
     return SimpleNamespace(parsed=parsed)
 
 

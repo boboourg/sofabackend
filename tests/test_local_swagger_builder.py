@@ -34,10 +34,12 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics", document["paths"])
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds", document["paths"])
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees", document["paths"])
+        self.assertIn("/api/v1/sport/0/event-count", document["paths"])
         self.assertIn("PlayerStatisticsEnvelope", document["components"]["schemas"])
         self.assertIn("SeasonStatisticsEnvelope", document["components"]["schemas"])
         self.assertIn("SeasonRoundsEnvelope", document["components"]["schemas"])
         self.assertIn("SeasonCupTreesEnvelope", document["components"]["schemas"])
+        self.assertIn("SportEventCountEnvelope", document["components"]["schemas"])
 
     def test_document_covers_every_registered_local_api_path(self) -> None:
         summary = SwaggerDataSummary(
@@ -119,6 +121,7 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches", paths)
         self.assertIn("/api/v1/event/{event_id}/shotmap", paths)
         self.assertIn("/api/v1/event/{event_id}/esports-games", paths)
+        self.assertEqual(paths["/api/v1/sport/0/event-count"]["get"]["tags"], ["Event List"])
         self.assertEqual(paths["/api/v1/event/{event_id}/innings"]["get"]["tags"], ["Special Routes"])
         self.assertEqual(paths["/api/v1/event/{event_id}/shotmap"]["get"]["tags"], ["Special Routes"])
         self.assertEqual(paths["/api/v1/event/{event_id}/esports-games"]["get"]["tags"], ["Special Routes"])
