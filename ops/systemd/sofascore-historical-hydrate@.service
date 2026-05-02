@@ -12,7 +12,7 @@ ExecStart=/opt/sofascore/deploy/run_service.sh worker-historical-hydrate --consu
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
-TimeoutStopSec=30
+TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target

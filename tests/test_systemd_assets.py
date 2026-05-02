@@ -51,7 +51,12 @@ class SystemdAssetTests(unittest.TestCase):
             self.assertIn("Restart=always", text, filename)
             self.assertIn("RestartSec=5", text, filename)
             self.assertIn("KillSignal=SIGINT", text, filename)
-            self.assertIn("TimeoutStopSec=30", text, filename)
+            expected_timeout = (
+                "TimeoutStopSec=90"
+                if filename in {"sofascore-hydrate@.service", "sofascore-historical-hydrate@.service"}
+                else "TimeoutStopSec=30"
+            )
+            self.assertIn(expected_timeout, text, filename)
             self.assertIn("After=network-online.target redis-server.service postgresql.service", text, filename)
             self.assertIn("Wants=network-online.target", text, filename)
             self.assertIn(f"ExecStart=/opt/sofascore/deploy/run_service.sh {command_suffix}", text, filename)
