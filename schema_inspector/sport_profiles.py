@@ -77,7 +77,7 @@ SUPPORTED_SPORT_SLUGS = (
 
 FOOTBALL_PROFILE = SportProfile(
     sport_slug="football",
-    live_discovery_interval_seconds=120.0,
+    live_discovery_interval_seconds=30.0,
     hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("home", "away", "total"),
@@ -103,7 +103,7 @@ FOOTBALL_PROFILE = SportProfile(
 
 BASKETBALL_PROFILE = SportProfile(
     sport_slug="basketball",
-    live_discovery_interval_seconds=120.0,
+    live_discovery_interval_seconds=60.0,
     hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("total",),
@@ -265,7 +265,7 @@ TABLE_TENNIS_PROFILE = SportProfile(
 
 ICE_HOCKEY_PROFILE = SportProfile(
     sport_slug="ice-hockey",
-    live_discovery_interval_seconds=120.0,
+    live_discovery_interval_seconds=60.0,
     hot_poll_seconds=10,
     standings_scopes=("total", "home", "away"),
     team_event_scopes=("home", "away", "total"),

@@ -201,7 +201,7 @@ class OpsHealthTests(unittest.IsolatedAsyncioTestCase):
                         "sport_slug": "football",
                         "surface": "sport_live_events",
                         "reason": "snapshot_older_than_terminal_state",
-                        "latest_fetched_at": datetime(2026, 4, 22, 1, 1, 25, tzinfo=timezone.utc),
+                        "latest_fetched_at": datetime(2026, 4, 22, 1, 2, 0, tzinfo=timezone.utc),
                         "latest_finalized_at": datetime(2026, 4, 22, 1, 2, 42, tzinfo=timezone.utc),
                     }
                 ]
