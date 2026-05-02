@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from schema_inspector.fetch_models import FetchOutcomeEnvelope
 from schema_inspector.parsers.base import ParseResult
+from schema_inspector.endpoints import EVENT_H2H_ENDPOINT, EVENT_H2H_EVENTS_ENDPOINT
 from schema_inspector.pipeline.pilot_orchestrator import PilotOrchestrator
 
 
@@ -66,6 +67,7 @@ class _FakeNormalizeWorker:
                 ),
                 "team": ({"id": 11},),
                 "player": player_rows,
+                "manager": ({"id": 33},),
             },
         )
 
@@ -119,7 +121,22 @@ class PilotOrchestratorFreshnessTests(unittest.IsolatedAsyncioTestCase):
         endpoint_patterns = [task.endpoint_pattern for task in fetch_executor.tasks]
         self.assertIn("/api/v1/team/{team_id}", endpoint_patterns)
         self.assertNotIn("/api/v1/player/{player_id}", endpoint_patterns)
-        self.assertEqual(freshness_store.checked, ["freshness:player:77"])
+        self.assertEqual(
+            freshness_store.checked,
+            ["freshness:team:11", "freshness:player:77", "freshness:manager:33"],
+        )
+
+    async def test_team_and_manager_fan_out_skipped_when_profiles_are_fresh(self) -> None:
+        fetch_executor = _FakeFetchExecutor()
+        freshness_store = _FakeFreshnessStore({"freshness:team:11", "freshness:manager:33"})
+        orchestrator = _build_orchestrator(fetch_executor=fetch_executor, freshness_store=freshness_store)
+
+        await orchestrator.run_event(event_id=123, sport_slug="football")
+
+        endpoint_patterns = [task.endpoint_pattern for task in fetch_executor.tasks]
+        self.assertNotIn("/api/v1/team/{team_id}", endpoint_patterns)
+        self.assertIn("/api/v1/player/{player_id}", endpoint_patterns)
+        self.assertNotIn("/api/v1/manager/{manager_id}", endpoint_patterns)
 
     async def test_player_fan_out_proceeds_with_freshness_fields_when_stale(self) -> None:
         fetch_executor = _FakeFetchExecutor()
@@ -136,6 +153,88 @@ class PilotOrchestratorFreshnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(player_tasks), 1)
         self.assertEqual(player_tasks[0].freshness_key, "freshness:player:77")
         self.assertEqual(player_tasks[0].freshness_ttl_seconds, 86_400)
+
+        team_tasks = [
+            task
+            for task in fetch_executor.tasks
+            if task.endpoint_pattern == "/api/v1/team/{team_id}"
+        ]
+        manager_tasks = [
+            task
+            for task in fetch_executor.tasks
+            if task.endpoint_pattern == "/api/v1/manager/{manager_id}"
+        ]
+        self.assertEqual(team_tasks[0].freshness_key, "freshness:team:11")
+        self.assertEqual(team_tasks[0].freshness_ttl_seconds, 86_400)
+        self.assertEqual(manager_tasks[0].freshness_key, "freshness:manager:33")
+        self.assertEqual(manager_tasks[0].freshness_ttl_seconds, 604_800)
+
+    async def test_h2h_endpoint_skipped_when_fresh(self) -> None:
+        fetch_executor = _FakeFetchExecutor()
+        freshness_store = _FakeFreshnessStore(
+            {"freshness:event-detail:123:/api/v1/event/{event_id}/h2h"}
+        )
+        orchestrator = _build_orchestrator(fetch_executor=fetch_executor, freshness_store=freshness_store)
+
+        outcome, parsed = await orchestrator._fetch_gated_event_endpoint(
+            endpoint=EVENT_H2H_ENDPOINT,
+            sport_slug="football",
+            path_params={"event_id": 123},
+            context_entity_type="event",
+            context_entity_id=123,
+            context_event_id=123,
+            fetch_reason="hydrate_special_route",
+            status_phase="pre",
+        )
+
+        self.assertIsNone(outcome)
+        self.assertIsNone(parsed)
+        self.assertEqual(fetch_executor.tasks, [])
+
+    async def test_custom_h2h_events_endpoint_uses_static_freshness_key(self) -> None:
+        fetch_executor = _FakeFetchExecutor()
+        freshness_store = _FakeFreshnessStore()
+        orchestrator = _build_orchestrator(fetch_executor=fetch_executor, freshness_store=freshness_store)
+
+        await orchestrator._fetch_gated_event_endpoint(
+            endpoint=EVENT_H2H_EVENTS_ENDPOINT,
+            sport_slug="football",
+            path_params={"event_id": 123, "custom_id": "abc123"},
+            context_entity_type="event",
+            context_entity_id=123,
+            context_event_id=123,
+            fetch_reason="hydrate_special_route",
+            status_phase="pre",
+        )
+
+        task = fetch_executor.tasks[-1]
+        self.assertEqual(
+            task.freshness_key,
+            "freshness:event-detail-custom:abc123:/api/v1/event/{custom_id}/h2h/events",
+        )
+        self.assertEqual(task.freshness_ttl_seconds, 86_400)
+
+    async def test_event_player_endpoint_uses_short_freshness_ttl(self) -> None:
+        fetch_executor = _FakeFetchExecutor()
+        freshness_store = _FakeFreshnessStore()
+        orchestrator = _build_orchestrator(fetch_executor=fetch_executor, freshness_store=freshness_store)
+
+        await orchestrator._run_special_job(
+            job=SimpleNamespace(
+                job_type="hydrate_special_route",
+                params={"special_kind": "event_player_statistics", "player_id": 77},
+            ),
+            sport_slug="football",
+            event_id=123,
+            status_phase="live",
+        )
+
+        task = fetch_executor.tasks[-1]
+        self.assertEqual(
+            task.freshness_key,
+            "freshness:event-player:123:77:/api/v1/event/{event_id}/player/{player_id}/statistics",
+        )
+        self.assertEqual(task.freshness_ttl_seconds, 300)
 
     async def test_duplicate_player_still_uses_in_process_hydrated_entities_dedup(self) -> None:
         fetch_executor = _FakeFetchExecutor()

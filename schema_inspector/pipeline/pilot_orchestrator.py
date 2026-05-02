@@ -13,6 +13,9 @@ from ..endpoints import (
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_DETAIL_ENDPOINT,
+    EVENT_H2H_ENDPOINT,
+    EVENT_H2H_EVENTS_ENDPOINT,
+    EVENT_MANAGERS_ENDPOINT,
     EVENT_PLAYER_HEATMAP_ENDPOINT,
     EVENT_PLAYER_SHOTMAP_ENDPOINT,
     EVENT_GOALKEEPER_SHOTMAP_ENDPOINT,
@@ -47,6 +50,27 @@ MISSING_ROOT_TERMINAL_STATUS = "not_found"
 MISSING_ROOT_RETIRE_THRESHOLD = 3
 MISSING_ROOT_RETIRE_LOOKBACK = 20
 PLAYER_PROFILE_FRESHNESS_TTL_SECONDS = 86_400
+TEAM_PROFILE_FRESHNESS_TTL_SECONDS = 86_400
+MANAGER_PROFILE_FRESHNESS_TTL_SECONDS = 604_800
+EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS = 86_400
+EVENT_PLAYER_DETAIL_FRESHNESS_TTL_SECONDS = 300
+
+_EVENT_STATIC_DETAIL_FRESHNESS_PATTERNS = frozenset(
+    {
+        EVENT_MANAGERS_ENDPOINT.pattern,
+        EVENT_H2H_ENDPOINT.pattern,
+        EVENT_H2H_EVENTS_ENDPOINT.pattern,
+    }
+)
+_EVENT_PLAYER_DETAIL_FRESHNESS_PATTERNS = frozenset(
+    {
+        EVENT_PLAYER_STATISTICS_ENDPOINT.pattern,
+        EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT.pattern,
+        EVENT_PLAYER_HEATMAP_ENDPOINT.pattern,
+        EVENT_PLAYER_SHOTMAP_ENDPOINT.pattern,
+        EVENT_GOALKEEPER_SHOTMAP_ENDPOINT.pattern,
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -488,17 +512,20 @@ class PilotOrchestrator:
                     break
                 for entity_endpoint, entity_type, entity_id in next_targets:
                     hydrated_entities.add((entity_type, entity_id))
-                    freshness_key = None
-                    freshness_ttl_seconds = None
-                    if entity_type == "player" and entity_endpoint is PLAYER_ENDPOINT:
-                        freshness_key = _player_profile_freshness_key(entity_id)
-                        freshness_ttl_seconds = self.player_profile_freshness_ttl_seconds
-                        if self._is_resource_fresh(freshness_key):
-                            logger.debug(
-                                "Skipping fresh player profile fan-out: player_id=%s",
-                                entity_id,
-                            )
-                            continue
+                    freshness_key, freshness_ttl_seconds = _entity_profile_freshness_fields(
+                        entity_endpoint,
+                        entity_type,
+                        entity_id,
+                        player_ttl_seconds=self.player_profile_freshness_ttl_seconds,
+                    )
+                    if freshness_key is not None and self._is_resource_fresh(freshness_key):
+                        logger.debug(
+                            "Skipping fresh entity profile fan-out: entity_type=%s entity_id=%s endpoint=%s",
+                            entity_type,
+                            entity_id,
+                            entity_endpoint.pattern,
+                        )
+                        continue
                     outcome, parsed = await self._fetch_and_parse(
                         endpoint=entity_endpoint,
                         sport_slug=sport_slug,
@@ -722,6 +749,14 @@ class PilotOrchestrator:
     ) -> tuple[FetchOutcomeEnvelope | None, object | None]:
         if is_static_dead_event_endpoint(sport_slug, endpoint.pattern):
             return None, None
+        freshness_key, freshness_ttl_seconds = _event_detail_freshness_fields(endpoint, path_params)
+        if freshness_key is not None and self._is_resource_fresh(freshness_key):
+            logger.debug(
+                "Skipping fresh event detail resource: event_id=%s endpoint=%s",
+                context_event_id,
+                endpoint.pattern,
+            )
+            return None, None
         decision = None
         if self.event_endpoint_gate is not None:
             decision = await self.event_endpoint_gate.decide_event_probe(
@@ -741,6 +776,8 @@ class PilotOrchestrator:
             context_entity_id=context_entity_id,
             context_event_id=context_event_id,
             fetch_reason=fetch_reason,
+            freshness_key=freshness_key,
+            freshness_ttl_seconds=freshness_ttl_seconds,
         )
         if self.event_endpoint_gate is not None and decision is not None:
             await self.event_endpoint_gate.record_event_outcome(
@@ -1146,6 +1183,56 @@ def _entity_profile_targets(
                 seen.add(("manager", manager_id))
                 planned.append((MANAGER_ENDPOINT, "manager", manager_id))
     return tuple(planned)
+
+
+def _entity_profile_freshness_fields(
+    endpoint: SofascoreEndpoint,
+    entity_type: str,
+    entity_id: int,
+    *,
+    player_ttl_seconds: int,
+) -> tuple[str | None, int | None]:
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type == "team" and endpoint.pattern == TEAM_ENDPOINT.pattern:
+        return f"freshness:team:{int(entity_id)}", TEAM_PROFILE_FRESHNESS_TTL_SECONDS
+    if normalized_type == "player" and endpoint.pattern == PLAYER_ENDPOINT.pattern:
+        return _player_profile_freshness_key(entity_id), int(player_ttl_seconds)
+    if normalized_type == "manager" and endpoint.pattern == MANAGER_ENDPOINT.pattern:
+        return f"freshness:manager:{int(entity_id)}", MANAGER_PROFILE_FRESHNESS_TTL_SECONDS
+    return None, None
+
+
+def _event_detail_freshness_fields(
+    endpoint: SofascoreEndpoint,
+    path_params: dict[str, Any],
+) -> tuple[str | None, int | None]:
+    pattern = endpoint.pattern
+    if pattern in _EVENT_PLAYER_DETAIL_FRESHNESS_PATTERNS:
+        event_id = _as_int(path_params.get("event_id"))
+        player_id = _as_int(path_params.get("player_id"))
+        if event_id is None or player_id is None:
+            return None, None
+        return (
+            f"freshness:event-player:{event_id}:{player_id}:{pattern}",
+            EVENT_PLAYER_DETAIL_FRESHNESS_TTL_SECONDS,
+        )
+    if pattern in _EVENT_STATIC_DETAIL_FRESHNESS_PATTERNS:
+        if pattern == EVENT_H2H_EVENTS_ENDPOINT.pattern:
+            custom_id = str(path_params.get("custom_id") or "").strip()
+            if not custom_id:
+                return None, None
+            return (
+                f"freshness:event-detail-custom:{custom_id}:{pattern}",
+                EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS,
+            )
+        event_id = _as_int(path_params.get("event_id"))
+        if event_id is None:
+            return None, None
+        return (
+            f"freshness:event-detail:{event_id}:{pattern}",
+            EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS,
+        )
+    return None, None
 
 
 def _player_profile_freshness_key(player_id: int) -> str:
