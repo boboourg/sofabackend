@@ -414,9 +414,13 @@ class LocalApiApplication:
         if raw_query:
             return False, None
 
-        live_sport_slug = _extract_sport_slug_from_live_events_path(path)
-        if live_sport_slug is not None:
-            return True, await self._fetch_sport_live_events_payload(live_sport_slug)
+        # NOTE: /sport/{slug}/events/live is NOT served from the normalized
+        # event table because that table is missing the live-time fields the
+        # UI needs (time.played, homeScore, awayScore, currentPeriodStart...).
+        # The latest snapshot for this endpoint is refreshed every 5-15s by
+        # the hot-tier worker, which is the freshest correct shape we have.
+        # _fetch_sport_live_events_payload remains as a fallback inside
+        # _fetch_normalized_payload for the case when the snapshot is missing.
 
         event_root_id = _extract_event_id_from_entity_root_path(path, "event")
         if event_root_id is not None:
@@ -801,6 +805,10 @@ class LocalApiApplication:
         sport_slug = _extract_sport_slug_from_categories_path(path)
         if sport_slug is not None:
             return await self._fetch_sport_categories_payload(sport_slug)
+
+        live_sport_slug = _extract_sport_slug_from_live_events_path(path)
+        if live_sport_slug is not None:
+            return await self._fetch_sport_live_events_payload(live_sport_slug)
 
         category_seed = _extract_category_seed_request(path, path_params)
         if category_seed is not None:

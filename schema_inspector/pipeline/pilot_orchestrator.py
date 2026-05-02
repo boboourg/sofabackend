@@ -1217,7 +1217,15 @@ class PilotOrchestrator:
             CapabilityRollupAccumulator(sport_slug=sport_slug, endpoint_pattern=outcome.endpoint_pattern),
         )
         rollup = accumulator.observe(outcome)
-        self.planner.capability_rollup[outcome.endpoint_pattern] = rollup.support_level
+        # NOTE: Intentionally do NOT mutate self.planner.capability_rollup here.
+        # The planner's rollup is consumed by plan_lineup_followups /
+        # _special_kind_supported / should_schedule_edge during this run.
+        # If we mutated it live, prefetch and replay would diverge: prefetch
+        # lands fetches in a non-deterministic order (parallel fan-out),
+        # whereas replay sees all records pre-committed, so the rollup would
+        # be in different states at the same decision point.
+        # The accumulator above + _pending_capability_records below still
+        # captures everything we need to persist into capability_repository.
         if self.capability_repository is None:
             return
         self._pending_capability_records.append(
