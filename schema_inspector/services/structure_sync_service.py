@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_MISSING_ROUNDS = 2
 _MAX_CONSECUTIVE_EMPTY_CALENDAR_DAYS = 3
-_MAX_SEASON_EVENT_PAGES = 250
 _SEASON_EVENT_SURFACE_REFRESH_TTL_SECONDS = 24 * 3600
 _SEASON_LAST_ENDPOINT_PATTERN = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}"
 _SEASON_NEXT_ENDPOINT_PATTERN = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}"
@@ -62,6 +61,12 @@ class StructureSyncResult:
 class _SeasonSurfaceSyncResult:
     event_ids: tuple[int, ...]
     complete: bool
+
+
+@dataclass(frozen=True)
+class _SeasonSurfaceCompletion:
+    last_complete: bool = False
+    next_complete: bool = False
 
 
 async def run_structure_sync_for_tournament(
@@ -540,7 +545,7 @@ async def _append_current_season_event_surfaces(
     if _is_season_event_surface_fresh(redis_backend, freshness_key):
         return result
 
-    first_page_only = await _has_complete_season_event_surfaces(
+    completion = await _get_complete_season_event_surfaces(
         getattr(app, "database", None),
         season_id=current_season_id,
     )
@@ -550,7 +555,8 @@ async def _append_current_season_event_surfaces(
         sport_slug=sport_slug,
         event_list_job=event_list_job,
         timeout=timeout,
-        first_page_only=first_page_only,
+        last_first_page_only=completion.last_complete,
+        next_first_page_only=completion.next_complete,
     )
     if surface_result.complete:
         _mark_season_event_surface_fresh(redis_backend, freshness_key)
@@ -567,10 +573,12 @@ async def _sync_current_season_event_surfaces(
     sport_slug: str,
     event_list_job: EventListIngestJob,
     timeout: float,
-    first_page_only: bool = False,
+    last_first_page_only: bool = False,
+    next_first_page_only: bool = False,
 ) -> _SeasonSurfaceSyncResult:
-    surface_runner = _run_single_season_surface_page if first_page_only else _run_paginated_season_surface
-    last_result = await surface_runner(
+    last_runner = _run_single_season_surface_page if last_first_page_only else _run_paginated_season_surface
+    next_runner = _run_single_season_surface_page if next_first_page_only else _run_paginated_season_surface
+    last_result = await last_runner(
         event_list_job.run_season_last,
         surface_name="last",
         unique_tournament_id=unique_tournament_id,
@@ -578,7 +586,7 @@ async def _sync_current_season_event_surfaces(
         sport_slug=sport_slug,
         timeout=timeout,
     )
-    next_result = await surface_runner(
+    next_result = await next_runner(
         event_list_job.run_season_next,
         surface_name="next",
         unique_tournament_id=unique_tournament_id,
@@ -634,7 +642,8 @@ async def _run_paginated_season_surface(
     timeout: float,
 ) -> _SeasonSurfaceSyncResult:
     collected: list[int] = []
-    for page in range(_MAX_SEASON_EVENT_PAGES):
+    page = 0
+    while True:
         try:
             result = await runner(
                 unique_tournament_id=unique_tournament_id,
@@ -656,14 +665,7 @@ async def _run_paginated_season_surface(
         collected.extend(int(event.id) for event in getattr(result.parsed, "events", ()))
         if not _result_has_next_page(result):
             return _SeasonSurfaceSyncResult(event_ids=_dedupe_event_ids(collected), complete=True)
-    logger.warning(
-        "structure-sync season %s-events reached max page limit tournament=%s season=%s max_pages=%s",
-        surface_name,
-        unique_tournament_id,
-        season_id,
-        _MAX_SEASON_EVENT_PAGES,
-    )
-    return _SeasonSurfaceSyncResult(event_ids=_dedupe_event_ids(collected), complete=False)
+        page += 1
 
 
 def _result_has_next_page(result) -> bool:
@@ -681,10 +683,10 @@ def _has_season_event_surface_runners(event_list_job: EventListIngestJob) -> boo
     )
 
 
-async def _has_complete_season_event_surfaces(database, *, season_id: int) -> bool:
+async def _get_complete_season_event_surfaces(database, *, season_id: int) -> _SeasonSurfaceCompletion:
     connection_factory = getattr(database, "connection", None)
     if not callable(connection_factory):
-        return False
+        return _SeasonSurfaceCompletion()
     try:
         async with connection_factory() as connection:
             row = await connection.fetchrow(
@@ -717,8 +719,11 @@ async def _has_complete_season_event_surfaces(database, *, season_id: int) -> bo
             season_id,
             exc,
         )
-        return False
-    return bool(row and row["last_complete"] and row["next_complete"])
+        return _SeasonSurfaceCompletion()
+    return _SeasonSurfaceCompletion(
+        last_complete=bool(row and row["last_complete"]),
+        next_complete=bool(row and row["next_complete"]),
+    )
 
 
 def _is_async_callable(candidate: Any) -> bool:

@@ -51,20 +51,17 @@ def main() -> int:
     team_last.add_argument("--team-id", type=int, required=True)
     team_last.add_argument("--page", type=int, default=0)
     team_last.add_argument("--until-end", action="store_true", help="Continue pages until hasNextPage=false.")
-    team_last.add_argument("--max-pages", type=int, default=250, help="Safety cap for --until-end pagination.")
 
     team_next = subparsers.add_parser("team-next", help="Load /team/{id}/events/next/{page}")
     team_next.add_argument("--team-id", type=int, required=True)
     team_next.add_argument("--page", type=int, default=0)
     team_next.add_argument("--until-end", action="store_true", help="Continue pages until hasNextPage=false.")
-    team_next.add_argument("--max-pages", type=int, default=250, help="Safety cap for --until-end pagination.")
 
     team_surfaces = subparsers.add_parser(
         "team-surfaces",
         help="Load team last/next surfaces. Full crawl once, then refresh page 0 only after completion.",
     )
     team_surfaces.add_argument("--team-id", type=int, required=True)
-    team_surfaces.add_argument("--max-pages", type=int, default=250, help="Safety cap for initial pagination.")
 
     parser.add_argument("--timeout", type=float, default=20.0, help="Request timeout in seconds.")
     parser.add_argument("--proxy", action="append", default=[], help="Optional proxy URL. Can be passed multiple times.")
@@ -133,7 +130,6 @@ async def _run(args: argparse.Namespace) -> int:
                     job.run_team_last,
                     args.team_id,
                     start_page=args.page,
-                    max_pages=args.max_pages,
                     sport_slug=args.sport_slug,
                     timeout=args.timeout,
                 )
@@ -150,7 +146,6 @@ async def _run(args: argparse.Namespace) -> int:
                     job.run_team_next,
                     args.team_id,
                     start_page=args.page,
-                    max_pages=args.max_pages,
                     sport_slug=args.sport_slug,
                     timeout=args.timeout,
                 )
@@ -166,7 +161,6 @@ async def _run(args: argparse.Namespace) -> int:
                 database,
                 job,
                 team_id=args.team_id,
-                max_pages=args.max_pages,
                 sport_slug=args.sport_slug,
                 timeout=args.timeout,
             )
@@ -189,33 +183,31 @@ async def _run_team_surfaces(
     job,
     *,
     team_id: int,
-    max_pages: int,
     sport_slug: str,
     timeout: float,
 ):
-    if await _has_complete_team_event_surfaces(database, team_id=team_id):
-        results = [
-            await job.run_team_last(team_id, 0, sport_slug=sport_slug, timeout=timeout),
-            await job.run_team_next(team_id, 0, sport_slug=sport_slug, timeout=timeout),
-        ]
+    completion = await _get_complete_team_event_surfaces(database, team_id=team_id)
+    results = []
+    if completion.last_complete:
+        results.append(await job.run_team_last(team_id, 0, sport_slug=sport_slug, timeout=timeout))
     else:
-        results = []
         results.extend(
             await _run_paginated_collect(
                 job.run_team_last,
                 team_id,
                 start_page=0,
-                max_pages=max_pages,
                 sport_slug=sport_slug,
                 timeout=timeout,
             )
         )
+    if completion.next_complete:
+        results.append(await job.run_team_next(team_id, 0, sport_slug=sport_slug, timeout=timeout))
+    else:
         results.extend(
             await _run_paginated_collect(
                 job.run_team_next,
                 team_id,
                 start_page=0,
-                max_pages=max_pages,
                 sport_slug=sport_slug,
                 timeout=timeout,
             )
@@ -227,12 +219,12 @@ async def _run_paginated(
     runner,
     *runner_args,
     start_page: int,
-    max_pages: int,
     sport_slug: str,
     timeout: float,
 ):
     result = None
-    for page in range(start_page, start_page + max_pages):
+    page = start_page
+    while True:
         result = await runner(
             *runner_args,
             page,
@@ -241,6 +233,7 @@ async def _run_paginated(
         )
         if not _result_has_next_page(result):
             return result
+        page += 1
     return result
 
 
@@ -248,12 +241,12 @@ async def _run_paginated_collect(
     runner,
     *runner_args,
     start_page: int,
-    max_pages: int,
     sport_slug: str,
     timeout: float,
 ):
     results = []
-    for page in range(start_page, start_page + max_pages):
+    page = start_page
+    while True:
         result = await runner(
             *runner_args,
             page,
@@ -263,13 +256,14 @@ async def _run_paginated_collect(
         results.append(result)
         if not _result_has_next_page(result):
             break
+        page += 1
     return results
 
 
-async def _has_complete_team_event_surfaces(database, *, team_id: int) -> bool:
+async def _get_complete_team_event_surfaces(database, *, team_id: int):
     connection_factory = getattr(database, "connection", None)
     if not callable(connection_factory):
-        return False
+        return SimpleNamespace(last_complete=False, next_complete=False)
     try:
         async with connection_factory() as connection:
             row = await connection.fetchrow(
@@ -298,8 +292,11 @@ async def _has_complete_team_event_surfaces(database, *, team_id: int) -> bool:
             )
     except Exception as exc:
         logger.warning("team surface completion check failed team=%s: %s", team_id, exc)
-        return False
-    return bool(row and row["last_complete"] and row["next_complete"])
+        return SimpleNamespace(last_complete=False, next_complete=False)
+    return SimpleNamespace(
+        last_complete=bool(row and row["last_complete"]),
+        next_complete=bool(row and row["next_complete"]),
+    )
 
 
 def _combine_results(job_name: str, results):
