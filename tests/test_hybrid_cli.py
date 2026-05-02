@@ -495,6 +495,55 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(backend, fake_backend)
         self.assertEqual(fake_backend.ping_calls, 1)
 
+    async def test_dispatch_proxy_health_monitor_closes_redis_backend(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+
+        fake_backend = _FakeRedisBackend()
+
+        class _FakeDatabase:
+            connection = object()
+
+        class _FakeDatabaseContext:
+            def __init__(self, config) -> None:
+                self.config = config
+
+            async def __aenter__(self):
+                return _FakeDatabase()
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+        class _FakeProxyHealthMonitor:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            async def run_forever(self, connection_factory) -> None:
+                del connection_factory
+
+        with mock.patch.object(hybrid_cli, "load_runtime_config", return_value=object()):
+            with mock.patch.object(hybrid_cli, "load_database_config", return_value=object()):
+                with mock.patch.object(hybrid_cli, "AsyncpgDatabase", _FakeDatabaseContext):
+                    with mock.patch.object(hybrid_cli, "_load_redis_backend", return_value=fake_backend):
+                        with mock.patch.object(hybrid_cli, "ProxyHealthMonitor", _FakeProxyHealthMonitor):
+                            exit_code = await hybrid_cli._dispatch(
+                                argparse.Namespace(
+                                    command="proxy-health-monitor",
+                                    proxy=[],
+                                    user_agent=None,
+                                    max_attempts=None,
+                                    database_url=None,
+                                    db_min_size=None,
+                                    db_max_size=None,
+                                    db_timeout=None,
+                                    redis_url=None,
+                                    allow_memory_redis=False,
+                                    source=None,
+                                )
+                            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(fake_backend.closed)
+
     async def test_hybrid_app_close_closes_transport(self) -> None:
         from schema_inspector.cli import HybridApp
         from schema_inspector.runtime import RuntimeConfig
@@ -1910,10 +1959,14 @@ class _FakeAdapterWithEventListJob:
 class _FakeRedisBackend:
     def __init__(self) -> None:
         self.ping_calls = 0
+        self.closed = False
 
     def ping(self) -> bool:
         self.ping_calls += 1
         return True
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeRedis:

@@ -279,10 +279,10 @@ class LocalApiApplication:
         self._db_pool = await create_pool_with_fallback(self.database_config)
 
     async def _shutdown_async(self) -> None:
-        if self._db_pool is None:
-            return
-        await self._db_pool.close()
-        self._db_pool = None
+        if self._db_pool is not None:
+            await self._db_pool.close()
+            self._db_pool = None
+        await _close_redis_backend(getattr(self, "redis_backend", None))
 
     def _ensure_runtime_loop(self) -> None:
         if self._runtime_loop is not None:
@@ -1902,8 +1902,24 @@ def _load_optional_redis_backend(redis_url: str | None) -> Any | None:
     try:
         backend.ping()
     except Exception:
+        _close_redis_backend_sync(backend)
         return None
     return backend
+
+
+async def _close_redis_backend(backend: Any | None) -> None:
+    close_backend = getattr(backend, "close", None)
+    if not callable(close_backend):
+        return
+    maybe_awaitable = close_backend()
+    if asyncio.iscoroutine(maybe_awaitable):
+        await maybe_awaitable
+
+
+def _close_redis_backend_sync(backend: Any | None) -> None:
+    close_backend = getattr(backend, "close", None)
+    if callable(close_backend):
+        close_backend()
 
 
 def _load_project_env() -> dict[str, str]:

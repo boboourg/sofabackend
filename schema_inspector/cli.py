@@ -257,11 +257,7 @@ class HybridApp:
         await self.transport.close()
         if self._structure_transport is not None:
             await self._structure_transport.close()
-        close_backend = getattr(self.redis_backend, "close", None)
-        if callable(close_backend):
-            maybe_awaitable = close_backend()
-            if inspect.isawaitable(maybe_awaitable):
-                await maybe_awaitable
+        await _close_redis_backend(self.redis_backend)
 
     async def ensure_endpoint_registry(self, sport_slug: str) -> None:
         normalized_sport_slug = str(sport_slug or "").strip().lower() or "football"
@@ -912,13 +908,16 @@ async def _dispatch(args) -> int:
             allow_memory_fallback=bool(getattr(args, "allow_memory_redis", False)),
         )
         if args.command == "proxy-health-monitor":
-            monitor = ProxyHealthMonitor(
-                repository=ProxyHealthRepository(),
-                state_store=ProxyStateStore(redis_backend),
-                config=ProxyHealthMonitorConfig.from_env(_load_project_env()),
-            )
-            await monitor.run_forever(database.connection)
-            return 0
+            try:
+                monitor = ProxyHealthMonitor(
+                    repository=ProxyHealthRepository(),
+                    state_store=ProxyStateStore(redis_backend),
+                    config=ProxyHealthMonitorConfig.from_env(_load_project_env()),
+                )
+                await monitor.run_forever(database.connection)
+                return 0
+            finally:
+                await _close_redis_backend(redis_backend)
         app = HybridApp(
             database=database,
             runtime_config=runtime_config,
@@ -1473,6 +1472,15 @@ def _load_redis_backend(redis_url: str | None, *, allow_memory_fallback: bool):
     backend = redis.Redis.from_url(resolved_url, decode_responses=True)
     backend.ping()
     return backend
+
+
+async def _close_redis_backend(backend) -> None:
+    close_backend = getattr(backend, "close", None)
+    if not callable(close_backend):
+        return
+    maybe_awaitable = close_backend()
+    if inspect.isawaitable(maybe_awaitable):
+        await maybe_awaitable
 
 
 def _load_project_env() -> dict[str, str]:

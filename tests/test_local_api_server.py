@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import threading
 from types import SimpleNamespace
+from unittest import mock
 
 from schema_inspector.local_api_server import (
     ApiResponse,
@@ -1313,6 +1314,35 @@ class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload, {"uniqueTournament": {"id": 17}})
 
 
+class LocalApiRedisLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_async_closes_redis_backend(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        pool = _FakeClosablePool()
+        redis_backend = _FakeClosableRedis()
+        application._db_pool = pool
+        application.redis_backend = redis_backend
+
+        await application._shutdown_async()
+
+        self.assertTrue(pool.closed)
+        self.assertTrue(redis_backend.closed)
+
+    def test_load_optional_redis_backend_closes_backend_when_ping_fails(self) -> None:
+        import schema_inspector.local_api_server as local_api_server
+
+        fake_backend = _FakeFailingRedis()
+        fake_redis_module = SimpleNamespace(
+            Redis=SimpleNamespace(from_url=lambda *args, **kwargs: fake_backend),
+        )
+
+        with mock.patch.object(local_api_server, "_load_project_env", return_value={"REDIS_URL": "redis://example"}):
+            with mock.patch.dict("sys.modules", {"redis": fake_redis_module}):
+                backend = local_api_server._load_optional_redis_backend(None)
+
+        self.assertIsNone(backend)
+        self.assertTrue(fake_backend.closed)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1322,6 +1352,27 @@ def _make_fake_connector(connection):
         return connection
 
     return _connect
+
+
+class _FakeClosablePool:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeClosableRedis:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeFailingRedis(_FakeClosableRedis):
+    def ping(self) -> None:
+        raise RuntimeError("redis unavailable")
 
 
 class _FakeFetchRowConnection:
