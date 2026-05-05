@@ -880,6 +880,14 @@ class LocalApiApplication:
             return await self._fetch_event_incidents_payload(int(path_params["event_id"]))
         if template == "/api/v1/event/{event_id}/lineups":
             return await self._fetch_event_lineups_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/comments":
+            return await self._fetch_event_comments_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/h2h":
+            return await self._fetch_event_h2h_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/managers":
+            return await self._fetch_event_managers_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/pregame-form":
+            return await self._fetch_event_pregame_form_payload(int(path_params["event_id"]))
         if template == "/api/v1/event/{event_id}/player/{player_id}/statistics":
             return await self._fetch_event_player_statistics_payload(
                 int(path_params["event_id"]),
@@ -902,6 +910,23 @@ class LocalApiApplication:
                 page=max(int(path_params["page"]), 0),
                 direction="last" if template == _SEASON_EVENTS_LAST_TEMPLATE else "next",
             )
+        if template in {
+            "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
+            "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}",
+        }:
+            return await self._fetch_standings_payload(
+                season_id=int(path_params["season_id"]),
+                scope=str(path_params["scope"]),
+                unique_tournament_id=_optional_int_path_param(path_params, "unique_tournament_id"),
+                tournament_id=_optional_int_path_param(path_params, "tournament_id"),
+            )
+        if template == "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds":
+            return await self._fetch_season_rounds_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+                season_id=int(path_params["season_id"]),
+            )
+        if template == "/api/v1/player/{player_id}/transfer-history":
+            return await self._fetch_player_transfer_history_payload(int(path_params["player_id"]))
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
@@ -995,6 +1020,175 @@ class LocalApiApplication:
             ],
             "hasNextPage": has_next_page,
         }
+
+    async def _fetch_standings_payload(
+        self,
+        *,
+        season_id: int,
+        scope: str,
+        unique_tournament_id: int | None,
+        tournament_id: int | None,
+    ) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            standings = await connection.fetch(
+                """
+                SELECT
+                    st.id,
+                    st.season_id,
+                    st.tournament_id,
+                    st.name,
+                    st.type,
+                    st.updated_at_timestamp,
+                    st.descriptions,
+                    st.tie_breaking_rule_id,
+                    tbr.text AS tie_breaking_rule_text
+                FROM standing AS st
+                LEFT JOIN standing_tie_breaking_rule AS tbr
+                    ON tbr.id = st.tie_breaking_rule_id
+                LEFT JOIN tournament AS t
+                    ON t.id = st.tournament_id
+                WHERE st.season_id = $1
+                  AND st.type = $2
+                  AND ($3::bigint IS NULL OR t.unique_tournament_id = $3)
+                  AND ($4::bigint IS NULL OR st.tournament_id = $4)
+                ORDER BY st.name NULLS LAST, st.id
+                """,
+                season_id,
+                scope,
+                unique_tournament_id,
+                tournament_id,
+            )
+            if not standings:
+                return None
+            standing_ids = [int(row["id"]) for row in standings]
+            rows = await connection.fetch(
+                """
+                SELECT
+                    sr.id,
+                    sr.standing_id,
+                    sr.team_id,
+                    team.slug AS team_slug,
+                    team.name AS team_name,
+                    team.short_name AS team_short_name,
+                    sr.position,
+                    sr.matches,
+                    sr.wins,
+                    sr.draws,
+                    sr.losses,
+                    sr.points,
+                    sr.scores_for,
+                    sr.scores_against,
+                    sr.score_diff_formatted,
+                    sr.promotion_id,
+                    promotion.text AS promotion_text,
+                    sr.descriptions
+                FROM standing_row AS sr
+                LEFT JOIN team
+                    ON team.id = sr.team_id
+                LEFT JOIN standing_promotion AS promotion
+                    ON promotion.id = sr.promotion_id
+                WHERE sr.standing_id = ANY($1::bigint[])
+                ORDER BY sr.standing_id, sr.position, sr.id
+                """,
+                standing_ids,
+            )
+        finally:
+            await connection.close()
+
+        rows_by_standing: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            item: dict[str, Any] = {
+                "id": int(row["id"]),
+                "team": _minimal_entity_payload(
+                    row["team_id"],
+                    slug=row["team_slug"],
+                    name=row["team_name"],
+                    short_name=row["team_short_name"],
+                ),
+                "position": int(row["position"]),
+                "matches": int(row["matches"]),
+                "wins": int(row["wins"]),
+                "draws": int(row["draws"]),
+                "losses": int(row["losses"]),
+                "scoresFor": int(row["scores_for"]),
+                "scoresAgainst": int(row["scores_against"]),
+                "scoreDiffFormatted": str(row["score_diff_formatted"]),
+                "points": int(row["points"]),
+            }
+            if row["promotion_id"] is not None:
+                promotion: dict[str, Any] = {"id": int(row["promotion_id"])}
+                if row["promotion_text"] is not None:
+                    promotion["text"] = str(row["promotion_text"])
+                item["promotion"] = promotion
+            if row["descriptions"] is not None:
+                item["descriptions"] = _serialize_scalar(row["descriptions"])
+            rows_by_standing.setdefault(int(row["standing_id"]), []).append(item)
+
+        payload_standings: list[dict[str, Any]] = []
+        for row in standings:
+            standing: dict[str, Any] = {
+                "id": int(row["id"]),
+                "name": str(row["name"]),
+                "type": str(row["type"]),
+                "seasonId": int(row["season_id"]),
+                "rows": rows_by_standing.get(int(row["id"]), []),
+            }
+            if row["tournament_id"] is not None:
+                standing["tournamentId"] = int(row["tournament_id"])
+            if row["updated_at_timestamp"] is not None:
+                standing["updatedAtTimestamp"] = int(row["updated_at_timestamp"])
+            if row["descriptions"] is not None:
+                standing["descriptions"] = _serialize_scalar(row["descriptions"])
+            if row["tie_breaking_rule_id"] is not None:
+                rule: dict[str, Any] = {"id": int(row["tie_breaking_rule_id"])}
+                if row["tie_breaking_rule_text"] is not None:
+                    rule["text"] = str(row["tie_breaking_rule_text"])
+                standing["tieBreakingRule"] = rule
+            payload_standings.append(standing)
+
+        return {"standings": payload_standings}
+
+    async def _fetch_season_rounds_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int,
+    ) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT round_number, round_name, round_slug, is_current
+                FROM season_round
+                WHERE unique_tournament_id = $1
+                  AND season_id = $2
+                ORDER BY round_number
+                """,
+                unique_tournament_id,
+                season_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        rounds: list[dict[str, Any]] = []
+        current_round: dict[str, Any] | None = None
+        for row in rows:
+            item: dict[str, Any] = {"round": int(row["round_number"])}
+            if row["round_name"] is not None:
+                item["name"] = str(row["round_name"])
+            if row["round_slug"] is not None:
+                item["slug"] = str(row["round_slug"])
+            rounds.append(item)
+            if bool(row["is_current"]):
+                current_round = dict(item)
+
+        payload: dict[str, Any] = {"rounds": rounds}
+        if current_round is not None:
+            payload["currentRound"] = current_round
+        return payload
 
     async def _fetch_event_statistics_payload(self, event_id: int) -> dict[str, Any] | None:
         connection = await self._connect()
@@ -1169,6 +1363,229 @@ class LocalApiApplication:
             payload["away"] = sides["away"]
         return payload
 
+    async def _fetch_event_comments_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            feed = await connection.fetchrow(
+                """
+                SELECT home_player_color,
+                       home_goalkeeper_color,
+                       away_player_color,
+                       away_goalkeeper_color
+                FROM event_comment_feed
+                WHERE event_id = $1
+                """,
+                event_id,
+            )
+            rows = await connection.fetch(
+                """
+                SELECT
+                    c.comment_id,
+                    c.sequence,
+                    c.period_name,
+                    c.is_home,
+                    c.player_id,
+                    p.slug AS player_slug,
+                    p.name AS player_name,
+                    p.short_name AS player_short_name,
+                    p.position AS player_position,
+                    c.text,
+                    c.match_time,
+                    c.comment_type
+                FROM event_comment AS c
+                LEFT JOIN player AS p
+                    ON p.id = c.player_id
+                WHERE c.event_id = $1
+                ORDER BY c.sequence, c.comment_id
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if feed is None and not rows:
+            return None
+
+        comments: list[dict[str, Any]] = []
+        for row in rows:
+            item: dict[str, Any] = {}
+            if row["comment_id"] is not None:
+                item["id"] = int(row["comment_id"])
+            if row["sequence"] is not None:
+                item["sequence"] = int(row["sequence"])
+            if row["period_name"] is not None:
+                item["periodName"] = str(row["period_name"])
+            if row["is_home"] is not None:
+                item["isHome"] = bool(row["is_home"])
+            if row["player_id"] is not None:
+                player = _minimal_entity_payload(
+                    row["player_id"],
+                    slug=row["player_slug"],
+                    name=row["player_name"],
+                    short_name=row["player_short_name"],
+                )
+                if row["player_position"] is not None:
+                    player["position"] = str(row["player_position"])
+                item["player"] = player
+            if row["text"] is not None:
+                item["text"] = str(row["text"])
+            if row["match_time"] is not None:
+                item["time"] = int(row["match_time"])
+            if row["comment_type"] is not None:
+                item["type"] = str(row["comment_type"])
+            comments.append(item)
+
+        payload: dict[str, Any] = {"comments": comments}
+        if feed is not None:
+            home: dict[str, Any] = {}
+            away: dict[str, Any] = {}
+            if feed["home_player_color"] is not None:
+                home["playerColor"] = _serialize_scalar(feed["home_player_color"])
+            if feed["home_goalkeeper_color"] is not None:
+                home["goalkeeperColor"] = _serialize_scalar(feed["home_goalkeeper_color"])
+            if feed["away_player_color"] is not None:
+                away["playerColor"] = _serialize_scalar(feed["away_player_color"])
+            if feed["away_goalkeeper_color"] is not None:
+                away["goalkeeperColor"] = _serialize_scalar(feed["away_goalkeeper_color"])
+            if home:
+                payload["home"] = home
+            if away:
+                payload["away"] = away
+        return payload
+
+    async def _fetch_event_h2h_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT duel_type, home_wins, away_wins, draws
+                FROM event_duel
+                WHERE event_id = $1
+                ORDER BY duel_type
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        payload: dict[str, Any] = {}
+        for row in rows:
+            duel = {
+                "homeWins": int(row["home_wins"]),
+                "awayWins": int(row["away_wins"]),
+                "draws": int(row["draws"]),
+            }
+            duel_type = str(row["duel_type"])
+            if duel_type == "team":
+                payload["teamDuel"] = duel
+            elif duel_type == "manager":
+                payload["managerDuel"] = duel
+            else:
+                payload[_snake_to_camel(f"{duel_type}_duel")] = duel
+        return payload or None
+
+    async def _fetch_event_managers_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    ema.side,
+                    ema.manager_id,
+                    manager.slug AS manager_slug,
+                    manager.name AS manager_name,
+                    manager.short_name AS manager_short_name,
+                    manager.field_translations
+                FROM event_manager_assignment AS ema
+                LEFT JOIN manager
+                    ON manager.id = ema.manager_id
+                WHERE ema.event_id = $1
+                ORDER BY ema.side
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        payload: dict[str, Any] = {}
+        for row in rows:
+            if row["manager_id"] is None:
+                continue
+            manager_payload = _minimal_entity_payload(
+                row["manager_id"],
+                slug=row["manager_slug"],
+                name=row["manager_name"],
+                short_name=row["manager_short_name"],
+            )
+            if row["field_translations"] is not None:
+                manager_payload["fieldTranslations"] = _serialize_scalar(row["field_translations"])
+            side = str(row["side"])
+            if side == "home":
+                payload["homeManager"] = manager_payload
+            elif side == "away":
+                payload["awayManager"] = manager_payload
+        return payload or None
+
+    async def _fetch_event_pregame_form_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            root = await connection.fetchrow(
+                """
+                SELECT label
+                FROM event_pregame_form
+                WHERE event_id = $1
+                """,
+                event_id,
+            )
+            side_rows = await connection.fetch(
+                """
+                SELECT side, avg_rating, position, value
+                FROM event_pregame_form_side
+                WHERE event_id = $1
+                ORDER BY side
+                """,
+                event_id,
+            )
+            item_rows = await connection.fetch(
+                """
+                SELECT side, ordinal, form_value
+                FROM event_pregame_form_item
+                WHERE event_id = $1
+                ORDER BY side, ordinal
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if root is None and not side_rows and not item_rows:
+            return None
+
+        forms_by_side: dict[str, list[str]] = {}
+        for row in item_rows:
+            forms_by_side.setdefault(str(row["side"]), []).append(str(row["form_value"]))
+
+        payload: dict[str, Any] = {}
+        if root is not None and root["label"] is not None:
+            payload["label"] = str(root["label"])
+        for row in side_rows:
+            side_payload: dict[str, Any] = {}
+            if row["avg_rating"] is not None:
+                side_payload["avgRating"] = str(row["avg_rating"])
+            if row["position"] is not None:
+                side_payload["position"] = int(row["position"])
+            if row["value"] is not None:
+                side_payload["value"] = str(row["value"])
+            side_payload["form"] = forms_by_side.get(str(row["side"]), [])
+            side = str(row["side"])
+            if side == "home":
+                payload["homeTeam"] = side_payload
+            elif side == "away":
+                payload["awayTeam"] = side_payload
+        return payload or None
+
     async def _fetch_sport_live_events_payload(self, sport_slug: str) -> dict[str, Any]:
         # Sofascore's /events/live returns events that are ACTUALLY in flight
         # right now. Our DB carries a long tail of stale 'interrupted' /
@@ -1334,6 +1751,99 @@ class LocalApiApplication:
         if summary["extra_json"] is not None:
             payload["extra"] = _serialize_scalar(summary["extra_json"])
         return payload
+
+    async def _fetch_player_transfer_history_payload(self, player_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    pth.id,
+                    pth.player_id,
+                    p.slug AS player_slug,
+                    p.name AS player_name,
+                    p.short_name AS player_short_name,
+                    p.position AS player_position,
+                    pth.transfer_from_team_id,
+                    from_team.slug AS from_team_slug,
+                    from_team.name AS from_team_entity_name,
+                    from_team.short_name AS from_team_short_name,
+                    pth.from_team_name AS from_team_name,
+                    pth.transfer_to_team_id,
+                    to_team.slug AS to_team_slug,
+                    to_team.name AS to_team_entity_name,
+                    to_team.short_name AS to_team_short_name,
+                    pth.to_team_name AS to_team_name,
+                    pth.transfer_date_timestamp,
+                    pth.transfer_fee,
+                    pth.transfer_fee_description,
+                    pth.transfer_fee_raw,
+                    pth.type
+                FROM player_transfer_history AS pth
+                LEFT JOIN player AS p
+                    ON p.id = pth.player_id
+                LEFT JOIN team AS from_team
+                    ON from_team.id = pth.transfer_from_team_id
+                LEFT JOIN team AS to_team
+                    ON to_team.id = pth.transfer_to_team_id
+                WHERE pth.player_id = $1
+                ORDER BY pth.transfer_date_timestamp DESC NULLS LAST, pth.id DESC
+                """,
+                player_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        transfers: list[dict[str, Any]] = []
+        for row in rows:
+            item: dict[str, Any] = {"id": int(row["id"])}
+            player = _minimal_entity_payload(
+                row["player_id"],
+                slug=row["player_slug"],
+                name=row["player_name"],
+                short_name=row["player_short_name"],
+            )
+            if row["player_position"] is not None:
+                player["position"] = str(row["player_position"])
+            item["player"] = player
+            from_team = _team_payload_from_transfer_row(
+                row,
+                id_key="transfer_from_team_id",
+                slug_key="from_team_slug",
+                name_key="from_team_entity_name",
+                fallback_name_key="from_team_name",
+                short_name_key="from_team_short_name",
+            )
+            to_team = _team_payload_from_transfer_row(
+                row,
+                id_key="transfer_to_team_id",
+                slug_key="to_team_slug",
+                name_key="to_team_entity_name",
+                fallback_name_key="to_team_name",
+                short_name_key="to_team_short_name",
+            )
+            if from_team is not None:
+                item["transferFrom"] = from_team
+            if to_team is not None:
+                item["transferTo"] = to_team
+            if row["from_team_name"] is not None:
+                item["fromTeamName"] = str(row["from_team_name"])
+            if row["to_team_name"] is not None:
+                item["toTeamName"] = str(row["to_team_name"])
+            if row["transfer_date_timestamp"] is not None:
+                item["transferDateTimestamp"] = int(row["transfer_date_timestamp"])
+            if row["transfer_fee"] is not None:
+                item["transferFee"] = _serialize_scalar(row["transfer_fee"])
+            if row["transfer_fee_description"] is not None:
+                item["transferFeeDescription"] = str(row["transfer_fee_description"])
+            if row["transfer_fee_raw"] is not None:
+                item["transferFeeRaw"] = _serialize_scalar(row["transfer_fee_raw"])
+            if row["type"] is not None:
+                item["type"] = int(row["type"])
+            transfers.append(item)
+        return {"transferHistory": transfers}
 
     async def _fetch_event_player_rating_breakdown_payload(
         self,
@@ -2680,6 +3190,27 @@ def _minimal_entity_payload(
     if short_name is not None:
         payload["shortName"] = str(short_name)
     return payload
+
+
+def _team_payload_from_transfer_row(
+    row: Any,
+    *,
+    id_key: str,
+    slug_key: str,
+    name_key: str,
+    fallback_name_key: str,
+    short_name_key: str,
+) -> dict[str, Any] | None:
+    team_id = row[id_key]
+    team_name = _first_not_none(row[name_key], row[fallback_name_key])
+    if team_id is None:
+        return {"name": str(team_name)} if team_name is not None else None
+    return _minimal_entity_payload(
+        team_id,
+        slug=row[slug_key],
+        name=team_name,
+        short_name=row[short_name_key],
+    )
 
 
 def _optional_int_path_param(path_params: dict[str, str], name: str) -> int | None:

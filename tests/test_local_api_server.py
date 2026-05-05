@@ -449,39 +449,125 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
+    async def test_handle_api_get_rebuilds_standings_with_rows_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeStandingsConnection(
+            standings=[
+                {
+                    "id": 224907,
+                    "season_id": 77559,
+                    "tournament_id": 80,
+                    "name": "LaLiga",
+                    "type": "total",
+                    "updated_at_timestamp": 1770000123,
+                    "tie_breaking_rule_id": 7,
+                    "tie_breaking_rule_text": "Points, goal difference, goals scored",
+                    "descriptions": [{"text": "Champions League"}],
+                }
+            ],
+            rows=[
+                {
+                    "id": 10001,
+                    "standing_id": 224907,
+                    "team_id": 2817,
+                    "team_slug": "barcelona",
+                    "team_name": "Barcelona",
+                    "team_short_name": "Barcelona",
+                    "position": 1,
+                    "matches": 33,
+                    "wins": 28,
+                    "draws": 1,
+                    "losses": 4,
+                    "points": 85,
+                    "scores_for": 87,
+                    "scores_against": 30,
+                    "score_diff_formatted": "+57",
+                    "promotion_id": 1,
+                    "promotion_text": "Champions League",
+                    "descriptions": [{"text": "Qualified"}],
+                },
+                {
+                    "id": 10002,
+                    "standing_id": 224907,
+                    "team_id": 2829,
+                    "team_slug": "real-madrid",
+                    "team_name": "Real Madrid",
+                    "team_short_name": "Real Madrid",
+                    "position": 2,
+                    "matches": 33,
+                    "wins": 23,
+                    "draws": 5,
+                    "losses": 5,
+                    "points": 74,
+                    "scores_for": 68,
+                    "scores_against": 31,
+                    "score_diff_formatted": "+37",
+                    "promotion_id": None,
+                    "promotion_text": None,
+                    "descriptions": None,
+                },
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/8/season/77559/standings/total",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.payload["standings"]), 1)
+        standing = response.payload["standings"][0]
+        self.assertEqual(standing["id"], 224907)
+        self.assertEqual(standing["type"], "total")
+        self.assertEqual(standing["tieBreakingRule"], {"id": 7, "text": "Points, goal difference, goals scored"})
+        self.assertEqual(len(standing["rows"]), 2)
+        self.assertEqual(standing["rows"][0]["team"], {"id": 2817, "slug": "barcelona", "name": "Barcelona", "shortName": "Barcelona"})
+        self.assertEqual(standing["rows"][0]["position"], 1)
+        self.assertEqual(standing["rows"][0]["matches"], 33)
+        self.assertEqual(standing["rows"][0]["wins"], 28)
+        self.assertEqual(standing["rows"][0]["draws"], 1)
+        self.assertEqual(standing["rows"][0]["losses"], 4)
+        self.assertEqual(standing["rows"][0]["scoresFor"], 87)
+        self.assertEqual(standing["rows"][0]["scoresAgainst"], 30)
+        self.assertEqual(standing["rows"][0]["scoreDiffFormatted"], "+57")
+        self.assertEqual(standing["rows"][0]["points"], 85)
+        self.assertEqual(standing["rows"][0]["promotion"], {"id": 1, "text": "Champions League"})
+        self.assertEqual(standing["rows"][0]["descriptions"], [{"text": "Qualified"}])
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
     async def test_handle_api_get_uses_generic_normalized_fallback_for_remaining_source_table_routes(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()
         snapshot_connection = _FakeSnapshotConnection([])
         normalized_connection = _FakeGenericNormalizedConnection(
-            table_columns={"event_statistic": {"event_id", "period", "group_name", "stat_name", "home_value_numeric"}},
+            table_columns={"event_graph": {"event_id", "minute", "value"}},
             table_rows={
-                "event_statistic": [
+                "event_graph": [
                     {
                         "event_id": 14083191,
-                        "period": "ALL",
-                        "group_name": "Match overview",
-                        "stat_name": "Ball possession",
-                        "home_value_numeric": 62,
+                        "minute": 53,
+                        "value": 42,
                     }
                 ]
             },
         )
         application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
 
-        response = await application.handle_api_get("/api/v1/event/14083191/statistics", "")
+        response = await application.handle_api_get("/api/v1/event/14083191/graph", "")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.payload,
             {
-                "statistics": [
+                "graphPoints": [
                     {
                         "eventId": 14083191,
-                        "period": "ALL",
-                        "groupName": "Match overview",
-                        "statName": "Ball possession",
-                        "homeValueNumeric": 62,
+                        "minute": 53,
+                        "value": 42,
                     }
                 ]
             },
@@ -489,52 +575,193 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
-    async def test_handle_api_get_uses_generic_fallback_when_jsonb_row_is_text(self) -> None:
+    async def test_handle_api_get_rebuilds_transfer_history_with_nested_entities_without_raw_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()
         snapshot_connection = _FakeSnapshotConnection([])
-        normalized_connection = _FakeGenericNormalizedConnection(
-            table_columns={
-                "player_transfer_history": {
-                    "id",
-                    "player_id",
-                    "transfer_from_team_id",
-                    "transfer_to_team_id",
-                    "from_team_name",
-                    "to_team_name",
-                    "transfer_date_timestamp",
-                    "transfer_fee",
-                    "transfer_fee_description",
-                    "transfer_fee_raw",
-                    "type",
+        normalized_connection = _FakeReportNormalizedConnection(
+            transfer_history=[
+                {
+                    "id": 2467532,
+                    "player_id": 233338,
+                    "player_slug": "sample-player",
+                    "player_name": "Sample Player",
+                    "player_short_name": "S. Player",
+                    "player_position": "F",
+                    "transfer_from_team_id": 10,
+                    "from_team_slug": "old-club",
+                    "from_team_entity_name": "Old Club",
+                    "from_team_name": "Old Club",
+                    "from_team_short_name": "Old",
+                    "transfer_to_team_id": 20,
+                    "to_team_slug": "new-club",
+                    "to_team_entity_name": "New Club",
+                    "to_team_name": "New Club",
+                    "to_team_short_name": "New",
+                    "transfer_date_timestamp": 1711929600,
+                    "transfer_fee": 0,
+                    "transfer_fee_description": "Free transfer",
+                    "transfer_fee_raw": {"value": 0, "currency": "EUR"},
+                    "type": 3,
                 }
-            },
-            table_rows={
-                "player_transfer_history": [
-                    {
-                        "id": 2467532,
-                        "player_id": 233338,
-                        "transfer_from_team_id": 10,
-                        "transfer_to_team_id": 20,
-                        "from_team_name": "Old Club",
-                        "to_team_name": "New Club",
-                        "transfer_date_timestamp": 1711929600,
-                        "transfer_fee": 0,
-                        "transfer_fee_description": "Free transfer",
-                        "transfer_fee_raw": {"value": 0, "currency": "EUR"},
-                        "type": 3,
-                    }
-                ]
-            },
-            jsonb_rows_as_text=True,
+            ],
         )
         application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
 
         response = await application.handle_api_get("/api/v1/player/233338/transfer-history", "")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.payload["transferHistory"][0]["playerId"], 233338)
-        self.assertEqual(response.payload["transferHistory"][0]["transferFeeRaw"], {"value": 0, "currency": "EUR"})
+        transfer = response.payload["transferHistory"][0]
+        self.assertEqual(transfer["player"], {"id": 233338, "slug": "sample-player", "name": "Sample Player", "shortName": "S. Player", "position": "F"})
+        self.assertEqual(transfer["transferFrom"], {"id": 10, "slug": "old-club", "name": "Old Club", "shortName": "Old"})
+        self.assertEqual(transfer["transferTo"], {"id": 20, "slug": "new-club", "name": "New Club", "shortName": "New"})
+        self.assertEqual(transfer["fromTeamName"], "Old Club")
+        self.assertEqual(transfer["toTeamName"], "New Club")
+        self.assertEqual(transfer["transferFeeRaw"], {"value": 0, "currency": "EUR"})
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_comments_with_feed_colors_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeReportNormalizedConnection(
+            comment_feed={
+                "event_id": 14025026,
+                "home_player_color": {"primary": "#ffffff"},
+                "home_goalkeeper_color": {"primary": "#111111"},
+                "away_player_color": {"primary": "#222222"},
+                "away_goalkeeper_color": {"primary": "#333333"},
+            },
+            comments=[
+                {
+                    "comment_id": 37184719,
+                    "sequence": 0,
+                    "period_name": "2ND",
+                    "is_home": False,
+                    "player_id": 829932,
+                    "player_slug": "cristian-romero",
+                    "player_name": "Cristian Romero",
+                    "player_short_name": "C. Romero",
+                    "player_position": "D",
+                    "text": "Second Half begins.",
+                    "match_time": 46,
+                    "comment_type": "matchStarted",
+                }
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/14025026/comments", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["home"]["playerColor"], {"primary": "#ffffff"})
+        self.assertEqual(response.payload["away"]["goalkeeperColor"], {"primary": "#333333"})
+        self.assertEqual(response.payload["comments"][0]["id"], 37184719)
+        self.assertEqual(response.payload["comments"][0]["player"]["id"], 829932)
+        self.assertEqual(response.payload["comments"][0]["type"], "matchStarted")
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_h2h_duels_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeReportNormalizedConnection(
+            duels=[
+                {"duel_type": "team", "home_wins": 5, "away_wins": 3, "draws": 1},
+                {"duel_type": "manager", "home_wins": 1, "away_wins": 2, "draws": 0},
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/14025029/h2h", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["teamDuel"], {"homeWins": 5, "awayWins": 3, "draws": 1})
+        self.assertEqual(response.payload["managerDuel"], {"homeWins": 1, "awayWins": 2, "draws": 0})
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_managers_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeReportNormalizedConnection(
+            managers=[
+                {
+                    "side": "home",
+                    "manager_id": 5878,
+                    "manager_slug": "nuno-espirito-santo",
+                    "manager_name": "Nuno Espirito Santo",
+                    "manager_short_name": "N. E. Santo",
+                    "field_translations": {"nameTranslation": {"ar": "nuno"}},
+                },
+                {
+                    "side": "away",
+                    "manager_id": 787556,
+                    "manager_slug": "rob-edwards",
+                    "manager_name": "Rob Edwards",
+                    "manager_short_name": "R. Edwards",
+                    "field_translations": None,
+                },
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/14025029/managers", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["homeManager"]["id"], 5878)
+        self.assertEqual(response.payload["homeManager"]["fieldTranslations"], {"nameTranslation": {"ar": "nuno"}})
+        self.assertEqual(response.payload["awayManager"]["slug"], "rob-edwards")
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_pregame_form_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeReportNormalizedConnection(
+            pregame_root={"event_id": 14025029, "label": "Pts"},
+            pregame_sides=[
+                {"side": "home", "avg_rating": "6.73", "position": 18, "value": "29"},
+                {"side": "away", "avg_rating": "6.68", "position": 20, "value": "17"},
+            ],
+            pregame_items=[
+                {"side": "home", "ordinal": 0, "form_value": "W"},
+                {"side": "home", "ordinal": 1, "form_value": "D"},
+                {"side": "away", "ordinal": 0, "form_value": "L"},
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/event/14025029/pregame-form", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["label"], "Pts")
+        self.assertEqual(response.payload["homeTeam"], {"avgRating": "6.73", "position": 18, "value": "29", "form": ["W", "D"]})
+        self.assertEqual(response.payload["awayTeam"]["form"], ["L"])
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_rounds_without_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeReportNormalizedConnection(
+            rounds=[
+                {"round_number": 1, "round_name": None, "round_slug": None, "is_current": False},
+                {"round_number": 32, "round_name": None, "round_slug": None, "is_current": True},
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get("/api/v1/unique-tournament/17/season/76986/rounds", "")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["currentRound"], {"round": 32})
+        self.assertEqual(response.payload["rounds"], [{"round": 1}, {"round": 32}])
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
@@ -2044,6 +2271,92 @@ class _FakeNormalizedFallbackConnection:
             return self.heatmap_points
         if "FROM top_player_entry" in normalized:
             return self.top_player_entries
+        return []
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeStandingsConnection:
+    def __init__(
+        self,
+        *,
+        standings: list[dict[str, object]],
+        rows: list[dict[str, object]],
+    ) -> None:
+        self.standings = standings
+        self.rows = rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        normalized = " ".join(query.split())
+        if "information_schema.columns" in normalized:
+            return [{"column_name": column} for column in sorted({"id", "season_id", "tournament_id", "name", "type"})]
+        if "FROM standing_row" in normalized or "JOIN standing_row" in normalized:
+            return self.rows
+        if "FROM standing" in normalized:
+            return self.standings
+        return []
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeReportNormalizedConnection:
+    def __init__(
+        self,
+        *,
+        transfer_history: list[dict[str, object]] | None = None,
+        comment_feed: dict[str, object] | None = None,
+        comments: list[dict[str, object]] | None = None,
+        duels: list[dict[str, object]] | None = None,
+        managers: list[dict[str, object]] | None = None,
+        pregame_root: dict[str, object] | None = None,
+        pregame_sides: list[dict[str, object]] | None = None,
+        pregame_items: list[dict[str, object]] | None = None,
+        rounds: list[dict[str, object]] | None = None,
+    ) -> None:
+        self.transfer_history = transfer_history or []
+        self.comment_feed = comment_feed
+        self.comments = comments or []
+        self.duels = duels or []
+        self.managers = managers or []
+        self.pregame_root = pregame_root
+        self.pregame_sides = pregame_sides or []
+        self.pregame_items = pregame_items or []
+        self.rounds = rounds or []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args):
+        self.fetchrow_calls.append((query, args))
+        normalized = " ".join(query.split())
+        if "FROM event_comment_feed" in normalized:
+            return self.comment_feed
+        if "FROM event_pregame_form" in normalized:
+            return self.pregame_root
+        return None
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        normalized = " ".join(query.split())
+        if "FROM player_transfer_history" in normalized:
+            return self.transfer_history
+        if "FROM event_comment AS" in normalized:
+            return self.comments
+        if "FROM event_duel" in normalized:
+            return self.duels
+        if "FROM event_manager_assignment" in normalized:
+            return self.managers
+        if "FROM event_pregame_form_side" in normalized:
+            return self.pregame_sides
+        if "FROM event_pregame_form_item" in normalized:
+            return self.pregame_items
+        if "FROM season_round" in normalized:
+            return self.rounds
         return []
 
     async def close(self):
