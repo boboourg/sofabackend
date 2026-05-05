@@ -246,6 +246,29 @@ class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.attempts[0].proxy_address, "10.10.10.10:12345")
         self.assertNotIn("secret", result.final_proxy_address)
 
+    async def test_transport_enforces_wall_clock_timeout_per_attempt(self) -> None:
+        transport = _SlowTransport(
+            RuntimeConfig(
+                retry_policy=RetryPolicy(
+                    max_attempts=1,
+                    challenge_max_attempts=1,
+                    network_error_max_attempts=1,
+                    backoff_seconds=0.0,
+                ),
+                proxy_endpoints=load_runtime_config(
+                    env={},
+                    proxy_urls=["http://proxy-1.local:8080"],
+                ).proxy_endpoints,
+            ),
+            delay_seconds=0.05,
+            sleeper=lambda delay: None,
+        )
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await transport.fetch("https://www.sofascore.com/api/v1/event/1", timeout=0.01)
+
+        self.assertEqual(transport.calls, 1)
+
     async def test_transport_retries_access_denied_across_extended_proxy_budget(self) -> None:
         transport = _FakeTransport(
             RuntimeConfig(
@@ -397,6 +420,28 @@ class _RecordingTransport(InspectorTransport):
                 "impersonate": None if fingerprint_profile is None else fingerprint_profile.impersonate,
             }
         )
+        return type(
+            "_RawResponse",
+            (),
+            {
+                "resolved_url": url,
+                "status_code": 200,
+                "headers": {"content-type": "application/json"},
+                "body_bytes": b"{}",
+            },
+        )()
+
+
+class _SlowTransport(InspectorTransport):
+    def __init__(self, runtime_config: RuntimeConfig, *, delay_seconds: float, sleeper=None) -> None:
+        super().__init__(runtime_config, sleeper=sleeper or (lambda delay: None))
+        self.delay_seconds = delay_seconds
+        self.calls = 0
+
+    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None):
+        del headers, timeout, proxy_url, fingerprint_profile
+        self.calls += 1
+        await asyncio.sleep(self.delay_seconds)
         return type(
             "_RawResponse",
             (),

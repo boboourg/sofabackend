@@ -133,12 +133,15 @@ class InspectorTransport:
                 attempt_headers = self._apply_fingerprint_headers(request_headers, fingerprint_profile)
                 if lease is not None and lease.pre_request_delay > 0.0:
                     await self._sleep(lease.pre_request_delay)
-                raw = await self._execute_once(
-                    url,
-                    attempt_headers,
-                    timeout,
-                    proxy_url,
-                    fingerprint_profile=fingerprint_profile,
+                raw = await asyncio.wait_for(
+                    self._execute_once(
+                        url,
+                        attempt_headers,
+                        timeout,
+                        proxy_url,
+                        fingerprint_profile=fingerprint_profile,
+                    ),
+                    timeout=timeout,
                 )
 
                 # 304 Not Modified — data hasn't changed, return cached body.
@@ -223,8 +226,8 @@ class InspectorTransport:
                     final_proxy_address=proxy_address,
                 )
 
-            except (URLError, RequestsError) as exc:
-                error_msg = str(getattr(exc, "reason", exc))
+            except (URLError, RequestsError, asyncio.TimeoutError) as exc:
+                error_msg = _transport_error_message(exc, timeout=timeout)
                 await self._discard_session(proxy_url, fingerprint_profile=fingerprint_profile)
                 attempts.append(
                     TransportAttempt(
@@ -477,6 +480,12 @@ def _proxy_address_from_url(proxy_url: str | None) -> str | None:
     if parsed.port is None:
         return host
     return f"{host}:{parsed.port}"
+
+
+def _transport_error_message(exc: BaseException, *, timeout: float) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"request timed out after {timeout:g}s"
+    return str(getattr(exc, "reason", exc))
 
 
 def _load_proxy_state_store_from_env():
