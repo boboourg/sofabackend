@@ -767,6 +767,7 @@ class ServiceApp:
             consumer=consumer_name,
             block_ms=block_ms,
             job_audit_logger=self.job_audit_logger,
+            in_flight_store=self.live_event_inflight_store,
         )
 
     def build_housekeeping_loop(self) -> HousekeepingLoop | None:
