@@ -88,7 +88,7 @@ class LiveWorkerService:
             raise RuntimeError("Live worker requires event entity_id in stream payload.")
         event_id = int(job.entity_id)
         lock_owner: str | None = None
-        if self.in_flight_store is not None and job.job_type == JOB_REFRESH_LIVE_EVENT:
+        if self.in_flight_store is not None:
             lock_owner = f"{self.runtime.consumer}:{entry.message_id}:{job.job_id}"
             if not self.in_flight_store.claim(event_id=event_id, owner=lock_owner):
                 logger.info(

@@ -278,6 +278,43 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "coalesced_inflight")
         self.assertEqual(orchestrator.calls, [])
 
+    async def test_live_worker_skips_live_bootstrap_when_event_already_inflight(self) -> None:
+        from schema_inspector.queue.live_inflight import LiveEventInFlightStore
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        backend = _FakeRedisBackend()
+        in_flight_store = LiveEventInFlightStore(backend, ttl_ms=60_000)
+        self.assertTrue(in_flight_store.claim(event_id=7001, owner="other-worker"))
+        orchestrator = _FakeOrchestrator()
+
+        worker = LiveWorkerService(
+            orchestrator=orchestrator,
+            delayed_scheduler=_FakeDelayedScheduler(),
+            queue=_FakeQueue(),
+            lane="tier_1",
+            consumer="worker-live-tier-1-1",
+            in_flight_store=in_flight_store,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_LIVE_HOT,
+                message_id="2-1",
+                values={
+                    "job_id": "job-live-1",
+                    "job_type": "hydrate_event_root",
+                    "sport_slug": "football",
+                    "entity_id": "7001",
+                    "scope": "live",
+                    "params_json": '{"hydration_mode":"live_delta","live_bootstrap":true}',
+                    "attempt": "1",
+                },
+            )
+        )
+
+        self.assertEqual(result, "coalesced_inflight")
+        self.assertEqual(orchestrator.calls, [])
+
     async def test_live_worker_releases_inflight_after_refresh(self) -> None:
         from schema_inspector.queue.live_inflight import LiveEventInFlightStore
         from schema_inspector.workers.live_worker_service import LiveWorkerService
