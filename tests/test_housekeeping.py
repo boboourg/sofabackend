@@ -24,6 +24,7 @@ class HousekeepingConfigParsingTests(unittest.TestCase):
                 "SOFASCORE_HOUSEKEEPING_INTERVAL_SECONDS": "60",
                 "SOFASCORE_HOUSEKEEPING_BATCH_SIZE": "20000",
                 "SOFASCORE_HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES": "120",
+                "SOFASCORE_RETENTION_LIVE_SNAPSHOT_HOURS": "24",
             }
         )
 
@@ -32,6 +33,7 @@ class HousekeepingConfigParsingTests(unittest.TestCase):
         self.assertEqual(config.interval_s, 60.0)
         self.assertEqual(config.batch_size, 20_000)
         self.assertEqual(config.zombie_max_age_minutes, 120)
+        self.assertEqual(config.live_snapshot_retention_hours, 24)
 
 
 class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -43,6 +45,7 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
         retention = _FakeRetentionRepository(
             request_log_count=11,
             snapshot_count=22,
+            live_snapshot_count=25,
             live_history_count=33,
             capability_observation_count=44,
         )
@@ -82,6 +85,7 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
             {
                 "api_request_log": 11,
                 "api_payload_snapshot_legacy": 22,
+                "api_payload_snapshot_live_versions": 25,
                 "event_live_state_history": 33,
                 "endpoint_capability_observation": 44,
             },
@@ -293,11 +297,13 @@ class _FakeRetentionRepository:
         *,
         request_log_count: int = 0,
         snapshot_count: int = 0,
+        live_snapshot_count: int = 0,
         live_history_count: int = 0,
         capability_observation_count: int = 0,
     ) -> None:
         self.request_log_count = request_log_count
         self.snapshot_count = snapshot_count
+        self.live_snapshot_count = live_snapshot_count
         self.live_history_count = live_history_count
         self.capability_observation_count = capability_observation_count
 
@@ -308,6 +314,10 @@ class _FakeRetentionRepository:
     async def count_expired_legacy_snapshots(self, executor, *, cutoff: datetime) -> int:
         del executor, cutoff
         return self.snapshot_count
+
+    async def count_expired_live_snapshot_versions(self, executor, *, cutoff: datetime) -> int:
+        del executor, cutoff
+        return self.live_snapshot_count
 
     async def count_expired_live_state_history(self, executor, *, cutoff: datetime) -> int:
         del executor, cutoff
@@ -322,6 +332,10 @@ class _FakeRetentionRepository:
         return 0
 
     async def delete_legacy_snapshot_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:
+        del executor, cutoff, batch_size
+        return 0
+
+    async def delete_live_snapshot_version_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:
         del executor, cutoff, batch_size
         return 0
 

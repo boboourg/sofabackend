@@ -68,6 +68,7 @@ _ENV_MAX_BATCHES = _ENV_PREFIX + "RETENTION_MAX_BATCHES_PER_TICK"
 _ENV_BATCH_SLEEP_MS = _ENV_PREFIX + "RETENTION_BATCH_SLEEP_MS"
 _ENV_REQUEST_LOG_HOURS = _ENV_PREFIX + "RETENTION_REQUEST_LOG_HOURS"
 _ENV_SNAPSHOT_DAYS = _ENV_PREFIX + "RETENTION_PAYLOAD_SNAPSHOT_DAYS"
+_ENV_LIVE_SNAPSHOT_HOURS = _ENV_PREFIX + "RETENTION_LIVE_SNAPSHOT_HOURS"
 _ENV_LIVE_HISTORY_DAYS = _ENV_PREFIX + "RETENTION_LIVE_HISTORY_DAYS"
 _ENV_CAPABILITY_OBS_DAYS = _ENV_PREFIX + "RETENTION_CAPABILITY_OBSERVATION_DAYS"
 _ENV_ZOMBIE_MAX_AGE_MIN = _ENV_PREFIX + "SWEEPER_ZOMBIE_MAX_AGE_MINUTES"
@@ -98,6 +99,7 @@ class HousekeepingConfig:
     batch_sleep_ms: int = 100
     request_log_retention_hours: int = 48
     payload_snapshot_retention_days: int = 7
+    live_snapshot_retention_hours: int = 24
     live_state_history_retention_days: int = 30
     capability_observation_retention_days: int = 7
     zombie_max_age_minutes: int = 120
@@ -119,6 +121,7 @@ class HousekeepingConfig:
             batch_sleep_ms=_env_int(env, _ENV_BATCH_SLEEP_MS, 100, minimum=0),
             request_log_retention_hours=_env_int(env, _ENV_REQUEST_LOG_HOURS, 48, minimum=1),
             payload_snapshot_retention_days=_env_int(env, _ENV_SNAPSHOT_DAYS, 7, minimum=1),
+            live_snapshot_retention_hours=_env_int(env, _ENV_LIVE_SNAPSHOT_HOURS, 24, minimum=1),
             live_state_history_retention_days=_env_int(env, _ENV_LIVE_HISTORY_DAYS, 30, minimum=1),
             capability_observation_retention_days=_env_int(env, _ENV_CAPABILITY_OBS_DAYS, 7, minimum=1),
             zombie_max_age_minutes=_env_int_any(
@@ -141,6 +144,7 @@ class HousekeepingTickReport:
 
     request_log_deleted: int = 0
     payload_snapshot_deleted: int = 0
+    live_payload_snapshot_deleted: int = 0
     live_state_history_deleted: int = 0
     capability_observation_deleted: int = 0
     zombies_found: int = 0
@@ -249,6 +253,11 @@ class HousekeepingLoop:
                 cutoff=self._cutoff(days=self.config.payload_snapshot_retention_days),
                 delete_batch=self.retention_repository.delete_legacy_snapshot_batch,
             )
+            report.live_payload_snapshot_deleted = await self._run_retention_safely(
+                name="api_payload_snapshot_live_versions",
+                cutoff=self._cutoff(hours=self.config.live_snapshot_retention_hours),
+                delete_batch=self.retention_repository.delete_live_snapshot_version_batch,
+            )
             report.live_state_history_deleted = await self._run_retention_safely(
                 name="event_live_state_history",
                 cutoff=self._cutoff(days=self.config.live_state_history_retention_days),
@@ -319,6 +328,7 @@ class HousekeepingLoop:
     async def _fill_dry_run_counts(self, report: HousekeepingTickReport) -> None:
         request_log_cutoff = self._cutoff(hours=self.config.request_log_retention_hours)
         snapshot_cutoff = self._cutoff(days=self.config.payload_snapshot_retention_days)
+        live_snapshot_cutoff = self._cutoff(hours=self.config.live_snapshot_retention_hours)
         history_cutoff = self._cutoff(days=self.config.live_state_history_retention_days)
         capability_cutoff = self._cutoff(days=self.config.capability_observation_retention_days)
         async with self._connection_factory() as connection:
@@ -328,6 +338,9 @@ class HousekeepingLoop:
                 ),
                 "api_payload_snapshot_legacy": await self.retention_repository.count_expired_legacy_snapshots(
                     connection, cutoff=snapshot_cutoff
+                ),
+                "api_payload_snapshot_live_versions": await self.retention_repository.count_expired_live_snapshot_versions(
+                    connection, cutoff=live_snapshot_cutoff
                 ),
                 "event_live_state_history": await self.retention_repository.count_expired_live_state_history(
                     connection, cutoff=history_cutoff
@@ -639,6 +652,7 @@ def report_to_log(report: HousekeepingTickReport) -> str:
             f"dry_run would_delete "
             f"request_log={would.get('api_request_log', 0)} "
             f"snapshot={would.get('api_payload_snapshot_legacy', 0)} "
+            f"live_snapshot={would.get('api_payload_snapshot_live_versions', 0)} "
             f"live_history={would.get('event_live_state_history', 0)} "
             f"zombies_found={report.zombies_found} "
             f"stale_live_found={report.stale_live_found} "
@@ -647,6 +661,7 @@ def report_to_log(report: HousekeepingTickReport) -> str:
     return (
         f"deleted request_log={report.request_log_deleted} "
         f"snapshot={report.payload_snapshot_deleted} "
+        f"live_snapshot={report.live_payload_snapshot_deleted} "
         f"live_history={report.live_state_history_deleted} "
         f"zombies={report.zombies_cleared}/{report.zombies_found} "
         f"stale_live={report.stale_live_cleared}/{report.stale_live_found} "

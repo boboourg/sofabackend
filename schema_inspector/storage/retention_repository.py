@@ -139,7 +139,75 @@ class RetentionRepository:
         return _parse_delete_tag(command_tag)
 
     # ------------------------------------------------------------------
-    # endpoint_capability_observation — append-only probe log
+    # api_payload_snapshot - scoped live/event snapshot versions
+    # ------------------------------------------------------------------
+    #
+    # Live/event payloads are rewritten frequently. The local API still
+    # needs the latest raw payload for every scope, so this retention step
+    # deletes only older scoped versions that are not referenced by
+    # api_snapshot_head.latest_snapshot_id.
+
+    async def count_expired_live_snapshot_versions(
+        self,
+        executor: SqlExecutor,
+        *,
+        cutoff: datetime,
+    ) -> int:
+        value = await executor.fetchval(
+            """
+            SELECT count(*)
+            FROM api_payload_snapshot p
+            WHERE p.scope_key IS NOT NULL
+              AND p.fetched_at < $1
+              AND (
+                  p.endpoint_pattern LIKE '/api/v1/event/%'
+                  OR p.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM api_snapshot_head h
+                  WHERE h.latest_snapshot_id = p.id
+              )
+            """,
+            cutoff,
+        )
+        return int(value or 0)
+
+    async def delete_live_snapshot_version_batch(
+        self,
+        executor: SqlExecutor,
+        *,
+        cutoff: datetime,
+        batch_size: int,
+    ) -> int:
+        command_tag = await executor.execute(
+            """
+            WITH victims AS (
+                SELECT p.id
+                FROM api_payload_snapshot p
+                WHERE p.scope_key IS NOT NULL
+                  AND p.fetched_at < $1
+                  AND (
+                      p.endpoint_pattern LIKE '/api/v1/event/%'
+                      OR p.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM api_snapshot_head h
+                      WHERE h.latest_snapshot_id = p.id
+                  )
+                ORDER BY p.id
+                LIMIT $2
+            )
+            DELETE FROM api_payload_snapshot
+            USING victims
+            WHERE api_payload_snapshot.id = victims.id
+            """,
+            cutoff,
+            int(batch_size),
+        )
+        return _parse_delete_tag(command_tag)
+
+    # ------------------------------------------------------------------
+    # endpoint_capability_observation - append-only probe log
     # ------------------------------------------------------------------
     #
     # Aggregates roll up into endpoint_capability_rollup; the raw
