@@ -1193,6 +1193,9 @@ class PilotOrchestrator:
         outcome: FetchOutcomeEnvelope,
         context_type: str | None,
     ) -> None:
+        if outcome.classification == "replay_skipped_missing":
+            return
+
         payload_validity = "json" if outcome.is_valid_json else "non_json"
         if outcome.is_soft_error_payload:
             payload_validity = "soft_error_json"

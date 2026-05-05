@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -16,7 +17,7 @@ class FetchTask:
     endpoint_pattern: str
     source_url: str
     timeout_profile: str
-    timeout_seconds: float = 20.0
+    timeout_seconds: float = field(default_factory=lambda: _default_timeout_seconds())
     method: str = "GET"
     request_headers: Mapping[str, str] | None = None
     query_params: Mapping[str, object] | None = None
@@ -29,6 +30,15 @@ class FetchTask:
     fetch_reason: str | None = None
     freshness_key: str | None = None
     freshness_ttl_seconds: int | None = None
+
+
+def _default_timeout_seconds() -> float:
+    raw_value = os.getenv("SOFASCORE_FETCH_TIMEOUT_SECONDS", "20")
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return 20.0
+    return value if value > 0 else 20.0
 
 
 @dataclass(frozen=True)
