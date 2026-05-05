@@ -508,6 +508,8 @@ class LocalApiApplication:
                 if split.path != path:
                     continue
                 decoded_payload = _decode_snapshot_payload(row["payload"])
+                if _snapshot_payload_missing_normalized_details(route, decoded_payload):
+                    continue
                 if _query_maps_equal(split.query, raw_query):
                     return await self._reconcile_snapshot_payload(connection, route, decoded_payload)
                 if not raw_query and latest_path_match is None:
@@ -3131,6 +3133,22 @@ def _payload_status_type(payload: Any) -> str | None:
                     if isinstance(status, dict) and isinstance(status.get("type"), str):
                         return str(status["type"])
     return None
+
+
+def _snapshot_payload_missing_normalized_details(route: RouteSpec, payload: Any) -> bool:
+    """Skip known partial raw snapshots so normalized serializers can rebuild them."""
+    path_template = route.endpoint.path_template
+    if path_template not in {
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
+        "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}",
+    }:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    standings = payload.get("standings")
+    if not isinstance(standings, list) or not standings:
+        return False
+    return any(isinstance(item, dict) and "rows" not in item for item in standings)
 
 
 def _query_maps_equal(left_raw: str, right_raw: str) -> bool:

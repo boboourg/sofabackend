@@ -539,6 +539,67 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
+    async def test_handle_api_get_rebuilds_standings_when_snapshot_is_missing_rows(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection(
+            [
+                {
+                    "source_slug": "sofascore",
+                    "source_url": "https://www.sofascore.com/api/v1/unique-tournament/8/season/77559/standings/total",
+                    "payload": {"standings": [{"id": 224907, "type": "total"}]},
+                }
+            ]
+        )
+        normalized_connection = _FakeStandingsConnection(
+            standings=[
+                {
+                    "id": 224907,
+                    "season_id": 77559,
+                    "tournament_id": 80,
+                    "name": "LaLiga",
+                    "type": "total",
+                    "updated_at_timestamp": None,
+                    "tie_breaking_rule_id": None,
+                    "tie_breaking_rule_text": None,
+                    "descriptions": None,
+                }
+            ],
+            rows=[
+                {
+                    "id": 10001,
+                    "standing_id": 224907,
+                    "team_id": 2817,
+                    "team_slug": "barcelona",
+                    "team_name": "Barcelona",
+                    "team_short_name": "Barcelona",
+                    "position": 1,
+                    "matches": 33,
+                    "wins": 28,
+                    "draws": 1,
+                    "losses": 4,
+                    "points": 85,
+                    "scores_for": 87,
+                    "scores_against": 30,
+                    "score_diff_formatted": "+57",
+                    "promotion_id": None,
+                    "promotion_text": None,
+                    "descriptions": None,
+                }
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/8/season/77559/standings/total",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["standings"][0]["rows"][0]["team"]["id"], 2817)
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
     async def test_handle_api_get_uses_generic_normalized_fallback_for_remaining_source_table_routes(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()
