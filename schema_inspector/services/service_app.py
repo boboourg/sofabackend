@@ -10,6 +10,7 @@ from typing import Any
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
+from ..queue.live_inflight import LiveEventInFlightStore
 from ..sources import build_source_adapter
 from ..storage.planner_cursor_repository import PlannerCursorRepository
 from ..storage.tournament_registry_repository import TournamentRegistryRepository
@@ -193,6 +194,7 @@ class ServiceApp:
         self.delayed_scheduler = DelayedJobScheduler(self.app.redis_backend)
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
         self.completion_store = DedupeStore(self.app.redis_backend)
+        self.live_event_inflight_store = LiveEventInFlightStore(self.app.redis_backend)
         self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
@@ -609,6 +611,7 @@ class ServiceApp:
             consumer=consumer_name,
             block_ms=block_ms,
             job_audit_logger=self.job_audit_logger,
+            in_flight_store=self.live_event_inflight_store,
         )
 
     def build_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:

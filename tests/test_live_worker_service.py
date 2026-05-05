@@ -242,6 +242,78 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(worker.delayed_scheduler.calls, [("job-live-9", 1_800_000_005_000)])
 
+    async def test_live_worker_skips_refresh_when_event_already_inflight(self) -> None:
+        from schema_inspector.queue.live_inflight import LiveEventInFlightStore
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        backend = _FakeRedisBackend()
+        in_flight_store = LiveEventInFlightStore(backend, ttl_ms=60_000)
+        self.assertTrue(in_flight_store.claim(event_id=7001, owner="other-worker"))
+        orchestrator = _FakeOrchestrator()
+
+        worker = LiveWorkerService(
+            orchestrator=orchestrator,
+            delayed_scheduler=_FakeDelayedScheduler(),
+            queue=_FakeQueue(),
+            lane="tier_1",
+            consumer="worker-live-tier-1-1",
+            in_flight_store=in_flight_store,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_LIVE_HOT,
+                message_id="2-1",
+                values={
+                    "job_id": "job-live-1",
+                    "job_type": "refresh_live_event",
+                    "sport_slug": "football",
+                    "event_id": "7001",
+                    "lane": "tier_1",
+                    "attempt": "1",
+                },
+            )
+        )
+
+        self.assertEqual(result, "coalesced_inflight")
+        self.assertEqual(orchestrator.calls, [])
+
+    async def test_live_worker_releases_inflight_after_refresh(self) -> None:
+        from schema_inspector.queue.live_inflight import LiveEventInFlightStore
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        backend = _FakeRedisBackend()
+        in_flight_store = LiveEventInFlightStore(backend, ttl_ms=60_000)
+        orchestrator = _FakeOrchestrator()
+
+        worker = LiveWorkerService(
+            orchestrator=orchestrator,
+            delayed_scheduler=_FakeDelayedScheduler(),
+            queue=_FakeQueue(),
+            lane="tier_1",
+            consumer="worker-live-tier-1-1",
+            in_flight_store=in_flight_store,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_LIVE_HOT,
+                message_id="2-1",
+                values={
+                    "job_id": "job-live-1",
+                    "job_type": "refresh_live_event",
+                    "sport_slug": "football",
+                    "event_id": "7001",
+                    "lane": "tier_1",
+                    "attempt": "1",
+                },
+            )
+        )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(orchestrator.calls, [(7001, "football", "live_delta")])
+        self.assertTrue(in_flight_store.claim(event_id=7001, owner="next-worker"))
+
     async def test_live_worker_warm_honours_lane_specific_concurrency_env(self) -> None:
         from schema_inspector.workers.live_worker_service import LiveWorkerService
 
@@ -320,6 +392,27 @@ class _FakeQueue:
     def ack(self, *args, **kwargs):
         del args, kwargs
         return 0
+
+
+class _FakeRedisBackend:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def set(self, key: str, value: str, *, nx: bool = False, px: int | None = None) -> bool:
+        del px
+        if nx and key in self.values:
+            return False
+        self.values[key] = str(value)
+        return True
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def delete(self, key: str) -> int:
+        if key not in self.values:
+            return 0
+        del self.values[key]
+        return 1
 
 
 @contextmanager

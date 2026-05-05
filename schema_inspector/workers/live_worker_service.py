@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 from ..jobs.types import JOB_REFRESH_LIVE_EVENT
@@ -23,6 +24,7 @@ from ..services.worker_runtime import BatchDispatchPlan, WorkerRuntime, resolve_
 from ._stream_jobs import decode_stream_job
 
 _HOT_PREFETCH_COUNT = 25
+logger = logging.getLogger(__name__)
 
 
 class LiveWorkerService:
@@ -41,6 +43,7 @@ class LiveWorkerService:
         default_sport_slug: str = "football",
         job_audit_logger=None,
         max_concurrency: int | None = None,
+        in_flight_store=None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
         if normalized_lane not in {"hot", "warm", "tier_1", "tier_2", "tier_3"}:
@@ -49,6 +52,7 @@ class LiveWorkerService:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
         self.delayed_payload_store = delayed_payload_store
+        self.in_flight_store = in_flight_store
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
@@ -82,17 +86,35 @@ class LiveWorkerService:
         job = decode_stream_job(entry)
         if job.entity_id is None:
             raise RuntimeError("Live worker requires event entity_id in stream payload.")
+        event_id = int(job.entity_id)
+        lock_owner: str | None = None
+        if self.in_flight_store is not None and job.job_type == JOB_REFRESH_LIVE_EVENT:
+            lock_owner = f"{self.runtime.consumer}:{entry.message_id}:{job.job_id}"
+            if not self.in_flight_store.claim(event_id=event_id, owner=lock_owner):
+                logger.info(
+                    "Coalesced in-flight live refresh: lane=%s event_id=%s stream=%s message_id=%s consumer=%s",
+                    self.lane,
+                    event_id,
+                    entry.stream,
+                    entry.message_id,
+                    self.runtime.consumer,
+                )
+                return "coalesced_inflight"
         sport_slug = job.sport_slug or self.default_sport_slug
-        await self.orchestrator.run_event(
-            event_id=int(job.entity_id),
-            sport_slug=sport_slug,
-            hydration_mode=resolve_live_hydration_mode(
-                requested_mode=job.params.get("hydration_mode") or "live_delta",
+        try:
+            await self.orchestrator.run_event(
+                event_id=event_id,
                 sport_slug=sport_slug,
-                scope=job.scope,
-            ),
-        )
-        return "completed"
+                hydration_mode=resolve_live_hydration_mode(
+                    requested_mode=job.params.get("hydration_mode") or "live_delta",
+                    sport_slug=sport_slug,
+                    scope=job.scope,
+                ),
+            )
+            return "completed"
+        finally:
+            if self.in_flight_store is not None and lock_owner is not None:
+                self.in_flight_store.release(event_id=event_id, owner=lock_owner)
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
         del exc

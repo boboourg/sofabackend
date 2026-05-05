@@ -1616,6 +1616,20 @@ class _MemoryRedisBackend:
         self._expire_scalar_key(key, now_ms=observed_at)
         return key in self.values
 
+    def get(self, key: str, *, now_ms: int | None = None) -> str | None:
+        observed_at = int(now_ms if now_ms is not None else 0)
+        self._expire_scalar_key(key, now_ms=observed_at)
+        current = self.values.get(key)
+        if current is None:
+            return None
+        return str(current.get("value"))
+
+    def delete(self, key: str) -> int:
+        if key not in self.values:
+            return 0
+        del self.values[key]
+        return 1
+
     def hset(self, key: str, mapping: dict[str, object]) -> int:
         bucket = self.hashes.setdefault(key, {})
         bucket.update(dict(mapping))

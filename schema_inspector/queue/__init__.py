@@ -4,6 +4,7 @@ from .dedupe import DedupeStore
 from .delayed import DELAYED_JOBS_KEY, DelayedJob, DelayedJobScheduler
 from .freshness import FreshnessStore
 from .leases import Lease, LeaseManager
+from .live_inflight import LIVE_EVENT_INFLIGHT_KEY, LiveEventInFlightStore
 from .proxy_state import PROXY_COOLDOWN_ZSET, ProxyState, ProxyStateStore
 from .ratelimit_state import RateLimitState, RateLimitStateStore
 from .streams import (
@@ -81,6 +82,8 @@ __all__ = [
     "LeaseManager",
     "DedupeStore",
     "FreshnessStore",
+    "LIVE_EVENT_INFLIGHT_KEY",
+    "LiveEventInFlightStore",
     "PROXY_COOLDOWN_ZSET",
     "ProxyState",
     "ProxyStateStore",
