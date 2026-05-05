@@ -25,6 +25,7 @@ class HousekeepingConfigParsingTests(unittest.TestCase):
                 "SOFASCORE_HOUSEKEEPING_BATCH_SIZE": "20000",
                 "SOFASCORE_HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES": "120",
                 "SOFASCORE_RETENTION_LIVE_SNAPSHOT_HOURS": "24",
+                "SOFASCORE_RETENTION_LIVE_SNAPSHOT_INTERVAL_HOURS": "24",
             }
         )
 
@@ -34,6 +35,7 @@ class HousekeepingConfigParsingTests(unittest.TestCase):
         self.assertEqual(config.batch_size, 20_000)
         self.assertEqual(config.zombie_max_age_minutes, 120)
         self.assertEqual(config.live_snapshot_retention_hours, 24)
+        self.assertEqual(config.live_snapshot_retention_interval_hours, 24)
 
 
 class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -143,6 +145,35 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.event_id, 8001)
         self.assertEqual(record.terminal_status, ZOMBIE_TERMINAL_STATUS)
         self.assertIsNone(record.final_snapshot_id)
+
+    async def test_housekeeping_loop_runs_live_snapshot_retention_daily_after_exhaustion(self) -> None:
+        from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop
+
+        current_time = datetime(2026, 5, 5, 7, 0, tzinfo=timezone.utc)
+        retention = _FakeRetentionRepository()
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                batch_size=100,
+                max_batches_per_tick=1,
+                live_snapshot_retention_interval_hours=24,
+                stale_live_enabled=False,
+            ),
+            connection_factory=lambda: _FakeConnectionContext(),
+            retention_repository=retention,
+            live_state_store=_FakeLiveStateStore({}),
+            redis_backend=_FakeRedisBackend(zsets={}),
+            clock=lambda: current_time,
+        )
+
+        await loop.run_once()
+        await loop.run_once()
+        self.assertEqual(retention.live_snapshot_delete_calls, 1)
+
+        current_time = datetime(2026, 5, 6, 8, 0, tzinfo=timezone.utc)
+        await loop.run_once()
+        self.assertEqual(retention.live_snapshot_delete_calls, 2)
 
     async def test_housekeeping_loop_retires_db_only_stale_live_rows_missing_from_surface(self) -> None:
         from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop
@@ -306,6 +337,7 @@ class _FakeRetentionRepository:
         self.live_snapshot_count = live_snapshot_count
         self.live_history_count = live_history_count
         self.capability_observation_count = capability_observation_count
+        self.live_snapshot_delete_calls = 0
 
     async def count_expired_request_logs(self, executor, *, cutoff: datetime) -> int:
         del executor, cutoff
@@ -337,6 +369,7 @@ class _FakeRetentionRepository:
 
     async def delete_live_snapshot_version_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:
         del executor, cutoff, batch_size
+        self.live_snapshot_delete_calls += 1
         return 0
 
     async def delete_live_state_history_batch(self, executor, *, cutoff: datetime, batch_size: int) -> int:

@@ -69,6 +69,7 @@ _ENV_BATCH_SLEEP_MS = _ENV_PREFIX + "RETENTION_BATCH_SLEEP_MS"
 _ENV_REQUEST_LOG_HOURS = _ENV_PREFIX + "RETENTION_REQUEST_LOG_HOURS"
 _ENV_SNAPSHOT_DAYS = _ENV_PREFIX + "RETENTION_PAYLOAD_SNAPSHOT_DAYS"
 _ENV_LIVE_SNAPSHOT_HOURS = _ENV_PREFIX + "RETENTION_LIVE_SNAPSHOT_HOURS"
+_ENV_LIVE_SNAPSHOT_INTERVAL_HOURS = _ENV_PREFIX + "RETENTION_LIVE_SNAPSHOT_INTERVAL_HOURS"
 _ENV_LIVE_HISTORY_DAYS = _ENV_PREFIX + "RETENTION_LIVE_HISTORY_DAYS"
 _ENV_CAPABILITY_OBS_DAYS = _ENV_PREFIX + "RETENTION_CAPABILITY_OBSERVATION_DAYS"
 _ENV_ZOMBIE_MAX_AGE_MIN = _ENV_PREFIX + "SWEEPER_ZOMBIE_MAX_AGE_MINUTES"
@@ -100,6 +101,7 @@ class HousekeepingConfig:
     request_log_retention_hours: int = 48
     payload_snapshot_retention_days: int = 7
     live_snapshot_retention_hours: int = 24
+    live_snapshot_retention_interval_hours: int = 24
     live_state_history_retention_days: int = 30
     capability_observation_retention_days: int = 7
     zombie_max_age_minutes: int = 120
@@ -122,6 +124,12 @@ class HousekeepingConfig:
             request_log_retention_hours=_env_int(env, _ENV_REQUEST_LOG_HOURS, 48, minimum=1),
             payload_snapshot_retention_days=_env_int(env, _ENV_SNAPSHOT_DAYS, 7, minimum=1),
             live_snapshot_retention_hours=_env_int(env, _ENV_LIVE_SNAPSHOT_HOURS, 24, minimum=1),
+            live_snapshot_retention_interval_hours=_env_int(
+                env,
+                _ENV_LIVE_SNAPSHOT_INTERVAL_HOURS,
+                24,
+                minimum=1,
+            ),
             live_state_history_retention_days=_env_int(env, _ENV_LIVE_HISTORY_DAYS, 30, minimum=1),
             capability_observation_retention_days=_env_int(env, _ENV_CAPABILITY_OBS_DAYS, 7, minimum=1),
             zombie_max_age_minutes=_env_int_any(
@@ -208,6 +216,7 @@ class HousekeepingLoop:
         self._now_ms = now_ms_factory or (lambda: int(time.time() * 1000))
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._shutdown = False
+        self._last_live_snapshot_retention_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -253,11 +262,18 @@ class HousekeepingLoop:
                 cutoff=self._cutoff(days=self.config.payload_snapshot_retention_days),
                 delete_batch=self.retention_repository.delete_legacy_snapshot_batch,
             )
-            report.live_payload_snapshot_deleted = await self._run_retention_safely(
-                name="api_payload_snapshot_live_versions",
-                cutoff=self._cutoff(hours=self.config.live_snapshot_retention_hours),
-                delete_batch=self.retention_repository.delete_live_snapshot_version_batch,
-            )
+            if self._should_run_live_snapshot_retention():
+                report.live_payload_snapshot_deleted = await self._run_retention_safely(
+                    name="api_payload_snapshot_live_versions",
+                    cutoff=self._cutoff(hours=self.config.live_snapshot_retention_hours),
+                    delete_batch=self.retention_repository.delete_live_snapshot_version_batch,
+                )
+                # Keep chewing through an existing backlog on consecutive ticks.
+                # Once the retention step no longer fills every configured batch,
+                # pause this heavier sweep until the next daily interval.
+                max_deleted = self.config.batch_size * self.config.max_batches_per_tick
+                if report.live_payload_snapshot_deleted < max_deleted:
+                    self._last_live_snapshot_retention_at = self._clock()
             report.live_state_history_deleted = await self._run_retention_safely(
                 name="event_live_state_history",
                 cutoff=self._cutoff(days=self.config.live_state_history_retention_days),
@@ -324,6 +340,12 @@ class HousekeepingLoop:
         except Exception:
             logger.exception("retention step failed: %s", name)
             return 0
+
+    def _should_run_live_snapshot_retention(self) -> bool:
+        if self._last_live_snapshot_retention_at is None:
+            return True
+        elapsed = self._clock() - self._last_live_snapshot_retention_at
+        return elapsed >= timedelta(hours=self.config.live_snapshot_retention_interval_hours)
 
     async def _fill_dry_run_counts(self, report: HousekeepingTickReport) -> None:
         request_log_cutoff = self._cutoff(hours=self.config.request_log_retention_hours)
