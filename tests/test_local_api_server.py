@@ -2311,6 +2311,64 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page1["events"][0]["id"], 200)
         self.assertEqual(page1["hasNextPage"], False)
 
+    async def test_team_players_returns_none_when_snapshot_is_soft_error(self) -> None:
+        """Stale team_id snapshots flagged as soft-error must NOT leak to the
+        API as a valid payload. Returning None lets the dispatcher reply 404.
+        """
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                ("/api/v1/team/{team_id}/players", 1161574): {
+                    "payload": {"error": {"code": 404, "message": "Not Found"}},
+                    "is_soft_error_payload": True,
+                    "http_status": 404,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_team_players_payload(1161574)
+
+        self.assertIsNone(result)
+
+    async def test_team_players_returns_none_when_http_status_is_4xx(self) -> None:
+        """Even when is_soft_error_payload was not set (e.g. ingest predates
+        the flag), an http_status >= 400 must short-circuit to None."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                ("/api/v1/team/{team_id}/players", 9999): {
+                    "payload": {"error": {"code": 404}},
+                    "is_soft_error_payload": False,
+                    "http_status": 404,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_team_players_payload(9999)
+
+        self.assertIsNone(result)
+
+    async def test_player_events_last_returns_none_for_soft_error_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                (1234567, "https://www.sofascore.com/api/v1/player/1234567/events/last/0"): {
+                    "payload": {"error": {"code": 404}},
+                    "is_soft_error_payload": True,
+                    "http_status": 404,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_events_last_payload(1234567, 0)
+
+        self.assertIsNone(result)
+
     async def test_passthrough_handlers_return_none_when_no_snapshot(self) -> None:
         """Without a raw snapshot we must return ``None`` so the dispatcher
         produces a 404. There is no normalized fallback for these routes;

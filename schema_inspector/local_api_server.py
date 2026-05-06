@@ -1884,7 +1884,7 @@ class LocalApiApplication:
         try:
             snapshot_row = await connection.fetchrow(
                 """
-                SELECT payload
+                SELECT payload, is_soft_error_payload, http_status
                 FROM api_payload_snapshot
                 WHERE endpoint_pattern = '/api/v1/player/{player_id}/statistics'
                   AND context_entity_type = 'player'
@@ -1897,6 +1897,8 @@ class LocalApiApplication:
         finally:
             await connection.close()
         if snapshot_row is None:
+            return None
+        if _snapshot_row_is_soft_error(snapshot_row):
             return None
         decoded = _decode_snapshot_payload(snapshot_row["payload"])
         if not isinstance(decoded, dict):
@@ -1925,13 +1927,20 @@ class LocalApiApplication:
         team/players, team/featured-players, player/attribute-overviews)
         where the upstream payload contains sofascore-derived synthetic
         fields we do not normalize and reconstruction is impossible.
+
+        Snapshot rows flagged as ``is_soft_error_payload`` (typically the
+        Sofascore ``{"error": {"code": 404, "message": "Not Found"}}``
+        envelope produced by the resource refresh worker for stale entity
+        ids) are intentionally suppressed -- returning ``None`` lets the
+        dispatcher reply with a proper 404 instead of leaking the upstream
+        error payload to API consumers.
         """
 
         connection = await self._connect()
         try:
             snapshot_row = await connection.fetchrow(
                 """
-                SELECT payload
+                SELECT payload, is_soft_error_payload, http_status
                 FROM api_payload_snapshot
                 WHERE endpoint_pattern = $1
                   AND context_entity_type = $2
@@ -1946,6 +1955,8 @@ class LocalApiApplication:
         finally:
             await connection.close()
         if snapshot_row is None:
+            return None
+        if _snapshot_row_is_soft_error(snapshot_row):
             return None
         decoded = _decode_snapshot_payload(snapshot_row["payload"])
         if not isinstance(decoded, dict):
@@ -2015,7 +2026,7 @@ class LocalApiApplication:
         try:
             snapshot_row = await connection.fetchrow(
                 """
-                SELECT payload
+                SELECT payload, is_soft_error_payload, http_status
                 FROM api_payload_snapshot
                 WHERE endpoint_pattern = '/api/v1/player/{player_id}/events/last/{page}'
                   AND context_entity_type = 'player'
@@ -2030,6 +2041,8 @@ class LocalApiApplication:
         finally:
             await connection.close()
         if snapshot_row is None:
+            return None
+        if _snapshot_row_is_soft_error(snapshot_row):
             return None
         decoded = _decode_snapshot_payload(snapshot_row["payload"])
         if not isinstance(decoded, dict):
@@ -3261,6 +3274,32 @@ def _decode_snapshot_payload(payload: Any) -> Any:
             except orjson.JSONDecodeError:
                 return payload
     return payload
+
+
+def _snapshot_row_is_soft_error(row: Any) -> bool:
+    """True if the snapshot row represents an upstream error envelope.
+
+    Resource Refresh Worker writes one snapshot per fetch; for stale entity
+    ids that no longer resolve in Sofascore the upstream returns 404 with
+    ``{"error": {"code": 404, "message": "Not Found"}}`` and the row is
+    flagged ``is_soft_error_payload=true`` and/or ``http_status >= 400``.
+    The local API must not surface those as if they were valid payloads.
+    """
+
+    if row is None:
+        return False
+    soft_flag = row["is_soft_error_payload"] if "is_soft_error_payload" in row.keys() else None
+    if soft_flag is True:
+        return True
+    status = row["http_status"] if "http_status" in row.keys() else None
+    if status is not None:
+        try:
+            code = int(status)
+        except (TypeError, ValueError):
+            return False
+        if code >= 400:
+            return True
+    return False
 
 
 def _wrap_stripped_entity_payload(payload: Any, wrapper_key: str) -> Any:

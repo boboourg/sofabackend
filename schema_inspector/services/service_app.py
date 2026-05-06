@@ -53,6 +53,7 @@ from ..queue.streams import (
     StreamEntry,
 )
 from ..queue.resource_cursor import ResourceCursorStore
+from ..queue.resource_negative_cache import ResourceNegativeCache
 from ..sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
 from ..ops.health import fetch_live_snapshot_repair_reasons
 from .backpressure import BackpressureLimit, QueueBackpressure
@@ -207,6 +208,7 @@ class ServiceApp:
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
         self.structure_cursor_store = StructureCursorStore(self.app.redis_backend)
         self.resource_cursor_store = ResourceCursorStore(self.app.redis_backend)
+        self.resource_negative_cache = ResourceNegativeCache(self.app.redis_backend)
         database = getattr(self.app, "database", None)
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
@@ -650,6 +652,7 @@ class ServiceApp:
             tick_interval_seconds=loop_interval_seconds,
             publish_per_tick_cap=publish_per_tick_cap,
             lag_threshold=lag_threshold,
+            negative_cache=self.resource_negative_cache,
         )
 
     def build_resource_refresh_worker(
@@ -685,6 +688,7 @@ class ServiceApp:
             block_ms=block_ms,
             endpoints=local_api_endpoints(),
             job_audit_logger=self.job_audit_logger,
+            negative_cache=self.resource_negative_cache,
         )
 
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:

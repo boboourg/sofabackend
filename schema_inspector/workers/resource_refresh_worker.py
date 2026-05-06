@@ -25,6 +25,7 @@ from typing import Any, Mapping
 
 from ..endpoints import SofascoreEndpoint, local_api_endpoints
 from ..fetch_models import FetchTask
+from ..queue.resource_negative_cache import ResourceNegativeCache
 from ..queue.streams import (
     GROUP_RESOURCE_REFRESH,
     STREAM_RESOURCE_REFRESH,
@@ -56,6 +57,7 @@ class ResourceRefreshWorker:
         default_timeout_seconds: float = 20.0,
         job_audit_logger=None,
         max_concurrency: int | None = None,
+        negative_cache: ResourceNegativeCache | None = None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.delayed_scheduler = delayed_scheduler
@@ -66,6 +68,7 @@ class ResourceRefreshWorker:
         self.stream = stream
         self.default_timeout_seconds = float(default_timeout_seconds)
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
+        self.negative_cache = negative_cache
         self._endpoints_by_pattern: dict[str, SofascoreEndpoint] = {
             ep.pattern: ep
             for ep in (endpoints if endpoints is not None else local_api_endpoints())
@@ -141,6 +144,15 @@ class ResourceRefreshWorker:
                 f"resource refresh transport failed: pattern={pattern} "
                 f"target={job.entity_id} reason={outcome.classification}"
             )
+        # Mark stale targets in the negative cache so the planner stops
+        # republishing them. Triggered by upstream 404 OR a soft-error
+        # JSON envelope (some Sofascore endpoints return 200 with an error
+        # body; classify_fetch_result tags those via classification).
+        if self.negative_cache is not None and _is_negative_outcome(outcome):
+            self.negative_cache.mark_404(
+                endpoint_pattern=pattern,
+                path_params=path_params,
+            )
         return "completed"
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
@@ -159,6 +171,25 @@ class ResourceRefreshWorker:
 
     def request_shutdown(self) -> None:
         self.runtime.request_shutdown()
+
+
+def _is_negative_outcome(outcome: Any) -> bool:
+    """True for outcomes that should mark the target in the negative cache.
+
+    Covers HTTP 404 and JSON soft-error envelopes (200 with ``{"error":...}``
+    body that ``classify_fetch_result`` flags via classification).
+    """
+
+    status = getattr(outcome, "http_status", None)
+    if status == 404:
+        return True
+    if status is not None and 400 <= int(status) < 500 and status != 429:
+        # 4xx other than 429 (rate limited) is also "no point retrying soon".
+        return True
+    classification = str(getattr(outcome, "classification", "") or "").lower()
+    if "soft_error" in classification:
+        return True
+    return bool(getattr(outcome, "is_soft_error_payload", False))
 
 
 def _optional_int(value: Any) -> int | None:

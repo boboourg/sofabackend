@@ -5,6 +5,7 @@ from typing import Any
 
 from schema_inspector.endpoints import TEAM_PLAYERS_ENDPOINT, SofascoreEndpoint
 from schema_inspector.fetch_models import FetchOutcomeEnvelope, FetchTask
+from schema_inspector.queue.resource_negative_cache import ResourceNegativeCache
 from schema_inspector.queue.streams import StreamEntry
 from schema_inspector.workers._stream_jobs import encode_stream_job
 from schema_inspector.jobs.envelope import JobEnvelope
@@ -84,7 +85,12 @@ def _entry(envelope: JobEnvelope) -> StreamEntry:
     return StreamEntry(stream="stream:etl:resource_refresh", message_id="0-1", values=payload)
 
 
-def _build_worker(executor: _CapturingExecutor, *, endpoints: tuple[SofascoreEndpoint, ...]) -> ResourceRefreshWorker:
+def _build_worker(
+    executor: _CapturingExecutor,
+    *,
+    endpoints: tuple[SofascoreEndpoint, ...],
+    negative_cache: ResourceNegativeCache | None = None,
+) -> ResourceRefreshWorker:
     return ResourceRefreshWorker(
         fetch_executor=executor,
         delayed_scheduler=_StubScheduler(),
@@ -93,7 +99,23 @@ def _build_worker(executor: _CapturingExecutor, *, endpoints: tuple[SofascoreEnd
         queue=None,  # WorkerRuntime is never .run_forever'd in these unit tests
         consumer="test-consumer-1",
         endpoints=endpoints,
+        negative_cache=negative_cache,
     )
+
+
+class _FakeNegativeCacheBackend:
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    def exists(self, key):
+        return 1 if key in self.store else 0
+
+    def set(self, key, value, ex=None):
+        self.store[key] = str(value)
+        return True
+
+    def delete(self, key):
+        return 1 if self.store.pop(key, None) is not None else 0
 
 
 class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -166,6 +188,94 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             await worker.handle(_entry(envelope))
         self.assertIn("transport failed", str(ctx.exception))
+
+    async def test_handle_marks_negative_cache_on_404(self) -> None:
+        executor = _CapturingExecutor(http_status=404)
+        backend = _FakeNegativeCacheBackend()
+        cache = ResourceNegativeCache(backend, env={})
+        worker = _build_worker(executor, endpoints=(TEAM_PLAYERS_ENDPOINT,), negative_cache=cache)
+        envelope = _make_envelope(
+            pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+            entity_type="team",
+            entity_id=1161574,
+            path_params={"team_id": 1161574},
+        )
+
+        result = await worker.handle(_entry(envelope))
+
+        self.assertEqual(result, "completed")
+        # Subsequent lookup should hit the negative cache.
+        self.assertTrue(
+            cache.is_negatively_cached(
+                endpoint_pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+                path_params={"team_id": 1161574},
+            )
+        )
+
+    async def test_handle_does_not_mark_negative_cache_on_200(self) -> None:
+        executor = _CapturingExecutor(http_status=200)
+        backend = _FakeNegativeCacheBackend()
+        cache = ResourceNegativeCache(backend, env={})
+        worker = _build_worker(executor, endpoints=(TEAM_PLAYERS_ENDPOINT,), negative_cache=cache)
+        envelope = _make_envelope(
+            pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+            entity_type="team",
+            entity_id=42,
+            path_params={"team_id": 42},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertFalse(
+            cache.is_negatively_cached(
+                endpoint_pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+                path_params={"team_id": 42},
+            )
+        )
+
+    async def test_handle_marks_negative_cache_on_403(self) -> None:
+        # 4xx other than 429 should also be marked (no proxy will fix 403).
+        executor = _CapturingExecutor(http_status=403)
+        backend = _FakeNegativeCacheBackend()
+        cache = ResourceNegativeCache(backend, env={})
+        worker = _build_worker(executor, endpoints=(TEAM_PLAYERS_ENDPOINT,), negative_cache=cache)
+        envelope = _make_envelope(
+            pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+            entity_type="team",
+            entity_id=999,
+            path_params={"team_id": 999},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertTrue(
+            cache.is_negatively_cached(
+                endpoint_pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+                path_params={"team_id": 999},
+            )
+        )
+
+    async def test_handle_does_not_mark_negative_cache_on_429(self) -> None:
+        # 429 = rate limited; a worker retry might succeed soon.
+        executor = _CapturingExecutor(http_status=429)
+        backend = _FakeNegativeCacheBackend()
+        cache = ResourceNegativeCache(backend, env={})
+        worker = _build_worker(executor, endpoints=(TEAM_PLAYERS_ENDPOINT,), negative_cache=cache)
+        envelope = _make_envelope(
+            pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+            entity_type="team",
+            entity_id=42,
+            path_params={"team_id": 42},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertFalse(
+            cache.is_negatively_cached(
+                endpoint_pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+                path_params={"team_id": 42},
+            )
+        )
 
 
 if __name__ == "__main__":

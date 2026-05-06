@@ -30,6 +30,7 @@ from ..endpoints import SofascoreEndpoint
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_REFRESH_RESOURCE
 from ..queue.resource_cursor import ResourceCursorStore
+from ..queue.resource_negative_cache import ResourceNegativeCache
 from ..queue.streams import STREAM_RESOURCE_REFRESH, RedisStreamQueue
 from ..workers._stream_jobs import encode_stream_job
 from .resource_scope import ResourceTarget, ScopeResolver
@@ -52,6 +53,7 @@ class ResourcePlannerDaemon:
         publish_per_tick_cap: int = 20,
         lag_threshold: int = 5000,
         now_ms_factory: Callable[[], int] | None = None,
+        negative_cache: ResourceNegativeCache | None = None,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -64,7 +66,9 @@ class ResourcePlannerDaemon:
         self.publish_per_tick_cap = int(publish_per_tick_cap)
         self.lag_threshold = int(lag_threshold)
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
+        self.negative_cache = negative_cache
         self.shutdown_requested = False
+        self._stats_negative_skipped = 0
 
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
@@ -130,7 +134,12 @@ class ResourcePlannerDaemon:
                     published += 1
 
         if published:
-            logger.info("Resource planner: published=%s stream=%s", published, self.stream)
+            logger.info(
+                "Resource planner: published=%s stream=%s neg_cache_skipped_total=%s",
+                published,
+                self.stream,
+                self._stats_negative_skipped,
+            )
         return published
 
     # ------------------------------------------------------------------
@@ -161,6 +170,15 @@ class ResourcePlannerDaemon:
             path_params=target.path_params,
         )
         if last_ms > 0 and (now_ms - last_ms) < interval_ms:
+            return False
+        # Negative cache: skip targets known to 404 within the configured TTL.
+        # We do NOT update the cursor when skipping for this reason -- once the
+        # negative TTL expires we want the next tick to retry naturally.
+        if self.negative_cache is not None and self.negative_cache.is_negatively_cached(
+            endpoint_pattern=endpoint.pattern,
+            path_params=target.path_params,
+        ):
+            self._stats_negative_skipped += 1
             return False
         envelope = _build_envelope(endpoint, target)
         try:

@@ -7,13 +7,19 @@ from typing import Iterable
 from schema_inspector.endpoints import SofascoreEndpoint
 from schema_inspector.jobs.types import JOB_REFRESH_RESOURCE
 from schema_inspector.queue.resource_cursor import ResourceCursorStore
+from schema_inspector.queue.resource_negative_cache import ResourceNegativeCache
 from schema_inspector.services.resource_planner import ResourcePlannerDaemon
 from schema_inspector.services.resource_scope import ResourceTarget
 
 
 class _FakeRedis:
+    """Minimal Redis stub supporting both hash ops (cursor) and key/value
+    ops with TTL (negative cache).
+    """
+
     def __init__(self) -> None:
         self.store: dict[str, dict[str, str]] = {}
+        self.kv: dict[str, str] = {}
 
     def hget(self, key, field):
         return self.store.get(key, {}).get(field)
@@ -24,6 +30,16 @@ class _FakeRedis:
         bucket = self.store.setdefault(key, {})
         bucket.update(mapping or {})
         return len(mapping or {})
+
+    def exists(self, key):
+        return 1 if key in self.kv else 0
+
+    def set(self, key, value, ex=None):
+        self.kv[key] = str(value)
+        return True
+
+    def delete(self, key):
+        return 1 if self.kv.pop(key, None) is not None else 0
 
 
 class _FakeQueue:
@@ -87,6 +103,7 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         publish_per_tick_cap: int = 20,
         lag_threshold: int = 5000,
         now_ms: int = 10_000_000,
+        negative_cache: ResourceNegativeCache | None = None,
     ) -> tuple[ResourcePlannerDaemon, _FakeQueue, ResourceCursorStore]:
         queue = queue or _FakeQueue()
         cursor_store = ResourceCursorStore(redis_backend or _FakeRedis())
@@ -100,6 +117,7 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
             publish_per_tick_cap=publish_per_tick_cap,
             lag_threshold=lag_threshold,
             now_ms_factory=lambda: now_ms,
+            negative_cache=negative_cache,
         )
         return planner, queue, cursor_store
 
@@ -193,6 +211,60 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published, 0)
         self.assertEqual(queue.published, [])
         self.assertEqual(resolver.resolve_calls, 0)
+
+    async def test_negative_cache_skips_publish_and_does_not_update_cursor(self) -> None:
+        endpoint = _stub_endpoint()
+        resolver = _FakeResolver([_team_target(1161574)])
+        backend = _FakeRedis()
+        negative_cache = ResourceNegativeCache(backend, env={})
+        # Pre-mark the target as 404.
+        negative_cache.mark_404(
+            endpoint_pattern=endpoint.pattern,
+            path_params={"team_id": 1161574},
+        )
+        planner, queue, cursor_store = self._build(
+            endpoint=endpoint,
+            resolver=resolver,
+            redis_backend=backend,
+            negative_cache=negative_cache,
+        )
+
+        published = await planner.tick()
+
+        self.assertEqual(published, 0)
+        self.assertEqual(queue.published, [])
+        # Cursor must NOT advance -- otherwise after the negative TTL expires
+        # the planner would still skip due to a "fresh" cursor.
+        self.assertEqual(
+            cursor_store.load_last_refresh_ms(
+                endpoint_pattern=endpoint.pattern,
+                path_params={"team_id": 1161574},
+            ),
+            0,
+        )
+        self.assertEqual(planner._stats_negative_skipped, 1)
+
+    async def test_negative_cache_does_not_block_healthy_targets(self) -> None:
+        endpoint = _stub_endpoint()
+        resolver = _FakeResolver([_team_target(42), _team_target(1161574)])
+        backend = _FakeRedis()
+        negative_cache = ResourceNegativeCache(backend, env={})
+        negative_cache.mark_404(
+            endpoint_pattern=endpoint.pattern,
+            path_params={"team_id": 1161574},
+        )
+        planner, queue, _ = self._build(
+            endpoint=endpoint,
+            resolver=resolver,
+            redis_backend=backend,
+            negative_cache=negative_cache,
+        )
+
+        published = await planner.tick()
+
+        self.assertEqual(published, 1)
+        self.assertEqual(len(queue.published), 1)
+        self.assertEqual(int(queue.published[0][1]["entity_id"]), 42)
 
     async def test_pagination_targets_get_distinct_cursors(self) -> None:
         endpoint = _stub_endpoint(
