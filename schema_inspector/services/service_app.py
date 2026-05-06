@@ -88,7 +88,11 @@ from .historical_tournament_planner import (
     HistoricalTournamentPlanningTarget,
 )
 from .resource_planner import ResourcePlannerDaemon
-from .resource_scope import ManagedScopeResolver, TeamOfActiveUTResolver
+from .resource_scope import (
+    ManagedScopeResolver,
+    PlayerOfActiveSquadResolver,
+    TeamOfActiveUTResolver,
+)
 from .structure_planner import (
     StructureCursorStore,
     StructurePlannerDaemon,
@@ -639,6 +643,10 @@ class ServiceApp:
         resolvers: dict[str, Any] = {
             ManagedScopeResolver.kind: ManagedScopeResolver(),
             TeamOfActiveUTResolver.kind: TeamOfActiveUTResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            PlayerOfActiveSquadResolver.kind: PlayerOfActiveSquadResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
             ),

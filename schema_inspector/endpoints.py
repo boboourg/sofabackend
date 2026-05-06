@@ -792,6 +792,14 @@ PLAYER_STATISTICS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/player/{player_id}/statistics",
     envelope_key="seasons,typesMap",
     target_table="player_season_statistics",
+    # Stage C.1: refresh once per day for every player on a recently-fetched
+    # active-squad team roster. PlayerOfActiveSquadResolver derives the scope
+    # from successful /api/v1/team/{team_id}/players snapshots so we never
+    # touch player_ids attached to ghost / stale team rosters.
+    refresh_interval_seconds=24 * 3600,
+    refresh_priority=50,
+    scope_kind="player-of-active-squad",
+    freshness_ttl_seconds=22 * 3600,
 )
 
 PLAYER_TRANSFER_HISTORY_ENDPOINT = SofascoreEndpoint(
