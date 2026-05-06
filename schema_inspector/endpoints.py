@@ -806,6 +806,13 @@ PLAYER_TRANSFER_HISTORY_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/player/{player_id}/transfer-history",
     envelope_key="transferHistory",
     target_table="player_transfer_history",
+    # Stage C.2: transfers change rarely; once per week is plenty. Same
+    # active-squad scope as PLAYER_STATISTICS so any player on a recently
+    # ingested team roster gets a fresh transfer history.
+    refresh_interval_seconds=7 * 24 * 3600,
+    refresh_priority=60,
+    scope_kind="player-of-active-squad",
+    freshness_ttl_seconds=6 * 24 * 3600,
 )
 
 PLAYER_STATISTICS_SEASONS_ENDPOINT = SofascoreEndpoint(
@@ -887,6 +894,12 @@ PLAYER_ATTRIBUTE_OVERVIEWS_ENDPOINT = SofascoreEndpoint(
     envelope_key="playerAttributeOverviews,averageAttributeOverviews",
     target_table="api_payload_snapshot",
     notes="Sofascore-derived synthetic attribute scores. Raw passthrough only.",
+    # Stage C.2: ratings refresh daily; same active-squad scope as
+    # PLAYER_STATISTICS. Sofascore-derived synthetic, no normalized fallback.
+    refresh_interval_seconds=24 * 3600,
+    refresh_priority=55,
+    scope_kind="player-of-active-squad",
+    freshness_ttl_seconds=22 * 3600,
 )
 
 PLAYER_EVENTS_LAST_ENDPOINT = SofascoreEndpoint(
