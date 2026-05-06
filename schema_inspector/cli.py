@@ -1192,6 +1192,21 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "resource-planner-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_resource_planner_daemon(
+                    loop_interval_seconds=args.loop_interval_seconds,
+                    publish_per_tick_cap=args.publish_per_tick_cap,
+                    lag_threshold=args.lag_threshold,
+                )
+                return 0
+            if args.command == "worker-resource-refresh":
+                service_app = ServiceApp(app)
+                await service_app.run_resource_refresh_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
             if args.command == "worker-historical-enrichment":
                 service_app = ServiceApp(app)
                 await service_app.run_historical_enrichment_worker(
@@ -1440,6 +1455,45 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Redis consumer name for the structure-sync worker.",
     )
     worker_structure_sync.add_argument(
+        "--block-ms",
+        type=int,
+        default=5000,
+        help="XREADGROUP block timeout in milliseconds.",
+    )
+
+    resource_planner_daemon = subparsers.add_parser(
+        "resource-planner-daemon",
+        help="Run the generic resource-refresh planner (publishes JOB_REFRESH_RESOURCE for opted-in endpoints).",
+    )
+    resource_planner_daemon.add_argument(
+        "--loop-interval-seconds",
+        type=float,
+        default=30.0,
+        help="Tick interval in seconds.",
+    )
+    resource_planner_daemon.add_argument(
+        "--publish-per-tick-cap",
+        type=int,
+        default=20,
+        help="Maximum number of jobs published per tick (cold-start safety).",
+    )
+    resource_planner_daemon.add_argument(
+        "--lag-threshold",
+        type=int,
+        default=5000,
+        help="Skip the tick when stream:etl:resource_refresh length is at or above this value.",
+    )
+
+    worker_resource_refresh = subparsers.add_parser(
+        "worker-resource-refresh",
+        help="Run the generic resource-refresh consumer group loop.",
+    )
+    worker_resource_refresh.add_argument(
+        "--consumer-name",
+        default="worker-resource-refresh-1",
+        help="Redis consumer name for the resource-refresh worker.",
+    )
+    worker_resource_refresh.add_argument(
         "--block-ms",
         type=int,
         default=5000,

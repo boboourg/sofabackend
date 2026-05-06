@@ -29,6 +29,8 @@ REQUIRED_ETL_UNITS = {
     "sofascore-maintenance@.service": "worker-maintenance --consumer-name maintenance-%i --block-ms 5000",
     "sofascore-historical-maintenance@.service": "worker-historical-maintenance --consumer-name historical-maintenance-%i --block-ms 5000",
     "sofascore-structure-sync.service": "worker-structure-sync --consumer-name structure-sync-1 --block-ms 5000",
+    "sofascore-resource-planner.service": "resource-planner-daemon --loop-interval-seconds 30 --publish-per-tick-cap 20 --lag-threshold 5000",
+    "sofascore-resource-refresh@.service": "worker-resource-refresh --consumer-name resource-refresh-%i --block-ms 5000",
 }
 
 

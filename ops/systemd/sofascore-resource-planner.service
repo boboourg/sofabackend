@@ -1,0 +1,18 @@
+[Unit]
+Description=Sofascore Resource Refresh Planner
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sofascore/deploy/run_service.sh resource-planner-daemon --loop-interval-seconds 30 --publish-per-tick-cap 20 --lag-threshold 5000
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

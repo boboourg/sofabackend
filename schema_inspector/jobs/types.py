@@ -24,3 +24,8 @@ JOB_FINALIZE_EVENT = "finalize_event"
 JOB_NORMALIZE_SNAPSHOT = "normalize_snapshot"
 JOB_RECONCILE_CAPABILITY = "reconcile_capability"
 JOB_REPLAY_FAILED_JOB = "replay_failed_job"
+# Generic Resource Refresh Loop (services/resource_planner.py).
+# One job type per refresh cycle regardless of endpoint family. Endpoint-
+# specific knowledge is carried in ``params``: endpoint_pattern, path_params,
+# context_*, freshness_key, freshness_ttl_seconds.
+JOB_REFRESH_RESOURCE = "refresh_resource"

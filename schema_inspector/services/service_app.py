@@ -27,9 +27,11 @@ from ..queue.streams import (
     GROUP_LIVE_TIER_2,
     GROUP_LIVE_TIER_3,
     GROUP_LIVE_WARM,
+    GROUP_RESOURCE_REFRESH,
     GROUP_STRUCTURE_SYNC,
     HISTORICAL_CONSUMER_GROUPS,
     OPERATIONAL_CONSUMER_GROUPS,
+    RESOURCE_REFRESH_CONSUMER_GROUPS,
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
     STREAM_HISTORICAL_ENRICHMENT,
@@ -44,11 +46,13 @@ from ..queue.streams import (
     STREAM_LIVE_TIER_3,
     STREAM_LIVE_WARM,
     STREAM_MAINTENANCE,
+    STREAM_RESOURCE_REFRESH,
     STREAM_STRUCTURE_SYNC,
     STRUCTURE_CONSUMER_GROUPS,
     RedisStreamQueue,
     StreamEntry,
 )
+from ..queue.resource_cursor import ResourceCursorStore
 from ..sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
 from ..ops.health import fetch_live_snapshot_repair_reasons
 from .backpressure import BackpressureLimit, QueueBackpressure
@@ -82,6 +86,8 @@ from .historical_tournament_planner import (
     HistoricalTournamentPlannerDaemon,
     HistoricalTournamentPlanningTarget,
 )
+from .resource_planner import ResourcePlannerDaemon
+from .resource_scope import ManagedScopeResolver
 from .structure_planner import (
     StructureCursorStore,
     StructurePlannerDaemon,
@@ -102,6 +108,7 @@ from ..workers.historical_archive_worker import HistoricalEnrichmentWorker, Hist
 from ..workers.live_worker_service import LiveWorkerService
 from ..workers.maintenance_worker import MaintenanceWorker
 from ..workers.maintenance_worker import ReclaimTarget
+from ..workers.resource_refresh_worker import ResourceRefreshWorker
 from ..workers.structure_worker import StructureSyncWorker
 
 logger = logging.getLogger(__name__)
@@ -199,6 +206,7 @@ class ServiceApp:
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
         self.structure_cursor_store = StructureCursorStore(self.app.redis_backend)
+        self.resource_cursor_store = ResourceCursorStore(self.app.redis_backend)
         database = getattr(self.app, "database", None)
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
@@ -212,6 +220,10 @@ class ServiceApp:
 
     def ensure_structure_consumer_groups(self) -> None:
         for stream, group in STRUCTURE_CONSUMER_GROUPS:
+            self.stream_queue.ensure_group(stream, group)
+
+    def ensure_resource_refresh_consumer_groups(self) -> None:
+        for stream, group in RESOURCE_REFRESH_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
 
     def build_planner_daemon(
@@ -600,6 +612,72 @@ class ServiceApp:
             job_audit_logger=self.job_audit_logger,
         )
 
+    def build_resource_planner_daemon(
+        self,
+        *,
+        loop_interval_seconds: float = 30.0,
+        publish_per_tick_cap: int = 20,
+        lag_threshold: int = 5000,
+    ) -> ResourcePlannerDaemon:
+        """Build the generic resource refresh planner.
+
+        Stage A: only ``ManagedScopeResolver`` is wired (``scope_kind="managed"``)
+        and only endpoints that opted in via ``refresh_interval_seconds`` are
+        considered. Future stages add SQL-driven resolvers without changing
+        any code in this build method -- only resolver registration here grows.
+        """
+
+        from ..endpoints import local_api_endpoints
+
+        self.ensure_resource_refresh_consumer_groups()
+        endpoints = local_api_endpoints()
+        resolvers = {ManagedScopeResolver.kind: ManagedScopeResolver()}
+        return ResourcePlannerDaemon(
+            queue=self.stream_queue,
+            cursor_store=self.resource_cursor_store,
+            endpoints=endpoints,
+            resolvers=resolvers,
+            stream=STREAM_RESOURCE_REFRESH,
+            tick_interval_seconds=loop_interval_seconds,
+            publish_per_tick_cap=publish_per_tick_cap,
+            lag_threshold=lag_threshold,
+        )
+
+    def build_resource_refresh_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+    ) -> ResourceRefreshWorker:
+        """Build the generic resource refresh worker.
+
+        Wires a per-message FetchExecutor that borrows a fresh asyncpg
+        connection from the pool, runs one fetch + snapshot insert, and
+        releases the connection back. This mirrors how ``team_detail_cli``
+        operates and keeps the worker independent of long-lived DB sessions.
+        """
+
+        from ..endpoints import local_api_endpoints
+
+        self.ensure_resource_refresh_consumer_groups()
+        executor = _PerConnectionFetchExecutor(
+            transport=self.app.transport,
+            raw_repository=self.app.raw_repository,
+            database=self.app.database,
+            freshness_store=self.app.freshness_store,
+        )
+        return ResourceRefreshWorker(
+            fetch_executor=executor,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            block_ms=block_ms,
+            endpoints=local_api_endpoints(),
+            job_audit_logger=self.job_audit_logger,
+        )
+
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
         self.ensure_consumer_groups()
         return HydrateWorker(
@@ -965,6 +1043,33 @@ class ServiceApp:
         worker = self.build_structure_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
+    async def run_resource_planner_daemon(
+        self,
+        *,
+        loop_interval_seconds: float = 30.0,
+        publish_per_tick_cap: int = 20,
+        lag_threshold: int = 5000,
+    ) -> None:
+        self.ensure_resource_refresh_consumer_groups()
+        daemon = self.build_resource_planner_daemon(
+            loop_interval_seconds=loop_interval_seconds,
+            publish_per_tick_cap=publish_per_tick_cap,
+            lag_threshold=lag_threshold,
+        )
+        await daemon.run_forever()
+
+    async def run_resource_refresh_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+    ) -> None:
+        worker = self.build_resource_refresh_worker(
+            consumer_name=consumer_name,
+            block_ms=block_ms,
+        )
+        await worker.run_forever()
+
     async def run_historical_enrichment_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_historical_enrichment_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
@@ -1026,3 +1131,41 @@ class ServiceApp:
         recover = getattr(self.app, "recover_live_state", None)
         if callable(recover):
             await recover()
+
+
+class _PerConnectionFetchExecutor:
+    """Adapter exposing ``execute(task)`` semantics over a per-call asyncpg
+    connection borrowed from the pool.
+
+    The base ``FetchExecutor`` requires a live ``sql_executor`` at
+    construction time. Workers that consume Redis Streams cannot hold a
+    single long-lived connection (it would pin DB resources), so we build
+    a fresh executor for every job using a short-lived connection from
+    ``database.connection()`` and release it as soon as the snapshot is
+    written.
+    """
+
+    def __init__(
+        self,
+        *,
+        transport,
+        raw_repository,
+        database,
+        freshness_store=None,
+    ) -> None:
+        self.transport = transport
+        self.raw_repository = raw_repository
+        self.database = database
+        self.freshness_store = freshness_store
+
+    async def execute(self, task):
+        from ..fetch_executor import FetchExecutor
+
+        async with self.database.connection() as connection:
+            executor = FetchExecutor(
+                transport=self.transport,
+                raw_repository=self.raw_repository,
+                sql_executor=connection,
+                freshness_store=self.freshness_store,
+            )
+            return await executor.execute(task)

@@ -28,7 +28,15 @@ class EndpointRegistryEntry:
 
 @dataclass(frozen=True)
 class SofascoreEndpoint:
-    """One exact Sofascore endpoint definition."""
+    """One exact Sofascore endpoint definition.
+
+    The optional ``refresh_*`` fields drive the generic Resource Refresh Loop
+    (see ``schema_inspector.services.resource_planner``). When ``refresh_*``
+    fields are ``None`` the endpoint is *not* auto-refreshed; callers must
+    fetch it via ad-hoc CLI / structure-sync / live discovery. This default
+    keeps every existing endpoint constant binary-compatible -- only
+    endpoints that explicitly opt in get periodic refresh.
+    """
 
     path_template: str
     envelope_key: str
@@ -37,6 +45,11 @@ class SofascoreEndpoint:
     notes: str | None = None
     source_slug: str = "sofascore"
     contract_version: str = "v1"
+    # Resource Refresh Loop metadata (optional, opt-in).
+    refresh_interval_seconds: int | None = None
+    refresh_priority: int = 50
+    scope_kind: str | None = None
+    freshness_ttl_seconds: int | None = None
 
     @property
     def pattern(self) -> str:
@@ -843,6 +856,13 @@ TEAM_PLAYERS_ENDPOINT = SofascoreEndpoint(
     envelope_key="players,foreignPlayers,nationalPlayers",
     target_table="api_payload_snapshot",
     notes="Sofascore team roster. Raw passthrough -- preserves foreign/national player subsets.",
+    # Stage A pilot: refresh every 12h for the small list of teams produced by
+    # ManagedScopeResolver (env SCHEMA_INSPECTOR_RESOURCE_PILOT_TEAMS). Stage B
+    # will switch scope_kind to "team-of-active-ut".
+    refresh_interval_seconds=12 * 3600,
+    refresh_priority=40,
+    scope_kind="managed",
+    freshness_ttl_seconds=11 * 3600,
 )
 
 TEAM_FEATURED_PLAYERS_ENDPOINT = SofascoreEndpoint(
