@@ -202,6 +202,16 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_client.seen_urls, [tournament_url, seasons_url, info_url])
         self.assertEqual(len(bundle.registry_entries), len(COMPETITION_ENDPOINTS))
         self.assertEqual(len(bundle.payload_snapshots), 3)
+
+        # Snapshots must keep the upstream wrapper so the local API can serve
+        # them 1:1 with sofascore. Historically the parser stored only the
+        # unwrapped envelope, breaking the contract for these routes.
+        snapshot_by_pattern = {snap.endpoint_pattern: snap for snap in bundle.payload_snapshots}
+        ut_snapshot = snapshot_by_pattern[UNIQUE_TOURNAMENT_ENDPOINT.pattern]
+        self.assertIn("uniqueTournament", ut_snapshot.payload)
+        self.assertEqual(ut_snapshot.payload["uniqueTournament"]["id"], 17)
+        info_snapshot = snapshot_by_pattern[UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT.pattern]
+        self.assertIn("info", info_snapshot.payload)
         self.assertEqual(bundle.sports[0].slug, "football")
         self.assertEqual(bundle.categories[0].slug, "england")
         self.assertEqual(bundle.unique_tournaments[0].title_holder_team_id, 42)

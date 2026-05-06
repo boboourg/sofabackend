@@ -207,13 +207,16 @@ class CompetitionParser:
         response = await self.client.get_json(url, timeout=timeout)
         envelope = _require_mapping(response.payload, endpoint.envelope_key, url)
 
+        # Persist the full upstream response (``{"uniqueTournament": {...}}``)
+        # so the snapshot stays 1:1 with sofascore. Use the unwrapped envelope
+        # only for downstream normalization, not for snapshot storage.
         state.add_payload_snapshot(
             endpoint_pattern=endpoint.pattern,
             response=response,
             envelope_key=endpoint.envelope_key,
             context_entity_type="unique_tournament",
             context_entity_id=unique_tournament_id,
-            payload=envelope,
+            payload=_full_response_payload(response, fallback_key=endpoint.envelope_key, fallback_value=envelope),
         )
         state.ingest_unique_tournament(envelope)
 
@@ -279,13 +282,16 @@ class CompetitionParser:
             raise
         envelope = _require_mapping(response.payload, endpoint.envelope_key, url)
 
+        # Persist the full upstream response (``{"info": {...}}``) so the
+        # snapshot stays 1:1 with sofascore. Use the unwrapped envelope only
+        # for downstream normalization.
         state.add_payload_snapshot(
             endpoint_pattern=endpoint.pattern,
             response=response,
             envelope_key=endpoint.envelope_key,
             context_entity_type="season",
             context_entity_id=season_id,
-            payload=envelope,
+            payload=_full_response_payload(response, fallback_key=endpoint.envelope_key, fallback_value=envelope),
         )
         state.ingest_season_info(envelope, unique_tournament_id=unique_tournament_id)
 
@@ -563,6 +569,29 @@ def _require_mapping(payload: object, envelope_key: str, source_url: str) -> Map
     if not isinstance(envelope, Mapping):
         raise CompetitionParserError(f"Missing object envelope '{envelope_key}' for {source_url}")
     return envelope
+
+
+def _full_response_payload(
+    response: SofascoreResponse,
+    *,
+    fallback_key: str,
+    fallback_value: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return the full upstream JSON body for snapshot storage.
+
+    The competition pipeline used to persist only the unwrapped envelope
+    (``payload[envelope_key]``), which broke 1:1 contract with sofascore for
+    ``/api/v1/unique-tournament/{id}`` and ``.../season/{id}/info``. This
+    helper preserves the full ``{"<envelope_key>": {...}}`` shape and falls
+    back to a synthetic wrapper if the upstream response was a non-mapping
+    (defensive — should not happen in practice since ``_require_mapping``
+    already validated the envelope).
+    """
+
+    payload = response.payload
+    if isinstance(payload, Mapping):
+        return payload
+    return {fallback_key: fallback_value}
 
 
 def _require_sequence(payload: object, envelope_key: str, source_url: str) -> tuple[object, ...]:
