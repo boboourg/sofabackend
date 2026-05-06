@@ -92,6 +92,9 @@ from .resource_scope import (
     ManagedScopeResolver,
     PlayerOfActiveSquadFirstPageResolver,
     PlayerOfActiveSquadResolver,
+    SeasonOfActiveUTBaseResolver,
+    SeasonOfActiveUTEventsResolver,
+    SeasonOfActiveUTStandingsResolver,
     TeamOfActiveUTResolver,
 )
 from .structure_planner import (
@@ -648,6 +651,13 @@ class ServiceApp:
             database=self.app.database,
             redis_backend=self.app.redis_backend,
         )
+        # Same trick for season-of-active-ut: one base resolver shared
+        # between events and standings wrappers (one SQL query / cache hit
+        # per tick covers both endpoint families).
+        season_active_ut_base = SeasonOfActiveUTBaseResolver(
+            database=self.app.database,
+            redis_backend=self.app.redis_backend,
+        )
         resolvers: dict[str, Any] = {
             ManagedScopeResolver.kind: ManagedScopeResolver(),
             TeamOfActiveUTResolver.kind: TeamOfActiveUTResolver(
@@ -657,6 +667,12 @@ class ServiceApp:
             PlayerOfActiveSquadResolver.kind: player_active_squad_resolver,
             PlayerOfActiveSquadFirstPageResolver.kind: PlayerOfActiveSquadFirstPageResolver(
                 base=player_active_squad_resolver,
+            ),
+            SeasonOfActiveUTEventsResolver.kind: SeasonOfActiveUTEventsResolver(
+                base=season_active_ut_base,
+            ),
+            SeasonOfActiveUTStandingsResolver.kind: SeasonOfActiveUTStandingsResolver(
+                base=season_active_ut_base,
             ),
         }
         return ResourcePlannerDaemon(

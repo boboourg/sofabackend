@@ -14,6 +14,11 @@ from .base import ResourceTarget, ScopeResolver
 from .managed import ManagedScopeResolver
 from .player_of_active_squad import PlayerOfActiveSquadResolver
 from .player_of_active_squad_first_page import PlayerOfActiveSquadFirstPageResolver
+from .season_of_active_ut import (
+    SeasonOfActiveUTBaseResolver,
+    SeasonOfActiveUTEventsResolver,
+    SeasonOfActiveUTStandingsResolver,
+)
 from .team_of_active_ut import TeamOfActiveUTResolver
 
 __all__ = [
@@ -22,5 +27,8 @@ __all__ = [
     "ManagedScopeResolver",
     "PlayerOfActiveSquadResolver",
     "PlayerOfActiveSquadFirstPageResolver",
+    "SeasonOfActiveUTBaseResolver",
+    "SeasonOfActiveUTEventsResolver",
+    "SeasonOfActiveUTStandingsResolver",
     "TeamOfActiveUTResolver",
 ]

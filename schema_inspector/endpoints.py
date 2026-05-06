@@ -310,6 +310,15 @@ def season_last_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}",
         envelope_key="events",
         target_table="event",
+        # Stage 4: opt into Resource Refresh Loop. Page=0 is auto-refreshed
+        # every 30 minutes for the (ut, season) pairs produced by
+        # SeasonOfActiveUTEventsResolver. Generic _fetch_snapshot_payload
+        # then serves the raw upstream payload (1:1 with sofascore.com)
+        # once the refresh worker has populated api_payload_snapshot.
+        refresh_interval_seconds=30 * 60,
+        refresh_priority=45,
+        scope_kind="season-of-active-ut-events",
+        freshness_ttl_seconds=25 * 60,
     )
 
 
@@ -318,6 +327,10 @@ def season_next_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}",
         envelope_key="events",
         target_table="event",
+        refresh_interval_seconds=30 * 60,
+        refresh_priority=45,
+        scope_kind="season-of-active-ut-events",
+        freshness_ttl_seconds=25 * 60,
     )
 
 
@@ -754,6 +767,13 @@ STATISTICS_ENDPOINTS = (
 )
 
 UNIQUE_TOURNAMENT_STANDINGS_ENDPOINT = SofascoreEndpoint(
+    # Stage 4: opt-in. SeasonOfActiveUTStandingsResolver fans out per (ut,
+    # season) pair into three targets (scope ∈ total/home/away), so a single
+    # endpoint pattern covers all three buckets via per-target cursors.
+    refresh_interval_seconds=30 * 60,
+    refresh_priority=50,
+    scope_kind="season-of-active-ut-standings",
+    freshness_ttl_seconds=25 * 60,
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
     envelope_key="standings",
     target_table="standing",
