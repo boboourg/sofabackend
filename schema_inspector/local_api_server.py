@@ -929,6 +929,8 @@ class LocalApiApplication:
             )
         if template == "/api/v1/player/{player_id}/transfer-history":
             return await self._fetch_player_transfer_history_payload(int(path_params["player_id"]))
+        if template == "/api/v1/player/{player_id}/statistics":
+            return await self._fetch_player_statistics_payload(int(path_params["player_id"]))
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
@@ -1846,6 +1848,56 @@ class LocalApiApplication:
                 item["type"] = int(row["type"])
             transfers.append(item)
         return {"transferHistory": transfers}
+
+    async def _fetch_player_statistics_payload(self, player_id: int) -> dict[str, Any] | None:
+        """Return ``/api/v1/player/{player_id}/statistics`` via raw-snapshot
+        waterfall.
+
+        Sofascore upstream returns ``{"seasons": [...], "typesMap": {...}}``.
+        The legacy generic-handler path read the normalized
+        ``player_season_statistics`` table and produced a flat
+        ``{"playerSeasonStatistics": [...]}`` envelope, which is not 1:1.
+
+        Order:
+          1. Latest raw ``api_payload_snapshot`` row pinned to this player.
+             Returned as-is (with the same defensive re-wrap helper used by
+             other entity endpoints, in case some historical row was stored
+             without the ``seasons`` wrapper).
+          2. ``None`` so the caller can fall back to the legacy generic
+             handler over ``player_season_statistics``. That fallback is
+             intentionally retained for players we have ingested into the
+             normalized table but never raw-snapshotted.
+        """
+
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/player/{player_id}/statistics'
+                  AND context_entity_type = 'player'
+                  AND context_entity_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                player_id,
+            )
+        finally:
+            await connection.close()
+        if snapshot_row is None:
+            return None
+        decoded = _decode_snapshot_payload(snapshot_row["payload"])
+        if not isinstance(decoded, dict):
+            return None
+        # Player statistics is a collection envelope ("seasons" array +
+        # "typesMap" object), not an id-bearing entity. _wrap_stripped_entity_payload
+        # is intentionally NOT applied here -- it would mis-wrap a seasons array
+        # as ``{"seasons": <array>}`` even when the array is correct, or accept
+        # an id-only legacy row as a valid season list. All 852 prod snapshots
+        # already carry the upstream wrapper; if we ever encounter a stripped
+        # row, falling back to the normalized handler is safer than guessing.
+        return decoded
 
     async def _fetch_event_player_rating_breakdown_payload(
         self,

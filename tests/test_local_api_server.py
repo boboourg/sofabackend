@@ -2116,6 +2116,77 @@ class LocalApiEntityRootFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["event"]["status"]["type"], "finished")
 
 
+class LocalApiPlayerStatisticsTests(unittest.IsolatedAsyncioTestCase):
+    """``/api/v1/player/{player_id}/statistics`` must serve the upstream
+    ``{"seasons": [...], "typesMap": {...}}`` shape directly from the latest
+    raw snapshot, not the flat ``{"playerSeasonStatistics": [...]}`` produced
+    by the legacy normalized handler. The normalized fallback only kicks in
+    when no raw snapshot exists for the player."""
+
+    async def test_player_statistics_returns_raw_snapshot_when_present(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("raw_player_statistics_snapshot", 944656): {
+                    "payload": {
+                        "seasons": [
+                            {
+                                "endYear": "2024",
+                                "season": {"id": 76986, "name": "23/24"},
+                                "startYear": "2023",
+                                "statistics": {"goals": 21},
+                                "team": {"id": 42, "slug": "team-42"},
+                                "uniqueTournament": {"id": 17},
+                                "year": "23/24",
+                            }
+                        ],
+                        "typesMap": {"1": "overall"},
+                    },
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_statistics_payload(944656)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(sorted(result.keys()), ["seasons", "typesMap"])
+        self.assertEqual(result["seasons"][0]["season"]["id"], 76986)
+        self.assertEqual(result["typesMap"], {"1": "overall"})
+
+    async def test_player_statistics_returns_none_when_no_snapshot_to_allow_normalized_fallback(
+        self,
+    ) -> None:
+        """When no raw snapshot exists, the specialized handler must return
+        ``None`` so the dispatcher falls through to the generic normalized
+        handler over ``player_season_statistics``. This preserves coverage
+        for players we have ingested into normalized tables but never
+        snapshotted."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(rows={})
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_statistics_payload(99999999)
+
+        self.assertIsNone(result)
+
+    async def test_player_statistics_returns_none_when_snapshot_payload_is_not_a_dict(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("raw_player_statistics_snapshot", 944656): {
+                    "payload": "not-an-object",
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_statistics_payload(944656)
+
+        self.assertIsNone(result)
+
+
 class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):
     """End-to-end dispatch: ensure ``_fetch_normalized_payload`` wires each
     entity-root route to the correct fallback method without touching the
@@ -2331,6 +2402,8 @@ class _FakeFetchRowConnection:
         normalized = " ".join(query.split())
         if "FROM event_terminal_state" in normalized:
             return "final_payload"
+        if "FROM api_payload_snapshot" in normalized and "/api/v1/player/{player_id}/statistics" in normalized:
+            return "raw_player_statistics_snapshot"
         if "FROM api_payload_snapshot" in normalized and "event_id" in normalized:
             return "raw_event_snapshot"
         if "FROM api_payload_snapshot" in normalized and "team_id" in normalized:
