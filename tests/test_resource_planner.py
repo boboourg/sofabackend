@@ -246,6 +246,96 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.published, [])
         self.assertEqual(resolver.resolve_calls, 0)
 
+    async def test_round_robin_fairness_across_endpoints(self) -> None:
+        """Sequential walking under a shared cap starves later endpoints
+        during cold start. Round-robin must give every opted-in endpoint a
+        proportional share of the per-tick cap."""
+
+        endpoint_a = _stub_endpoint(pattern="/api/v1/team/{team_id}/players")
+        endpoint_b = _stub_endpoint(pattern="/api/v1/player/{player_id}/transfer-history")
+        endpoint_c = _stub_endpoint(pattern="/api/v1/player/{player_id}/attribute-overviews")
+
+        # endpoint_a has 50 overdue targets (simulating the cold-start spike);
+        # the others have plenty as well. With cap=9 fairness means 3+3+3.
+        targets_a = [
+            ResourceTarget(entity_type="team", entity_id=i, path_params={"team_id": i})
+            for i in range(50)
+        ]
+        targets_b = [
+            ResourceTarget(entity_type="player", entity_id=10_000 + i, path_params={"player_id": 10_000 + i})
+            for i in range(20)
+        ]
+        targets_c = [
+            ResourceTarget(entity_type="player", entity_id=20_000 + i, path_params={"player_id": 20_000 + i})
+            for i in range(20)
+        ]
+
+        class _MultiResolver:
+            kind = "test"
+
+            def __init__(self, plans: dict[str, list]):
+                self.plans = plans
+                self.calls = 0
+
+            async def resolve(self):
+                self.calls += 1
+                # Resolver returns the union; planner filters per endpoint via
+                # cursor anyway. To test fairness we fake one resolver that
+                # yields different targets per endpoint by reading the call
+                # state. Easier: register three separate resolvers under
+                # distinct kinds.
+                raise NotImplementedError
+
+        # Use distinct scope_kinds and register separate resolvers per endpoint.
+        endpoint_a = _stub_endpoint(
+            pattern="/api/v1/team/{team_id}/players", scope_kind="kind-a"
+        )
+        endpoint_b = _stub_endpoint(
+            pattern="/api/v1/player/{player_id}/transfer-history", scope_kind="kind-b"
+        )
+        endpoint_c = _stub_endpoint(
+            pattern="/api/v1/player/{player_id}/attribute-overviews", scope_kind="kind-c"
+        )
+        resolver_a = _FakeResolver(targets_a)
+        resolver_a.kind = "kind-a"
+        resolver_b = _FakeResolver(targets_b)
+        resolver_b.kind = "kind-b"
+        resolver_c = _FakeResolver(targets_c)
+        resolver_c.kind = "kind-c"
+
+        queue = _FakeQueue()
+        cursor_store = ResourceCursorStore(_FakeRedis())
+        planner = ResourcePlannerDaemon(
+            queue=queue,
+            cursor_store=cursor_store,
+            endpoints=(endpoint_a, endpoint_b, endpoint_c),
+            resolvers={
+                "kind-a": resolver_a,
+                "kind-b": resolver_b,
+                "kind-c": resolver_c,
+            },
+            stream="stream:etl:resource_refresh",
+            tick_interval_seconds=30.0,
+            publish_per_tick_cap=9,
+            lag_threshold=5_000,
+            now_ms_factory=lambda: 10_000_000,
+        )
+
+        published = await planner.tick()
+
+        self.assertEqual(published, 9)
+        # Count published per endpoint pattern: each must get exactly 3.
+        counts = {"a": 0, "b": 0, "c": 0}
+        for stream, env in queue.published:
+            params = json.loads(env["params_json"])
+            if "team_id" in params["path_params"]:
+                counts["a"] += 1
+            elif params["endpoint_pattern"].endswith("transfer-history"):
+                counts["b"] += 1
+            elif params["endpoint_pattern"].endswith("attribute-overviews"):
+                counts["c"] += 1
+        self.assertEqual(counts, {"a": 3, "b": 3, "c": 3})
+
     async def test_negative_cache_skips_publish_and_does_not_update_cursor(self) -> None:
         endpoint = _stub_endpoint()
         resolver = _FakeResolver([_team_target(1161574)])

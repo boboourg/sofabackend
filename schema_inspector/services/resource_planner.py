@@ -103,9 +103,14 @@ class ResourcePlannerDaemon:
         now_ms = int(self.now_ms_factory())
         cap = self.publish_per_tick_cap
 
+        # Build per-endpoint iterables once. Sequentially walking endpoints
+        # under a shared cap starves any endpoint that is not first in the
+        # list during a cold-start spike (e.g. 50k overdue PLAYER_STATISTICS
+        # jobs would block PLAYER_TRANSFER_HISTORY for hours). Round-robin
+        # across endpoints keeps every family making forward progress on
+        # every tick.
+        per_endpoint_streams: list[tuple[SofascoreEndpoint, int, "Iterable[ResourceTarget]"]] = []
         for endpoint in self.endpoints:
-            if published >= cap:
-                break
             resolver = self.resolvers.get(endpoint.scope_kind or "")
             if resolver is None:
                 logger.warning(
@@ -124,16 +129,18 @@ class ResourcePlannerDaemon:
                 )
                 continue
             interval_ms = int(endpoint.refresh_interval_seconds) * 1000
-            for target in targets:
-                if published >= cap:
-                    break
-                if self._publish_if_due(
-                    endpoint=endpoint,
-                    target=target,
-                    interval_ms=interval_ms,
-                    now_ms=now_ms,
-                ):
-                    published += 1
+            per_endpoint_streams.append((endpoint, interval_ms, iter(targets)))
+
+        for endpoint, interval_ms, target in _round_robin(per_endpoint_streams):
+            if published >= cap:
+                break
+            if self._publish_if_due(
+                endpoint=endpoint,
+                target=target,
+                interval_ms=interval_ms,
+                now_ms=now_ms,
+            ):
+                published += 1
 
         if published:
             logger.info(
@@ -273,6 +280,31 @@ async def _resolve_targets(resolver: ScopeResolver) -> Iterable[ResourceTarget]:
     """
 
     return await resolver.resolve()
+
+
+def _round_robin(
+    per_endpoint_streams: list[tuple[SofascoreEndpoint, int, "Iterable[ResourceTarget]"]],
+):
+    """Interleave one target from each endpoint per round.
+
+    Yields ``(endpoint, interval_ms, target)`` triples. When an endpoint's
+    iterator is exhausted it is dropped from the rotation. This guarantees
+    every endpoint gets at least ``ceil(cap / N_endpoints)`` publish slots
+    per tick instead of being starved by an earlier endpoint with a long
+    overdue list.
+    """
+
+    active = [(ep, interval, iter(targets)) for ep, interval, targets in per_endpoint_streams]
+    while active:
+        next_round = []
+        for endpoint, interval_ms, iterator in active:
+            try:
+                target = next(iterator)
+            except StopIteration:
+                continue
+            yield endpoint, interval_ms, target
+            next_round.append((endpoint, interval_ms, iterator))
+        active = next_round
 
 
 __all__ = ["ResourcePlannerDaemon"]
