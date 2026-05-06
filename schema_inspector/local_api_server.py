@@ -488,7 +488,10 @@ class LocalApiApplication:
         path_params: dict[str, str],
     ) -> Any | None:
         context_value = _parse_context_value(route, path_params)
-        query = "SELECT source_url, payload FROM api_payload_snapshot WHERE endpoint_pattern = $1"
+        query = (
+            "SELECT source_url, payload, is_soft_error_payload, http_status "
+            "FROM api_payload_snapshot WHERE endpoint_pattern = $1"
+        )
         arguments: list[Any] = [route.endpoint.pattern]
         source_slug = getattr(route.endpoint, "source_slug", None)
         if source_slug:
@@ -506,6 +509,11 @@ class LocalApiApplication:
             for row in rows:
                 split = urlsplit(str(row["source_url"]))
                 if split.path != path:
+                    continue
+                # Suppress soft-error / 4xx envelopes so the API doesn't leak
+                # ``{"error": {"code": 404, "message": "Not Found"}}`` as a
+                # successful response. The dispatcher will return 404 below.
+                if _snapshot_row_is_soft_error(row):
                     continue
                 decoded_payload = _decode_snapshot_payload(row["payload"])
                 if _snapshot_payload_missing_normalized_details(route, decoded_payload):

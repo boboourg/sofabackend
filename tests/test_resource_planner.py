@@ -42,13 +42,22 @@ class _FakeRedis:
         return 1 if self.kv.pop(key, None) is not None else 0
 
 
+class _FakeGroupInfo:
+    def __init__(self, lag: int | None) -> None:
+        self.lag = lag
+
+
 class _FakeQueue:
-    def __init__(self, *, length: int = 0) -> None:
-        self.length = length
+    def __init__(self, *, lag: int = 0) -> None:
+        self.lag = lag
         self.published: list[tuple[str, dict[str, object]]] = []
 
     def stream_length(self, stream: str) -> int:
-        return self.length
+        # Kept for compatibility with older callers; planner now uses group_info.
+        return self.lag
+
+    def group_info(self, stream: str, group: str):
+        return _FakeGroupInfo(self.lag)
 
     def publish(self, stream: str, values) -> str:
         self.published.append((stream, dict(values)))
@@ -191,10 +200,14 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published, 10)
         self.assertEqual(len(queue.published), 10)
 
-    async def test_backpressure_skips_tick_when_lag_high(self) -> None:
+    async def test_backpressure_skips_tick_when_group_lag_high(self) -> None:
+        # Backpressure MUST consult the consumer-group lag (unread tail), not
+        # the total stream length. Streams retain ack'd messages forever
+        # without XTRIM/MAXLEN, so using XLEN here would wedge the planner
+        # the moment XLEN exceeded the threshold even with lag=0.
         endpoint = _stub_endpoint()
         resolver = _FakeResolver([_team_target(42)])
-        queue = _FakeQueue(length=10_000)
+        queue = _FakeQueue(lag=10_000)
         planner, _, _ = self._build(
             endpoint=endpoint, resolver=resolver, queue=queue, lag_threshold=5_000
         )
@@ -202,6 +215,27 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published, 0)
         self.assertEqual(queue.published, [])
         self.assertEqual(resolver.resolve_calls, 0)
+
+    async def test_backpressure_does_not_trip_on_high_xlen_with_zero_lag(self) -> None:
+        # Regression: pre-fix, the planner read XLEN (which keeps growing
+        # because Redis Streams do not auto-trim ack'd messages) and got
+        # stuck in permanent backpressure.
+        endpoint = _stub_endpoint()
+        resolver = _FakeResolver([_team_target(42)])
+
+        class _XlenHighLagZeroQueue(_FakeQueue):
+            def stream_length(self, stream: str) -> int:
+                return 50_000  # huge tail of already-acked messages
+
+            def group_info(self, stream: str, group: str):
+                return _FakeGroupInfo(0)  # but the unread lag is zero
+
+        queue = _XlenHighLagZeroQueue()
+        planner, _, _ = self._build(
+            endpoint=endpoint, resolver=resolver, queue=queue, lag_threshold=5_000
+        )
+        published = await planner.tick()
+        self.assertEqual(published, 1)
 
     async def test_missing_resolver_logs_and_skips(self) -> None:
         endpoint = _stub_endpoint(scope_kind="not-registered")

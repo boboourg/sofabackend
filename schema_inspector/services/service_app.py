@@ -649,6 +649,7 @@ class ServiceApp:
             endpoints=endpoints,
             resolvers=resolvers,
             stream=STREAM_RESOURCE_REFRESH,
+            group=GROUP_RESOURCE_REFRESH,
             tick_interval_seconds=loop_interval_seconds,
             publish_per_tick_cap=publish_per_tick_cap,
             lag_threshold=lag_threshold,

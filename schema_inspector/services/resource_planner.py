@@ -31,7 +31,7 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_REFRESH_RESOURCE
 from ..queue.resource_cursor import ResourceCursorStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
-from ..queue.streams import STREAM_RESOURCE_REFRESH, RedisStreamQueue
+from ..queue.streams import GROUP_RESOURCE_REFRESH, STREAM_RESOURCE_REFRESH, RedisStreamQueue
 from ..workers._stream_jobs import encode_stream_job
 from .resource_scope import ResourceTarget, ScopeResolver
 
@@ -49,6 +49,7 @@ class ResourcePlannerDaemon:
         endpoints: tuple[SofascoreEndpoint, ...],
         resolvers: Mapping[str, ScopeResolver],
         stream: str = STREAM_RESOURCE_REFRESH,
+        group: str = GROUP_RESOURCE_REFRESH,
         tick_interval_seconds: float = 30.0,
         publish_per_tick_cap: int = 20,
         lag_threshold: int = 5000,
@@ -62,6 +63,7 @@ class ResourcePlannerDaemon:
         )
         self.resolvers = dict(resolvers)
         self.stream = stream
+        self.group = group
         self.tick_interval_seconds = float(tick_interval_seconds)
         self.publish_per_tick_cap = int(publish_per_tick_cap)
         self.lag_threshold = int(lag_threshold)
@@ -145,17 +147,28 @@ class ResourcePlannerDaemon:
     # ------------------------------------------------------------------
 
     def _is_blocked_by_backpressure(self) -> bool:
+        """Return True when the consumer-group LAG (unread messages, NOT the
+        total stream length) is at or above the threshold.
+
+        Using ``stream_length`` (XLEN) here would be a bug: Redis Streams
+        retain ack'd messages until XTRIM/MAXLEN, so XLEN keeps growing
+        forever even when consumers are caught up. Backpressure must read
+        the unread tail via XINFO GROUPS lag.
+        """
+
         if self.lag_threshold <= 0:
             return False
         try:
-            length = self.queue.stream_length(self.stream)
+            info = self.queue.group_info(self.stream, self.group)
         except Exception as exc:
             logger.warning(
-                "Resource planner: stream_length probe failed (fail-open): %s",
+                "Resource planner: group_info probe failed (fail-open): %s",
                 exc,
             )
             return False
-        return int(length or 0) >= self.lag_threshold
+        if info is None or info.lag is None:
+            return False
+        return int(info.lag) >= self.lag_threshold
 
     def _publish_if_due(
         self,
