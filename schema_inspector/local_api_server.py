@@ -931,6 +931,17 @@ class LocalApiApplication:
             return await self._fetch_player_transfer_history_payload(int(path_params["player_id"]))
         if template == "/api/v1/player/{player_id}/statistics":
             return await self._fetch_player_statistics_payload(int(path_params["player_id"]))
+        if template == "/api/v1/team/{team_id}/players":
+            return await self._fetch_team_players_payload(int(path_params["team_id"]))
+        if template == "/api/v1/team/{team_id}/featured-players":
+            return await self._fetch_team_featured_players_payload(int(path_params["team_id"]))
+        if template == "/api/v1/player/{player_id}/attribute-overviews":
+            return await self._fetch_player_attribute_overviews_payload(int(path_params["player_id"]))
+        if template == "/api/v1/player/{player_id}/events/last/{page}":
+            return await self._fetch_player_events_last_payload(
+                int(path_params["player_id"]),
+                max(int(path_params["page"]), 0),
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
@@ -1897,6 +1908,132 @@ class LocalApiApplication:
         # an id-only legacy row as a valid season list. All 852 prod snapshots
         # already carry the upstream wrapper; if we ever encounter a stripped
         # row, falling back to the normalized handler is safer than guessing.
+        return decoded
+
+    async def _fetch_latest_entity_passthrough(
+        self,
+        *,
+        endpoint_pattern: str,
+        context_entity_type: str,
+        context_entity_id: int,
+    ) -> dict[str, Any] | None:
+        """Return the latest raw ``api_payload_snapshot`` payload for a
+        single-entity passthrough endpoint, or ``None`` when nothing has
+        been ingested yet.
+
+        Used by raw-passthrough handlers (D-category endpoints like
+        team/players, team/featured-players, player/attribute-overviews)
+        where the upstream payload contains sofascore-derived synthetic
+        fields we do not normalize and reconstruction is impossible.
+        """
+
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = $1
+                  AND context_entity_type = $2
+                  AND context_entity_id = $3
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                endpoint_pattern,
+                context_entity_type,
+                context_entity_id,
+            )
+        finally:
+            await connection.close()
+        if snapshot_row is None:
+            return None
+        decoded = _decode_snapshot_payload(snapshot_row["payload"])
+        if not isinstance(decoded, dict):
+            return None
+        return decoded
+
+    async def _fetch_team_players_payload(self, team_id: int) -> dict[str, Any] | None:
+        """``/api/v1/team/{team_id}/players`` — raw passthrough only.
+
+        Upstream returns ``{"players": [...], "foreignPlayers": [...],
+        "nationalPlayers": [...]}`` with subsets we do not normalize.
+        Reconstruction from normalized tables would lose the foreign/national
+        partitioning; raw is the only 1:1 source.
+        """
+
+        return await self._fetch_latest_entity_passthrough(
+            endpoint_pattern="/api/v1/team/{team_id}/players",
+            context_entity_type="team",
+            context_entity_id=team_id,
+        )
+
+    async def _fetch_team_featured_players_payload(self, team_id: int) -> dict[str, Any] | None:
+        """``/api/v1/team/{team_id}/featured-players`` — raw passthrough only.
+
+        Sofascore's editorial pick keyed by event id. We do not store an
+        equivalent "featured" relationship anywhere; reconstruction is
+        impossible.
+        """
+
+        return await self._fetch_latest_entity_passthrough(
+            endpoint_pattern="/api/v1/team/{team_id}/featured-players",
+            context_entity_type="team",
+            context_entity_id=team_id,
+        )
+
+    async def _fetch_player_attribute_overviews_payload(self, player_id: int) -> dict[str, Any] | None:
+        """``/api/v1/player/{player_id}/attribute-overviews`` — raw passthrough only.
+
+        Sofascore-derived synthetic attribute scores
+        (``playerAttributeOverviews`` per yearShift + ``averageAttributeOverviews``).
+        Cannot be reconstructed from raw stats.
+        """
+
+        return await self._fetch_latest_entity_passthrough(
+            endpoint_pattern="/api/v1/player/{player_id}/attribute-overviews",
+            context_entity_type="player",
+            context_entity_id=player_id,
+        )
+
+    async def _fetch_player_events_last_payload(
+        self,
+        player_id: int,
+        page: int,
+    ) -> dict[str, Any] | None:
+        """``/api/v1/player/{player_id}/events/last/{page}`` — raw passthrough.
+
+        Per-page snapshots: each page lives as its own ``api_payload_snapshot``
+        row, distinguished by ``source_url``. The handler picks the latest
+        snapshot whose source_url matches this exact page so pagination stays
+        consistent.
+        """
+
+        expected_url = (
+            f"https://www.sofascore.com/api/v1/player/{player_id}/events/last/{page}"
+        )
+        connection = await self._connect()
+        try:
+            snapshot_row = await connection.fetchrow(
+                """
+                SELECT payload
+                FROM api_payload_snapshot
+                WHERE endpoint_pattern = '/api/v1/player/{player_id}/events/last/{page}'
+                  AND context_entity_type = 'player'
+                  AND context_entity_id = $1
+                  AND source_url = $2
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                player_id,
+                expected_url,
+            )
+        finally:
+            await connection.close()
+        if snapshot_row is None:
+            return None
+        decoded = _decode_snapshot_payload(snapshot_row["payload"])
+        if not isinstance(decoded, dict):
+            return None
         return decoded
 
     async def _fetch_event_player_rating_breakdown_payload(

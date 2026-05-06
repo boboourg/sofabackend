@@ -829,6 +829,43 @@ TEAM_PERFORMANCE_GRAPH_ENDPOINT = SofascoreEndpoint(
     target_table="api_payload_snapshot",
 )
 
+# --- Raw-passthrough D-category endpoints. ---
+# These have no equivalent normalized table either because the upstream payload
+# is sofascore-derived synthetic data we cannot reconstruct (featured-players,
+# attribute-overviews) or because the normalized projection would lose
+# upstream-only fields (team/players roster sections, player events
+# playedForTeamMap / statisticsMap). target_table="api_payload_snapshot"
+# signals the generic handler to skip and defer to a specialized passthrough
+# handler in local_api_server.
+
+TEAM_PLAYERS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/team/{team_id}/players",
+    envelope_key="players,foreignPlayers,nationalPlayers",
+    target_table="api_payload_snapshot",
+    notes="Sofascore team roster. Raw passthrough -- preserves foreign/national player subsets.",
+)
+
+TEAM_FEATURED_PLAYERS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/team/{team_id}/featured-players",
+    envelope_key="featuredPlayers",
+    target_table="api_payload_snapshot",
+    notes="Sofascore editorial featured players keyed by event id. Raw passthrough only.",
+)
+
+PLAYER_ATTRIBUTE_OVERVIEWS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/player/{player_id}/attribute-overviews",
+    envelope_key="playerAttributeOverviews,averageAttributeOverviews",
+    target_table="api_payload_snapshot",
+    notes="Sofascore-derived synthetic attribute scores. Raw passthrough only.",
+)
+
+PLAYER_EVENTS_LAST_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/player/{player_id}/events/last/{page}",
+    envelope_key="events,hasNextPage",
+    target_table="api_payload_snapshot",
+    notes="Player's recent events with pagination. Raw passthrough preserves playedForTeamMap and statisticsMap.",
+)
+
 ENTITIES_ENDPOINTS = (
     TEAM_ENDPOINT,
     PLAYER_ENDPOINT,
@@ -842,6 +879,10 @@ ENTITIES_ENDPOINTS = (
     TEAM_SEASON_OVERALL_STATISTICS_ENDPOINT,
     PLAYER_SEASON_HEATMAP_OVERALL_ENDPOINT,
     TEAM_PERFORMANCE_GRAPH_ENDPOINT,
+    TEAM_PLAYERS_ENDPOINT,
+    TEAM_FEATURED_PLAYERS_ENDPOINT,
+    PLAYER_ATTRIBUTE_OVERVIEWS_ENDPOINT,
+    PLAYER_EVENTS_LAST_ENDPOINT,
 )
 
 def unique_tournament_top_players_endpoint(path_suffix: str = "overall") -> SofascoreEndpoint:

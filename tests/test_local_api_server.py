@@ -2187,6 +2187,145 @@ class LocalApiPlayerStatisticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+class _FakeEntityPassthroughConnection:
+    """Connection that resolves raw passthrough fetches keyed by either
+    ``(endpoint_pattern, context_entity_id)`` (single-entity endpoints) or
+    ``(player_id, source_url)`` (paginated player events/last)."""
+
+    def __init__(self, rows: dict):
+        self.rows = rows
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args):
+        normalized = " ".join(query.split())
+        if "context_entity_type = $2" in normalized and len(args) >= 3:
+            # _fetch_latest_entity_passthrough(pattern, type, id)
+            return self.rows.get((str(args[0]), int(args[2])))
+        if "context_entity_type = 'player'" in normalized and "/events/last/" in normalized and len(args) >= 2:
+            return self.rows.get((int(args[0]), str(args[1])))
+        return None
+
+    async def close(self):
+        self.closed = True
+
+
+class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
+    """D-category endpoints that have no normalized representation: serve the
+    latest raw snapshot or 404 (None). No legacy fallback is intentional --
+    reconstruction would silently lie about sofascore-derived synthetic data."""
+
+    async def test_team_players_returns_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                ("/api/v1/team/{team_id}/players", 42): {
+                    "payload": {
+                        "players": [{"id": 1, "name": "X"}],
+                        "foreignPlayers": [],
+                        "nationalPlayers": [{"id": 2, "name": "Y"}],
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_team_players_payload(42)
+
+        self.assertEqual(sorted(result.keys()), ["foreignPlayers", "nationalPlayers", "players"])
+        self.assertEqual(result["players"][0]["id"], 1)
+        self.assertEqual(result["nationalPlayers"][0]["id"], 2)
+
+    async def test_team_featured_players_returns_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                ("/api/v1/team/{team_id}/featured-players", 37): {
+                    "payload": {
+                        "featuredPlayers": {
+                            "14065232": {"player": {"id": 978838}, "eventId": 14065232}
+                        }
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_team_featured_players_payload(37)
+
+        self.assertEqual(list(result.keys()), ["featuredPlayers"])
+        self.assertEqual(result["featuredPlayers"]["14065232"]["eventId"], 14065232)
+
+    async def test_player_attribute_overviews_returns_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                ("/api/v1/player/{player_id}/attribute-overviews", 1142562): {
+                    "payload": {
+                        "playerAttributeOverviews": [
+                            {"attacking": 83, "yearShift": 0, "id": 62861}
+                        ],
+                        "averageAttributeOverviews": [
+                            {"attacking": 61, "yearShift": 0, "id": 19812}
+                        ],
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_attribute_overviews_payload(1142562)
+
+        self.assertEqual(
+            sorted(result.keys()),
+            ["averageAttributeOverviews", "playerAttributeOverviews"],
+        )
+        self.assertEqual(result["playerAttributeOverviews"][0]["attacking"], 83)
+
+    async def test_player_events_last_uses_per_page_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                (1152, "https://www.sofascore.com/api/v1/player/1152/events/last/0"): {
+                    "payload": {
+                        "events": [{"id": 100}],
+                        "hasNextPage": True,
+                        "playedForTeamMap": {"100": 42},
+                    }
+                },
+                (1152, "https://www.sofascore.com/api/v1/player/1152/events/last/1"): {
+                    "payload": {
+                        "events": [{"id": 200}],
+                        "hasNextPage": False,
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        page0 = await application._fetch_player_events_last_payload(1152, 0)
+        page1 = await application._fetch_player_events_last_payload(1152, 1)
+
+        self.assertEqual(page0["events"][0]["id"], 100)
+        self.assertEqual(page0["hasNextPage"], True)
+        self.assertEqual(page0["playedForTeamMap"], {"100": 42})
+        self.assertEqual(page1["events"][0]["id"], 200)
+        self.assertEqual(page1["hasNextPage"], False)
+
+    async def test_passthrough_handlers_return_none_when_no_snapshot(self) -> None:
+        """Without a raw snapshot we must return ``None`` so the dispatcher
+        produces a 404. There is no normalized fallback for these routes;
+        guessing would return wrong data."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(rows={})
+        application._connect = _make_fake_connector(connection)
+
+        self.assertIsNone(await application._fetch_team_players_payload(99999999))
+        self.assertIsNone(await application._fetch_team_featured_players_payload(99999999))
+        self.assertIsNone(await application._fetch_player_attribute_overviews_payload(99999999))
+        self.assertIsNone(await application._fetch_player_events_last_payload(99999999, 0))
+
+
 class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):
     """End-to-end dispatch: ensure ``_fetch_normalized_payload`` wires each
     entity-root route to the correct fallback method without touching the
