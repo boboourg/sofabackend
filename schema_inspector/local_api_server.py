@@ -950,6 +950,11 @@ class LocalApiApplication:
                 int(path_params["player_id"]),
                 max(int(path_params["page"]), 0),
             )
+        if template == "/api/v1/player/{player_id}/events/next/{page}":
+            return await self._fetch_player_events_next_payload(
+                int(path_params["player_id"]),
+                max(int(path_params["page"]), 0),
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
@@ -2019,16 +2024,40 @@ class LocalApiApplication:
         player_id: int,
         page: int,
     ) -> dict[str, Any] | None:
-        """``/api/v1/player/{player_id}/events/last/{page}`` — raw passthrough.
+        """``/api/v1/player/{player_id}/events/last/{page}`` — raw passthrough."""
 
-        Per-page snapshots: each page lives as its own ``api_payload_snapshot``
-        row, distinguished by ``source_url``. The handler picks the latest
-        snapshot whose source_url matches this exact page so pagination stays
-        consistent.
+        return await self._fetch_player_events_per_page(player_id, page, direction="last")
+
+    async def _fetch_player_events_next_payload(
+        self,
+        player_id: int,
+        page: int,
+    ) -> dict[str, Any] | None:
+        """``/api/v1/player/{player_id}/events/next/{page}`` — raw passthrough."""
+
+        return await self._fetch_player_events_per_page(player_id, page, direction="next")
+
+    async def _fetch_player_events_per_page(
+        self,
+        player_id: int,
+        page: int,
+        *,
+        direction: str,
+    ) -> dict[str, Any] | None:
+        """Per-page snapshot lookup for ``/player/{id}/events/{last|next}/{page}``.
+
+        Each page lives as its own ``api_payload_snapshot`` row, distinguished
+        by ``source_url``. The handler picks the latest snapshot whose
+        source_url matches this exact page so pagination stays consistent.
+        Soft-error rows (``is_soft_error_payload`` or HTTP 4xx) are
+        suppressed so the dispatcher answers a clean 404.
         """
 
+        if direction not in {"last", "next"}:
+            raise ValueError(f"direction must be 'last' or 'next', got {direction!r}")
+        endpoint_pattern = f"/api/v1/player/{{player_id}}/events/{direction}/{{page}}"
         expected_url = (
-            f"https://www.sofascore.com/api/v1/player/{player_id}/events/last/{page}"
+            f"https://www.sofascore.com/api/v1/player/{player_id}/events/{direction}/{page}"
         )
         connection = await self._connect()
         try:
@@ -2036,13 +2065,14 @@ class LocalApiApplication:
                 """
                 SELECT payload, is_soft_error_payload, http_status
                 FROM api_payload_snapshot
-                WHERE endpoint_pattern = '/api/v1/player/{player_id}/events/last/{page}'
+                WHERE endpoint_pattern = $1
                   AND context_entity_type = 'player'
-                  AND context_entity_id = $1
-                  AND source_url = $2
+                  AND context_entity_id = $2
+                  AND source_url = $3
                 ORDER BY id DESC
                 LIMIT 1
                 """,
+                endpoint_pattern,
                 player_id,
                 expected_url,
             )

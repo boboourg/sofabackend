@@ -2190,7 +2190,7 @@ class LocalApiPlayerStatisticsTests(unittest.IsolatedAsyncioTestCase):
 class _FakeEntityPassthroughConnection:
     """Connection that resolves raw passthrough fetches keyed by either
     ``(endpoint_pattern, context_entity_id)`` (single-entity endpoints) or
-    ``(player_id, source_url)`` (paginated player events/last)."""
+    ``(player_id, source_url)`` (paginated player events/{last,next})."""
 
     def __init__(self, rows: dict):
         self.rows = rows
@@ -2198,11 +2198,18 @@ class _FakeEntityPassthroughConnection:
 
     async def fetchrow(self, query: str, *args):
         normalized = " ".join(query.split())
+        # _fetch_latest_entity_passthrough(pattern, type, id) -- 3 args, type is $2 placeholder.
         if "context_entity_type = $2" in normalized and len(args) >= 3:
-            # _fetch_latest_entity_passthrough(pattern, type, id)
             return self.rows.get((str(args[0]), int(args[2])))
-        if "context_entity_type = 'player'" in normalized and "/events/last/" in normalized and len(args) >= 2:
-            return self.rows.get((int(args[0]), str(args[1])))
+        # _fetch_player_events_per_page(pattern, player_id, source_url) --
+        # 3 args, type is the literal 'player'.
+        if (
+            "context_entity_type = 'player'" in normalized
+            and len(args) >= 3
+            and isinstance(args[0], str)
+            and "/events/" in str(args[0])
+        ):
+            return self.rows.get((int(args[1]), str(args[2])))
         return None
 
     async def close(self):
@@ -2280,6 +2287,46 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
             ["averageAttributeOverviews", "playerAttributeOverviews"],
         )
         self.assertEqual(result["playerAttributeOverviews"][0]["attacking"], 83)
+
+    async def test_player_events_next_uses_per_page_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                (1152, "https://www.sofascore.com/api/v1/player/1152/events/next/0"): {
+                    "payload": {
+                        "events": [{"id": 500, "startTimestamp": 1_900_000_000}],
+                        "hasNextPage": False,
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_events_next_payload(1152, 0)
+
+        self.assertEqual(result["events"][0]["id"], 500)
+        self.assertEqual(result["hasNextPage"], False)
+
+    async def test_player_events_last_and_next_use_distinct_keys(self) -> None:
+        # Same player, same page=0, different direction -> different snapshots.
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                (44, "https://www.sofascore.com/api/v1/player/44/events/last/0"): {
+                    "payload": {"events": [{"id": 1}], "hasNextPage": False}
+                },
+                (44, "https://www.sofascore.com/api/v1/player/44/events/next/0"): {
+                    "payload": {"events": [{"id": 2}], "hasNextPage": False}
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        last = await application._fetch_player_events_last_payload(44, 0)
+        nxt = await application._fetch_player_events_next_payload(44, 0)
+
+        self.assertEqual(last["events"][0]["id"], 1)
+        self.assertEqual(nxt["events"][0]["id"], 2)
 
     async def test_player_events_last_uses_per_page_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -2382,6 +2429,7 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await application._fetch_team_featured_players_payload(99999999))
         self.assertIsNone(await application._fetch_player_attribute_overviews_payload(99999999))
         self.assertIsNone(await application._fetch_player_events_last_payload(99999999, 0))
+        self.assertIsNone(await application._fetch_player_events_next_payload(99999999, 0))
 
 
 class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):
