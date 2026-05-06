@@ -13,6 +13,7 @@ small resolver classes.
 from .base import ResourceTarget, ScopeResolver
 from .managed import ManagedScopeResolver
 from .player_of_active_squad import PlayerOfActiveSquadResolver
+from .player_of_active_squad_first_page import PlayerOfActiveSquadFirstPageResolver
 from .team_of_active_ut import TeamOfActiveUTResolver
 
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "ScopeResolver",
     "ManagedScopeResolver",
     "PlayerOfActiveSquadResolver",
+    "PlayerOfActiveSquadFirstPageResolver",
     "TeamOfActiveUTResolver",
 ]

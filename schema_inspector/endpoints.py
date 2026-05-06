@@ -907,6 +907,15 @@ PLAYER_EVENTS_LAST_ENDPOINT = SofascoreEndpoint(
     envelope_key="events,hasNextPage",
     target_table="api_payload_snapshot",
     notes="Player's recent events with pagination. Raw passthrough preserves playedForTeamMap and statisticsMap.",
+    # Stage C.3: only page=0 is auto-refreshed by the planner -- this is what
+    # the frontend "Matches" tab reads. Higher pages are deep history that
+    # almost never changes; Stage C.4 will add worker-side auto-pagination
+    # (chain page=K+1 on hasNextPage=true via the delayed scheduler with a
+    # ~14-30d cadence) without changing this metadata.
+    refresh_interval_seconds=6 * 3600,
+    refresh_priority=45,
+    scope_kind="player-of-active-squad-first-page",
+    freshness_ttl_seconds=5 * 3600,
 )
 
 ENTITIES_ENDPOINTS = (

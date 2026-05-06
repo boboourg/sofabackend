@@ -90,6 +90,7 @@ from .historical_tournament_planner import (
 from .resource_planner import ResourcePlannerDaemon
 from .resource_scope import (
     ManagedScopeResolver,
+    PlayerOfActiveSquadFirstPageResolver,
     PlayerOfActiveSquadResolver,
     TeamOfActiveUTResolver,
 )
@@ -640,15 +641,22 @@ class ServiceApp:
 
         self.ensure_resource_refresh_consumer_groups()
         endpoints = local_api_endpoints()
+        # Build the player-of-active-squad resolver once and share it with
+        # the page=0 wrapper. That keeps both scope_kinds hitting the same
+        # Redis cache + a single database query per refresh window.
+        player_active_squad_resolver = PlayerOfActiveSquadResolver(
+            database=self.app.database,
+            redis_backend=self.app.redis_backend,
+        )
         resolvers: dict[str, Any] = {
             ManagedScopeResolver.kind: ManagedScopeResolver(),
             TeamOfActiveUTResolver.kind: TeamOfActiveUTResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
             ),
-            PlayerOfActiveSquadResolver.kind: PlayerOfActiveSquadResolver(
-                database=self.app.database,
-                redis_backend=self.app.redis_backend,
+            PlayerOfActiveSquadResolver.kind: player_active_squad_resolver,
+            PlayerOfActiveSquadFirstPageResolver.kind: PlayerOfActiveSquadFirstPageResolver(
+                base=player_active_squad_resolver,
             ),
         }
         return ResourcePlannerDaemon(
