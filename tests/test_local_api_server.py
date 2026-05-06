@@ -2288,46 +2288,6 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["playerAttributeOverviews"][0]["attacking"], 83)
 
-    async def test_player_events_next_uses_per_page_snapshot(self) -> None:
-        application = LocalApiApplication.__new__(LocalApiApplication)
-        connection = _FakeEntityPassthroughConnection(
-            rows={
-                (1152, "https://www.sofascore.com/api/v1/player/1152/events/next/0"): {
-                    "payload": {
-                        "events": [{"id": 500, "startTimestamp": 1_900_000_000}],
-                        "hasNextPage": False,
-                    }
-                },
-            }
-        )
-        application._connect = _make_fake_connector(connection)
-
-        result = await application._fetch_player_events_next_payload(1152, 0)
-
-        self.assertEqual(result["events"][0]["id"], 500)
-        self.assertEqual(result["hasNextPage"], False)
-
-    async def test_player_events_last_and_next_use_distinct_keys(self) -> None:
-        # Same player, same page=0, different direction -> different snapshots.
-        application = LocalApiApplication.__new__(LocalApiApplication)
-        connection = _FakeEntityPassthroughConnection(
-            rows={
-                (44, "https://www.sofascore.com/api/v1/player/44/events/last/0"): {
-                    "payload": {"events": [{"id": 1}], "hasNextPage": False}
-                },
-                (44, "https://www.sofascore.com/api/v1/player/44/events/next/0"): {
-                    "payload": {"events": [{"id": 2}], "hasNextPage": False}
-                },
-            }
-        )
-        application._connect = _make_fake_connector(connection)
-
-        last = await application._fetch_player_events_last_payload(44, 0)
-        nxt = await application._fetch_player_events_next_payload(44, 0)
-
-        self.assertEqual(last["events"][0]["id"], 1)
-        self.assertEqual(nxt["events"][0]["id"], 2)
-
     async def test_player_events_last_uses_per_page_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeEntityPassthroughConnection(
@@ -2429,7 +2389,6 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await application._fetch_team_featured_players_payload(99999999))
         self.assertIsNone(await application._fetch_player_attribute_overviews_payload(99999999))
         self.assertIsNone(await application._fetch_player_events_last_payload(99999999, 0))
-        self.assertIsNone(await application._fetch_player_events_next_payload(99999999, 0))
 
 
 class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):

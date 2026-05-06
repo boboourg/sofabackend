@@ -918,21 +918,6 @@ PLAYER_EVENTS_LAST_ENDPOINT = SofascoreEndpoint(
     freshness_ttl_seconds=5 * 3600,
 )
 
-PLAYER_EVENTS_NEXT_ENDPOINT = SofascoreEndpoint(
-    path_template="/api/v1/player/{player_id}/events/next/{page}",
-    envelope_key="events,hasNextPage",
-    target_table="api_payload_snapshot",
-    notes="Player's upcoming events with pagination. Raw passthrough -- mirrors events/last semantics.",
-    # Stage C.3.5: same first-page scope as PLAYER_EVENTS_LAST. Future fixtures
-    # change more frequently than past results, so 6h cadence is the floor.
-    # Stage C.4 will add the same auto-pagination treatment for both
-    # directions.
-    refresh_interval_seconds=6 * 3600,
-    refresh_priority=45,
-    scope_kind="player-of-active-squad-first-page",
-    freshness_ttl_seconds=5 * 3600,
-)
-
 ENTITIES_ENDPOINTS = (
     TEAM_ENDPOINT,
     PLAYER_ENDPOINT,
@@ -950,7 +935,6 @@ ENTITIES_ENDPOINTS = (
     TEAM_FEATURED_PLAYERS_ENDPOINT,
     PLAYER_ATTRIBUTE_OVERVIEWS_ENDPOINT,
     PLAYER_EVENTS_LAST_ENDPOINT,
-    PLAYER_EVENTS_NEXT_ENDPOINT,
 )
 
 def unique_tournament_top_players_endpoint(path_suffix: str = "overall") -> SofascoreEndpoint:
