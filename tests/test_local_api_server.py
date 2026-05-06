@@ -17,6 +17,7 @@ from schema_inspector.local_api_server import (
     _compile_path_template,
     _decode_snapshot_payload,
     _extract_event_id_from_entity_root_path,
+    _wrap_stripped_entity_payload,
     _normalized_query_map,
     _parse_context_value,
     _json_dumps_bytes,
@@ -1984,6 +1985,135 @@ class LocalApiEntityRootFallbackTests(unittest.IsolatedAsyncioTestCase):
         row = {"id": 1, "slug": None, "name": "Z", "category_id": None, "country_alpha2": None}
         payload = _synthesize_unique_tournament_root_payload(row)
         self.assertEqual(payload, {"uniqueTournament": {"id": 1, "name": "Z"}})
+
+    # --- stripped snapshot rewrap (PR fixes ingest-side wrapper loss) ---
+
+    def test_wrap_stripped_entity_payload_wraps_dict_with_id(self) -> None:
+        result = _wrap_stripped_entity_payload({"id": 17, "name": "LaLiga"}, "uniqueTournament")
+        self.assertEqual(result, {"uniqueTournament": {"id": 17, "name": "LaLiga"}})
+
+    def test_wrap_stripped_entity_payload_passes_through_already_wrapped(self) -> None:
+        already_wrapped = {"uniqueTournament": {"id": 17}, "extra": "x"}
+        result = _wrap_stripped_entity_payload(already_wrapped, "uniqueTournament")
+        self.assertIs(result, already_wrapped)
+
+    def test_wrap_stripped_entity_payload_passes_through_error_envelope(self) -> None:
+        # Soft-error / status payloads without "id" must not be coerced into a fake entity.
+        err = {"error": {"code": 404, "message": "Not Found"}}
+        result = _wrap_stripped_entity_payload(err, "uniqueTournament")
+        self.assertIs(result, err)
+
+    def test_wrap_stripped_entity_payload_passes_through_non_dict(self) -> None:
+        self.assertEqual(_wrap_stripped_entity_payload([], "uniqueTournament"), [])
+        self.assertIsNone(_wrap_stripped_entity_payload(None, "uniqueTournament"))
+        self.assertEqual(_wrap_stripped_entity_payload("oops", "uniqueTournament"), "oops")
+
+    async def test_unique_tournament_root_rewraps_stripped_snapshot(self) -> None:
+        """Historical raw snapshots were stored as the inner uniqueTournament
+        body (``{"id": 17, ...}``) instead of the upstream-wrapped envelope.
+        The handler must restore the wrapper on read so the API stays 1:1."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("raw_unique_tournament_snapshot", 17): {
+                    "payload": {"id": 17, "slug": "laliga", "name": "LaLiga"},
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_unique_tournament_root_payload(17)
+
+        self.assertIsNotNone(result)
+        self.assertIn("uniqueTournament", result)
+        self.assertEqual(result["uniqueTournament"]["id"], 17)
+        self.assertEqual(result["uniqueTournament"]["slug"], "laliga")
+        # Critically: the handler must NOT also synthesize from the normalized
+        # row when a raw snapshot exists, even when stripped.
+        self.assertNotIn("id", result)
+
+    async def test_unique_tournament_root_passes_through_already_wrapped_snapshot(self) -> None:
+        """Newer ingest paths that correctly preserve the upstream wrapper
+        must not be touched twice."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("raw_unique_tournament_snapshot", 17): {
+                    "payload": {
+                        "uniqueTournament": {"id": 17, "name": "LaLiga"},
+                        "extra": "preserved",
+                    },
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_unique_tournament_root_payload(17)
+
+        self.assertEqual(result["uniqueTournament"]["id"], 17)
+        # No double-wrapping.
+        self.assertNotIn("uniqueTournament", result["uniqueTournament"])
+        self.assertEqual(result.get("extra"), "preserved")
+
+    async def test_event_root_rewraps_stripped_terminal_snapshot(self) -> None:
+        """Some finalized snapshots in event_terminal_state.final_snapshot_id
+        were stored as the inner event body. Re-wrap on read so the contract
+        still surfaces as ``{"event": {...}}``."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("final_payload", 15994150): {
+                    "terminal_status": "finished",
+                    "final_payload": {
+                        "id": 15994150,
+                        "status": {"code": 100, "type": "finished"},
+                        "homeTeam": {"id": 10},
+                    },
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_event_root_payload(15994150)
+
+        self.assertIsNotNone(result)
+        self.assertIn("event", result)
+        self.assertEqual(result["event"]["id"], 15994150)
+        self.assertEqual(result["event"]["status"]["type"], "finished")
+
+    async def test_event_root_rewraps_stripped_raw_snapshot_and_applies_terminal_status(self) -> None:
+        """A stripped raw event snapshot must be wrapped before
+        ``_apply_terminal_status_to_event_payload`` runs, otherwise the
+        terminal-status overlay silently misses (it expects ``payload['event']``)."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                ("final_payload", 15994151): {
+                    "terminal_status": "finished",
+                    "final_payload": None,  # no finalized snapshot row -> waterfall to raw
+                },
+                ("raw_event_snapshot", 15994151): {
+                    "payload": {
+                        "id": 15994151,
+                        "status": {"code": 7, "type": "inprogress"},
+                        "slug": "x-vs-y",
+                    },
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_event_root_payload(15994151)
+
+        self.assertIsNotNone(result)
+        self.assertIn("event", result)
+        self.assertEqual(result["event"]["id"], 15994151)
+        # Terminal-status overlay must override the live status from the stripped payload.
+        self.assertEqual(result["event"]["status"]["type"], "finished")
 
 
 class LocalApiNormalizedFallbackDispatchTests(unittest.IsolatedAsyncioTestCase):

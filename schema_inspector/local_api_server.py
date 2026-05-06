@@ -2387,7 +2387,7 @@ class LocalApiApplication:
             if terminal_row is not None:
                 decoded = _decode_snapshot_payload(terminal_row.get("final_payload"))
                 if isinstance(decoded, dict):
-                    return decoded
+                    return _wrap_stripped_entity_payload(decoded, "event")
 
             snapshot_row = await connection.fetchrow(
                 """
@@ -2404,7 +2404,8 @@ class LocalApiApplication:
             if snapshot_row is not None:
                 decoded = _decode_snapshot_payload(snapshot_row["payload"])
                 if isinstance(decoded, dict):
-                    return _apply_terminal_status_to_event_payload(decoded, terminal_status_raw)
+                    rewrapped = _wrap_stripped_entity_payload(decoded, "event")
+                    return _apply_terminal_status_to_event_payload(rewrapped, terminal_status_raw)
 
             normalized_row = await connection.fetchrow(
                 """
@@ -2557,7 +2558,7 @@ class LocalApiApplication:
             if snapshot_row is not None:
                 decoded = _decode_snapshot_payload(snapshot_row["payload"])
                 if isinstance(decoded, dict):
-                    return decoded
+                    return _wrap_stripped_entity_payload(decoded, "uniqueTournament")
 
             normalized_row = await connection.fetchrow(
                 """
@@ -3071,6 +3072,32 @@ def _decode_snapshot_payload(payload: Any) -> Any:
             except orjson.JSONDecodeError:
                 return payload
     return payload
+
+
+def _wrap_stripped_entity_payload(payload: Any, wrapper_key: str) -> Any:
+    """Restore Sofascore upstream wrapper when the ingest pipeline saved the
+    inner entity body instead of the full ``{"<key>": {...}}`` envelope.
+
+    Some root-entity snapshots in ``api_payload_snapshot`` were stored as the
+    inner object (``{"id": 17, "name": "LaLiga", ...}``) rather than the
+    upstream-wrapped envelope (``{"uniqueTournament": {"id": 17, ...}}``).
+    Re-wrapping at read time keeps the API contract 1:1 with Sofascore without
+    requiring a re-ingest of historical rows. New ingest paths should still be
+    fixed to preserve the wrapper at write time.
+
+    Detection rule: payload is a dict, the wrapper key is missing, and the
+    payload carries the canonical entity marker ``id``. Anything else is
+    returned untouched (already-wrapped envelopes, error/soft-error payloads,
+    or non-dict bodies).
+    """
+
+    if not isinstance(payload, dict):
+        return payload
+    if wrapper_key in payload:
+        return payload
+    if "id" not in payload:
+        return payload
+    return {wrapper_key: payload}
 
 
 def _json_dumps_bytes(payload: Any) -> bytes:
