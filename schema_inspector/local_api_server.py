@@ -943,6 +943,8 @@ class LocalApiApplication:
             return await self._fetch_team_players_payload(int(path_params["team_id"]))
         if template == "/api/v1/team/{team_id}/featured-players":
             return await self._fetch_team_featured_players_payload(int(path_params["team_id"]))
+        if template == "/api/v1/team/{team_id}/transfers":
+            return await self._fetch_team_transfers_payload(int(path_params["team_id"]))
         if template == "/api/v1/player/{player_id}/attribute-overviews":
             return await self._fetch_player_attribute_overviews_payload(int(path_params["player_id"]))
         if template == "/api/v1/player/{player_id}/events/last/{page}":
@@ -1996,6 +1998,20 @@ class LocalApiApplication:
 
         return await self._fetch_latest_entity_passthrough(
             endpoint_pattern="/api/v1/team/{team_id}/featured-players",
+            context_entity_type="team",
+            context_entity_id=team_id,
+        )
+
+    async def _fetch_team_transfers_payload(self, team_id: int) -> dict[str, Any] | None:
+        """``/api/v1/team/{team_id}/transfers`` — raw passthrough.
+
+        Upstream returns ``{transfersIn: [...], transfersOut: [...]}`` with
+        full nested player + fee metadata. No pagination, no query params.
+        Refreshed every 30 days through the resource refresh loop.
+        """
+
+        return await self._fetch_latest_entity_passthrough(
+            endpoint_pattern="/api/v1/team/{team_id}/transfers",
             context_entity_type="team",
             context_entity_id=team_id,
         )

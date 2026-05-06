@@ -95,6 +95,7 @@ from .resource_scope import (
     SeasonOfActiveUTBaseResolver,
     SeasonOfActiveUTEventsResolver,
     SeasonOfActiveUTStandingsResolver,
+    TeamOfActiveUTFirstPageResolver,
     TeamOfActiveUTResolver,
 )
 from .structure_planner import (
@@ -658,11 +659,18 @@ class ServiceApp:
             database=self.app.database,
             redis_backend=self.app.redis_backend,
         )
+        # Same trick for team-of-active-ut: one base resolver, plus a
+        # first-page wrapper so /team/{id}/events/{last,next}/{page} can opt
+        # in via a distinct scope_kind without duplicating the SQL.
+        team_active_ut_resolver = TeamOfActiveUTResolver(
+            database=self.app.database,
+            redis_backend=self.app.redis_backend,
+        )
         resolvers: dict[str, Any] = {
             ManagedScopeResolver.kind: ManagedScopeResolver(),
-            TeamOfActiveUTResolver.kind: TeamOfActiveUTResolver(
-                database=self.app.database,
-                redis_backend=self.app.redis_backend,
+            TeamOfActiveUTResolver.kind: team_active_ut_resolver,
+            TeamOfActiveUTFirstPageResolver.kind: TeamOfActiveUTFirstPageResolver(
+                base=team_active_ut_resolver,
             ),
             PlayerOfActiveSquadResolver.kind: player_active_squad_resolver,
             PlayerOfActiveSquadFirstPageResolver.kind: PlayerOfActiveSquadFirstPageResolver(

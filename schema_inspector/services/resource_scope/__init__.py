@@ -20,6 +20,7 @@ from .season_of_active_ut import (
     SeasonOfActiveUTStandingsResolver,
 )
 from .team_of_active_ut import TeamOfActiveUTResolver
+from .team_of_active_ut_first_page import TeamOfActiveUTFirstPageResolver
 
 __all__ = [
     "ResourceTarget",
@@ -31,4 +32,5 @@ __all__ = [
     "SeasonOfActiveUTEventsResolver",
     "SeasonOfActiveUTStandingsResolver",
     "TeamOfActiveUTResolver",
+    "TeamOfActiveUTFirstPageResolver",
 ]

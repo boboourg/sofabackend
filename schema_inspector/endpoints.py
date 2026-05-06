@@ -339,6 +339,13 @@ def team_last_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/team/{team_id}/events/last/{page}",
         envelope_key="events",
         target_table="event",
+        # Stage 5: page=0 auto-refresh for active-UT teams. Same logic as
+        # season events list -- generic _fetch_snapshot_payload serves the
+        # raw upstream payload once worker has filled api_payload_snapshot.
+        refresh_interval_seconds=6 * 3600,
+        refresh_priority=45,
+        scope_kind="team-of-active-ut-first-page",
+        freshness_ttl_seconds=5 * 3600,
     )
 
 
@@ -347,6 +354,10 @@ def team_next_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/team/{team_id}/events/next/{page}",
         envelope_key="events",
         target_table="event",
+        refresh_interval_seconds=6 * 3600,
+        refresh_priority=45,
+        scope_kind="team-of-active-ut-first-page",
+        freshness_ttl_seconds=5 * 3600,
     )
 
 
@@ -907,6 +918,28 @@ TEAM_FEATURED_PLAYERS_ENDPOINT = SofascoreEndpoint(
     envelope_key="featuredPlayers",
     target_table="api_payload_snapshot",
     notes="Sofascore editorial featured players keyed by event id. Raw passthrough only.",
+    # Stage 5: featured-players is an editorial pick keyed by upcoming/recent
+    # eventId. The set rotates every match, so 24h cadence keeps it fresh
+    # without flooding (most teams play 1-2 matches per week).
+    refresh_interval_seconds=24 * 3600,
+    refresh_priority=55,
+    scope_kind="team-of-active-ut",
+    freshness_ttl_seconds=22 * 3600,
+)
+
+
+TEAM_TRANSFERS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/team/{team_id}/transfers",
+    envelope_key="transfersIn,transfersOut",
+    target_table="api_payload_snapshot",
+    notes="Sofascore team transfer history (in + out). No pagination, no query params. Raw passthrough.",
+    # Stage 5: transfers change only inside transfer windows -- 30 days is
+    # plenty. freshness_ttl 25d so a stray duplicate publish from the
+    # planner gets deduped at FreshnessStore before hitting upstream.
+    refresh_interval_seconds=30 * 24 * 3600,
+    refresh_priority=65,
+    scope_kind="team-of-active-ut",
+    freshness_ttl_seconds=25 * 24 * 3600,
 )
 
 PLAYER_ATTRIBUTE_OVERVIEWS_ENDPOINT = SofascoreEndpoint(
@@ -953,6 +986,7 @@ ENTITIES_ENDPOINTS = (
     TEAM_PERFORMANCE_GRAPH_ENDPOINT,
     TEAM_PLAYERS_ENDPOINT,
     TEAM_FEATURED_PLAYERS_ENDPOINT,
+    TEAM_TRANSFERS_ENDPOINT,
     PLAYER_ATTRIBUTE_OVERVIEWS_ENDPOINT,
     PLAYER_EVENTS_LAST_ENDPOINT,
 )

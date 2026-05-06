@@ -2242,6 +2242,30 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["players"][0]["id"], 1)
         self.assertEqual(result["nationalPlayers"][0]["id"], 2)
 
+    async def test_team_transfers_returns_raw_snapshot(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeEntityPassthroughConnection(
+            rows={
+                ("/api/v1/team/{team_id}/transfers", 2817): {
+                    "payload": {
+                        "transfersIn": [
+                            {"id": 100, "player": {"id": 9}, "transferDateTimestamp": 1700000000}
+                        ],
+                        "transfersOut": [
+                            {"id": 101, "player": {"id": 11}, "transferDateTimestamp": 1700000010}
+                        ],
+                    }
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_team_transfers_payload(2817)
+
+        self.assertEqual(sorted(result.keys()), ["transfersIn", "transfersOut"])
+        self.assertEqual(result["transfersIn"][0]["id"], 100)
+        self.assertEqual(result["transfersOut"][0]["id"], 101)
+
     async def test_team_featured_players_returns_raw_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeEntityPassthroughConnection(
