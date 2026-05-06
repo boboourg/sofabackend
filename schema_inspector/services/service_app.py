@@ -87,7 +87,7 @@ from .historical_tournament_planner import (
     HistoricalTournamentPlanningTarget,
 )
 from .resource_planner import ResourcePlannerDaemon
-from .resource_scope import ManagedScopeResolver
+from .resource_scope import ManagedScopeResolver, TeamOfActiveUTResolver
 from .structure_planner import (
     StructureCursorStore,
     StructurePlannerDaemon,
@@ -616,22 +616,31 @@ class ServiceApp:
         self,
         *,
         loop_interval_seconds: float = 30.0,
-        publish_per_tick_cap: int = 20,
+        publish_per_tick_cap: int = 100,
         lag_threshold: int = 5000,
     ) -> ResourcePlannerDaemon:
         """Build the generic resource refresh planner.
 
-        Stage A: only ``ManagedScopeResolver`` is wired (``scope_kind="managed"``)
-        and only endpoints that opted in via ``refresh_interval_seconds`` are
-        considered. Future stages add SQL-driven resolvers without changing
-        any code in this build method -- only resolver registration here grows.
+        Stage A wired ``ManagedScopeResolver`` (env-driven pilot list).
+        Stage B adds ``TeamOfActiveUTResolver`` (SQL: teams with recently-
+        updated standings) so endpoints with ``scope_kind="team-of-active-ut"``
+        cover all active leagues without per-team env config.
+
+        Future stages add resolvers here (player-of-active-squad,
+        season-of-active-ut) without touching the planner / worker code.
         """
 
         from ..endpoints import local_api_endpoints
 
         self.ensure_resource_refresh_consumer_groups()
         endpoints = local_api_endpoints()
-        resolvers = {ManagedScopeResolver.kind: ManagedScopeResolver()}
+        resolvers: dict[str, Any] = {
+            ManagedScopeResolver.kind: ManagedScopeResolver(),
+            TeamOfActiveUTResolver.kind: TeamOfActiveUTResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+        }
         return ResourcePlannerDaemon(
             queue=self.stream_queue,
             cursor_store=self.resource_cursor_store,
@@ -1047,7 +1056,7 @@ class ServiceApp:
         self,
         *,
         loop_interval_seconds: float = 30.0,
-        publish_per_tick_cap: int = 20,
+        publish_per_tick_cap: int = 100,
         lag_threshold: int = 5000,
     ) -> None:
         self.ensure_resource_refresh_consumer_groups()

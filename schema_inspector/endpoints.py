@@ -856,12 +856,14 @@ TEAM_PLAYERS_ENDPOINT = SofascoreEndpoint(
     envelope_key="players,foreignPlayers,nationalPlayers",
     target_table="api_payload_snapshot",
     notes="Sofascore team roster. Raw passthrough -- preserves foreign/national player subsets.",
-    # Stage A pilot: refresh every 12h for the small list of teams produced by
-    # ManagedScopeResolver (env SCHEMA_INSPECTOR_RESOURCE_PILOT_TEAMS). Stage B
-    # will switch scope_kind to "team-of-active-ut".
+    # Stage B: scope expanded from a hand-picked env list to all teams whose
+    # standings were updated in the last 30 days (SQL-backed via
+    # TeamOfActiveUTResolver, cached in Redis 30 min). Pilot env
+    # SCHEMA_INSPECTOR_RESOURCE_PILOT_TEAMS now only matters for endpoints
+    # explicitly using scope_kind="managed".
     refresh_interval_seconds=12 * 3600,
     refresh_priority=40,
-    scope_kind="managed",
+    scope_kind="team-of-active-ut",
     freshness_ttl_seconds=11 * 3600,
 )
 

@@ -12,5 +12,11 @@ small resolver classes.
 
 from .base import ResourceTarget, ScopeResolver
 from .managed import ManagedScopeResolver
+from .team_of_active_ut import TeamOfActiveUTResolver
 
-__all__ = ["ResourceTarget", "ScopeResolver", "ManagedScopeResolver"]
+__all__ = [
+    "ResourceTarget",
+    "ScopeResolver",
+    "ManagedScopeResolver",
+    "TeamOfActiveUTResolver",
+]
