@@ -843,6 +843,12 @@ class PilotOrchestrator:
             fetch_reason=fetch_reason,
             freshness_key=freshness_key,
             freshness_ttl_seconds=freshness_ttl_seconds,
+            # P0.2 — propagate the endpoint's HEAD-probe preference for
+            # the PilotOrchestrator path too (sync_season_widget,
+            # season-detail / event-detail special routes). Without this
+            # only the resource-refresh path gates by HEAD; the
+            # higher-volume widget path keeps issuing full GETs.
+            prefer_head_probe=bool(getattr(endpoint, "prefer_head_probe", False)),
         )
         outcome = await self.fetch_executor.execute(task)
         await self._record_capability(sport_slug=sport_slug, outcome=outcome, context_type=context_entity_type)
