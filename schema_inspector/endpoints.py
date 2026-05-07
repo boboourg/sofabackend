@@ -936,20 +936,20 @@ PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT = SofascoreEndpoint(
     notes=(
         "Player career national-team aggregate. Raw passthrough; small payload (~600B "
         "with data, 17 B empty). Pre-D2 probe: 200 always, even for retired legends and "
-        "players without national-team history (empty `statistics: []`). Resolver narrows "
-        "to ~8k players with at least one ingested national-team appearance."
+        "players without national-team history (empty `statistics: []`). Scope is the "
+        "broad active-squad set — D6 empty-data marker (30 days) absorbs the ~30% "
+        "empty-body responses so the cost stays bounded while celebrity players whose "
+        "national lineups are not yet hydrated (e.g. CR7) still get covered."
     ),
-    # D2: upstream returns 200 even for players without national-team
-    # history (empty array), so the negative cache cannot narrow the scope
-    # — we narrow at resolver level instead via PlayerOfNationalTeamHistory.
-    # Refresh weekly: career aggregates change at most a few times per year.
+    # D8: switched scope from player-of-national-team-history (narrow,
+    # ~8k) to player-of-active-squad (broad, ~51k) so well-known players
+    # whose national-team match lineups have not been hydrated yet are
+    # still picked up. The D6 EmptyDataMarker keeps the empty-body
+    # responses from re-firing weekly.
     refresh_interval_seconds=7 * 24 * 3600,
     refresh_priority=70,
-    scope_kind="player-of-national-team-history",
+    scope_kind="player-of-active-squad",
     freshness_ttl_seconds=6 * 24 * 3600,
-    # D6: ~30% empty bodies in the narrowed scope. Mark them and skip
-    # re-publishing for 30 days — career aggregates change rarely so the
-    # marker won't shadow real updates.
     empty_predicate="national_team_statistics",
     empty_data_ttl_seconds=30 * 24 * 3600,
 )

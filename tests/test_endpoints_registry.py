@@ -180,7 +180,7 @@ class EndpointRegistryTests(unittest.TestCase):
             (EVENT_BASEBALL_AT_BATS_ENDPOINT, "event-of-active-baseball", 10 * 60),
             (TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT, "team-of-active-ut-season", 24 * 3600),
             (PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT, "player-of-active-squad", 24 * 3600),
-            (PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT, "player-of-national-team-history", 7 * 24 * 3600),
+            (PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT, "player-of-active-squad", 7 * 24 * 3600),
             (PLAYER_LAST_YEAR_SUMMARY_ENDPOINT, "player-of-active-squad", 24 * 3600),
         ]
         for endpoint, expected_kind, expected_interval in cases:
