@@ -2616,12 +2616,20 @@ class LocalApiApplication:
 
         connection = await self._connect()
         try:
+            # Pin the terminal snapshot to the event-root endpoint pattern.
+            # Without this filter a stale ``final_snapshot_id`` pointing at
+            # a different endpoint (e.g. ``/event/{e}/incidents`` from a
+            # post-match housekeeping write) would be returned as if it
+            # were the event root, producing the wrong shape (home/away/
+            # incidents instead of the proper event envelope). This was
+            # caught by the D10 1:1 audit on event 14023930.
             terminal_row = await connection.fetchrow(
                 """
                 SELECT ets.terminal_status, ets.finalized_at, aps.payload AS final_payload
                 FROM event_terminal_state AS ets
                 LEFT JOIN api_payload_snapshot AS aps
                     ON aps.id = ets.final_snapshot_id
+                    AND aps.endpoint_pattern = '/api/v1/event/{event_id}'
                 WHERE ets.event_id = $1
                 """,
                 event_id,
