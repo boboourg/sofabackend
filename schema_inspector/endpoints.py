@@ -497,6 +497,14 @@ def local_api_endpoints(sport_slugs: tuple[str, ...] = LOCAL_API_SUPPORTED_SPORT
     for endpoint in COMPETITION_ENDPOINTS + STANDINGS_ENDPOINTS + STATISTICS_ENDPOINTS + ENTITIES_ENDPOINTS:
         add(endpoint)
 
+    # D11: keep deprecated/empirically-broken endpoints routable in
+    # Swagger / route registry (so existing client code doesn't break)
+    # but DON'T put them into ``event_detail_endpoints`` -> they no
+    # longer participate in the hydrate-worker per-event fetch loop.
+    # See ``EVENT_DETAIL_DEPRECATED_ENDPOINTS`` for the concrete list.
+    for endpoint in EVENT_DETAIL_DEPRECATED_ENDPOINTS:
+        add(endpoint)
+
     return tuple(endpoints)
 
 EVENT_DETAIL_ENDPOINT = SofascoreEndpoint(
@@ -754,11 +762,23 @@ EVENT_DETAIL_BASE_ENDPOINTS = (
     EVENT_VOTES_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
     EVENT_GRAPH_ENDPOINT,
-    EVENT_GRAPH_SEQUENCE_ENDPOINT,
     EVENT_HEATMAP_ENDPOINT,
     EVENT_ODDS_ALL_ENDPOINT,
     EVENT_ODDS_FEATURED_ENDPOINT,
     EVENT_WINNING_ODDS_ENDPOINT,
+    # D11 removed from BASE: EVENT_GRAPH_SEQUENCE_ENDPOINT and
+    # EVENT_WEATHER_ENDPOINT. Pre-D11 audit established that both return
+    # 100% 4xx for football, baseball, ice-hockey, tennis events that we
+    # tested (652/652 4xx for the 2-league force-fetch and 0 successful
+    # snapshots in the entire DB across all sports). Keeping them in
+    # BASE caused a guaranteed 404 per event per hydrate cycle — wasted
+    # proxy budget. They remain reachable for Swagger via
+    # ``EVENT_DETAIL_DEPRECATED_ENDPOINTS`` so frontend probing still
+    # works; only the auto-fetch chain is severed.
+)
+
+EVENT_DETAIL_DEPRECATED_ENDPOINTS = (
+    EVENT_GRAPH_SEQUENCE_ENDPOINT,
     EVENT_WEATHER_ENDPOINT,
 )
 
