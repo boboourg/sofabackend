@@ -1212,6 +1212,38 @@ class LocalApiAsgiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 204)
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
 
+    def test_asgi_collapses_repeated_slashes_in_request_path(self) -> None:
+        """A stray ``//`` in the URL must not break route matching.
+
+        Sofascore canonical URLs never contain consecutive slashes, but client
+        code that joins path fragments naively can produce ``/api/v1//player/...``
+        — the catch-all route would otherwise return 404 because the regex
+        compiled from ``path_template`` looks for exactly one ``/``. The local
+        API normalizes the path before route lookup so the malformed form is
+        served the same as the canonical one.
+        """
+
+        from fastapi.testclient import TestClient
+
+        application = _FakeAsgiApplication(
+            api_response=SerializedApiResponse(
+                status_code=200,
+                body=b'{"events":[]}',
+                cache_control="public, max-age=2",
+            )
+        )
+        app = create_asgi_app(application=application)
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1//player/750/events/last/0")
+
+        self.assertEqual(response.status_code, 200)
+        # The application sees only the collapsed canonical path:
+        self.assertEqual(
+            application.api_calls,
+            [("/api/v1/player/750/events/last/0", "")],
+        )
+
     async def test_handle_api_get_http_response_uses_static_ttl_for_finished_event_root(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()

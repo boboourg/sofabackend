@@ -3148,6 +3148,14 @@ def create_asgi_app(
     @app.get("/{path:path}")
     async def _get(path: str, request: Request) -> Response:
         raw_path = "/" + path if path else "/"
+        # Defensive: collapse repeated slashes ("/api/v1//player/..."). FastAPI
+        # passes the path through verbatim and the regex compiled from
+        # path_template won't match if a stray "//" sneaks in. Sofascore-style
+        # canonical URLs never contain consecutive slashes, so collapsing is
+        # safe. We do this before route matching so downstream code never has
+        # to deal with the malformed form.
+        if "//" in raw_path:
+            raw_path = re.sub(r"/+", "/", raw_path)
         raw_query = request.url.query
         if raw_path in {"/", "/docs"}:
             return Response(
