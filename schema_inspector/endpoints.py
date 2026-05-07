@@ -50,6 +50,16 @@ class SofascoreEndpoint:
     refresh_priority: int = 50
     scope_kind: str | None = None
     freshness_ttl_seconds: int | None = None
+    # Worker-side auto-pagination (Stage 8 / C.4). When ``auto_paginate``
+    # is True the resource refresh worker chains page=K+1 immediately on
+    # ``hasNextPage=true`` until ``hasNextPage=false`` (initial walk) OR
+    # ``max_pages`` (safety fuse). On completion the worker records the
+    # entity in ``PaginationDoneStore`` and the planner skips re-walking
+    # for ``audit_interval_seconds``. Page=0 keeps refreshing on the
+    # endpoint's normal ``refresh_interval_seconds`` cadence regardless.
+    auto_paginate: bool = False
+    audit_interval_seconds: int | None = None
+    max_pages: int = 50
 
     @property
     def pattern(self) -> str:
@@ -960,15 +970,20 @@ PLAYER_EVENTS_LAST_ENDPOINT = SofascoreEndpoint(
     envelope_key="events,hasNextPage",
     target_table="api_payload_snapshot",
     notes="Player's recent events with pagination. Raw passthrough preserves playedForTeamMap and statisticsMap.",
-    # Stage C.3: only page=0 is auto-refreshed by the planner -- this is what
-    # the frontend "Matches" tab reads. Higher pages are deep history that
-    # almost never changes; Stage C.4 will add worker-side auto-pagination
-    # (chain page=K+1 on hasNextPage=true via the delayed scheduler with a
-    # ~14-30d cadence) without changing this metadata.
+    # Stage C.3: page=0 auto-refreshes every 6h (planner) -- this is what
+    # the frontend "Matches" tab reads.
     refresh_interval_seconds=6 * 3600,
     refresh_priority=45,
     scope_kind="player-of-active-squad-first-page",
     freshness_ttl_seconds=5 * 3600,
+    # Stage 8 / C.4: worker-side auto-pagination. On hasNextPage=true the
+    # worker chains page=K+1 with no inter-page delay (worker pool capacity
+    # is the natural rate limit). On hasNextPage=false the entity is marked
+    # in PaginationDoneStore. Subsequent page=0 refreshes from the planner
+    # check the marker and skip starting a new walk for 14 days.
+    auto_paginate=True,
+    audit_interval_seconds=14 * 24 * 3600,
+    max_pages=50,
 )
 
 ENTITIES_ENDPOINTS = (

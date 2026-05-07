@@ -25,14 +25,18 @@ from typing import Any, Mapping
 
 from ..endpoints import SofascoreEndpoint, local_api_endpoints
 from ..fetch_models import FetchTask
+from ..jobs.envelope import JobEnvelope
+from ..jobs.types import JOB_REFRESH_RESOURCE
+from ..queue.pagination_done import PaginationDoneStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
 from ..queue.streams import (
     GROUP_RESOURCE_REFRESH,
     STREAM_RESOURCE_REFRESH,
+    RedisStreamQueue,
     StreamEntry,
 )
 from ..services.worker_runtime import WorkerRuntime, resolve_worker_max_concurrency
-from ._stream_jobs import decode_stream_job
+from ._stream_jobs import decode_stream_job, encode_stream_job
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,8 @@ class ResourceRefreshWorker:
         job_audit_logger=None,
         max_concurrency: int | None = None,
         negative_cache: ResourceNegativeCache | None = None,
+        pagination_done: PaginationDoneStore | None = None,
+        snapshot_reader=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.delayed_scheduler = delayed_scheduler
@@ -69,6 +75,12 @@ class ResourceRefreshWorker:
         self.default_timeout_seconds = float(default_timeout_seconds)
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.negative_cache = negative_cache
+        self.pagination_done = pagination_done
+        # ``snapshot_reader`` is an awaitable callable
+        # ``async (snapshot_id: int) -> dict | None`` that returns the
+        # decoded payload of a freshly inserted snapshot. Tests inject a
+        # mock; the production wire-up is in service_app.
+        self._snapshot_reader = snapshot_reader
         self._endpoints_by_pattern: dict[str, SofascoreEndpoint] = {
             ep.pattern: ep
             for ep in (endpoints if endpoints is not None else local_api_endpoints())
@@ -153,7 +165,129 @@ class ResourceRefreshWorker:
                 endpoint_pattern=pattern,
                 path_params=path_params,
             )
+        elif (
+            endpoint.auto_paginate
+            and outcome.http_status == 200
+            and outcome.snapshot_id is not None
+            and job.entity_id is not None
+        ):
+            # Stage 8 / C.4 worker-side auto-pagination: chain page=K+1 on
+            # hasNextPage=true, mark completed on hasNextPage=false. Only
+            # runs on a successful fetch with a fresh snapshot row (skipping
+            # dedup'd inserts is fine -- the next planner tick will retry).
+            await self._maybe_chain_next_page(
+                job=job,
+                pattern=pattern,
+                path_params=path_params,
+                snapshot_id=outcome.snapshot_id,
+                endpoint=endpoint,
+            )
         return "completed"
+
+    async def _maybe_chain_next_page(
+        self,
+        *,
+        job: JobEnvelope,
+        pattern: str,
+        path_params: Mapping[str, Any],
+        snapshot_id: int,
+        endpoint: SofascoreEndpoint,
+    ) -> None:
+        """Inspect just-inserted snapshot, publish page=K+1 if appropriate."""
+
+        if self._snapshot_reader is None:
+            return  # no reader wired (e.g. unit tests opting out)
+        try:
+            payload = await self._snapshot_reader(snapshot_id)
+        except Exception as exc:
+            logger.warning(
+                "auto-pagination snapshot read failed pattern=%s target=%s id=%s: %s",
+                pattern,
+                job.entity_id,
+                snapshot_id,
+                exc,
+            )
+            return
+        if not isinstance(payload, dict):
+            return
+        has_next = payload.get("hasNextPage")
+        entity_id = int(job.entity_id) if job.entity_id is not None else None
+        if entity_id is None:
+            return
+
+        # Terminal: hasNextPage=false (or absent) -> mark completed and stop.
+        if has_next is False:
+            if self.pagination_done is not None:
+                self.pagination_done.mark_completed(
+                    endpoint_pattern=pattern,
+                    entity_id=entity_id,
+                    when_ms=int(self.now_ms_factory()),
+                )
+            return
+        if has_next is None:
+            # Defensive: malformed payload -> do not chain (ambiguous).
+            return
+
+        current_page = int(path_params.get("page", 0) or 0)
+        next_page = current_page + 1
+
+        # Safety fuse: never let a chain run past max_pages.
+        if endpoint.max_pages and next_page >= int(endpoint.max_pages):
+            logger.warning(
+                "auto-pagination safety fuse: pattern=%s target=%s reached max_pages=%s",
+                pattern,
+                entity_id,
+                endpoint.max_pages,
+            )
+            if self.pagination_done is not None:
+                # Treat as completed for cool-down purposes; the next audit
+                # cycle will retry.
+                self.pagination_done.mark_completed(
+                    endpoint_pattern=pattern,
+                    entity_id=entity_id,
+                    when_ms=int(self.now_ms_factory()),
+                )
+            return
+
+        # Cool-down only on the planner-driven page=0 entry. Once a chain
+        # has started (page>=1) we always continue until terminal/max_pages.
+        if (
+            current_page == 0
+            and self.pagination_done is not None
+            and endpoint.audit_interval_seconds is not None
+            and self.pagination_done.is_completed_recently(
+                endpoint_pattern=pattern,
+                entity_id=entity_id,
+                audit_interval_seconds=int(endpoint.audit_interval_seconds),
+                now_ms=int(self.now_ms_factory()),
+            )
+        ):
+            return
+
+        # Defence in depth: skip if the next page is already known-bad in
+        # the negative cache.
+        next_path_params = dict(path_params)
+        next_path_params["page"] = next_page
+        if (
+            self.negative_cache is not None
+            and self.negative_cache.is_negatively_cached(
+                endpoint_pattern=pattern,
+                path_params=next_path_params,
+            )
+        ):
+            return
+
+        next_envelope = _build_next_page_envelope(job, pattern, next_path_params)
+        try:
+            self.queue.publish(self.stream, encode_stream_job(next_envelope))
+        except Exception as exc:
+            logger.warning(
+                "auto-pagination publish failed pattern=%s target=%s page=%s: %s",
+                pattern,
+                entity_id,
+                next_page,
+                exc,
+            )
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
         del exc
@@ -171,6 +305,46 @@ class ResourceRefreshWorker:
 
     def request_shutdown(self) -> None:
         self.runtime.request_shutdown()
+
+
+def _build_next_page_envelope(
+    job: JobEnvelope,
+    pattern: str,
+    next_path_params: Mapping[str, Any],
+) -> JobEnvelope:
+    """Build a JOB_REFRESH_RESOURCE envelope for page=K+1 of an auto-paginated chain.
+
+    Reuses freshness_key / context fields from the originating job's params
+    but rebuilds the freshness_key for the new page so per-page TTL stays
+    independent. Note: idempotency_key is recomputed inside JobEnvelope.create
+    based on the (job_type, entity, params) tuple, so two distinct pages of
+    the same entity get distinct ids.
+    """
+
+    import json
+
+    src_params = dict(job.params or {})
+    new_params = dict(src_params)
+    new_params["path_params"] = dict(next_path_params)
+    # Per-page freshness_key so the FreshnessStore TTL on page=K does not
+    # block page=K+1.
+    pp_repr = json.dumps(
+        dict(next_path_params), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    new_params["freshness_key"] = f"freshness:{pattern}|{pp_repr}"
+
+    return JobEnvelope.create(
+        job_type=JOB_REFRESH_RESOURCE,
+        sport_slug=job.sport_slug,
+        entity_type=job.entity_type,
+        entity_id=int(job.entity_id) if job.entity_id is not None else None,
+        scope=job.scope or "resource_refresh",
+        params=new_params,
+        priority=int(job.priority or 0),
+        trace_id=job.trace_id,
+        capability_hint=job.capability_hint or "resource_refresh",
+        parent_job_id=job.job_id,
+    )
 
 
 def _is_negative_outcome(outcome: Any) -> bool:

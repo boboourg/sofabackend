@@ -3,11 +3,16 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from schema_inspector.endpoints import TEAM_PLAYERS_ENDPOINT, SofascoreEndpoint
+from schema_inspector.endpoints import (
+    PLAYER_EVENTS_LAST_ENDPOINT,
+    TEAM_PLAYERS_ENDPOINT,
+    SofascoreEndpoint,
+)
 from schema_inspector.fetch_models import FetchOutcomeEnvelope, FetchTask
+from schema_inspector.queue.pagination_done import PaginationDoneStore
 from schema_inspector.queue.resource_negative_cache import ResourceNegativeCache
 from schema_inspector.queue.streams import StreamEntry
-from schema_inspector.workers._stream_jobs import encode_stream_job
+from schema_inspector.workers._stream_jobs import decode_stream_payload, encode_stream_job
 from schema_inspector.jobs.envelope import JobEnvelope
 from schema_inspector.jobs.types import JOB_REFRESH_RESOURCE
 from schema_inspector.workers.resource_refresh_worker import ResourceRefreshWorker
@@ -16,9 +21,10 @@ from schema_inspector.workers.resource_refresh_worker import ResourceRefreshWork
 class _CapturingExecutor:
     """Stand-in for FetchExecutor that records the FetchTask it was handed."""
 
-    def __init__(self, *, http_status: int | None = 200) -> None:
+    def __init__(self, *, http_status: int | None = 200, snapshot_id: int | None = None) -> None:
         self.tasks: list[FetchTask] = []
         self.http_status = http_status
+        self.snapshot_id = snapshot_id
 
     async def execute(self, task: FetchTask) -> FetchOutcomeEnvelope:
         self.tasks.append(task)
@@ -32,9 +38,20 @@ class _CapturingExecutor:
             classification="success_json" if self.http_status else "transport_error",
             proxy_id=None,
             challenge_reason=None,
-            snapshot_id=None,
+            snapshot_id=self.snapshot_id,
             payload_hash=None,
         )
+
+
+class _PublishingQueue:
+    """Stand-in for RedisStreamQueue that records publish() calls."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict[str, object]]] = []
+
+    def publish(self, stream: str, values) -> str:
+        self.published.append((stream, dict(values)))
+        return f"id-{len(self.published)}"
 
 
 class _StubScheduler:
@@ -90,17 +107,46 @@ def _build_worker(
     *,
     endpoints: tuple[SofascoreEndpoint, ...],
     negative_cache: ResourceNegativeCache | None = None,
+    pagination_done: PaginationDoneStore | None = None,
+    snapshot_reader=None,
+    queue=None,
 ) -> ResourceRefreshWorker:
     return ResourceRefreshWorker(
         fetch_executor=executor,
         delayed_scheduler=_StubScheduler(),
         delayed_payload_store=_StubPayloadStore(),
         completion_store=None,
-        queue=None,  # WorkerRuntime is never .run_forever'd in these unit tests
+        queue=queue,  # only used by auto-pagination publish
         consumer="test-consumer-1",
         endpoints=endpoints,
         negative_cache=negative_cache,
+        pagination_done=pagination_done,
+        snapshot_reader=snapshot_reader,
     )
+
+
+class _FakePaginationBackend:
+    def __init__(self) -> None:
+        self.store: dict[str, dict[str, str]] = {}
+
+    def hget(self, key, field):
+        return self.store.get(key, {}).get(field)
+
+    def hset(self, key, mapping=None, **kwargs):
+        if mapping is None:
+            mapping = kwargs.get("mapping")
+        bucket = self.store.setdefault(key, {})
+        bucket.update(mapping or {})
+        return len(mapping or {})
+
+    def hdel(self, key, field):
+        return 1 if self.store.get(key, {}).pop(field, None) is not None else 0
+
+
+def _make_async_reader(payload):
+    async def reader(snapshot_id):
+        return payload
+    return reader
 
 
 class _FakeNegativeCacheBackend:
@@ -254,6 +300,245 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
                 path_params={"team_id": 999},
             )
         )
+
+    # --- Stage 8 / C.4: worker-side auto-pagination -----------------------------
+
+    async def test_chain_publishes_next_page_when_has_next_true(self) -> None:
+        executor = _CapturingExecutor(http_status=200, snapshot_id=42)
+        queue = _PublishingQueue()
+        pagination = PaginationDoneStore(_FakePaginationBackend())
+        reader = _make_async_reader({"events": [{"id": 1}], "hasNextPage": True})
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            pagination_done=pagination,
+            snapshot_reader=reader,
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 0},
+        )
+
+        result = await worker.handle(_entry(envelope))
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(len(queue.published), 1)
+        published_payload = queue.published[0][1]
+        next_envelope = decode_stream_payload(published_payload)
+        self.assertEqual(next_envelope.params["path_params"], {"player_id": 750, "page": 1})
+        self.assertEqual(next_envelope.entity_id, 750)
+        self.assertEqual(next_envelope.parent_job_id, envelope.job_id)
+        # Pagination_done NOT marked yet -- chain still in progress.
+        self.assertFalse(
+            pagination.is_completed_recently(
+                endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+                entity_id=750,
+                audit_interval_seconds=14 * 86400,
+            )
+        )
+
+    async def test_chain_marks_completed_when_has_next_false(self) -> None:
+        executor = _CapturingExecutor(http_status=200, snapshot_id=99)
+        queue = _PublishingQueue()
+        pagination = PaginationDoneStore(_FakePaginationBackend())
+        reader = _make_async_reader({"events": [], "hasNextPage": False})
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            pagination_done=pagination,
+            snapshot_reader=reader,
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 17},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        # No further pages published.
+        self.assertEqual(queue.published, [])
+        # pagination_done stamped.
+        self.assertTrue(
+            pagination.is_completed_recently(
+                endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+                entity_id=750,
+                audit_interval_seconds=14 * 86400,
+            )
+        )
+
+    async def test_chain_skipped_at_page_zero_when_completed_recently(self) -> None:
+        executor = _CapturingExecutor(http_status=200, snapshot_id=1)
+        queue = _PublishingQueue()
+        pagination = PaginationDoneStore(_FakePaginationBackend())
+        # Pre-mark as completed within the audit window.
+        pagination.mark_completed(
+            endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_id=750,
+        )
+        reader = _make_async_reader({"events": [], "hasNextPage": True})  # would chain
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            pagination_done=pagination,
+            snapshot_reader=reader,
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 0},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        # Skipped chain because pagination_done is fresh.
+        self.assertEqual(queue.published, [])
+
+    async def test_chain_continues_past_page_zero_regardless_of_completion_marker(self) -> None:
+        # Once a chain has started (page>=1), do not let the cool-down marker
+        # interrupt it -- otherwise we get a half-completed walk.
+        executor = _CapturingExecutor(http_status=200, snapshot_id=1)
+        queue = _PublishingQueue()
+        pagination = PaginationDoneStore(_FakePaginationBackend())
+        pagination.mark_completed(
+            endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_id=750,
+        )
+        reader = _make_async_reader({"events": [], "hasNextPage": True})
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            pagination_done=pagination,
+            snapshot_reader=reader,
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 5},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertEqual(len(queue.published), 1)
+        next_envelope = decode_stream_payload(queue.published[0][1])
+        self.assertEqual(next_envelope.params["path_params"]["page"], 6)
+
+    async def test_chain_safety_fuse_at_max_pages(self) -> None:
+        executor = _CapturingExecutor(http_status=200, snapshot_id=1)
+        queue = _PublishingQueue()
+        pagination = PaginationDoneStore(_FakePaginationBackend())
+        reader = _make_async_reader({"events": [], "hasNextPage": True})
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            pagination_done=pagination,
+            snapshot_reader=reader,
+            queue=queue,
+        )
+        # PLAYER_EVENTS_LAST_ENDPOINT.max_pages == 50, so page=49 + 1 hits the fuse.
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 49},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertEqual(queue.published, [])
+        # Stamped as completed even though there were more pages -- prevents
+        # the next planner tick from immediately starting another walk.
+        self.assertTrue(
+            pagination.is_completed_recently(
+                endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+                entity_id=750,
+                audit_interval_seconds=14 * 86400,
+            )
+        )
+
+    async def test_chain_skipped_when_endpoint_auto_paginate_false(self) -> None:
+        # TEAM_PLAYERS_ENDPOINT has auto_paginate=False -> never chains.
+        executor = _CapturingExecutor(http_status=200, snapshot_id=1)
+        queue = _PublishingQueue()
+        pagination = PaginationDoneStore(_FakePaginationBackend())
+        reader = _make_async_reader({"hasNextPage": True})
+        worker = _build_worker(
+            executor,
+            endpoints=(TEAM_PLAYERS_ENDPOINT,),
+            pagination_done=pagination,
+            snapshot_reader=reader,
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=TEAM_PLAYERS_ENDPOINT.pattern,
+            entity_type="team",
+            entity_id=42,
+            path_params={"team_id": 42},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertEqual(queue.published, [])
+
+    async def test_chain_skipped_on_dedup_snapshot_id_none(self) -> None:
+        # snapshot_id=None means upstream payload was a duplicate of an
+        # existing row -> we have nothing fresh to inspect -> skip chain.
+        executor = _CapturingExecutor(http_status=200, snapshot_id=None)
+        queue = _PublishingQueue()
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            pagination_done=PaginationDoneStore(_FakePaginationBackend()),
+            snapshot_reader=_make_async_reader({"hasNextPage": True}),
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 0},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertEqual(queue.published, [])
+
+    async def test_chain_skipped_when_next_page_negatively_cached(self) -> None:
+        executor = _CapturingExecutor(http_status=200, snapshot_id=7)
+        queue = _PublishingQueue()
+        neg = ResourceNegativeCache(_FakeNegativeCacheBackend(), env={})
+        # Pre-mark page=1 as bad.
+        neg.mark_404(
+            endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            path_params={"player_id": 750, "page": 1},
+        )
+        worker = _build_worker(
+            executor,
+            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            negative_cache=neg,
+            pagination_done=PaginationDoneStore(_FakePaginationBackend()),
+            snapshot_reader=_make_async_reader({"hasNextPage": True}),
+            queue=queue,
+        )
+        envelope = _make_envelope(
+            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750, "page": 0},
+        )
+
+        await worker.handle(_entry(envelope))
+
+        self.assertEqual(queue.published, [])
 
     async def test_handle_does_not_mark_negative_cache_on_429(self) -> None:
         # 429 = rate limited; a worker retry might succeed soon.

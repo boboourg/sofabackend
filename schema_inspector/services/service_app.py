@@ -52,6 +52,7 @@ from ..queue.streams import (
     RedisStreamQueue,
     StreamEntry,
 )
+from ..queue.pagination_done import PaginationDoneStore
 from ..queue.resource_cursor import ResourceCursorStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
 from ..sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
@@ -218,6 +219,7 @@ class ServiceApp:
         self.structure_cursor_store = StructureCursorStore(self.app.redis_backend)
         self.resource_cursor_store = ResourceCursorStore(self.app.redis_backend)
         self.resource_negative_cache = ResourceNegativeCache(self.app.redis_backend)
+        self.pagination_done_store = PaginationDoneStore(self.app.redis_backend)
         database = getattr(self.app, "database", None)
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
@@ -719,6 +721,26 @@ class ServiceApp:
             database=self.app.database,
             freshness_store=self.app.freshness_store,
         )
+        # snapshot_reader is async (snapshot_id) -> dict|None. Used by the
+        # auto-pagination chain to inspect the just-inserted payload's
+        # hasNextPage flag without re-doing the upstream fetch.
+        async def _snapshot_reader(snapshot_id: int):
+            async with self.app.database.connection() as connection:
+                row = await connection.fetchrow(
+                    "SELECT payload FROM api_payload_snapshot WHERE id = $1",
+                    int(snapshot_id),
+                )
+            if row is None:
+                return None
+            payload = row["payload"]
+            if isinstance(payload, str):
+                import orjson
+                try:
+                    payload = orjson.loads(payload)
+                except Exception:
+                    return None
+            return payload
+
         return ResourceRefreshWorker(
             fetch_executor=executor,
             delayed_scheduler=self.delayed_scheduler,
@@ -730,6 +752,8 @@ class ServiceApp:
             endpoints=local_api_endpoints(),
             job_audit_logger=self.job_audit_logger,
             negative_cache=self.resource_negative_cache,
+            pagination_done=self.pagination_done_store,
+            snapshot_reader=_snapshot_reader,
         )
 
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
