@@ -2114,7 +2114,16 @@ class LocalApiApplication:
         if not rows:
             return None
 
-        payload: dict[str, list[dict[str, Any]]] = {}
+        # Upstream returns all four action groups even when empty; the
+        # synthesizer must emit empty arrays so a player with 0 dribbles
+        # still has a `dribbles: []` key in the response. Pre-D9.4 audit
+        # caught this as a 1-keypath drift (compare-endpoint).
+        payload: dict[str, list[dict[str, Any]]] = {
+            "passes": [],
+            "dribbles": [],
+            "defensive": [],
+            "ball-carries": [],
+        }
         for row in rows:
             item: dict[str, Any] = {}
             if row["event_action_type"] is not None:
