@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .fetch_classifier import (
-    CLASSIFICATION_SOFT_ERROR_JSON,
     CLASSIFICATION_SUCCESS_EMPTY_JSON,
     CLASSIFICATION_SUCCESS_JSON,
     classify_fetch_result,
@@ -172,7 +171,16 @@ class FetchExecutor:
         snapshot_id: int | None = None
         payload_snapshot: PayloadSnapshotRecord | None = None
         snapshot_head: ApiSnapshotHeadRecord | None = None
-        if transport_result.body_bytes:
+        # P0.1: soft-error envelopes (200/4xx with ``{"error": ...}`` body)
+        # are not stored as ``api_payload_snapshot`` rows. They occupy disk
+        # without contributing to either parsing (parser registry returns
+        # ``soft_error_payload`` status and writes nothing) or read-side
+        # passthrough (the API filters them out). The request_log row is
+        # still written for forensics, and ResourceRefreshWorker still
+        # marks the target in ResourceNegativeCache via the outcome's
+        # ``is_soft_error_payload`` flag.
+        should_persist_payload = bool(transport_result.body_bytes) and not classified.is_soft_error_payload
+        if should_persist_payload:
             payload_snapshot = PayloadSnapshotRecord(
                 trace_id=task.trace_id,
                 job_id=task.job_id,
@@ -207,11 +215,16 @@ class FetchExecutor:
                 )
         elif self.write_mode != "deferred":
             await self.raw_repository.insert_request_log(self.sql_executor, request_log)
+            if classified.is_soft_error_payload and transport_result.body_bytes:
+                logger.info(
+                    "fetch_executor: skip soft-error snapshot insert pattern=%s status=%s",
+                    task.endpoint_pattern,
+                    transport_result.status_code,
+                )
 
         if snapshot_id is not None and classified.classification in {
             CLASSIFICATION_SUCCESS_JSON,
             CLASSIFICATION_SUCCESS_EMPTY_JSON,
-            CLASSIFICATION_SOFT_ERROR_JSON,
         }:
             snapshot_head = ApiSnapshotHeadRecord(
                 endpoint_pattern=task.endpoint_pattern,

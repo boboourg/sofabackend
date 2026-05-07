@@ -248,6 +248,136 @@ class FetchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raw_repository.request_logs[0].attempts_json[0]["challenge_reason"], "bot_challenge")
         self.assertEqual(raw_repository.request_logs[0].payload_bytes, len(b"<html>captcha</html>"))
 
+    async def test_executor_skips_snapshot_insert_on_soft_error_200(self) -> None:
+        """200-with-soft-error-body: keep request log, drop the snapshot insert.
+
+        Sofascore returns ``{"error": {...}}`` with status 200 for some
+        endpoints (e.g. /event/{e}/statistics for events without stats,
+        /team/{t}/featured-players for teams without featured rosters).
+        These rows occupy disk space without contributing to either
+        parsing or read-side passthrough; the negative cache absorbs
+        them via the outcome's ``is_soft_error_payload`` flag.
+        """
+
+        transport = _FakeTransport(
+            TransportResult(
+                resolved_url="https://www.sofascore.com/api/v1/event/9/statistics",
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"error":{"code":404,"message":"Not Found"}}',
+                attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+                final_proxy_name="proxy_1",
+                challenge_reason=None,
+            )
+        )
+        raw_repository = _FakeRawRepository()
+        executor = FetchExecutor(transport=transport, raw_repository=raw_repository, sql_executor=object())
+
+        outcome = await executor.execute(
+            FetchTask(
+                trace_id="trace-soft",
+                job_id="job-soft",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}/statistics",
+                source_url="https://www.sofascore.com/api/v1/event/9/statistics",
+                timeout_profile="standard_json",
+                context_entity_type="event",
+                context_entity_id=9,
+                context_event_id=9,
+                fetch_reason="hydrate_event_edge",
+            )
+        )
+
+        self.assertEqual(outcome.classification, "soft_error_json")
+        self.assertTrue(outcome.is_soft_error_payload)
+        self.assertIsNone(outcome.snapshot_id)
+        self.assertEqual(len(raw_repository.request_logs), 1)
+        self.assertEqual(len(raw_repository.snapshots), 0)
+        self.assertEqual(len(raw_repository.snapshot_heads), 0)
+
+    async def test_executor_skips_snapshot_insert_on_soft_error_404(self) -> None:
+        """404 with body ``{"error":...}`` (e.g. /event/{e}/innings for non-MLB)."""
+
+        transport = _FakeTransport(
+            TransportResult(
+                resolved_url="https://www.sofascore.com/api/v1/event/9/innings",
+                status_code=404,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"error":{"code":404,"message":"Not Found"}}',
+                attempts=(TransportAttempt(1, "proxy_1", 404, None, None),),
+                final_proxy_name="proxy_1",
+                challenge_reason=None,
+            )
+        )
+        raw_repository = _FakeRawRepository()
+        executor = FetchExecutor(transport=transport, raw_repository=raw_repository, sql_executor=object())
+
+        outcome = await executor.execute(
+            FetchTask(
+                trace_id="trace-404",
+                job_id="job-404",
+                sport_slug="baseball",
+                endpoint_pattern="/api/v1/event/{event_id}/innings",
+                source_url="https://www.sofascore.com/api/v1/event/9/innings",
+                timeout_profile="standard_json",
+                context_entity_type="event",
+                context_entity_id=9,
+                context_event_id=9,
+                fetch_reason="resource_refresh",
+            )
+        )
+
+        self.assertEqual(outcome.classification, "not_found")
+        self.assertTrue(outcome.is_soft_error_payload)
+        self.assertIsNone(outcome.snapshot_id)
+        self.assertEqual(len(raw_repository.request_logs), 1)
+        self.assertEqual(len(raw_repository.snapshots), 0)
+
+    async def test_executor_skips_stage_snapshot_on_deferred_soft_error(self) -> None:
+        """Deferred path also drops soft-error snapshots."""
+
+        transport = _FakeTransport(
+            TransportResult(
+                resolved_url="https://www.sofascore.com/api/v1/event/9/statistics",
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"error":{"code":404,"message":"Not Found"}}',
+                attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+                final_proxy_name="proxy_1",
+                challenge_reason=None,
+            )
+        )
+        raw_repository = _FakeRawRepository()
+        snapshot_store = _FakeSnapshotStore()
+        executor = FetchExecutor(
+            transport=transport,
+            raw_repository=raw_repository,
+            sql_executor=None,
+            snapshot_store=snapshot_store,
+            write_mode="deferred",
+        )
+
+        outcome = await executor.execute(
+            FetchTask(
+                trace_id="trace-soft-deferred",
+                job_id="job-soft-deferred",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}/statistics",
+                source_url="https://www.sofascore.com/api/v1/event/9/statistics",
+                timeout_profile="pilot",
+                context_entity_type="event",
+                context_entity_id=9,
+                context_event_id=9,
+                fetch_reason="hydrate_event_edge",
+            )
+        )
+
+        self.assertTrue(outcome.is_soft_error_payload)
+        self.assertIsNone(outcome.snapshot_id)
+        self.assertEqual(len(snapshot_store.records), 0)
+        self.assertEqual(len(executor.prefetched_records), 1)
+        self.assertIsNone(executor.prefetched_records[0].payload_snapshot)
+
     async def test_executor_writes_network_error_message_into_request_log(self) -> None:
         class _FailingTransport:
             async def fetch(self, url: str, *, headers=None, timeout: float = 20.0):

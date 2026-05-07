@@ -330,7 +330,12 @@ class PilotLiveStatePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_state_repository.live_history[-1].poll_profile, "terminal")
         self.assertEqual(live_state_repository.live_history[-1].observed_status_type, "not_found")
         self.assertEqual(live_state_repository.terminal_states[-1].terminal_status, "not_found")
-        self.assertIsNotNone(live_state_repository.terminal_states[-1].final_snapshot_id)
+        # P0.1: soft-error 404 responses ({"error": "Not found"}) are no
+        # longer persisted as ``api_payload_snapshot`` rows, so the pin
+        # is null. The retire decision itself still lives in
+        # ``event_terminal_state.terminal_status``, which is the load-
+        # bearing field for read-side filtering.
+        self.assertIsNone(live_state_repository.terminal_states[-1].final_snapshot_id)
 
 
 def _json_result(url: str, payload: object, *, status_code: int = 200) -> TransportResult:
