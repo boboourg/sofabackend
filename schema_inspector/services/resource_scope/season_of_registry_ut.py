@@ -125,7 +125,7 @@ class SeasonOfRegistryUTResolver:
         future_seconds = self.window_days_future * 86_400
         pilot_uts = list(self.pilot_unique_tournament_ids())
         sql = """
-        SELECT DISTINCT t.unique_tournament_id AS ut_id, t.season_id AS season_id
+        SELECT DISTINCT t.unique_tournament_id AS ut_id, e.season_id AS season_id
         FROM event e
         JOIN tournament t ON t.id = e.tournament_id
         JOIN tournament_registry tr
@@ -134,7 +134,7 @@ class SeasonOfRegistryUTResolver:
             AND tr.is_active
             AND tr.current_enabled
         WHERE t.unique_tournament_id IS NOT NULL
-          AND t.season_id IS NOT NULL
+          AND e.season_id IS NOT NULL
           AND e.start_timestamp IS NOT NULL
           AND e.start_timestamp >= EXTRACT(EPOCH FROM now())::bigint - $2::bigint
           AND e.start_timestamp <= EXTRACT(EPOCH FROM now())::bigint + $3::bigint
@@ -142,7 +142,7 @@ class SeasonOfRegistryUTResolver:
             cardinality($4::bigint[]) = 0
             OR t.unique_tournament_id = ANY($4::bigint[])
           )
-        ORDER BY t.unique_tournament_id, t.season_id
+        ORDER BY t.unique_tournament_id, e.season_id
         LIMIT $5::bigint
         """
         async with self.database.connection() as connection:
