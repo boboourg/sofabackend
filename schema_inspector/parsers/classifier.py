@@ -51,6 +51,16 @@ def classify_snapshot(snapshot: RawSnapshot) -> str:
     if pattern == "/api/v1/event/{event_id}/player/{player_id}/rating-breakdown":
         return "event_player_rating_breakdown"
     if pattern == "/api/v1/event/{event_id}/innings":
+        # P0.2: live probe (2026-05-07) confirmed /innings is cricket-only on
+        # prod — baseball events 100% return soft-error 404. Cricket payload
+        # shape ``{innings: [{number, battingTeam, ..., wickets, overs}]}``
+        # is incompatible with BaseballInningsParser. Sport-aware routing
+        # keeps legacy baseball snapshots parseable while new cricket
+        # snapshots fall through to ``unknown`` (raw passthrough until a
+        # CricketInningsParser is registered).
+        sport = str(snapshot.sport_slug or "").strip().lower()
+        if sport == "cricket":
+            return "cricket_innings"
         return "baseball_innings"
     if pattern == "/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches":
         return "baseball_pitches"

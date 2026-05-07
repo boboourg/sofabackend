@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .endpoints import (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
+    EVENT_INNINGS_ENDPOINT,
     EVENT_AVERAGE_POSITIONS_ENDPOINT,
     EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
     EVENT_COMMENTS_ENDPOINT,
@@ -132,8 +133,16 @@ def build_event_detail_request_specs(
             if normalized_sport_slug == "football":
                 add(EVENT_TEAM_STREAKS_BETTING_ODDS_ENDPOINT, provider_id=provider_id)
 
+    # P0.2: /innings used to be wired here for baseball — confirmed dead
+    # on prod (100% soft-error 404 over 30 days). The endpoint is now
+    # cricket-only via the cricket adapter's ``cricket_innings`` family.
     if "baseball_innings" in adapter.special_families:
+        # Legacy: keep the import path alive so a hot-fix can resurrect
+        # baseball /innings without redeploying. Currently no sport
+        # adapter sets baseball_innings, so this is dormant.
         add(EVENT_BASEBALL_INNINGS_ENDPOINT)
+    if "cricket_innings" in adapter.special_families:
+        add(EVENT_INNINGS_ENDPOINT)
     if "esports_games" in adapter.special_families:
         add(EVENT_ESPORTS_GAMES_ENDPOINT)
     if not core_only and has_global_highlights is True:

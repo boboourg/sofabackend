@@ -74,7 +74,19 @@ class _FakeCapabilityRepository:
 
 
 class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
-    async def test_baseball_core_pipeline_still_fetches_innings_special(self) -> None:
+    async def test_baseball_core_pipeline_does_not_fetch_innings_after_p02(self) -> None:
+        """P0.2 — /innings is cricket-only on prod (live probe 2026-05-07
+        confirmed 100% soft-error 404 for baseball events). Baseball
+        adapter no longer declares ``baseball_innings`` in
+        special_families and EVENT_DETAIL_BASEBALL_ENDPOINTS no longer
+        contains the /innings endpoint.
+
+        Test renamed for documentation clarity; baseball pipeline
+        instead exercises /at-bats and /atbat/{id}/pitches.
+        """
+        return await self._legacy_baseball_pipeline_does_not_fetch_innings()
+
+    async def _legacy_baseball_pipeline_does_not_fetch_innings(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/15507996"
         statistics_url = "https://www.sofascore.com/api/v1/event/15507996/statistics"
         lineups_url = "https://www.sofascore.com/api/v1/event/15507996/lineups"
@@ -121,9 +133,10 @@ class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
         report = await orchestrator.run_event(event_id=15507996, sport_slug="baseball", hydration_mode="core")
 
         self.assertIn(incidents_url, transport.seen_urls)
-        self.assertIn(innings_url, transport.seen_urls)
+        # P0.2: /innings no longer fetched for baseball events.
+        self.assertNotIn(innings_url, transport.seen_urls)
         self.assertNotIn("https://www.sofascore.com/api/v1/event/15507996/comments", transport.seen_urls)
-        self.assertIn("baseball_innings", {item.parser_family for item in report.parse_results})
+        self.assertNotIn("baseball_innings", {item.parser_family for item in report.parse_results})
 
     async def test_baseball_pipeline_uses_regular_season_adapter_and_innings_special(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/15507996"
@@ -227,11 +240,13 @@ class BaseballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         report = await orchestrator.run_event(event_id=15507996, sport_slug="baseball")
 
-        self.assertIn(innings_url, transport.seen_urls)
+        # P0.2: /innings no longer fetched for baseball; /at-bats +
+        # /atbat/{id}/pitches remain the baseball special routes.
+        self.assertNotIn(innings_url, transport.seen_urls)
         self.assertIn(incidents_url, transport.seen_urls)
         self.assertIn(pitches_url, transport.seen_urls)
         self.assertIn(manager_home_url, transport.seen_urls)
-        self.assertIn("baseball_innings", {item.parser_family for item in report.parse_results})
+        self.assertNotIn("baseball_innings", {item.parser_family for item in report.parse_results})
         self.assertIn("baseball_pitches", {item.parser_family for item in report.parse_results})
 
 

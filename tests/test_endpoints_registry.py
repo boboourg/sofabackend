@@ -98,11 +98,16 @@ class EndpointRegistryTests(unittest.TestCase):
     def test_event_detail_endpoints_include_sport_specific_special_routes(self) -> None:
         football_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="football")}
         baseball_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="baseball")}
+        cricket_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="cricket")}
         ice_hockey_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="ice-hockey")}
         esports_patterns = {endpoint.pattern for endpoint in event_detail_endpoints(sport_slug="esports")}
 
         self.assertIn("/api/v1/event/{event_id}/statistics", football_patterns)
-        self.assertIn("/api/v1/event/{event_id}/innings", baseball_patterns)
+        # P0.2: /innings is cricket-only on prod (baseball events 100% 404).
+        self.assertIn("/api/v1/event/{event_id}/innings", cricket_patterns)
+        self.assertNotIn("/api/v1/event/{event_id}/innings", baseball_patterns)
+        # Baseball keeps /at-bats and /atbat/{id}/pitches.
+        self.assertIn("/api/v1/event/{event_id}/at-bats", baseball_patterns)
         self.assertIn("/api/v1/event/{event_id}/shotmap", ice_hockey_patterns)
         self.assertIn("/api/v1/event/{event_id}/esports-games", esports_patterns)
 

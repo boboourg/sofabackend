@@ -20,9 +20,15 @@ def test_tennis_live_delta_uses_point_feed_and_tennis_power() -> None:
     )
 
 
-def test_baseball_live_delta_includes_innings_detail_endpoint() -> None:
+def test_baseball_live_delta_no_longer_includes_innings() -> None:
+    # P0.2: /innings is cricket-only on prod (live probe confirmed
+    # 100% soft-error 404 for baseball events).
     assert live_delta_edge_kinds("baseball") == ("meta", "statistics", "lineups")
-    assert live_delta_detail_endpoint_patterns("baseball") == ("/api/v1/event/{event_id}/innings",)
+    assert live_delta_detail_endpoint_patterns("baseball") == ()
+
+
+def test_cricket_live_delta_includes_innings_detail_endpoint() -> None:
+    assert live_delta_detail_endpoint_patterns("cricket") == ("/api/v1/event/{event_id}/innings",)
 
 
 def test_all_13_sports_have_explicit_policy() -> None:

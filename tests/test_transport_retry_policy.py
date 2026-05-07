@@ -391,7 +391,7 @@ class _FakeTransport(InspectorTransport):
     def __init__(self, runtime_config: RuntimeConfig, *, sleeper=None) -> None:
         super().__init__(runtime_config, sleeper=sleeper or (lambda delay: None))
 
-    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None):
+    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None, method="GET"):
         del url, headers, timeout, proxy_url, fingerprint_profile
         return type(
             "_RawResponse",
@@ -410,7 +410,7 @@ class _RecordingTransport(InspectorTransport):
         super().__init__(runtime_config, sleeper=sleeper or (lambda delay: None))
         self.seen_requests: list[dict[str, object]] = []
 
-    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None):
+    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None, method="GET"):
         del timeout
         self.seen_requests.append(
             {
@@ -438,7 +438,7 @@ class _SlowTransport(InspectorTransport):
         self.delay_seconds = delay_seconds
         self.calls = 0
 
-    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None):
+    async def _execute_once(self, url: str, headers, timeout: float, proxy_url: str | None, fingerprint_profile=None, method="GET"):
         del headers, timeout, proxy_url, fingerprint_profile
         self.calls += 1
         await asyncio.sleep(self.delay_seconds)

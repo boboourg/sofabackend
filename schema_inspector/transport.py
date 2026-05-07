@@ -82,6 +82,7 @@ class InspectorTransport:
         *,
         headers: Mapping[str, str] | None = None,
         timeout: float = 20.0,
+        method: str = "GET",
     ) -> TransportResult:
         parsed = urlparse(url)
         proxy_required = parsed.scheme in {"http", "https"}
@@ -140,6 +141,7 @@ class InspectorTransport:
                         timeout,
                         proxy_url,
                         fingerprint_profile=fingerprint_profile,
+                        method=method,
                     ),
                     timeout=timeout,
                 )
@@ -285,6 +287,7 @@ class InspectorTransport:
         proxy_url: str | None,
         *,
         fingerprint_profile: FingerprintProfile | None = None,
+        method: str = "GET",
     ) -> _RawResponse:
         parsed = urlparse(url)
 
@@ -294,11 +297,18 @@ class InspectorTransport:
 
         # 2. STEALTH MODE for HTTP/HTTPS
         session = await self._get_session(proxy_url, fingerprint_profile=fingerprint_profile)
-        response = await session.get(
-            url,
-            headers=dict(headers),
-            timeout=timeout,
-        )
+        if str(method or "GET").upper() == "HEAD":
+            response = await session.head(
+                url,
+                headers=dict(headers),
+                timeout=timeout,
+            )
+        else:
+            response = await session.get(
+                url,
+                headers=dict(headers),
+                timeout=timeout,
+            )
 
         return _RawResponse(
             resolved_url=response.url,

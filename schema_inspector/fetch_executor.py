@@ -44,6 +44,8 @@ class FetchExecutor:
         write_mode: str = "immediate",
         clock=None,
         freshness_store=None,
+        head_probe_recent_200_window_days: int = 30,
+        recent_200_lookup=None,
     ) -> None:
         self.transport = transport
         self.raw_repository = raw_repository
@@ -52,6 +54,16 @@ class FetchExecutor:
         self.write_mode = str(write_mode or "immediate").strip().lower()
         self.clock = clock or time.monotonic
         self.freshness_store = freshness_store
+        self.head_probe_recent_200_window_days = int(head_probe_recent_200_window_days)
+        # Defence-in-depth lookup for the HEAD probe: when HEAD says 4xx,
+        # we ask this callable whether ``api_payload_snapshot`` has a
+        # real 200 row for the same (endpoint_pattern, ut, season,
+        # event_id) within the configured window. If yes, we still
+        # issue the body GET (HEAD endpoint may be temporarily lying).
+        # ``async (task) -> bool`` signature. ``None`` disables the
+        # safety net (HEAD result is taken at face value — only for
+        # tests where DB access is undesired).
+        self._recent_200_lookup = recent_200_lookup
         self._prefetched_records: list[PrefetchedFetchRecord] = []
 
     @property
@@ -76,6 +88,20 @@ class FetchExecutor:
         return replace(record.outcome, snapshot_id=snapshot_id)
 
     async def execute(self, task: FetchTask) -> FetchOutcomeEnvelope:
+        # P0.2 — HEAD probe gating. Endpoints flagged with
+        # ``prefer_head_probe=True`` issue a cheap HEAD first; if HEAD
+        # is 4xx we skip the body GET (saving up to ~1.9 MB / call on
+        # /top-players for sub-tier leagues). The ``recent_200_lookup``
+        # callback gives us defence-in-depth: if the HEAD says 4xx but
+        # we have a confirmed 200 within the recent window, we issue
+        # the GET anyway in case the HEAD endpoint is temporarily
+        # lying. Live probe (2026-05-07, 38/38 samples) showed HEAD
+        # mirrors GET status reliably.
+        if task.prefer_head_probe:
+            head_outcome = await self._head_probe(task)
+            if head_outcome is not None:
+                return head_outcome
+
         started_monotonic = self.clock()
         started_at = _utc_now()
         try:
@@ -275,6 +301,129 @@ class FetchExecutor:
                 )
             )
         return outcome
+
+    async def _head_probe(self, task: FetchTask) -> FetchOutcomeEnvelope | None:
+        """HEAD-then-GET pre-flight for endpoints with prefer_head_probe.
+
+        Returns:
+            * ``None`` to indicate the caller should proceed with the
+              normal GET (either HEAD said 200, HEAD raised a transport
+              error, or HEAD said 4xx but recent-200 lookup signalled
+              the cache might be lying).
+            * ``FetchOutcomeEnvelope`` with the HEAD's 4xx status when
+              we can short-circuit — request_log is still written for
+              forensics, no body is fetched, no snapshot row is
+              inserted.
+        """
+
+        started_monotonic = self.clock()
+        started_at = _utc_now()
+        head_timeout = max(min(task.timeout_seconds * 0.5, 10.0), 2.0)
+        try:
+            head_result = await self.transport.fetch(
+                task.source_url,
+                headers=dict(task.request_headers or {}),
+                timeout=head_timeout,
+                method="HEAD",
+            )
+        except Exception as exc:
+            # Transport-level failure on the HEAD probe — fall through
+            # to normal GET so we don't lose data on transient errors.
+            logger.warning(
+                "fetch_executor: HEAD probe transport failure pattern=%s url=%s: %s — falling through to GET",
+                task.endpoint_pattern,
+                task.source_url,
+                exc,
+            )
+            return None
+
+        status = int(head_result.status_code) if head_result.status_code is not None else 0
+        if 200 <= status < 300:
+            return None  # HEAD says OK -> proceed with body GET
+        if status == 0:
+            return None  # ambiguous -> let GET classify
+        if 400 <= status < 500 and status != 429:
+            # HEAD says client error. Defence-in-depth: if we have a
+            # recent 200 for this target, still issue GET.
+            if self._recent_200_lookup is not None:
+                try:
+                    has_recent_200 = await self._recent_200_lookup(task)
+                except Exception as exc:
+                    logger.warning(
+                        "fetch_executor: recent-200 lookup failed pattern=%s: %s — assuming False",
+                        task.endpoint_pattern,
+                        exc,
+                    )
+                    has_recent_200 = False
+                if has_recent_200:
+                    logger.info(
+                        "fetch_executor: HEAD %s but recent 200 exists pattern=%s — forcing GET",
+                        status,
+                        task.endpoint_pattern,
+                    )
+                    return None
+            # Short-circuit: write request log, return synthetic outcome.
+            finished_at = _utc_now()
+            latency_ms = int((self.clock() - started_monotonic) * 1000)
+            request_log = ApiRequestLogRecord(
+                trace_id=task.trace_id,
+                job_id=task.job_id,
+                job_type=task.fetch_reason,
+                sport_slug=task.sport_slug,
+                method="HEAD",
+                source_url=task.source_url,
+                endpoint_pattern=task.endpoint_pattern,
+                request_headers_redacted=task.request_headers,
+                query_params=task.query_params,
+                proxy_id=head_result.final_proxy_name,
+                proxy_address=head_result.final_proxy_address,
+                transport_attempt=len(head_result.attempts),
+                http_status=status,
+                challenge_reason=head_result.challenge_reason,
+                started_at=started_at,
+                finished_at=finished_at,
+                latency_ms=latency_ms,
+                attempts_json=_attempts_json(head_result.attempts),
+                payload_bytes=0,
+                error_message=None,
+            )
+            if self.write_mode != "deferred":
+                await self.raw_repository.insert_request_log(self.sql_executor, request_log)
+            outcome = FetchOutcomeEnvelope(
+                trace_id=task.trace_id,
+                job_id=task.job_id,
+                endpoint_pattern=task.endpoint_pattern,
+                source_url=task.source_url,
+                resolved_url=head_result.resolved_url,
+                http_status=status,
+                classification="head_probe_skipped",
+                proxy_id=head_result.final_proxy_name,
+                challenge_reason=head_result.challenge_reason,
+                snapshot_id=None,
+                payload_hash=None,
+                payload_root_keys=(),
+                is_valid_json=False,
+                is_empty_payload=True,
+                is_soft_error_payload=False,
+                retry_recommended=False,
+                capability_signal="unsupported",
+                attempts=tuple(head_result.attempts),
+                fetched_at=finished_at,
+                error_message=None,
+            )
+            if self.write_mode == "deferred":
+                self._prefetched_records.append(
+                    PrefetchedFetchRecord(
+                        task=task,
+                        outcome=outcome,
+                        request_log=request_log,
+                        payload_snapshot=None,
+                        snapshot_head=None,
+                    )
+                )
+            return outcome
+        # 5xx / 429 / unexpected — don't trust HEAD, proceed with GET.
+        return None
 
     def _mark_freshness_if_success(self, task: FetchTask, outcome: FetchOutcomeEnvelope) -> None:
         if (

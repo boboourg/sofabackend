@@ -70,6 +70,19 @@ class SofascoreEndpoint:
     # whose 200 always carries useful data.
     empty_predicate: str | None = None
     empty_data_ttl_seconds: int | None = None
+    # P0.2 — HEAD-probe-first opt-in. When ``prefer_head_probe`` is True
+    # the FetchExecutor first issues an HTTP HEAD against the resolved
+    # URL. Sofascore's HEAD endpoint mirrors GET status reliably (live
+    # probe 2026-05-07: 38/38 match) so we can decide whether to issue
+    # the body-heavy GET without paying for the response payload. Only
+    # endpoints with high "structurally-not-applicable" 404 rates
+    # benefit (e.g. /top-players/regularSeason for football, ~1.9 MB
+    # GET vs. ~0 byte HEAD). For each pattern with this flag the worker
+    # also performs a defence-in-depth ``recent_200`` lookup: if the
+    # HEAD says 4xx but ``api_payload_snapshot`` has a real 200 within
+    # ``head_probe_recent_200_window_days`` (default 30), we still
+    # issue the GET in case the HEAD endpoint is temporarily lying.
+    prefer_head_probe: bool = False
 
     @property
     def pattern(self) -> str:
@@ -660,12 +673,27 @@ EVENT_TENNIS_POWER_ENDPOINT = SofascoreEndpoint(
     notes="Tennis-specific momentum/power payload.",
 )
 
-EVENT_BASEBALL_INNINGS_ENDPOINT = SofascoreEndpoint(
+# P0.2 — /innings is cricket-only on prod (live probe 2026-05-07 confirmed
+# baseball /innings returns 100% soft-error 404; cricket events return real
+# innings payload with shape {innings: [{number, battingTeam, bowlingTeam,
+# score, wickets, overs, extra, wide, noBall, bye, legBye, penalty}]}, which
+# is incompatible with BaseballInningsParser's (event_id, ordinal, inning,
+# home_score, away_score) schema). Stored as raw passthrough until a proper
+# CricketInningsParser is wired. ``baseball_inning`` table is preserved for
+# legacy snapshots; classifier remains sport-aware so a stray baseball
+# /innings 200 (if upstream restores the route) can still parse via
+# BaseballInningsParser.
+EVENT_INNINGS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/innings",
     envelope_key="innings",
-    target_table="baseball_inning",
-    notes="Baseball-specific innings/score progression payload.",
+    target_table="api_payload_snapshot",
+    notes="Cricket innings payload (raw passthrough). Baseball events 404 here.",
+    # P0.2 — HEAD probe gates the body fetch; baseball events HEAD=404
+    # so we skip GET entirely.
+    prefer_head_probe=True,
 )
+# Backwards-compat alias — many call sites still import the old symbol.
+EVENT_BASEBALL_INNINGS_ENDPOINT = EVENT_INNINGS_ENDPOINT
 
 EVENT_BASEBALL_AT_BATS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/at-bats",
@@ -713,6 +741,7 @@ EVENT_GOALKEEPER_SHOTMAP_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/goalkeeper-shotmap/player/{player_id}",
     envelope_key="shotmap",
     target_table="api_payload_snapshot",
+    prefer_head_probe=True,  # P0.2 — only goalkeepers; HEAD gates body
 )
 
 EVENT_ESPORTS_GAMES_ENDPOINT = SofascoreEndpoint(
@@ -808,9 +837,12 @@ EVENT_DETAIL_TENNIS_ENDPOINTS = (
 )
 
 EVENT_DETAIL_BASEBALL_ENDPOINTS = (
-    EVENT_BASEBALL_INNINGS_ENDPOINT,
     EVENT_BASEBALL_AT_BATS_ENDPOINT,
     EVENT_BASEBALL_PITCHES_ENDPOINT,
+)
+
+EVENT_DETAIL_CRICKET_ENDPOINTS = (
+    EVENT_INNINGS_ENDPOINT,
 )
 
 EVENT_DETAIL_ICE_HOCKEY_ENDPOINTS = (
@@ -842,6 +874,8 @@ def event_detail_endpoints(*, sport_slug: str | None = None) -> tuple[SofascoreE
         return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_TENNIS_ENDPOINTS
     if normalized_sport_slug == "baseball":
         return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_BASEBALL_ENDPOINTS
+    if normalized_sport_slug == "cricket":
+        return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_CRICKET_ENDPOINTS
     if normalized_sport_slug == "ice-hockey":
         return EVENT_DETAIL_BASE_ENDPOINTS + EVENT_DETAIL_ICE_HOCKEY_ENDPOINTS
     if normalized_sport_slug == "esports":
@@ -1060,6 +1094,7 @@ TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT = SofascoreEndpoint(
     refresh_priority=55,
     scope_kind="team-of-active-ut-season",
     freshness_ttl_seconds=22 * 3600,
+    prefer_head_probe=True,  # P0.2 — 96.3% soft-error on prod
 )
 
 PLAYER_SEASON_HEATMAP_OVERALL_ENDPOINT = SofascoreEndpoint(
@@ -1119,6 +1154,7 @@ TEAM_FEATURED_PLAYERS_ENDPOINT = SofascoreEndpoint(
     refresh_priority=55,
     scope_kind="team-of-active-ut",
     freshness_ttl_seconds=22 * 3600,
+    prefer_head_probe=True,  # P0.2 — 94.5% soft-error on prod
 )
 
 
@@ -1203,6 +1239,10 @@ def unique_tournament_top_players_endpoint(path_suffix: str = "overall") -> Sofa
         ),
         envelope_key="topPlayers",
         target_table="top_player_snapshot",
+        # P0.2 — body is huge (1.9 MB on PL active season) and 80%+ of
+        # sub-tier (ut, season) pairs return 4xx. HEAD probe gates the
+        # body fetch.
+        prefer_head_probe=True,
     )
 
 
@@ -1223,6 +1263,7 @@ def unique_tournament_top_players_per_game_endpoint(path_suffix: str = "all/over
         ),
         envelope_key="topPlayers",
         target_table="top_player_snapshot",
+        prefer_head_probe=True,  # P0.2 — same rationale as top-players
     )
 
 
@@ -1237,6 +1278,7 @@ def team_scoped_top_players_endpoint(path_suffix: str = "overall") -> SofascoreE
         ),
         envelope_key="topPlayers",
         target_table="top_player_snapshot",
+        prefer_head_probe=True,  # P0.2
     )
 
 
@@ -1257,6 +1299,7 @@ def unique_tournament_top_teams_endpoint(path_suffix: str = "overall") -> Sofasc
         ),
         envelope_key="topTeams",
         target_table="top_team_snapshot",
+        prefer_head_probe=True,  # P0.2
     )
 
 
@@ -1278,6 +1321,11 @@ UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/player-of-the-season",
     envelope_key="player,team,statistics,playerOfTheTournament",
     target_table="season_player_of_the_season",
+    # P0.2 — POS endpoint returns 200 only after season completes (live
+    # probe: PL 24/25, PL 23/24 → 200; PL 25/26 active → 404). Most
+    # active-season probes are wasted; HEAD-probe gating eliminates the
+    # body fetch on those.
+    prefer_head_probe=True,
 )
 
 UNIQUE_TOURNAMENT_TEAM_OF_THE_WEEK_PERIODS_ENDPOINT = SofascoreEndpoint(

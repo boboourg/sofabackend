@@ -1409,10 +1409,40 @@ class _PerConnectionFetchExecutor:
         from ..fetch_executor import FetchExecutor
 
         async with self.database.connection() as connection:
+            # P0.2 — defence-in-depth lookup for the HEAD-probe: if HEAD
+            # says 4xx we still issue GET when a real 200 exists for
+            # this target within the last 30 days. Implemented as an
+            # inline async closure over the per-call connection.
+            async def _recent_200(t):
+                window_seconds = 30 * 86400
+                row = await connection.fetchrow(
+                    """
+                    SELECT 1 AS hit
+                    FROM api_payload_snapshot
+                    WHERE endpoint_pattern = $1
+                      AND http_status = 200
+                      AND coalesce(is_soft_error_payload, false) = false
+                      AND fetched_at >= now() - make_interval(secs => $2::bigint)
+                      AND (
+                            ($3::bigint IS NULL OR context_event_id = $3::bigint)
+                        AND ($4::bigint IS NULL OR context_unique_tournament_id = $4::bigint)
+                        AND ($5::bigint IS NULL OR context_season_id = $5::bigint)
+                      )
+                    LIMIT 1
+                    """,
+                    str(t.endpoint_pattern or ""),
+                    int(window_seconds),
+                    int(t.context_event_id) if t.context_event_id is not None else None,
+                    int(t.context_unique_tournament_id) if t.context_unique_tournament_id is not None else None,
+                    int(t.context_season_id) if t.context_season_id is not None else None,
+                )
+                return row is not None
+
             executor = FetchExecutor(
                 transport=self.transport,
                 raw_repository=self.raw_repository,
                 sql_executor=connection,
                 freshness_store=self.freshness_store,
+                recent_200_lookup=_recent_200,
             )
             return await executor.execute(task)

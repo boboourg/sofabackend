@@ -165,7 +165,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         ]
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None, method="GET"):
             del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             item = responses.pop(0)
@@ -229,7 +229,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         ]
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None, method="GET"):
             del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             item = responses.pop(0)
@@ -295,7 +295,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
         ]
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None, method="GET"):
             del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             item = responses.pop(0)
@@ -326,7 +326,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
 
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None, method="GET"):
             del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             from schema_inspector.transport import _RawResponse
@@ -377,7 +377,7 @@ class SchemaInspectorTests(unittest.IsolatedAsyncioTestCase):
 
         observed_proxy_urls = []
 
-        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None):
+        def fake_execute(url, headers, timeout, proxy_url, fingerprint_profile=None, method="GET"):
             del url, headers, timeout, fingerprint_profile
             observed_proxy_urls.append(proxy_url)
             from schema_inspector.transport import _RawResponse

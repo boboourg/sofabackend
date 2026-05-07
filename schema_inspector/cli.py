@@ -1214,6 +1214,27 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "backfill-leaderboards":
+                from .services.leaderboards_backfill import run_leaderboards_backfill
+
+                report = await run_leaderboards_backfill(
+                    database=app.database,
+                    stream_queue=app.stream_queue,
+                    sport_slug=args.sport_slug,
+                    priority_rank_threshold=args.priority_rank,
+                    completed_gap_days=args.completed_gap_days,
+                    history_window_days=args.history_window_days,
+                )
+                print(
+                    "leaderboards_backfill "
+                    f"pos={report.pos_published} "
+                    f"top_players_overall={report.top_players_overall_published} "
+                    f"top_teams_overall={report.top_teams_overall_published} "
+                    f"top_players_regular={report.top_players_regular_season_published} "
+                    f"top_teams_regular={report.top_teams_regular_season_published} "
+                    f"total={report.total}"
+                )
+                return 0
             if args.command == "worker-historical-enrichment":
                 service_app = ServiceApp(app)
                 await service_app.run_historical_enrichment_worker(
@@ -1521,6 +1542,31 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5000,
         help="XREADGROUP block timeout in milliseconds.",
+    )
+
+    backfill_leaderboards = subparsers.add_parser(
+        "backfill-leaderboards",
+        help=(
+            "P0.2 one-shot: scan completed top-tier (ut, season) pairs missing "
+            "POS / top-players / top-teams snapshots locally and publish "
+            "JOB_REFRESH_RESOURCE envelopes to stream:etl:resource_refresh."
+        ),
+    )
+    backfill_leaderboards.add_argument(
+        "--sport-slug", default="football",
+        help="Sport slug for top-tier scan (default football).",
+    )
+    backfill_leaderboards.add_argument(
+        "--priority-rank", type=int, default=30,
+        help="Tournament_registry.priority_rank threshold (default 30).",
+    )
+    backfill_leaderboards.add_argument(
+        "--completed-gap-days", type=int, default=7,
+        help="Days since last event for a season to be considered completed (default 7).",
+    )
+    backfill_leaderboards.add_argument(
+        "--history-window-days", type=int, default=365,
+        help="How far back to scan completed pairs (default 365).",
     )
 
     worker_historical_enrichment = subparsers.add_parser("worker-historical-enrichment", help="Run the archival enrichment consumer group loop.")

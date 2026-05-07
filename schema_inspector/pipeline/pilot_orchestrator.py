@@ -190,6 +190,7 @@ class PilotOrchestrator:
         stream_queue=None,
         now_ms_factory=None,
         season_widget_gate=None,
+        season_widget_structural_gate=None,
         event_endpoint_gate=None,
         live_bootstrap_coordinator=None,
         final_sweep_gate=None,
@@ -211,6 +212,9 @@ class PilotOrchestrator:
         self.live_state_repository = live_state_repository
         self.stream_queue = stream_queue
         self.season_widget_gate = season_widget_gate
+        # P0.2 — optional structural pre-filter for season widgets.
+        # ``None`` = legacy behaviour (only negative-cache gating).
+        self.season_widget_structural_gate = season_widget_structural_gate
         self.event_endpoint_gate = event_endpoint_gate
         self.live_bootstrap_coordinator = live_bootstrap_coordinator
         self.final_sweep_gate = final_sweep_gate
@@ -613,18 +617,32 @@ class PilotOrchestrator:
 
             if unique_tournament_id is not None and season_id is not None:
                 blocked_widget_patterns: tuple[str, ...] = ()
+                candidate_patterns = self.planner.plan_season_widget_patterns(
+                    sport_slug,
+                    unique_tournament_id=int(unique_tournament_id),
+                    season_id=int(season_id),
+                )
                 if self.season_widget_gate is not None:
-                    candidate_patterns = self.planner.plan_season_widget_patterns(
-                        sport_slug,
-                        unique_tournament_id=int(unique_tournament_id),
-                        season_id=int(season_id),
-                    )
                     blocked_widget_patterns = await self.season_widget_gate.blocked_endpoint_patterns(
                         sport_slug=sport_slug,
                         unique_tournament_id=int(unique_tournament_id),
                         season_id=int(season_id),
                         endpoint_patterns=candidate_patterns,
                     )
+                # P0.2 — structural pre-filter (POS completed-only,
+                # regularSeason allowlist) merged in before negative
+                # cache decisions. Cheap: at most one DB lookup for POS
+                # plus an in-memory allowlist check for regularSeason.
+                if self.season_widget_structural_gate is not None and candidate_patterns:
+                    structural_blocks = await self.season_widget_structural_gate.blocked_patterns(
+                        unique_tournament_id=int(unique_tournament_id),
+                        season_id=int(season_id),
+                        candidate_patterns=candidate_patterns,
+                    )
+                    if structural_blocks:
+                        merged = set(blocked_widget_patterns)
+                        merged.update(structural_blocks)
+                        blocked_widget_patterns = tuple(sorted(merged))
                 widget_jobs = self.planner.plan_season_widgets(
                     sport_slug,
                     unique_tournament_id=int(unique_tournament_id),

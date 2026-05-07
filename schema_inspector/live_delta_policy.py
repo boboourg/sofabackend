@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from .endpoints import (
-    EVENT_BASEBALL_INNINGS_ENDPOINT,
     EVENT_ESPORTS_GAMES_ENDPOINT,
+    EVENT_INNINGS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_SHOTMAP_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
@@ -29,7 +29,11 @@ LIVE_DELTA_EDGE_KINDS: dict[str, tuple[str, ...]] = {
 }
 
 LIVE_DELTA_DETAIL_ENDPOINTS: dict[str, tuple[SofascoreEndpoint, ...]] = {
-    "baseball": (EVENT_BASEBALL_INNINGS_ENDPOINT,),
+    # P0.2: /innings moved baseball → cricket (live probe confirmed
+    # baseball /innings is 100% soft-error 404). Cricket events get the
+    # innings live-delta hook; baseball keeps only at-bats/pitches via
+    # event_detail_endpoints.
+    "cricket": (EVENT_INNINGS_ENDPOINT,),
     "esports": (EVENT_ESPORTS_GAMES_ENDPOINT,),
     "ice-hockey": (EVENT_SHOTMAP_ENDPOINT,),
     "tennis": (EVENT_POINT_BY_POINT_ENDPOINT, EVENT_TENNIS_POWER_ENDPOINT),

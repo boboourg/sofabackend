@@ -30,6 +30,12 @@ class FetchTask:
     fetch_reason: str | None = None
     freshness_key: str | None = None
     freshness_ttl_seconds: int | None = None
+    # P0.2 — when True, FetchExecutor first issues an HTTP HEAD; if HEAD
+    # is 4xx (and no recent 200 in api_payload_snapshot) the body GET is
+    # skipped. Sofascore HEAD/GET status agree 100% in our live probe
+    # (38/38), so this is safe for endpoints with high "structurally
+    # not applicable" 404 rates.
+    prefer_head_probe: bool = False
 
 
 def _default_timeout_seconds() -> float:

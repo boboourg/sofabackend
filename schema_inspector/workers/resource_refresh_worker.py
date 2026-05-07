@@ -166,6 +166,10 @@ class ResourceRefreshWorker:
             fetch_reason="resource_refresh",
             freshness_key=_optional_str(params.get("freshness_key")),
             freshness_ttl_seconds=_optional_int(params.get("freshness_ttl_seconds")),
+            # P0.2 — propagate the endpoint's HEAD-probe preference so
+            # FetchExecutor knows whether to issue the cheap pre-flight
+            # request first.
+            prefer_head_probe=bool(getattr(endpoint, "prefer_head_probe", False)),
         )
 
         outcome = await self.fetch_executor.execute(task)
