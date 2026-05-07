@@ -27,6 +27,7 @@ from ..endpoints import SofascoreEndpoint, local_api_endpoints
 from ..fetch_models import FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_REFRESH_RESOURCE
+from ..queue.empty_data import EmptyDataStore
 from ..queue.pagination_done import PaginationDoneStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
 from ..queue.streams import (
@@ -63,6 +64,8 @@ class ResourceRefreshWorker:
         max_concurrency: int | None = None,
         negative_cache: ResourceNegativeCache | None = None,
         pagination_done: PaginationDoneStore | None = None,
+        empty_data_store: EmptyDataStore | None = None,
+        empty_predicates: dict[str, Any] | None = None,
         snapshot_reader=None,
     ) -> None:
         self.fetch_executor = fetch_executor
@@ -76,6 +79,8 @@ class ResourceRefreshWorker:
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.negative_cache = negative_cache
         self.pagination_done = pagination_done
+        self.empty_data_store = empty_data_store
+        self.empty_predicates = dict(empty_predicates or DEFAULT_EMPTY_PREDICATES)
         # ``snapshot_reader`` is an awaitable callable
         # ``async (snapshot_id: int) -> dict | None`` that returns the
         # decoded payload of a freshly inserted snapshot. Tests inject a
@@ -166,23 +171,93 @@ class ResourceRefreshWorker:
                 path_params=path_params,
             )
         elif (
-            endpoint.auto_paginate
-            and outcome.http_status == 200
+            outcome.http_status == 200
             and outcome.snapshot_id is not None
             and job.entity_id is not None
         ):
-            # Stage 8 / C.4 worker-side auto-pagination: chain page=K+1 on
-            # hasNextPage=true, mark completed on hasNextPage=false. Only
-            # runs on a successful fetch with a fresh snapshot row (skipping
-            # dedup'd inserts is fine -- the next planner tick will retry).
-            await self._maybe_chain_next_page(
-                job=job,
-                pattern=pattern,
-                path_params=path_params,
-                snapshot_id=outcome.snapshot_id,
-                endpoint=endpoint,
-            )
+            # D6: empty-data marker. Some endpoints return 200 with an empty
+            # body for entities that have no data (e.g. last-year-summary
+            # for retired players, national-team-statistics for players
+            # without a national appearance). The negative cache cannot help
+            # because status is 200; we instead inspect the payload through
+            # an endpoint-specific predicate and record the entity in the
+            # EmptyDataStore so the planner can skip re-publishing for the
+            # endpoint's empty_data_ttl_seconds.
+            if (
+                endpoint.empty_predicate is not None
+                and self.empty_data_store is not None
+            ):
+                await self._maybe_mark_empty(
+                    job=job,
+                    pattern=pattern,
+                    snapshot_id=outcome.snapshot_id,
+                    endpoint=endpoint,
+                )
+            if endpoint.auto_paginate:
+                # Stage 8 / C.4 worker-side auto-pagination: chain page=K+1 on
+                # hasNextPage=true, mark completed on hasNextPage=false. Only
+                # runs on a successful fetch with a fresh snapshot row (skipping
+                # dedup'd inserts is fine -- the next planner tick will retry).
+                await self._maybe_chain_next_page(
+                    job=job,
+                    pattern=pattern,
+                    path_params=path_params,
+                    snapshot_id=outcome.snapshot_id,
+                    endpoint=endpoint,
+                )
         return "completed"
+
+    async def _maybe_mark_empty(
+        self,
+        *,
+        job: JobEnvelope,
+        pattern: str,
+        snapshot_id: int,
+        endpoint: SofascoreEndpoint,
+    ) -> None:
+        if self._snapshot_reader is None:
+            return
+        predicate_name = str(endpoint.empty_predicate or "")
+        predicate = self.empty_predicates.get(predicate_name)
+        if predicate is None:
+            logger.warning(
+                "empty-data: unknown predicate %r for pattern=%s; skipping mark",
+                predicate_name,
+                pattern,
+            )
+            return
+        try:
+            payload = await self._snapshot_reader(snapshot_id)
+        except Exception as exc:
+            logger.warning(
+                "empty-data snapshot read failed pattern=%s target=%s id=%s: %s",
+                pattern,
+                job.entity_id,
+                snapshot_id,
+                exc,
+            )
+            return
+        try:
+            is_empty = bool(predicate(payload))
+        except Exception as exc:
+            logger.warning(
+                "empty-data predicate %r raised on pattern=%s target=%s: %s",
+                predicate_name,
+                pattern,
+                job.entity_id,
+                exc,
+            )
+            return
+        if not is_empty:
+            return
+        entity_id = int(job.entity_id) if job.entity_id is not None else None
+        if entity_id is None:
+            return
+        self.empty_data_store.mark_empty(
+            endpoint_pattern=pattern,
+            entity_id=entity_id,
+            when_ms=int(self.now_ms_factory()),
+        )
 
     async def _maybe_chain_next_page(
         self,
@@ -381,4 +456,36 @@ def _optional_str(value: Any) -> str | None:
     return str(value)
 
 
-__all__ = ["ResourceRefreshWorker"]
+def _is_empty_last_year_summary(payload: Any) -> bool:
+    """True when the rolling 12-month summary carries no data.
+
+    Pre-D2 probe shape: ``{"summary": [...], "uniqueTournamentsMap": {...}}``.
+    Empty body for retired/inactive players is exactly the two-key dict with
+    an empty list and an empty dict.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    summary = payload.get("summary")
+    map_part = payload.get("uniqueTournamentsMap")
+    summary_empty = isinstance(summary, list) and len(summary) == 0
+    map_empty = isinstance(map_part, dict) and len(map_part) == 0
+    return summary_empty and map_empty
+
+
+def _is_empty_national_team_statistics(payload: Any) -> bool:
+    """True when the player has no national-team aggregate statistics."""
+
+    if not isinstance(payload, dict):
+        return False
+    stats = payload.get("statistics")
+    return isinstance(stats, list) and len(stats) == 0
+
+
+DEFAULT_EMPTY_PREDICATES: dict[str, Any] = {
+    "last_year_summary": _is_empty_last_year_summary,
+    "national_team_statistics": _is_empty_national_team_statistics,
+}
+
+
+__all__ = ["ResourceRefreshWorker", "DEFAULT_EMPTY_PREDICATES"]

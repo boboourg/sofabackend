@@ -6,6 +6,7 @@ from typing import Iterable
 
 from schema_inspector.endpoints import SofascoreEndpoint
 from schema_inspector.jobs.types import JOB_REFRESH_RESOURCE
+from schema_inspector.queue.empty_data import EmptyDataStore
 from schema_inspector.queue.resource_cursor import ResourceCursorStore
 from schema_inspector.queue.resource_negative_cache import ResourceNegativeCache
 from schema_inspector.services.resource_planner import ResourcePlannerDaemon
@@ -113,6 +114,7 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         lag_threshold: int = 5000,
         now_ms: int = 10_000_000,
         negative_cache: ResourceNegativeCache | None = None,
+        empty_data_store: EmptyDataStore | None = None,
     ) -> tuple[ResourcePlannerDaemon, _FakeQueue, ResourceCursorStore]:
         queue = queue or _FakeQueue()
         cursor_store = ResourceCursorStore(redis_backend or _FakeRedis())
@@ -127,6 +129,7 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
             lag_threshold=lag_threshold,
             now_ms_factory=lambda: now_ms,
             negative_cache=negative_cache,
+            empty_data_store=empty_data_store,
         )
         return planner, queue, cursor_store
 
@@ -389,6 +392,93 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published, 1)
         self.assertEqual(len(queue.published), 1)
         self.assertEqual(int(queue.published[0][1]["entity_id"]), 42)
+
+    async def test_empty_data_marker_skips_publish_and_does_not_update_cursor(self) -> None:
+        # D6: a target stamped as "empty" within the endpoint's TTL must be
+        # skipped at publish time, exactly like the negative cache path.
+        endpoint = SofascoreEndpoint(
+            path_template="/api/v1/player/{player_id}/last-year-summary",
+            envelope_key="summary,uniqueTournamentsMap",
+            target_table="api_payload_snapshot",
+            refresh_interval_seconds=24 * 3600,
+            scope_kind="test",
+            freshness_ttl_seconds=22 * 3600,
+            empty_predicate="last_year_summary",
+            empty_data_ttl_seconds=14 * 86400,
+        )
+        target = ResourceTarget(
+            entity_type="player",
+            entity_id=4747,
+            path_params={"player_id": 4747},
+        )
+        resolver = _FakeResolver([target])
+        backend = _FakeRedis()
+        empty_store = EmptyDataStore(backend)
+        empty_store.mark_empty(
+            endpoint_pattern=endpoint.pattern,
+            entity_id=4747,
+            when_ms=10_000_000 - 60_000,  # marked 60 s ago, well within TTL
+        )
+        planner, queue, cursor_store = self._build(
+            endpoint=endpoint,
+            resolver=resolver,
+            redis_backend=backend,
+            empty_data_store=empty_store,
+        )
+
+        published = await planner.tick()
+
+        self.assertEqual(published, 0)
+        self.assertEqual(queue.published, [])
+        self.assertEqual(
+            cursor_store.load_last_refresh_ms(
+                endpoint_pattern=endpoint.pattern,
+                path_params={"player_id": 4747},
+            ),
+            0,
+        )
+        self.assertEqual(planner._stats_empty_skipped, 1)
+
+    async def test_empty_data_marker_does_not_block_other_targets(self) -> None:
+        endpoint = SofascoreEndpoint(
+            path_template="/api/v1/player/{player_id}/last-year-summary",
+            envelope_key="summary,uniqueTournamentsMap",
+            target_table="api_payload_snapshot",
+            refresh_interval_seconds=24 * 3600,
+            scope_kind="test",
+            freshness_ttl_seconds=22 * 3600,
+            empty_predicate="last_year_summary",
+            empty_data_ttl_seconds=14 * 86400,
+        )
+        active = ResourceTarget(
+            entity_type="player",
+            entity_id=750,
+            path_params={"player_id": 750},
+        )
+        empty = ResourceTarget(
+            entity_type="player",
+            entity_id=4747,
+            path_params={"player_id": 4747},
+        )
+        resolver = _FakeResolver([active, empty])
+        backend = _FakeRedis()
+        empty_store = EmptyDataStore(backend)
+        empty_store.mark_empty(
+            endpoint_pattern=endpoint.pattern,
+            entity_id=4747,
+            when_ms=10_000_000 - 60_000,
+        )
+        planner, queue, _ = self._build(
+            endpoint=endpoint,
+            resolver=resolver,
+            redis_backend=backend,
+            empty_data_store=empty_store,
+        )
+
+        published = await planner.tick()
+
+        self.assertEqual(published, 1)
+        self.assertEqual(int(queue.published[0][1]["entity_id"]), 750)
 
     async def test_pagination_targets_get_distinct_cursors(self) -> None:
         endpoint = _stub_endpoint(

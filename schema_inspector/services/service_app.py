@@ -52,6 +52,7 @@ from ..queue.streams import (
     RedisStreamQueue,
     StreamEntry,
 )
+from ..queue.empty_data import EmptyDataStore
 from ..queue.pagination_done import PaginationDoneStore
 from ..queue.resource_cursor import ResourceCursorStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
@@ -90,14 +91,19 @@ from .historical_tournament_planner import (
 )
 from .resource_planner import ResourcePlannerDaemon
 from .resource_scope import (
+    EventOfFinishedBaseballResolver,
     ManagedScopeResolver,
     PlayerOfActiveSquadFirstPageResolver,
     PlayerOfActiveSquadResolver,
+    PlayerOfNationalTeamHistoryResolver,
     SeasonOfActiveUTBaseResolver,
     SeasonOfActiveUTEventsResolver,
     SeasonOfActiveUTStandingsResolver,
+    SeasonOfRegistryUTResolver,
     TeamOfActiveUTFirstPageResolver,
     TeamOfActiveUTResolver,
+    TeamOfActiveUTSeasonResolver,
+    TeamOfRegistryUTResolver,
 )
 from .structure_planner import (
     StructureCursorStore,
@@ -220,6 +226,7 @@ class ServiceApp:
         self.resource_cursor_store = ResourceCursorStore(self.app.redis_backend)
         self.resource_negative_cache = ResourceNegativeCache(self.app.redis_backend)
         self.pagination_done_store = PaginationDoneStore(self.app.redis_backend)
+        self.empty_data_store = EmptyDataStore(self.app.redis_backend)
         database = getattr(self.app, "database", None)
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
@@ -674,9 +681,38 @@ class ServiceApp:
             TeamOfActiveUTFirstPageResolver.kind: TeamOfActiveUTFirstPageResolver(
                 base=team_active_ut_resolver,
             ),
+            TeamOfActiveUTSeasonResolver.kind: TeamOfActiveUTSeasonResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            # D3: registry-driven scope. Registered side-by-side with the
+            # standings-driven team-of-active-ut. Initially DORMANT — no
+            # endpoint opts into "team-of-registry-ut" until the pilot
+            # measurement step explicitly switches a single endpoint over.
+            # Pilot scope gating is via SCHEMA_INSPECTOR_RESOURCE_REGISTRY_PILOT_UTS.
+            TeamOfRegistryUTResolver.kind: TeamOfRegistryUTResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            # D5: registry-driven (ut, season) scope. Used by /cuptrees
+            # whose upstream gate is binary (404 for league tournaments,
+            # 200 for cups). The 4xx is absorbed by ResourceNegativeCache
+            # so league UTs only contribute one wasted request per 7 days.
+            SeasonOfRegistryUTResolver.kind: SeasonOfRegistryUTResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
             PlayerOfActiveSquadResolver.kind: player_active_squad_resolver,
             PlayerOfActiveSquadFirstPageResolver.kind: PlayerOfActiveSquadFirstPageResolver(
                 base=player_active_squad_resolver,
+            ),
+            PlayerOfNationalTeamHistoryResolver.kind: PlayerOfNationalTeamHistoryResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            EventOfFinishedBaseballResolver.kind: EventOfFinishedBaseballResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
             ),
             SeasonOfActiveUTEventsResolver.kind: SeasonOfActiveUTEventsResolver(
                 base=season_active_ut_base,
@@ -696,6 +732,7 @@ class ServiceApp:
             publish_per_tick_cap=publish_per_tick_cap,
             lag_threshold=lag_threshold,
             negative_cache=self.resource_negative_cache,
+            empty_data_store=self.empty_data_store,
         )
 
     def build_resource_refresh_worker(
@@ -753,6 +790,7 @@ class ServiceApp:
             job_audit_logger=self.job_audit_logger,
             negative_cache=self.resource_negative_cache,
             pagination_done=self.pagination_done_store,
+            empty_data_store=self.empty_data_store,
             snapshot_reader=_snapshot_reader,
         )
 

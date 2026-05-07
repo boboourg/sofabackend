@@ -60,6 +60,16 @@ class SofascoreEndpoint:
     auto_paginate: bool = False
     audit_interval_seconds: int | None = None
     max_pages: int = 50
+    # D6 empty-data marker. Some endpoints return HTTP 200 with an empty
+    # body for entities that have no data yet/anymore (e.g. last-year-summary
+    # for retired players). ``empty_predicate`` names a registered predicate
+    # in the resource refresh worker that inspects the freshly stored
+    # payload and decides whether to mark the entity as "empty". When
+    # marked, the planner skips re-publishing for ``empty_data_ttl_seconds``.
+    # ``None`` disables the empty-marker path -- safe default for endpoints
+    # whose 200 always carries useful data.
+    empty_predicate: str | None = None
+    empty_data_ttl_seconds: int | None = None
 
     @property
     def pattern(self) -> str:
@@ -297,7 +307,22 @@ def season_cuptrees_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees",
         envelope_key="cupTrees",
         target_table="season_cup_tree",
-        notes="Cup tree / playoff structure payload with nested rounds, blocks and participants.",
+        notes=(
+            "Cup tree / playoff structure payload with nested rounds, blocks and participants. "
+            "Pre-D5 probe: upstream returns 200 only for tournaments that actually carry a cup "
+            "tree (UCL, FA Cup, DFB Pokal, Coppa Italia, Copa del Rey, Supercoppa…) and 404 for "
+            "league tournaments (LaLiga, PL, Serie A, Saudi PL, MLS…). The local field "
+            "`unique_tournament.has_playoff_series` is unreliable as a gate (Sofascore returns "
+            "false for cup tournaments too), so we lean on ResourceNegativeCache: leagues hit "
+            "404 once and the negative cache suppresses re-publishing for 7 days. After the "
+            "first sweep only the actual cup tournaments contribute traffic."
+        ),
+        # D5: weekly refresh, low priority. Scope is the broad registry-driven
+        # (ut, season) set so cup tournaments without standings still land here.
+        refresh_interval_seconds=7 * 24 * 3600,
+        refresh_priority=70,
+        scope_kind="season-of-registry-ut",
+        freshness_ttl_seconds=6 * 24 * 3600,
     )
 
 
@@ -614,6 +639,28 @@ EVENT_BASEBALL_INNINGS_ENDPOINT = SofascoreEndpoint(
     notes="Baseball-specific innings/score progression payload.",
 )
 
+EVENT_BASEBALL_AT_BATS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/event/{event_id}/at-bats",
+    envelope_key="atBats",
+    target_table="api_payload_snapshot",
+    notes=(
+        "Baseball game at-bats list; parent of /atbat/{at_bat_id}/pitches. Raw passthrough. "
+        "Pre-D2 probe: 200 OK for both finished (status=100) AND inprogress baseball events; "
+        "live payload updates as the game progresses. The Resource Refresh scope below intentionally "
+        "covers only finished events — live at-bats updates are out of scope for the refresh loop and "
+        "would belong to a separate live-tier ingest if ever needed."
+    ),
+    # D2: at-bats freezes once the game ends. Planner cycle is intentionally
+    # slow (1 year) — combined with a freshness_ttl just under that window
+    # this produces effectively a one-shot fetch per finished event for the
+    # lifetime of the rolling baseball window. Priority is low so it never
+    # competes with active football/player refresh capacity.
+    refresh_interval_seconds=365 * 24 * 3600,
+    refresh_priority=70,
+    scope_kind="event-of-finished-baseball",
+    freshness_ttl_seconds=350 * 24 * 3600,
+)
+
 EVENT_BASEBALL_PITCHES_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{event_id}/atbat/{at_bat_id}/pitches",
     envelope_key="pitches",
@@ -722,6 +769,7 @@ EVENT_DETAIL_TENNIS_ENDPOINTS = (
 
 EVENT_DETAIL_BASEBALL_ENDPOINTS = (
     EVENT_BASEBALL_INNINGS_ENDPOINT,
+    EVENT_BASEBALL_AT_BATS_ENDPOINT,
     EVENT_BASEBALL_PITCHES_ENDPOINT,
 )
 
@@ -862,6 +910,73 @@ PLAYER_STATISTICS_SEASONS_ENDPOINT = SofascoreEndpoint(
     target_table="entity_statistics_season",
 )
 
+PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/player/{player_id}/statistics/match-type/overall",
+    envelope_key="seasons,typesMap",
+    target_table="api_payload_snapshot",
+    notes=(
+        "Per-match-type aggregated season statistics. Raw passthrough. Pre-D2 probe: "
+        "200 OK for football, basketball (extra `all` key) and baseball; 404 for handball, "
+        "ice-hockey, rugby. The active-squad scope below is sport-agnostic; the negative "
+        "cache absorbs the 4xx for non-applicable sports after the first attempt."
+    ),
+    # D2: ~100 KB per player; same active-squad scope as /statistics. Retired
+    # players return 4xx upstream — ResourceNegativeCache catches them after
+    # the first 404 and skips re-publishing for 7 days.
+    refresh_interval_seconds=24 * 3600,
+    refresh_priority=55,
+    scope_kind="player-of-active-squad",
+    freshness_ttl_seconds=22 * 3600,
+)
+
+PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/player/{player_id}/national-team-statistics",
+    envelope_key="statistics",
+    target_table="api_payload_snapshot",
+    notes=(
+        "Player career national-team aggregate. Raw passthrough; small payload (~600B "
+        "with data, 17 B empty). Pre-D2 probe: 200 always, even for retired legends and "
+        "players without national-team history (empty `statistics: []`). Resolver narrows "
+        "to ~8k players with at least one ingested national-team appearance."
+    ),
+    # D2: upstream returns 200 even for players without national-team
+    # history (empty array), so the negative cache cannot narrow the scope
+    # — we narrow at resolver level instead via PlayerOfNationalTeamHistory.
+    # Refresh weekly: career aggregates change at most a few times per year.
+    refresh_interval_seconds=7 * 24 * 3600,
+    refresh_priority=70,
+    scope_kind="player-of-national-team-history",
+    freshness_ttl_seconds=6 * 24 * 3600,
+    # D6: ~30% empty bodies in the narrowed scope. Mark them and skip
+    # re-publishing for 30 days — career aggregates change rarely so the
+    # marker won't shadow real updates.
+    empty_predicate="national_team_statistics",
+    empty_data_ttl_seconds=30 * 24 * 3600,
+)
+
+PLAYER_LAST_YEAR_SUMMARY_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/player/{player_id}/last-year-summary",
+    envelope_key="summary,uniqueTournamentsMap",
+    target_table="api_payload_snapshot",
+    notes=(
+        "Player rolling 12-month per-tournament summary. Pre-D2 probe: 200 always, but "
+        "empty body (~40 B, summary=[], uniqueTournamentsMap={}) for ~70% of the active "
+        "squad scope (older actives, retired, youth/reserves). D6 empty-data marker is "
+        "REQUIRED here — without it ~35k useless 40 B requests would fire daily."
+    ),
+    # D2: rolling-12-month feed; refresh daily. Retired players return 200
+    # with empty arrays — D6 empty-data marker absorbs those.
+    refresh_interval_seconds=24 * 3600,
+    refresh_priority=55,
+    scope_kind="player-of-active-squad",
+    freshness_ttl_seconds=22 * 3600,
+    # D6: marker TTL = 14 days. Shorter than national-team-statistics
+    # because rolling-12mo windows can refill faster (a junior player
+    # getting their first senior appearance, an older player coming back).
+    empty_predicate="last_year_summary",
+    empty_data_ttl_seconds=14 * 24 * 3600,
+)
+
 TEAM_TEAM_STATISTICS_SEASONS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/team/{team_id}/team-statistics/seasons",
     envelope_key="uniqueTournamentSeasons,typesMap",
@@ -884,6 +999,19 @@ TEAM_SEASON_OVERALL_STATISTICS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics/overall",
     envelope_key="statistics",
     target_table="api_payload_snapshot",
+)
+
+TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/team/{team_id}/unique-tournament/{unique_tournament_id}/season/{season_id}/goal-distributions",
+    envelope_key="goalDistributions",
+    target_table="api_payload_snapshot",
+    notes="Football team per-season goal distribution by minute buckets. Raw passthrough.",
+    # D2: small payload (~1.7 KB), refresh once per day. Scope is the same
+    # standings-driven (team, ut, season) triple the active leagues use.
+    refresh_interval_seconds=24 * 3600,
+    refresh_priority=55,
+    scope_kind="team-of-active-ut-season",
+    freshness_ttl_seconds=22 * 3600,
 )
 
 PLAYER_SEASON_HEATMAP_OVERALL_ENDPOINT = SofascoreEndpoint(
@@ -911,15 +1039,23 @@ TEAM_PLAYERS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/team/{team_id}/players",
     envelope_key="players,foreignPlayers,nationalPlayers",
     target_table="api_payload_snapshot",
-    notes="Sofascore team roster. Raw passthrough -- preserves foreign/national player subsets.",
-    # Stage B: scope expanded from a hand-picked env list to all teams whose
-    # standings were updated in the last 30 days (SQL-backed via
-    # TeamOfActiveUTResolver, cached in Redis 30 min). Pilot env
-    # SCHEMA_INSPECTOR_RESOURCE_PILOT_TEAMS now only matters for endpoints
-    # explicitly using scope_kind="managed".
+    notes=(
+        "Sofascore team roster. Raw passthrough -- preserves foreign/national player subsets. "
+        "Scope source: D3 registry-driven resolver (event window in registry-active UTs) so "
+        "leagues without recent standings ingest (Saudi Pro League, MLS, qualifiers, cups) "
+        "are still covered. Pilot list controlled by "
+        "SCHEMA_INSPECTOR_RESOURCE_REGISTRY_PILOT_UTS; empty env = full registry."
+    ),
+    # D3 activation: switched from "team-of-active-ut" (standings-driven) to
+    # "team-of-registry-ut" (event-window over tournament_registry). The
+    # registry resolver is wider — it covers Saudi/MLS/qualifiers/cups whose
+    # standings worker is currently parked under historical_enrichment
+    # backpressure. The standings-driven resolver is still registered and
+    # used by sibling endpoints (FEATURED_PLAYERS, TRANSFERS) so the rollout
+    # is one endpoint at a time.
     refresh_interval_seconds=12 * 3600,
     refresh_priority=40,
-    scope_kind="team-of-active-ut",
+    scope_kind="team-of-registry-ut",
     freshness_ttl_seconds=11 * 3600,
 )
 
@@ -993,10 +1129,14 @@ ENTITIES_ENDPOINTS = (
     PLAYER_STATISTICS_ENDPOINT,
     PLAYER_TRANSFER_HISTORY_ENDPOINT,
     PLAYER_STATISTICS_SEASONS_ENDPOINT,
+    PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT,
+    PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT,
+    PLAYER_LAST_YEAR_SUMMARY_ENDPOINT,
     TEAM_TEAM_STATISTICS_SEASONS_ENDPOINT,
     TEAM_PLAYER_STATISTICS_SEASONS_ENDPOINT,
     PLAYER_SEASON_OVERALL_STATISTICS_ENDPOINT,
     TEAM_SEASON_OVERALL_STATISTICS_ENDPOINT,
+    TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT,
     PLAYER_SEASON_HEATMAP_OVERALL_ENDPOINT,
     TEAM_PERFORMANCE_GRAPH_ENDPOINT,
     TEAM_PLAYERS_ENDPOINT,

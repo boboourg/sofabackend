@@ -106,6 +106,111 @@ class EndpointRegistryTests(unittest.TestCase):
         self.assertIn("/api/v1/event/{event_id}/shotmap", ice_hockey_patterns)
         self.assertIn("/api/v1/event/{event_id}/esports-games", esports_patterns)
 
+    def test_d1_new_endpoints_are_registered_in_local_api_endpoints(self) -> None:
+        """D1: new endpoint constants must reach local_api_endpoints() and route specs.
+
+        ``_ALL_ENDPOINTS`` (built from ``local_api_endpoints()``) is the source
+        of truth for both ``build_route_specs()`` and the Swagger/OpenAPI doc,
+        so a single membership check covers both surfaces.
+        """
+
+        from schema_inspector.endpoints import (
+            EVENT_BASEBALL_AT_BATS_ENDPOINT,
+            PLAYER_LAST_YEAR_SUMMARY_ENDPOINT,
+            PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT,
+            PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT,
+            TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT,
+            local_api_endpoints,
+        )
+        from schema_inspector.local_api_server import build_route_specs
+
+        all_patterns = {endpoint.pattern for endpoint in local_api_endpoints()}
+        for endpoint in (
+            EVENT_BASEBALL_AT_BATS_ENDPOINT,
+            TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT,
+            PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT,
+            PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT,
+            PLAYER_LAST_YEAR_SUMMARY_ENDPOINT,
+        ):
+            self.assertIn(endpoint.pattern, all_patterns, msg=f"missing in local_api_endpoints: {endpoint.pattern}")
+
+        route_patterns = {route.endpoint.pattern for route in build_route_specs()}
+        for endpoint in (
+            EVENT_BASEBALL_AT_BATS_ENDPOINT,
+            TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT,
+            PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT,
+            PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT,
+            PLAYER_LAST_YEAR_SUMMARY_ENDPOINT,
+        ):
+            self.assertIn(endpoint.pattern, route_patterns, msg=f"missing in build_route_specs: {endpoint.pattern}")
+
+    def test_d1_new_endpoints_envelope_keys_match_upstream(self) -> None:
+        """Pre-D1 upstream probe verified these envelope_key shapes."""
+
+        from schema_inspector.endpoints import (
+            EVENT_BASEBALL_AT_BATS_ENDPOINT,
+            PLAYER_LAST_YEAR_SUMMARY_ENDPOINT,
+            PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT,
+            PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT,
+            TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT,
+        )
+
+        self.assertEqual(EVENT_BASEBALL_AT_BATS_ENDPOINT.envelope_key, "atBats")
+        self.assertEqual(TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT.envelope_key, "goalDistributions")
+        self.assertEqual(PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT.envelope_key, "seasons,typesMap")
+        self.assertEqual(PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT.envelope_key, "statistics")
+        self.assertEqual(PLAYER_LAST_YEAR_SUMMARY_ENDPOINT.envelope_key, "summary,uniqueTournamentsMap")
+
+    def test_d2_refresh_metadata_set_on_new_endpoints(self) -> None:
+        """D2 wires each new endpoint into the Resource Refresh Loop with a
+        scope_kind, refresh interval and freshness window. ``freshness_ttl``
+        must always sit just under ``refresh_interval`` so a duplicate
+        publish is deduped at the Freshness store before hitting upstream.
+        """
+
+        from schema_inspector.endpoints import (
+            EVENT_BASEBALL_AT_BATS_ENDPOINT,
+            PLAYER_LAST_YEAR_SUMMARY_ENDPOINT,
+            PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT,
+            PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT,
+            TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT,
+        )
+
+        cases = [
+            (EVENT_BASEBALL_AT_BATS_ENDPOINT, "event-of-finished-baseball", 365 * 24 * 3600),
+            (TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT, "team-of-active-ut-season", 24 * 3600),
+            (PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT, "player-of-active-squad", 24 * 3600),
+            (PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT, "player-of-national-team-history", 7 * 24 * 3600),
+            (PLAYER_LAST_YEAR_SUMMARY_ENDPOINT, "player-of-active-squad", 24 * 3600),
+        ]
+        for endpoint, expected_kind, expected_interval in cases:
+            with self.subTest(endpoint=endpoint.path_template):
+                self.assertEqual(endpoint.scope_kind, expected_kind)
+                self.assertEqual(endpoint.refresh_interval_seconds, expected_interval)
+                self.assertIsNotNone(endpoint.freshness_ttl_seconds)
+                self.assertLess(endpoint.freshness_ttl_seconds, endpoint.refresh_interval_seconds)
+                self.assertGreater(endpoint.refresh_priority, 0)
+
+    def test_d2_new_scope_kinds_are_distinct_strings(self) -> None:
+        """Scope kinds must be unique (the resolver registry is keyed by it)."""
+
+        from schema_inspector.services.resource_scope import (
+            EventOfFinishedBaseballResolver,
+            PlayerOfNationalTeamHistoryResolver,
+            TeamOfActiveUTSeasonResolver,
+        )
+
+        kinds = {
+            TeamOfActiveUTSeasonResolver.kind,
+            EventOfFinishedBaseballResolver.kind,
+            PlayerOfNationalTeamHistoryResolver.kind,
+        }
+        # All three must be present and distinct.
+        self.assertEqual(len(kinds), 3)
+        self.assertIn("team-of-active-ut-season", kinds)
+        self.assertIn("event-of-finished-baseball", kinds)
+        self.assertIn("player-of-national-team-history", kinds)
+
 
 if __name__ == "__main__":
     unittest.main()
