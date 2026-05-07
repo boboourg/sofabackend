@@ -284,13 +284,15 @@ UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}",
     envelope_key="events",
     target_table="event",
-    # D12: 2-pass parent→child. RoundOfManagedPairsResolver expands each
-    # managed (ut, season) pair to (ut, season, round_number) triples by
-    # parsing /rounds snapshot JSON, then this endpoint fetches per-round
-    # events. Refresh weekly — round results don't change once played.
+    # D13.2: globalised. RoundOfRegistryFootballResolver expands every
+    # registry-active football (ut, season) pair into (ut, season,
+    # round_number) triples by parsing the cached /rounds snapshot, and
+    # filters to ``round_number < currentRound`` so we never fetch the
+    # round still in progress. Refresh weekly — round results don't
+    # change once played.
     refresh_interval_seconds=7 * 24 * 3600,
     refresh_priority=65,
-    scope_kind="round-of-managed-football-pairs",
+    scope_kind="round-of-registry-football",
     freshness_ttl_seconds=6 * 24 * 3600,
 )
 
@@ -585,12 +587,13 @@ EVENT_H2H_EVENTS_ENDPOINT = SofascoreEndpoint(
     notes=(
         "CustomId-based H2H events feed. Path uses {custom_id} (string) "
         "rather than {event_id} — only endpoint in registry that does so. "
-        "D12: CustomIdOfManagedEventsResolver derives custom_id strings "
-        "from event.custom_id for managed (ut, season) pairs."
+        "D13.2: CustomIdOfRegistryEventsResolver yields custom_id targets "
+        "for every finished football event in the rolling event window "
+        "whose tournament is active+current_enabled in tournament_registry."
     ),
     refresh_interval_seconds=7 * 24 * 3600,
     refresh_priority=70,
-    scope_kind="custom-id-of-managed-events",
+    scope_kind="custom-id-of-registry-events",
     freshness_ttl_seconds=6 * 24 * 3600,
 )
 
@@ -1287,12 +1290,15 @@ UNIQUE_TOURNAMENT_TEAM_OF_THE_WEEK_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/{period_id}",
     envelope_key="formation,players",
     target_table="team_of_the_week",
-    # D12: 2-pass parent→child. PeriodOfManagedPairsResolver reads parsed
-    # `period` table for managed (ut, season) pairs and expands to
-    # (ut, season, period_id) triples so each ToTW slot gets fetched.
+    # D13.2: globalised. PeriodOfRegistryFootballResolver yields (ut,
+    # season, period_id) triples for every registry-active football
+    # league whose `period` table has rows. Combined with the D13.3
+    # Smart-404 blacklist (hash:resource_refresh:totw_season_status) the
+    # planner skips seasons proven not to support ToTW so we don't waste
+    # a request per (ut, season) on the 95% that 404.
     refresh_interval_seconds=14 * 24 * 3600,
     refresh_priority=75,
-    scope_kind="period-of-managed-football-pairs",
+    scope_kind="period-of-registry-football",
     freshness_ttl_seconds=13 * 24 * 3600,
 )
 

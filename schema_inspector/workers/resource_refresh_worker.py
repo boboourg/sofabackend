@@ -30,6 +30,7 @@ from ..jobs.types import JOB_REFRESH_RESOURCE
 from ..queue.empty_data import EmptyDataStore
 from ..queue.pagination_done import PaginationDoneStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
+from ..queue.totw_404_store import ToTW404Store
 from ..queue.streams import (
     GROUP_RESOURCE_REFRESH,
     STREAM_RESOURCE_REFRESH,
@@ -40,6 +41,15 @@ from ..services.worker_runtime import WorkerRuntime, resolve_worker_max_concurre
 from ._stream_jobs import decode_stream_job, encode_stream_job
 
 logger = logging.getLogger(__name__)
+
+# D13.3: hard-coded match for the ToTW endpoint pattern. Kept here as a
+# module constant rather than imported from ``endpoints`` to avoid a
+# circular import (endpoints.py is imported via local_api_endpoints
+# inside the worker constructor). If the ToTW path template changes,
+# update this string in lockstep.
+_TOTW_ENDPOINT_PATTERN = (
+    "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/{period_id}"
+)
 
 
 class ResourceRefreshWorker:
@@ -67,6 +77,8 @@ class ResourceRefreshWorker:
         empty_data_store: EmptyDataStore | None = None,
         empty_predicates: dict[str, Any] | None = None,
         snapshot_reader=None,
+        normalize_publisher=None,
+        totw_404_store: ToTW404Store | None = None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.delayed_scheduler = delayed_scheduler
@@ -81,6 +93,8 @@ class ResourceRefreshWorker:
         self.pagination_done = pagination_done
         self.empty_data_store = empty_data_store
         self.empty_predicates = dict(empty_predicates or DEFAULT_EMPTY_PREDICATES)
+        self._normalize_publisher = normalize_publisher
+        self.totw_404_store = totw_404_store
         # ``snapshot_reader`` is an awaitable callable
         # ``async (snapshot_id: int) -> dict | None`` that returns the
         # decoded payload of a freshly inserted snapshot. Tests inject a
@@ -170,41 +184,85 @@ class ResourceRefreshWorker:
                 endpoint_pattern=pattern,
                 path_params=path_params,
             )
+            # D13.3: Smart-404 by season for /team-of-the-week. A 404 on
+            # any period_id for a (ut, season) pair is a strong signal
+            # that the season does not support ToTW at all — every other
+            # period_id under the same season would also 404. Mark the
+            # season "no" so PeriodOfRegistryFootballResolver skips its
+            # full period list on the next planner tick.
+            if (
+                self.totw_404_store is not None
+                and pattern == _TOTW_ENDPOINT_PATTERN
+            ):
+                ut_id = path_params.get("unique_tournament_id")
+                season_id = path_params.get("season_id")
+                if ut_id is not None and season_id is not None:
+                    try:
+                        self.totw_404_store.mark_no(int(ut_id), int(season_id))
+                    except Exception as exc:
+                        logger.warning(
+                            "totw blacklist mark_no failed ut=%s season=%s: %s",
+                            ut_id, season_id, exc,
+                        )
         elif (
             outcome.http_status == 200
             and outcome.snapshot_id is not None
-            and job.entity_id is not None
         ):
-            # D6: empty-data marker. Some endpoints return 200 with an empty
-            # body for entities that have no data (e.g. last-year-summary
-            # for retired players, national-team-statistics for players
-            # without a national appearance). The negative cache cannot help
-            # because status is 200; we instead inspect the payload through
-            # an endpoint-specific predicate and record the entity in the
-            # EmptyDataStore so the planner can skip re-publishing for the
-            # endpoint's empty_data_ttl_seconds.
-            if (
-                endpoint.empty_predicate is not None
-                and self.empty_data_store is not None
-            ):
-                await self._maybe_mark_empty(
-                    job=job,
-                    pattern=pattern,
-                    snapshot_id=outcome.snapshot_id,
-                    endpoint=endpoint,
-                )
-            if endpoint.auto_paginate:
-                # Stage 8 / C.4 worker-side auto-pagination: chain page=K+1 on
-                # hasNextPage=true, mark completed on hasNextPage=false. Only
-                # runs on a successful fetch with a fresh snapshot row (skipping
-                # dedup'd inserts is fine -- the next planner tick will retry).
-                await self._maybe_chain_next_page(
-                    job=job,
-                    pattern=pattern,
-                    path_params=path_params,
-                    snapshot_id=outcome.snapshot_id,
-                    endpoint=endpoint,
-                )
+            # D13.1: forward the freshly inserted snapshot to the normalize
+            # stream so a worker-side parser populates the durable tables
+            # (season_round, period, ...). Failure of the publish must not
+            # fail the resource-refresh job — the snapshot is already on
+            # disk and can be replayed via ``replay --snapshot-id`` if
+            # needed.
+            if self._normalize_publisher is not None:
+                try:
+                    self._normalize_publisher(
+                        snapshot_id=int(outcome.snapshot_id),
+                        endpoint_pattern=pattern,
+                        sport_slug=str(job.sport_slug or ""),
+                        trace_id=job.trace_id,
+                        parent_job_id=job.job_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "normalize publish failed pattern=%s snapshot_id=%s: %s",
+                        pattern,
+                        outcome.snapshot_id,
+                        exc,
+                    )
+            if job.entity_id is not None:
+                # D6: empty-data marker. Some endpoints return 200 with an
+                # empty body for entities that have no data (e.g.
+                # last-year-summary for retired players,
+                # national-team-statistics for players without a national
+                # appearance). The negative cache cannot help because
+                # status is 200; we instead inspect the payload through
+                # an endpoint-specific predicate and record the entity in
+                # the EmptyDataStore so the planner can skip re-publishing
+                # for the endpoint's empty_data_ttl_seconds.
+                if (
+                    endpoint.empty_predicate is not None
+                    and self.empty_data_store is not None
+                ):
+                    await self._maybe_mark_empty(
+                        job=job,
+                        pattern=pattern,
+                        snapshot_id=outcome.snapshot_id,
+                        endpoint=endpoint,
+                    )
+                if endpoint.auto_paginate:
+                    # Stage 8 / C.4 worker-side auto-pagination: chain
+                    # page=K+1 on hasNextPage=true, mark completed on
+                    # hasNextPage=false. Only runs on a successful fetch
+                    # with a fresh snapshot row (skipping dedup'd inserts
+                    # is fine -- the next planner tick will retry).
+                    await self._maybe_chain_next_page(
+                        job=job,
+                        pattern=pattern,
+                        path_params=path_params,
+                        snapshot_id=outcome.snapshot_id,
+                        endpoint=endpoint,
+                    )
         return "completed"
 
     async def _maybe_mark_empty(

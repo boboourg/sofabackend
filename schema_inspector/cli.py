@@ -1207,6 +1207,13 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "worker-normalize":
+                service_app = ServiceApp(app)
+                await service_app.run_normalize_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
             if args.command == "worker-historical-enrichment":
                 service_app = ServiceApp(app)
                 await service_app.run_historical_enrichment_worker(
@@ -1494,6 +1501,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Redis consumer name for the resource-refresh worker.",
     )
     worker_resource_refresh.add_argument(
+        "--block-ms",
+        type=int,
+        default=5000,
+        help="XREADGROUP block timeout in milliseconds.",
+    )
+
+    worker_normalize = subparsers.add_parser(
+        "worker-normalize",
+        help="Run the normalize consumer group loop (stream:etl:normalize).",
+    )
+    worker_normalize.add_argument(
+        "--consumer-name",
+        default="worker-normalize-1",
+        help="Redis consumer name for the normalize worker.",
+    )
+    worker_normalize.add_argument(
         "--block-ms",
         type=int,
         default=5000,

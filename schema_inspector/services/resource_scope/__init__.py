@@ -12,6 +12,7 @@ small resolver classes.
 
 from .base import ResourceTarget, ScopeResolver
 from .custom_id_of_managed_events import CustomIdOfManagedEventsResolver
+from .custom_id_of_registry_events import CustomIdOfRegistryEventsResolver
 from .event_of_finished_baseball import EventOfFinishedBaseballResolver
 from .managed import ManagedScopeResolver
 from .managed_football_pairs import (
@@ -20,10 +21,12 @@ from .managed_football_pairs import (
     parse_managed_pairs,
 )
 from .period_of_managed_pairs import PeriodOfManagedPairsResolver
+from .period_of_registry_football import PeriodOfRegistryFootballResolver
 from .player_of_active_squad import PlayerOfActiveSquadResolver
 from .player_of_active_squad_first_page import PlayerOfActiveSquadFirstPageResolver
 from .player_of_national_team_history import PlayerOfNationalTeamHistoryResolver
 from .round_of_managed_pairs import RoundOfManagedPairsResolver
+from .round_of_registry_football import RoundOfRegistryFootballResolver
 from .season_of_active_ut import (
     SeasonOfActiveUTBaseResolver,
     SeasonOfActiveUTEventsResolver,
@@ -39,14 +42,17 @@ __all__ = [
     "ResourceTarget",
     "ScopeResolver",
     "CustomIdOfManagedEventsResolver",
+    "CustomIdOfRegistryEventsResolver",
     "EventOfFinishedBaseballResolver",
     "ManagedScopeResolver",
     "MANAGED_FOOTBALL_PAIRS_ENV_KEY",
     "PeriodOfManagedPairsResolver",
+    "PeriodOfRegistryFootballResolver",
     "PlayerOfActiveSquadResolver",
     "PlayerOfActiveSquadFirstPageResolver",
     "PlayerOfNationalTeamHistoryResolver",
     "RoundOfManagedPairsResolver",
+    "RoundOfRegistryFootballResolver",
     "SeasonOfActiveUTBaseResolver",
     "SeasonOfActiveUTEventsResolver",
     "SeasonOfActiveUTStandingsResolver",

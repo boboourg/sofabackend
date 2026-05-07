@@ -27,9 +27,11 @@ from ..queue.streams import (
     GROUP_LIVE_TIER_2,
     GROUP_LIVE_TIER_3,
     GROUP_LIVE_WARM,
+    GROUP_NORMALIZE,
     GROUP_RESOURCE_REFRESH,
     GROUP_STRUCTURE_SYNC,
     HISTORICAL_CONSUMER_GROUPS,
+    NORMALIZE_CONSUMER_GROUPS,
     OPERATIONAL_CONSUMER_GROUPS,
     RESOURCE_REFRESH_CONSUMER_GROUPS,
     STREAM_DISCOVERY,
@@ -46,6 +48,7 @@ from ..queue.streams import (
     STREAM_LIVE_TIER_3,
     STREAM_LIVE_WARM,
     STREAM_MAINTENANCE,
+    STREAM_NORMALIZE,
     STREAM_RESOURCE_REFRESH,
     STREAM_STRUCTURE_SYNC,
     STRUCTURE_CONSUMER_GROUPS,
@@ -56,6 +59,7 @@ from ..queue.empty_data import EmptyDataStore
 from ..queue.pagination_done import PaginationDoneStore
 from ..queue.resource_cursor import ResourceCursorStore
 from ..queue.resource_negative_cache import ResourceNegativeCache
+from ..queue.totw_404_store import ToTW404Store
 from ..sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
 from ..ops.health import fetch_live_snapshot_repair_reasons
 from .backpressure import BackpressureLimit, QueueBackpressure
@@ -92,13 +96,16 @@ from .historical_tournament_planner import (
 from .resource_planner import ResourcePlannerDaemon
 from .resource_scope import (
     CustomIdOfManagedEventsResolver,
+    CustomIdOfRegistryEventsResolver,
     EventOfFinishedBaseballResolver,
     ManagedScopeResolver,
     PeriodOfManagedPairsResolver,
+    PeriodOfRegistryFootballResolver,
     PlayerOfActiveSquadFirstPageResolver,
     PlayerOfActiveSquadResolver,
     PlayerOfNationalTeamHistoryResolver,
     RoundOfManagedPairsResolver,
+    RoundOfRegistryFootballResolver,
     SeasonOfActiveUTBaseResolver,
     SeasonOfActiveUTEventsResolver,
     SeasonOfActiveUTStandingsResolver,
@@ -128,6 +135,7 @@ from ..workers.historical_archive_worker import HistoricalEnrichmentWorker, Hist
 from ..workers.live_worker_service import LiveWorkerService
 from ..workers.maintenance_worker import MaintenanceWorker
 from ..workers.maintenance_worker import ReclaimTarget
+from ..workers.normalize_stream_worker import NormalizeStreamWorker
 from ..workers.resource_refresh_worker import ResourceRefreshWorker
 from ..workers.structure_worker import StructureSyncWorker
 
@@ -230,6 +238,7 @@ class ServiceApp:
         self.resource_negative_cache = ResourceNegativeCache(self.app.redis_backend)
         self.pagination_done_store = PaginationDoneStore(self.app.redis_backend)
         self.empty_data_store = EmptyDataStore(self.app.redis_backend)
+        self.totw_404_store = ToTW404Store(self.app.redis_backend)
         database = getattr(self.app, "database", None)
         self.job_audit_logger = None if database is None else JobAuditLogger(database=database)
 
@@ -247,6 +256,10 @@ class ServiceApp:
 
     def ensure_resource_refresh_consumer_groups(self) -> None:
         for stream, group in RESOURCE_REFRESH_CONSUMER_GROUPS:
+            self.stream_queue.ensure_group(stream, group)
+
+    def ensure_normalize_consumer_groups(self) -> None:
+        for stream, group in NORMALIZE_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
 
     def build_planner_daemon(
@@ -708,11 +721,9 @@ class ServiceApp:
             # D12 parent→child fan-out for managed football leagues.
             # All three resolvers gate on the same managed env list
             # (SCHEMA_INSPECTOR_FORCE_TOP_FOOTBALL_LEAGUES). Empty env
-            # = empty scope (safe default). Each resolver derives child
-            # ids from upstream-parent data already on disk:
-            #   - rounds:    parses /rounds snapshot JSON directly
-            #   - periods:   reads parsed `period` table
-            #   - custom_id: reads `event.custom_id`
+            # = empty scope (safe default). Kept registered so an
+            # operator can revert a single endpoint to the env-gated
+            # variant via scope_kind without redeploying the planner.
             RoundOfManagedPairsResolver.kind: RoundOfManagedPairsResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
@@ -722,6 +733,24 @@ class ServiceApp:
                 redis_backend=self.app.redis_backend,
             ),
             CustomIdOfManagedEventsResolver.kind: CustomIdOfManagedEventsResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            # D13.2 globalised parent→child fan-out for ALL active
+            # football leagues (registry-driven, no env gating). These
+            # are the resolvers active endpoints actually point at as of
+            # D13.2; the D12 managed variants above are kept registered
+            # only as an emergency-revert lever.
+            RoundOfRegistryFootballResolver.kind: RoundOfRegistryFootballResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            PeriodOfRegistryFootballResolver.kind: PeriodOfRegistryFootballResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+                totw_404_store=self.totw_404_store,
+            ),
+            CustomIdOfRegistryEventsResolver.kind: CustomIdOfRegistryEventsResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
             ),
@@ -801,6 +830,46 @@ class ServiceApp:
                     return None
             return payload
 
+        # D13.1: bridge fetch → normalize. The publisher pushes a
+        # ``JOB_NORMALIZE_SNAPSHOT`` envelope onto ``stream:etl:normalize``
+        # for every successfully inserted snapshot so the parser registry
+        # can populate downstream durable tables (season_round, period,
+        # ...). Best-effort: failures are logged inside the worker and
+        # do not fail the underlying fetch job.
+        from ..jobs.envelope import JobEnvelope
+        from ..jobs.types import JOB_NORMALIZE_SNAPSHOT
+        from ..workers._stream_jobs import encode_stream_job
+
+        # Make sure the consumer group exists so freshly published
+        # envelopes are not dropped on the floor before the first
+        # ``worker-normalize`` instance starts.
+        self.ensure_normalize_consumer_groups()
+
+        def _normalize_publisher(
+            *,
+            snapshot_id: int,
+            endpoint_pattern: str,
+            sport_slug: str = "",
+            trace_id: str | None = None,
+            parent_job_id: str | None = None,
+        ) -> None:
+            envelope = JobEnvelope.create(
+                job_type=JOB_NORMALIZE_SNAPSHOT,
+                sport_slug=sport_slug,
+                entity_type=None,
+                entity_id=None,
+                scope="normalize",
+                params={
+                    "snapshot_id": int(snapshot_id),
+                    "endpoint_pattern": str(endpoint_pattern or ""),
+                },
+                priority=0,
+                trace_id=trace_id,
+                capability_hint="normalize",
+                parent_job_id=parent_job_id,
+            )
+            self.stream_queue.publish(STREAM_NORMALIZE, encode_stream_job(envelope))
+
         return ResourceRefreshWorker(
             fetch_executor=executor,
             delayed_scheduler=self.delayed_scheduler,
@@ -815,6 +884,33 @@ class ServiceApp:
             pagination_done=self.pagination_done_store,
             empty_data_store=self.empty_data_store,
             snapshot_reader=_snapshot_reader,
+            normalize_publisher=_normalize_publisher,
+            totw_404_store=self.totw_404_store,
+        )
+
+    def build_normalize_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+    ) -> NormalizeStreamWorker:
+        """Build the stream consumer that turns raw snapshots into normalized rows."""
+
+        from ..parsers.registry import ParserRegistry
+
+        self.ensure_normalize_consumer_groups()
+        return NormalizeStreamWorker(
+            database=self.app.database,
+            raw_repository=self.app.raw_repository,
+            normalize_repository=self.app.normalize_repository,
+            parser_registry=ParserRegistry.default(),
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
         )
 
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
@@ -1204,6 +1300,18 @@ class ServiceApp:
         block_ms: int = 5_000,
     ) -> None:
         worker = self.build_resource_refresh_worker(
+            consumer_name=consumer_name,
+            block_ms=block_ms,
+        )
+        await worker.run_forever()
+
+    async def run_normalize_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+    ) -> None:
+        worker = self.build_normalize_worker(
             consumer_name=consumer_name,
             block_ms=block_ms,
         )
