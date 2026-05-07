@@ -91,11 +91,14 @@ from .historical_tournament_planner import (
 )
 from .resource_planner import ResourcePlannerDaemon
 from .resource_scope import (
+    CustomIdOfManagedEventsResolver,
     EventOfFinishedBaseballResolver,
     ManagedScopeResolver,
+    PeriodOfManagedPairsResolver,
     PlayerOfActiveSquadFirstPageResolver,
     PlayerOfActiveSquadResolver,
     PlayerOfNationalTeamHistoryResolver,
+    RoundOfManagedPairsResolver,
     SeasonOfActiveUTBaseResolver,
     SeasonOfActiveUTEventsResolver,
     SeasonOfActiveUTStandingsResolver,
@@ -699,6 +702,26 @@ class ServiceApp:
             # 200 for cups). The 4xx is absorbed by ResourceNegativeCache
             # so league UTs only contribute one wasted request per 7 days.
             SeasonOfRegistryUTResolver.kind: SeasonOfRegistryUTResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            # D12 parent→child fan-out for managed football leagues.
+            # All three resolvers gate on the same managed env list
+            # (SCHEMA_INSPECTOR_FORCE_TOP_FOOTBALL_LEAGUES). Empty env
+            # = empty scope (safe default). Each resolver derives child
+            # ids from upstream-parent data already on disk:
+            #   - rounds:    parses /rounds snapshot JSON directly
+            #   - periods:   reads parsed `period` table
+            #   - custom_id: reads `event.custom_id`
+            RoundOfManagedPairsResolver.kind: RoundOfManagedPairsResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            PeriodOfManagedPairsResolver.kind: PeriodOfManagedPairsResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            CustomIdOfManagedEventsResolver.kind: CustomIdOfManagedEventsResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
             ),

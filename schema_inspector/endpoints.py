@@ -284,6 +284,14 @@ UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}",
     envelope_key="events",
     target_table="event",
+    # D12: 2-pass parent→child. RoundOfManagedPairsResolver expands each
+    # managed (ut, season) pair to (ut, season, round_number) triples by
+    # parsing /rounds snapshot JSON, then this endpoint fetches per-round
+    # events. Refresh weekly — round results don't change once played.
+    refresh_interval_seconds=7 * 24 * 3600,
+    refresh_priority=65,
+    scope_kind="round-of-managed-football-pairs",
+    freshness_ttl_seconds=6 * 24 * 3600,
 )
 
 UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT = SofascoreEndpoint(
@@ -574,7 +582,16 @@ EVENT_H2H_EVENTS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/event/{custom_id}/h2h/events",
     envelope_key="events",
     target_table="api_payload_snapshot",
-    notes="CustomId-based H2H events feed used by football match center surfaces.",
+    notes=(
+        "CustomId-based H2H events feed. Path uses {custom_id} (string) "
+        "rather than {event_id} — only endpoint in registry that does so. "
+        "D12: CustomIdOfManagedEventsResolver derives custom_id strings "
+        "from event.custom_id for managed (ut, season) pairs."
+    ),
+    refresh_interval_seconds=7 * 24 * 3600,
+    refresh_priority=70,
+    scope_kind="custom-id-of-managed-events",
+    freshness_ttl_seconds=6 * 24 * 3600,
 )
 
 EVENT_PREGAME_FORM_ENDPOINT = SofascoreEndpoint(
@@ -1270,6 +1287,13 @@ UNIQUE_TOURNAMENT_TEAM_OF_THE_WEEK_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/team-of-the-week/{period_id}",
     envelope_key="formation,players",
     target_table="team_of_the_week",
+    # D12: 2-pass parent→child. PeriodOfManagedPairsResolver reads parsed
+    # `period` table for managed (ut, season) pairs and expands to
+    # (ut, season, period_id) triples so each ToTW slot gets fetched.
+    refresh_interval_seconds=14 * 24 * 3600,
+    refresh_priority=75,
+    scope_kind="period-of-managed-football-pairs",
+    freshness_ttl_seconds=13 * 24 * 3600,
 )
 
 UNIQUE_TOURNAMENT_PLAYER_STATISTICS_TYPES_ENDPOINT = SofascoreEndpoint(
