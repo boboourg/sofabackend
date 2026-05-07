@@ -908,6 +908,14 @@ PLAYER_STATISTICS_SEASONS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/player/{player_id}/statistics/seasons",
     envelope_key="uniqueTournamentSeasons,typesMap",
     target_table="entity_statistics_season",
+    # D9: opt into Resource Refresh Loop. Was previously fed only by the
+    # legacy structure-sync path so coverage was sparse (697 snapshots
+    # vs 51k active players). Same active-squad scope as /statistics so
+    # any player on a recently-fetched team roster gets auto-refreshed.
+    refresh_interval_seconds=7 * 24 * 3600,
+    refresh_priority=60,
+    scope_kind="player-of-active-squad",
+    freshness_ttl_seconds=6 * 24 * 3600,
 )
 
 PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT = SofascoreEndpoint(
