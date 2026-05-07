@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,16 @@ from ..services.housekeeping import HousekeepingConfig
 from ..sport_profiles import resolve_sport_profile
 from ..source_priority import SOURCE_PRIORITY
 from .queue_summary import QueueSummary, collect_queue_summary
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 @dataclass(frozen=True)
@@ -123,7 +134,12 @@ class HealthReport:
 
 
 _SNAPSHOT_FRESHNESS_MAX_AGE_SECONDS = 300
-_HISTORICAL_ENRICHMENT_GO_LIVE_MAX_LAG = 1000
+# Default 1000 historically; env override allows ops to raise the gate to a
+# realistic value without touching code (live-first prioritization means the
+# enrichment lane intentionally drifts behind during peak hours).
+_HISTORICAL_ENRICHMENT_GO_LIVE_MAX_LAG = _env_int(
+    "HISTORICAL_ENRICHMENT_GO_LIVE_MAX_LAG", 1000
+)
 _HISTORICAL_RETRY_SHARE_MAX = 0.01
 _LIVE_SNAPSHOT_TERMINAL_GRACE_SECONDS = 30
 
