@@ -177,7 +177,7 @@ class EndpointRegistryTests(unittest.TestCase):
         )
 
         cases = [
-            (EVENT_BASEBALL_AT_BATS_ENDPOINT, "event-of-finished-baseball", 365 * 24 * 3600),
+            (EVENT_BASEBALL_AT_BATS_ENDPOINT, "event-of-active-baseball", 10 * 60),
             (TEAM_SEASON_GOAL_DISTRIBUTIONS_ENDPOINT, "team-of-active-ut-season", 24 * 3600),
             (PLAYER_STATISTICS_MATCH_TYPE_OVERALL_ENDPOINT, "player-of-active-squad", 24 * 3600),
             (PLAYER_NATIONAL_TEAM_STATISTICS_ENDPOINT, "player-of-national-team-history", 7 * 24 * 3600),
@@ -208,7 +208,7 @@ class EndpointRegistryTests(unittest.TestCase):
         # All three must be present and distinct.
         self.assertEqual(len(kinds), 3)
         self.assertIn("team-of-active-ut-season", kinds)
-        self.assertIn("event-of-finished-baseball", kinds)
+        self.assertIn("event-of-active-baseball", kinds)
         self.assertIn("player-of-national-team-history", kinds)
 
 

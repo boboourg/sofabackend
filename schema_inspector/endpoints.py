@@ -645,20 +645,20 @@ EVENT_BASEBALL_AT_BATS_ENDPOINT = SofascoreEndpoint(
     target_table="api_payload_snapshot",
     notes=(
         "Baseball game at-bats list; parent of /atbat/{at_bat_id}/pitches. Raw passthrough. "
-        "Pre-D2 probe: 200 OK for both finished (status=100) AND inprogress baseball events; "
-        "live payload updates as the game progresses. The Resource Refresh scope below intentionally "
-        "covers only finished events — live at-bats updates are out of scope for the refresh loop and "
-        "would belong to a separate live-tier ingest if ever needed."
+        "Pre-D2 probe: 200 OK for both finished (status_code=100/110) AND inprogress baseball "
+        "events (status_code=23/24/29/30 — innings/pause); the live payload grows as the game "
+        "progresses. Scope covers BOTH finished and live games. Refresh interval is 10 minutes "
+        "so live games get sub-10-minute lag; finished games are deduped by FreshnessStore until "
+        "they drop out of the rolling baseball window."
     ),
-    # D2: at-bats freezes once the game ends. Planner cycle is intentionally
-    # slow (1 year) — combined with a freshness_ttl just under that window
-    # this produces effectively a one-shot fetch per finished event for the
-    # lifetime of the rolling baseball window. Priority is low so it never
-    # competes with active football/player refresh capacity.
-    refresh_interval_seconds=365 * 24 * 3600,
-    refresh_priority=70,
-    scope_kind="event-of-finished-baseball",
-    freshness_ttl_seconds=350 * 24 * 3600,
+    # D7: refresh every 10 min, freshness_ttl 8 min so a duplicate publish
+    # within the same window gets dedup'd. For finished events the snapshot
+    # is stable -> FreshnessStore blocks; for live events the snapshot
+    # legitimately changes between refreshes.
+    refresh_interval_seconds=10 * 60,
+    refresh_priority=55,
+    scope_kind="event-of-active-baseball",
+    freshness_ttl_seconds=8 * 60,
 )
 
 EVENT_BASEBALL_PITCHES_ENDPOINT = SofascoreEndpoint(

@@ -5,6 +5,7 @@ import json
 import unittest
 
 from schema_inspector.services.resource_scope.event_of_finished_baseball import (
+    BASEBALL_ACTIVE_STATUS_CODES,
     BASEBALL_FINISHED_STATUS_CODE,
     CACHE_KEY,
     DEFAULT_CACHE_TTL_SECONDS,
@@ -63,10 +64,14 @@ def _resolve(resolver: EventOfFinishedBaseballResolver):
 
 class EventOfFinishedBaseballResolverTests(unittest.TestCase):
     def test_kind_matches_endpoint_metadata(self) -> None:
-        self.assertEqual(EventOfFinishedBaseballResolver.kind, "event-of-finished-baseball")
+        # D7: covers both finished and live baseball events, hence the rename.
+        self.assertEqual(EventOfFinishedBaseballResolver.kind, "event-of-active-baseball")
 
-    def test_finished_status_code_is_sofascore_constant(self) -> None:
-        # Sofascore returns status_code=100 for finished events.
+    def test_active_status_codes_cover_finished_and_inprogress(self) -> None:
+        # 100/110 = finished/AET; 23/24/29 = innings; 30 = inter-inning pause.
+        self.assertEqual(BASEBALL_ACTIVE_STATUS_CODES, (100, 110, 23, 24, 29, 30))
+        # The deprecated alias keeps its historical value so any external
+        # importer continues to compile.
         self.assertEqual(BASEBALL_FINISHED_STATUS_CODE, 100)
 
     def test_defaults_match_documented_values(self) -> None:
@@ -96,7 +101,7 @@ class EventOfFinishedBaseballResolverTests(unittest.TestCase):
         self.assertEqual(json.loads(cached_value), [15501356, 16070184])
         self.assertEqual(ex, DEFAULT_CACHE_TTL_SECONDS)
 
-    def test_sql_params_include_finished_status_window_and_limit(self) -> None:
+    def test_sql_params_include_active_status_window_and_limit(self) -> None:
         rows = [{"event_id": 1}]
         database = _FakeDatabase(rows)
         resolver = EventOfFinishedBaseballResolver(database=database, redis_backend=None, env={})
@@ -104,9 +109,11 @@ class EventOfFinishedBaseballResolverTests(unittest.TestCase):
         _resolve(resolver)
 
         sql_args = database._connection.fetch_calls[0][1]
+        # SQL now passes ``status_code = ANY($1::int[])`` with the full
+        # active-statuses tuple in $1.
         self.assertEqual(
             sql_args,
-            (BASEBALL_FINISHED_STATUS_CODE, DEFAULT_WINDOW_DAYS * 86_400, DEFAULT_LIMIT),
+            (list(BASEBALL_ACTIVE_STATUS_CODES), DEFAULT_WINDOW_DAYS * 86_400, DEFAULT_LIMIT),
         )
 
     def test_uses_cache_on_second_call_without_db(self) -> None:

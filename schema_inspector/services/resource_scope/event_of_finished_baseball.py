@@ -1,15 +1,20 @@
-"""``EventOfFinishedBaseballResolver`` — finished baseball events for /at-bats refresh.
+"""``EventOfFinishedBaseballResolver`` — active baseball events for /at-bats refresh.
 
-Stage D2 scope: baseball events with ``status_code = 100`` (finished) whose
-``start_timestamp`` falls inside the configured rolling window. The
-``/api/v1/event/{event_id}/at-bats`` payload is one-shot in nature — once
-the game ends, the at-bats list is frozen. We still re-publish via the
-refresh planner periodically (default once per year per event) so a
-late-arriving correction from upstream can be picked up.
+Despite the historical class name (kept for git-blame continuity), the
+resolver now covers BOTH finished and inprogress baseball events. Sofascore
+returns 200 with a live-updating ``atBats`` array even mid-game (probe
+established this for status_code 23/24/29 — innings — and 30 — pause), so
+the Resource Refresh Loop picks them up and re-fetches every refresh
+interval. Once the game ends (status_code 100/110), the payload freezes
+and subsequent refreshes get deduped by the FreshnessStore until the
+event drops out of the rolling window.
 
-Combined with the endpoint's ``freshness_ttl_seconds`` (350 days) this
-produces effectively a single fetch per event for the lifetime of the
-event in this rolling window.
+Status codes covered:
+
+* 100 — Ended
+* 110 — AET (extra-inning finish)
+* 23, 24, 29 — Inning N (live)
+* 30 — Pause (live, between innings)
 
 Configuration::
 
@@ -33,6 +38,12 @@ DEFAULT_WINDOW_DAYS = 30
 DEFAULT_LIMIT = 20_000
 DEFAULT_CACHE_TTL_SECONDS = 1800
 CACHE_KEY = "set:resource_refresh:event_finished_baseball"
+# Status codes the resolver picks up. 100/110 are finished; 23/24/29 are
+# in-progress innings (Sofascore exposes one code per inning); 30 is the
+# inter-inning pause. Live games surface here so /at-bats refreshes during
+# the match and not just after the final out.
+BASEBALL_ACTIVE_STATUS_CODES: tuple[int, ...] = (100, 110, 23, 24, 29, 30)
+# Deprecated alias kept for any external import path; do not rely on it.
 BASEBALL_FINISHED_STATUS_CODE = 100
 
 WINDOW_ENV_KEY = "SCHEMA_INSPECTOR_RESOURCE_BASEBALL_FINISHED_WINDOW_DAYS"
@@ -41,9 +52,9 @@ CACHE_TTL_ENV_KEY = "SCHEMA_INSPECTOR_RESOURCE_BASEBALL_FINISHED_CACHE_TTL_SECON
 
 
 class EventOfFinishedBaseballResolver:
-    """Resolve finished baseball events from a rolling window, cached in Redis."""
+    """Resolve active (finished + live) baseball events, cached in Redis."""
 
-    kind = "event-of-finished-baseball"
+    kind = "event-of-active-baseball"
 
     def __init__(
         self,
@@ -98,7 +109,7 @@ class EventOfFinishedBaseballResolver:
         JOIN category c ON c.id = ut.category_id
         JOIN sport sp ON sp.id = c.sport_id
         WHERE sp.slug = 'baseball'
-          AND e.status_code = $1::int
+          AND e.status_code = ANY($1::int[])
           AND e.start_timestamp IS NOT NULL
           AND e.start_timestamp >= EXTRACT(EPOCH FROM now())::bigint - $2::bigint
         ORDER BY e.start_timestamp DESC
@@ -107,16 +118,17 @@ class EventOfFinishedBaseballResolver:
         async with self.database.connection() as connection:
             rows = await connection.fetch(
                 sql,
-                int(BASEBALL_FINISHED_STATUS_CODE),
+                list(BASEBALL_ACTIVE_STATUS_CODES),
                 int(cutoff_seconds),
                 int(self.limit),
             )
         event_ids = tuple(int(row["event_id"]) for row in rows if row["event_id"] is not None)
         logger.info(
-            "EventOfFinishedBaseballResolver: %s events (window=%sd, limit=%s)",
+            "EventOfFinishedBaseballResolver: %s events (window=%sd, limit=%s, statuses=%s)",
             len(event_ids),
             self.window_days,
             self.limit,
+            BASEBALL_ACTIVE_STATUS_CODES,
         )
         return event_ids
 
@@ -163,4 +175,9 @@ def _positive_int(raw: object, default: int) -> int:
     return value if value > 0 else default
 
 
-__all__ = ["EventOfFinishedBaseballResolver", "CACHE_KEY", "BASEBALL_FINISHED_STATUS_CODE"]
+__all__ = [
+    "EventOfFinishedBaseballResolver",
+    "CACHE_KEY",
+    "BASEBALL_ACTIVE_STATUS_CODES",
+    "BASEBALL_FINISHED_STATUS_CODE",
+]
