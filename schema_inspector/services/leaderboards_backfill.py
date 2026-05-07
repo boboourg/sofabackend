@@ -186,6 +186,7 @@ async def _find_pos_missing_pairs(
         FROM event e
         WHERE e.unique_tournament_id IN (SELECT unique_tournament_id FROM top_uts)
           AND e.start_timestamp IS NOT NULL
+          AND e.season_id IS NOT NULL
         GROUP BY 1, 2
         HAVING max(e.start_timestamp) <
                  EXTRACT(EPOCH FROM now())::bigint - $3::bigint
@@ -231,6 +232,7 @@ async def _find_overall_missing_pairs(
         FROM event e
         WHERE e.unique_tournament_id IN (SELECT unique_tournament_id FROM top_uts)
           AND e.start_timestamp IS NOT NULL
+          AND e.season_id IS NOT NULL
         GROUP BY 1, 2
         HAVING max(e.start_timestamp) <
                  EXTRACT(EPOCH FROM now())::bigint - $3::bigint
@@ -277,6 +279,7 @@ async def _find_regular_season_pairs(
         SELECT DISTINCT unique_tournament_id AS ut, season_id AS s
         FROM event
         WHERE unique_tournament_id = ANY($1::bigint[])
+          AND unique_tournament_id IS NOT NULL
           AND season_id IS NOT NULL
           AND start_timestamp IS NOT NULL
           AND start_timestamp > EXTRACT(EPOCH FROM now())::bigint - $2::bigint
