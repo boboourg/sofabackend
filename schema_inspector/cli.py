@@ -1214,6 +1214,30 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "sync-sportradar-coverage":
+                from pathlib import Path as _Path
+                from .services.sportradar_sync import run_sportradar_sync
+                report = await run_sportradar_sync(
+                    database=app.database,
+                    xlsx_path=_Path(args.xlsx),
+                    manual_overrides_path=_Path(args.overrides) if args.overrides else None,
+                    sport_slug=args.sport_slug,
+                )
+                d = report.as_dict()
+                print(
+                    "sportradar_sync "
+                    f"sport={d['sport_slug']} "
+                    f"total={d['total_rows']} "
+                    f"blind_id={d['by_method']['blind_id']} "
+                    f"name_match={d['by_method']['name_match']} "
+                    f"manual={d['by_method']['manual']} "
+                    f"unmatched={d['by_method']['unmatched']} "
+                    f"upserts_ok={d['upserts_succeeded']} "
+                    f"upserts_failed={d['upserts_failed']}"
+                )
+                if d["errors_sample"]:
+                    print(f"errors_sample: {d['errors_sample']}")
+                return 0
             if args.command == "backfill-leaderboards":
                 from .services.leaderboards_backfill import run_leaderboards_backfill
 
@@ -1542,6 +1566,27 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5000,
         help="XREADGROUP block timeout in milliseconds.",
+    )
+
+    sync_sportradar = subparsers.add_parser(
+        "sync-sportradar-coverage",
+        help=(
+            "P3.2: load Sportradar coverage matrix xlsx, reconcile sr_competition_id "
+            "to unique_tournament_id (blind_id / name_match / manual override / "
+            "unmatched), and upsert into sportradar_coverage table."
+        ),
+    )
+    sync_sportradar.add_argument(
+        "--xlsx", required=True,
+        help="Path to Sportradar coverage matrix xlsx export (e.g. footballmatrix.xlsx).",
+    )
+    sync_sportradar.add_argument(
+        "--overrides", default="config/sportradar_id_overrides.yaml",
+        help="Manual ID-override YAML (default: config/sportradar_id_overrides.yaml).",
+    )
+    sync_sportradar.add_argument(
+        "--sport-slug", default="football",
+        help="Sport slug; xlsx file must match this sport (default football).",
     )
 
     backfill_leaderboards = subparsers.add_parser(
