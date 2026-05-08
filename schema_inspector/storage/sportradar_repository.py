@@ -13,9 +13,37 @@ DB connection to satisfy that protocol.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
+
+
+def _coerce_timestamptz(value: Any) -> _dt.datetime | None:
+    """Best-effort conversion to timezone-aware datetime for asyncpg.
+
+    asyncpg's binary protocol requires datetime instances for TIMESTAMPTZ
+    columns; ISO-format strings (which arrive from JSON / config / CLI) need
+    explicit parsing first.
+    """
+    if value is None or isinstance(value, _dt.datetime):
+        if isinstance(value, _dt.datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=_dt.timezone.utc)
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # fromisoformat handles e.g. "2026-05-08T15:13:18.258121+00:00"
+        # Python 3.11+ also handles trailing "Z".
+        try:
+            parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        return parsed
+    return None
 
 
 class SqlExecutor(Protocol):
@@ -59,7 +87,7 @@ class SportradarCoverageRepository:
                 synced_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10,
-                CAST($11 AS TIMESTAMPTZ), CAST($12 AS TIMESTAMPTZ), now()
+                $11, $12, now()
             )
             ON CONFLICT (sr_competition_id) DO UPDATE SET
                 sr_competition_name = EXCLUDED.sr_competition_name,
@@ -85,8 +113,8 @@ class SportradarCoverageRepository:
             json.dumps(dict(record.coverage_attrs)),
             record.tier,
             record.season_id,
-            record.season_start_date,
-            record.last_changed,
+            _coerce_timestamptz(record.season_start_date),
+            _coerce_timestamptz(record.last_changed),
         )
 
     async def fetch_coverage_for_ut(
