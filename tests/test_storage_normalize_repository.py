@@ -212,6 +212,55 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event (" in sql)
         self.assertEqual(event_rows[0][8], 100)
 
+    async def test_event_upsert_status_code_has_terminal_state_monotonic_guard(self) -> None:
+        """F-8 P0: lock the SQL shape so the terminal-state monotonic guard
+        on event.status_code can't be silently removed in a future refactor.
+
+        Without this guard, a delayed-insert snapshot whose payload says
+        "1st half/inprogress" can overwrite a finished match's status_code
+        — see the 14083568 audit (terminal_state.finalized_at recorded but
+        event.status_code regressed back to 6 after a stale snapshot was
+        normalized hours later)."""
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=999_001,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 14083568,
+                        "slug": "guard-shape",
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "status_code": 6,
+                        "start_timestamp": 1_800_000_000,
+                    },
+                ),
+            },
+        )
+
+        await NormalizeRepository().persist_parse_result(executor, result)
+
+        event_upsert_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO event (" in sql
+        )
+        # Guard fragments — collapsing whitespace so multi-line CASE matches.
+        normalized = " ".join(event_upsert_sql.split())
+        self.assertIn("status_code = CASE", normalized)
+        self.assertIn("FROM event_terminal_state", normalized)
+        self.assertIn("ets.event_id = event.id", normalized)
+        # Terminal status types lifted from planner/live.py::TERMINAL_STATUS_TYPES.
+        for terminal_type in ("'finished'", "'afterextra'", "'afterpen'", "'cancelled'", "'canceled'", "'postponed'"):
+            self.assertIn(terminal_type, normalized)
+        # Fall-through preserves prior NULL-fallback semantics.
+        self.assertIn("COALESCE(EXCLUDED.status_code, event.status_code)", normalized)
+
     async def test_repository_sorts_detail_batch_rows_lexicographically(self) -> None:
         repository = NormalizeRepository()
         executor = _FakeExecutor()

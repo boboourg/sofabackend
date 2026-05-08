@@ -865,7 +865,31 @@ class NormalizeRepository:
                     home_team_id = COALESCE(EXCLUDED.home_team_id, event.home_team_id),
                     away_team_id = COALESCE(EXCLUDED.away_team_id, event.away_team_id),
                     venue_id = COALESCE(EXCLUDED.venue_id, event.venue_id),
-                    status_code = COALESCE(EXCLUDED.status_code, event.status_code),
+                    -- F-8 P0 monotonic guard: never downgrade status_code once
+                    -- the event has been recorded as terminal in
+                    -- event_terminal_state. Without this, a delayed-insert
+                    -- snapshot (id newer than the finalize snapshot but
+                    -- fetched_at older — see the 14083568 audit) can flip
+                    -- a finished match back to "1st half"/"inprogress" and
+                    -- cause the live worker to re-bootstrap polling.
+                    -- Terminal statuses lifted from
+                    -- schema_inspector/planner/live.py::TERMINAL_STATUS_TYPES.
+                    status_code = CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM event_terminal_state ets
+                            WHERE ets.event_id = event.id
+                              AND ets.terminal_status IN (
+                                  'finished',
+                                  'afterextra',
+                                  'afterpen',
+                                  'cancelled',
+                                  'canceled',
+                                  'postponed'
+                              )
+                        )
+                        THEN event.status_code
+                        ELSE COALESCE(EXCLUDED.status_code, event.status_code)
+                    END,
                     start_timestamp = EXCLUDED.start_timestamp
                 """,
                 event_rows,

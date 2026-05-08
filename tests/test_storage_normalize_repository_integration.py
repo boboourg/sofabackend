@@ -335,6 +335,156 @@ class NormalizeRepositoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child["parent_team_id"], 440)
         self.assertIsNone(parent["parent_team_id"])
 
+    async def test_status_code_does_not_regress_after_terminal_state_finalized(self) -> None:
+        """F-8 P0 (regression for 14083568-class bug): once an event has a
+        row in ``event_terminal_state`` with a terminal status, a delayed-
+        insert snapshot whose payload says "1st half"/"inprogress" must
+        NOT overwrite the persisted finished status_code on the next
+        normalize. The 2026-05-09 audit observed this exact regression
+        on LaLiga event 14083568, where a snapshot with id newer than the
+        finalize snapshot but fetched_at hours older flipped status_code
+        100 (Ended) back to 6 (1st half), which then re-livened the event
+        in Redis tier_1 polling."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO sport (id, slug, name) VALUES (1, 'football', 'Football');
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO event_status (code, description, type) VALUES
+                (6, '1st half', 'inprogress'),
+                (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, start_timestamp)
+                VALUES (14083568, 'la-liga-finished', 100, 1778266800);
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45674710, 'sofascore:event:14083568:/api/v1/event/{event_id}',
+                        '/api/v1/event/{event_id}', 200, 'finished-hash',
+                        '2026-05-09 00:40:24+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (14083568, 'finished', '2026-05-09 00:48:16+03', 45674710);
+            """
+        )
+
+        # Stale snapshot tries to flip the event back to "inprogress (1st half)".
+        result = ParseResult(
+            snapshot_id=45686328,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 14083568,
+                        "slug": "stale-1st-half",
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "status_code": 6,  # ← regression attempt
+                        "start_timestamp": 1778266800,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow("SELECT status_code FROM event WHERE id = $1", 14083568)
+        # Guard must hold the finished status — NEVER downgrade past terminal_state.
+        self.assertEqual(row["status_code"], 100)
+
+    async def test_status_code_normal_update_works_without_terminal_state(self) -> None:
+        """Negative test for F-8 P0 guard: when no terminal_state row exists
+        for the event, the COALESCE-style update must still succeed (the
+        guard must NOT block ordinary in-progress status transitions like
+        notstarted → 1st half → halftime → 2nd half)."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO sport (id, slug, name) VALUES (1, 'football', 'Football');
+            INSERT INTO event_status (code, description, type) VALUES
+                (6, '1st half', 'inprogress'),
+                (7, '2nd half', 'inprogress');
+            INSERT INTO event (id, slug, status_code, start_timestamp)
+                VALUES (14083569, 'live-event-no-terminal', 6, 1778266800);
+            """
+        )
+        # No event_terminal_state row → guard is dormant, normal update path applies.
+
+        result = ParseResult(
+            snapshot_id=45712000,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 14083569,
+                        "slug": "advance-to-2nd-half",
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "status_code": 7,
+                        "start_timestamp": 1778266800,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow("SELECT status_code FROM event WHERE id = $1", 14083569)
+        # Without terminal_state row, the new value still wins.
+        self.assertEqual(row["status_code"], 7)
+
+    async def test_status_code_null_payload_keeps_existing_when_no_terminal_state(self) -> None:
+        """F-8 P0 guard must preserve the original COALESCE NULL-fallback
+        behaviour for events without terminal state: a payload without
+        ``status_code`` (e.g., a partial entity row from a sibling parser)
+        must not blank out the existing status_code."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO sport (id, slug, name) VALUES (1, 'football', 'Football');
+            INSERT INTO event_status (code, description, type) VALUES (6, '1st half', 'inprogress');
+            INSERT INTO event (id, slug, status_code, start_timestamp)
+                VALUES (14083570, 'partial-update', 6, 1778266800);
+            """
+        )
+
+        result = ParseResult(
+            snapshot_id=45712001,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 14083570,
+                        "slug": "partial-update-touch",
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "status_code": None,  # ← NULL payload status
+                        "start_timestamp": 1778266800,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow("SELECT status_code FROM event WHERE id = $1", 14083570)
+        # NULL payload preserves existing status_code via COALESCE fallback.
+        self.assertEqual(row["status_code"], 6)
+
 
 if __name__ == "__main__":
     unittest.main()
