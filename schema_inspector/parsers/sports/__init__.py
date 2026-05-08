@@ -27,6 +27,14 @@ class SportAdapter:
     live_optional_edges: tuple[str, ...] = ()
     special_families: tuple[str, ...] = ()
     hydrate_entity_profiles: bool = False
+    # F-3 (2026-05-08): edges fetched ONCE at the final sweep but NOT during
+    # live polling. Closes the gap where finished football matches retain
+    # bootstrap-only versions of /comments, /best-players/summary, /h2h, and
+    # /pregame-form. These run with a dedicated mapping (see
+    # _endpoint_for_final_only_edge in pilot_orchestrator) and bypass the
+    # match_center_policy.football_edge_allowed gate which only knows about
+    # core_event_edges.
+    final_only_edges: tuple[str, ...] = ()
 
 
 GENERIC_ADAPTER = SportAdapter(
@@ -36,6 +44,7 @@ GENERIC_ADAPTER = SportAdapter(
     live_optional_edges=(),
     special_families=(),
     hydrate_entity_profiles=False,
+    final_only_edges=(),
 )
 
 
@@ -47,6 +56,7 @@ def _coerce(spec: dict[str, object]) -> SportAdapter:
         live_optional_edges=tuple(spec.get("live_optional_edges", ()) or ()),
         special_families=tuple(spec.get("special_families", ()) or ()),
         hydrate_entity_profiles=bool(spec.get("hydrate_entity_profiles", False)),
+        final_only_edges=tuple(spec.get("final_only_edges", ()) or ()),
     )
 
 
@@ -81,6 +91,7 @@ def resolve_sport_adapter(sport_slug: str) -> SportAdapter:
         live_optional_edges=GENERIC_ADAPTER.live_optional_edges,
         special_families=GENERIC_ADAPTER.special_families,
         hydrate_entity_profiles=GENERIC_ADAPTER.hydrate_entity_profiles,
+        final_only_edges=GENERIC_ADAPTER.final_only_edges,
     ))
 
 

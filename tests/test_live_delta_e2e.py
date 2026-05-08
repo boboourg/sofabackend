@@ -135,7 +135,13 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([row["hydration_mode"] for row in telemetry], ["full", "live_delta", "live_delta", "live_delta", "final_sweep"])
-        self.assertEqual([row["http_calls"] for row in telemetry], [3, 1, 1, 1, 1])
+        # F-3 (2026-05-08): final_sweep now also fetches the 4 final_only_edges
+        # for football (comments, best-players/summary, h2h, pregame-form) on
+        # top of the 1 core edge that survives football_edge_allowed gating in
+        # this fixture (status="finished", tier=tier_5 → no core edges allowed,
+        # but pre-F-3 still saw 1 call from the test fake; actual count
+        # observed is 5 = 1 core + 4 final_only).
+        self.assertEqual([row["http_calls"] for row in telemetry], [3, 1, 1, 1, 5])
         self.assertEqual([row["live_bootstrap_done_at"] for row in telemetry], [True, True, True, True, False])
         self.assertEqual(bootstrap.marked, [event_id])
         self.assertEqual(bootstrap.reset, [event_id])

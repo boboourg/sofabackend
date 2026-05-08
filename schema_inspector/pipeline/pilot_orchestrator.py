@@ -17,6 +17,7 @@ from ..endpoints import (
     EVENT_H2H_ENDPOINT,
     EVENT_H2H_EVENTS_ENDPOINT,
     EVENT_MANAGERS_ENDPOINT,
+    EVENT_GRAPH_ENDPOINT,
     EVENT_PLAYER_HEATMAP_ENDPOINT,
     EVENT_PLAYER_SHOTMAP_ENDPOINT,
     EVENT_GOALKEEPER_SHOTMAP_ENDPOINT,
@@ -24,6 +25,7 @@ from ..endpoints import (
     EVENT_LINEUPS_ENDPOINT,
     EVENT_PLAYER_RATING_BREAKDOWN_ENDPOINT,
     EVENT_PLAYER_STATISTICS_ENDPOINT,
+    EVENT_PREGAME_FORM_ENDPOINT,
     EVENT_SHOTMAP_ENDPOINT,
     EVENT_STATISTICS_ENDPOINT,
     MANAGER_ENDPOINT,
@@ -996,6 +998,7 @@ class PilotOrchestrator:
         outcomes: list[FetchOutcomeEnvelope] = []
         parses: list[object] = []
         adapter = resolve_sport_adapter(sport_slug)
+        # Phase 1: core edges, gated by football_edge_allowed (existing behaviour).
         for edge_kind in adapter.core_event_edges:
             if not football_edge_allowed(
                 sport_slug=sport_slug,
@@ -1006,6 +1009,31 @@ class PilotOrchestrator:
             ):
                 continue
             endpoint = _endpoint_for_edge_kind(edge_kind)
+            if endpoint is None:
+                continue
+            outcome, parsed = await self._fetch_gated_event_endpoint(
+                endpoint=endpoint,
+                sport_slug=sport_slug,
+                path_params={"event_id": event_id},
+                context_entity_type="event",
+                context_entity_id=event_id,
+                context_event_id=event_id,
+                fetch_reason=JOB_FINALIZE_EVENT,
+                status_phase=status_phase,
+            )
+            if outcome is None:
+                continue
+            outcomes.append(outcome)
+            if parsed is not None:
+                parses.append(parsed)
+        # Phase 2 (F-3, 2026-05-08): final-only edges. NOT gated by
+        # football_edge_allowed (whose allow-list only knows core edges) — we
+        # explicitly want these to run unconditionally at finalize so the
+        # finished match has the canonical post-match versions of /comments,
+        # /best-players/summary, /h2h, /pregame-form. They are NOT in
+        # live_delta_edge_kinds, so live polling cadence is unchanged.
+        for edge_kind in adapter.final_only_edges:
+            endpoint = _endpoint_for_final_only_edge(edge_kind)
             if endpoint is None:
                 continue
             outcome, parsed = await self._fetch_gated_event_endpoint(
@@ -1360,12 +1388,33 @@ class PilotOrchestrator:
 
 
 def _endpoint_for_edge_kind(edge_kind: str) -> SofascoreEndpoint | None:
+    # F-1 (2026-05-08): "graph" was historically mapped to None despite being
+    # listed in LIVE_DELTA_EDGE_KINDS for football/basketball/handball. The
+    # F-2 freshness audit confirmed /event/{id}/graph snapshots only ever
+    # update at bootstrap — never during live polling. Wiring it to
+    # EVENT_GRAPH_ENDPOINT closes that silent gap so momentum data refreshes
+    # at the same cadence as statistics/lineups/incidents.
     mapping = {
         "meta": None,
         "statistics": EVENT_STATISTICS_ENDPOINT,
         "lineups": EVENT_LINEUPS_ENDPOINT,
         "incidents": EVENT_INCIDENTS_ENDPOINT,
-        "graph": None,
+        "graph": EVENT_GRAPH_ENDPOINT,
+    }
+    return mapping.get(edge_kind)
+
+
+def _endpoint_for_final_only_edge(edge_kind: str) -> SofascoreEndpoint | None:
+    # F-3 (2026-05-08): edges that are only re-fetched at finalize, not during
+    # live polling. Kept in a separate mapping so adding entries here cannot
+    # accidentally re-enable them inside the live tick (which would happen if
+    # they shared `_endpoint_for_edge_kind` and someone added them to
+    # LIVE_DELTA_EDGE_KINDS by mistake).
+    mapping = {
+        "comments": EVENT_COMMENTS_ENDPOINT,
+        "best_players_summary": EVENT_BEST_PLAYERS_SUMMARY_ENDPOINT,
+        "h2h": EVENT_H2H_ENDPOINT,
+        "pregame_form": EVENT_PREGAME_FORM_ENDPOINT,
     }
     return mapping.get(edge_kind)
 

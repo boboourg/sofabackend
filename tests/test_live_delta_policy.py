@@ -5,11 +5,45 @@ from schema_inspector.live_delta_policy import (
     live_delta_detail_endpoint_patterns,
     live_delta_edge_kinds,
 )
+from schema_inspector.pipeline.pilot_orchestrator import _endpoint_for_edge_kind
 
 
 def test_football_live_delta_edges_are_score_stats_lineups_incidents_graph() -> None:
     assert live_delta_edge_kinds("football") == ("meta", "statistics", "lineups", "incidents", "graph")
     assert live_delta_detail_endpoint_patterns("football") == ()
+
+
+def test_every_live_delta_edge_kind_has_resolvable_endpoint_or_meta() -> None:
+    # F-1 regression: "graph" historically mapped to None despite being listed
+    # in LIVE_DELTA_EDGE_KINDS for football/basketball/handball, silently
+    # disabling its live polling. Guard against future repeats.
+    for sport, kinds in LIVE_DELTA_EDGE_KINDS.items():
+        for kind in kinds:
+            if kind == "meta":
+                # "meta" is intentionally None — it is fulfilled by the
+                # unconditional root /event/{event_id} fetch on every tick.
+                continue
+            endpoint = _endpoint_for_edge_kind(kind)
+            assert endpoint is not None, (
+                f"edge_kind={kind!r} for sport={sport!r} maps to None; "
+                f"add it to _endpoint_for_edge_kind in pilot_orchestrator.py"
+            )
+
+
+def test_final_only_edges_disjoint_from_live_delta_edges_per_sport() -> None:
+    # F-3 regression: final_only_edges must NOT overlap with the live polling
+    # set, otherwise final-only endpoints would also be hit on every live
+    # tick (defeating the "only at finalize" design).
+    from schema_inspector.parsers.sports import resolve_sport_adapter
+    for sport_slug in LIVE_DELTA_EDGE_KINDS:
+        adapter = resolve_sport_adapter(sport_slug)
+        live_set = set(LIVE_DELTA_EDGE_KINDS[sport_slug])
+        final_set = set(adapter.final_only_edges)
+        overlap = live_set & final_set
+        assert not overlap, (
+            f"sport={sport_slug!r} has final_only_edges overlapping with "
+            f"LIVE_DELTA_EDGE_KINDS: {overlap}"
+        )
 
 
 def test_tennis_live_delta_uses_point_feed_and_tennis_power() -> None:
