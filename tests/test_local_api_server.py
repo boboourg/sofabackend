@@ -178,6 +178,82 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("Route is not registered", response.payload["error"])
 
+    async def test_ops_snapshots_summary_uses_head_latest_fetched_at_over_dedup_stale_snapshot(
+        self,
+    ) -> None:
+        # F-5: ON CONFLICT (scope_key, payload_hash) DO NOTHING dedupe
+        # leaves api_payload_snapshot.fetched_at frozen at the FIRST insert.
+        # api_snapshot_head.latest_fetched_at is updated on every fetch
+        # regardless of dedupe and is the canonical "when did we last
+        # actually re-fetch" signal. /ops/snapshots/summary must surface
+        # the head value, not the stale snapshot timestamp.
+        from datetime import datetime, timezone
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        # Snapshot fetched_at is OLD (frozen by dedupe), head latest_fetched_at
+        # is NEW (updated on every re-fetch). The summary must report NEW.
+        # Postgres's GREATEST() runs server-side; the fake connection here
+        # simulates the value GREATEST would return when both inputs exist.
+        head_fetched_at = datetime(2026, 5, 8, 18, 30, 0, tzinfo=timezone.utc)
+        connection = _FakeOpsSnapshotsConnection(
+            snapshot_row={
+                "raw_snapshots": 12,
+                "trace_count": 3,
+                "endpoint_pattern_count": 5,
+                "event_context_count": 2,
+                "http_200_count": 10,
+                "http_404_count": 1,
+                "http_5xx_count": 1,
+                # GREATEST(head, snapshot) → head wins.
+                "latest_fetched_at": head_fetched_at,
+            },
+            request_count=42,
+        )
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_ops_snapshots_summary_payload()
+
+        # The SQL must reference api_snapshot_head — otherwise the dedupe
+        # bug remains. Locking the source-of-truth into the test guards
+        # against a future regression that drops the head subquery.
+        normalized_query = " ".join(connection.executed_query.split())
+        self.assertIn("api_snapshot_head", normalized_query)
+        self.assertIn("GREATEST", normalized_query)
+        self.assertIn("api_payload_snapshot", normalized_query)
+
+        self.assertEqual(payload["latest_fetched_at"], head_fetched_at.isoformat())
+        self.assertEqual(payload["raw_requests"], 42)
+        self.assertEqual(payload["raw_snapshots"], 12)
+
+    async def test_ops_snapshots_summary_falls_back_to_snapshot_when_head_absent(self) -> None:
+        # F-5 fallback: if api_snapshot_head has no rows yet (legacy data
+        # before the head migration, or freshly deployed empty DB), the
+        # GREATEST() expression evaluates to MAX(api_payload_snapshot.fetched_at)
+        # because GREATEST is NULL-safe in PostgreSQL. The fake connection
+        # mimics this by returning the snapshot value as the merged result.
+        from datetime import datetime, timezone
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        snapshot_fetched_at = datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
+        connection = _FakeOpsSnapshotsConnection(
+            snapshot_row={
+                "raw_snapshots": 1,
+                "trace_count": 1,
+                "endpoint_pattern_count": 1,
+                "event_context_count": 1,
+                "http_200_count": 1,
+                "http_404_count": 0,
+                "http_5xx_count": 0,
+                "latest_fetched_at": snapshot_fetched_at,
+            },
+            request_count=1,
+        )
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_ops_snapshots_summary_payload()
+
+        self.assertEqual(payload["latest_fetched_at"], snapshot_fetched_at.isoformat())
+
     async def test_queue_summary_tracks_historical_streams(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.live_state_store = None
@@ -2598,6 +2674,30 @@ def _make_fake_connector(connection):
         return connection
 
     return _connect
+
+
+class _FakeOpsSnapshotsConnection:
+    """Records the fetchrow query and returns predetermined rows for the
+    /ops/snapshots/summary SQL path. Used by F-5 tests to verify the
+    head/snapshot GREATEST() merge."""
+
+    def __init__(self, *, snapshot_row, request_count):
+        self.snapshot_row = snapshot_row
+        self.request_count = request_count
+        self.executed_query: str = ""
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args):
+        del args
+        self.executed_query = query
+        return self.snapshot_row
+
+    async def fetchval(self, query: str, *args):
+        del query, args
+        return self.request_count
+
+    async def close(self):
+        self.closed = True
 
 
 def _make_sequence_connector(connections):
