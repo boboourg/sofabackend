@@ -116,6 +116,48 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(result.next_poll_at, 1_800_000_005_000)
         self.assertEqual(store.fetch(15235532).dispatch_tier, "tier_1")
 
+    def test_track_event_clears_dispatch_claim_with_tier(self) -> None:
+        # F-7 Phase 0: clear_dispatch_claim must receive the resolved
+        # dispatch_tier so the per-tier clear counter reflects which
+        # stream actually drained a job (asymmetry between claim/clear
+        # rates per tier is the diagnostic signal).
+        store = _ClearRecordingStore()
+        worker = LiveWorker(now_ms_factory=lambda: 1_800_000_000_000)
+
+        worker.track_event(
+            sport_slug="football",
+            event_id=15235532,
+            status_type="inprogress",
+            minutes_to_start=0,
+            trace_id="trace-clear",
+            detail_id=1,
+            tournament_user_count=317795,
+            live_state_store=store,
+            stream_queue=_FakeStreamQueue(),
+        )
+
+        self.assertEqual(store.clear_calls, [(15235532, "tier_1")])
+
+
+class _ClearRecordingStore:
+    """Live state store fake that records every clear_dispatch_claim call
+    so we can assert the tier kwarg threading."""
+
+    def __init__(self) -> None:
+        self.upserts: list[object] = []
+        self.clear_calls: list[tuple[int, str | None]] = []
+        self.backend = _FakeLiveBackend()
+        self.hot_zset_key = "zset:live:hot"
+        self.warm_zset_key = "zset:live:warm"
+        self.cold_zset_key = "zset:live:cold"
+
+    def upsert(self, state, *, lane: str | None = None) -> None:
+        del lane
+        self.upserts.append(state)
+
+    def clear_dispatch_claim(self, event_id: int, *, tier: str | None = None) -> None:
+        self.clear_calls.append((int(event_id), tier))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -422,6 +422,169 @@ class PlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.published[0][0], STREAM_HYDRATE)
         self.assertEqual(queue.published[0][1]["job_id"], delayed_envelope.job_id)
 
+    async def test_planner_daemon_records_dispatch_metrics_per_tier(self) -> None:
+        # F-7 Phase 0: planner publish path must pass dispatch_tier into
+        # claim_dispatch and call record_published(tier) after publish so
+        # the staged rollout can verify cadence change per tier from
+        # /ops/queues/summary.
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        queue = _FakeQueue()
+        live_state_store = _RecordingLiveStateStore(
+            due_by_lane={"hot": (7011, 7012)},
+            states_by_event={
+                7011: LiveEventState(
+                    event_id=7011,
+                    sport_slug="football",
+                    status_type="inprogress",
+                    poll_profile="hot",
+                    last_seen_at=1,
+                    last_ingested_at=1,
+                    last_changed_at=1,
+                    next_poll_at=1_800_000_000_100,
+                    hot_until=1_800_000_000_100,
+                    home_score=0,
+                    away_score=0,
+                    version_hint=None,
+                    is_finalized=False,
+                    dispatch_tier="tier_1",
+                ),
+                7012: LiveEventState(
+                    event_id=7012,
+                    sport_slug="football",
+                    status_type="inprogress",
+                    poll_profile="hot",
+                    last_seen_at=1,
+                    last_ingested_at=1,
+                    last_changed_at=1,
+                    next_poll_at=1_800_000_000_100,
+                    hot_until=1_800_000_000_100,
+                    home_score=0,
+                    away_score=0,
+                    version_hint=None,
+                    is_finalized=False,
+                    dispatch_tier="tier_3",
+                ),
+            },
+        )
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(()),
+            delayed_job_loader=lambda job_id: None,
+            live_state_store=live_state_store,
+            scheduled_targets=(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        await daemon.tick(now_ms=1_800_000_000_000)
+
+        # Both events must have had claim_dispatch called with their tier.
+        self.assertEqual(
+            live_state_store.claim_calls,
+            [(7011, "tier_1"), (7012, "tier_3")],
+        )
+        # And record_published must fire once per successful publish, with
+        # the same tier — this is what fuels the per-tier rate metric.
+        self.assertEqual(
+            live_state_store.published_tiers,
+            ["tier_1", "tier_3"],
+        )
+
+    async def test_planner_daemon_uses_tier_aware_dispatch_lease(self) -> None:
+        # F-7 Phase 1: planner must call claim_dispatch with the lease
+        # value resolved per dispatch_tier (not the legacy single ctor
+        # value) so ops can dial each tier independently from .env.
+        from schema_inspector import live_dispatch_policy
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        original = (
+            live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_1_MS,
+            live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_2_MS,
+            live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_3_MS,
+        )
+        live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_1_MS = 5_000
+        live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_2_MS = 15_000
+        live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_3_MS = 60_000
+        try:
+            queue = _FakeQueue()
+            live_state_store = _RecordingLiveStateStore(
+                due_by_lane={"hot": (8001, 8002, 8003)},
+                states_by_event={
+                    8001: _make_live_state(8001, "tier_1"),
+                    8002: _make_live_state(8002, "tier_2"),
+                    8003: _make_live_state(8003, "tier_3"),
+                },
+            )
+            daemon = PlannerDaemon(
+                queue=queue,
+                delayed_scheduler=_FakeDelayedScheduler(()),
+                delayed_job_loader=lambda job_id: None,
+                live_state_store=live_state_store,
+                scheduled_targets=(),
+                live_dispatch_lease_ms=99_000,  # legacy ctor — must NOT win
+                now_ms_factory=lambda: 1_800_000_000_000,
+            )
+
+            await daemon.tick(now_ms=1_800_000_000_000)
+
+            self.assertEqual(
+                live_state_store.claim_calls,
+                [(8001, "tier_1"), (8002, "tier_2"), (8003, "tier_3")],
+            )
+            self.assertEqual(live_state_store.claim_lease_ms, [5_000, 15_000, 60_000])
+        finally:
+            (
+                live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_1_MS,
+                live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_2_MS,
+                live_dispatch_policy.LIVE_DISPATCH_LEASE_TIER_3_MS,
+            ) = original
+
+    async def test_planner_daemon_does_not_record_published_when_publish_raises(self) -> None:
+        # If the stream publish fails the metric must not move — the
+        # published counter is supposed to track jobs that actually went
+        # onto the wire.
+        from schema_inspector.services.planner_daemon import PlannerDaemon
+
+        queue = _RaisingQueue()
+        live_state_store = _RecordingLiveStateStore(
+            due_by_lane={"hot": (7021,)},
+            states_by_event={
+                7021: LiveEventState(
+                    event_id=7021,
+                    sport_slug="football",
+                    status_type="inprogress",
+                    poll_profile="hot",
+                    last_seen_at=1,
+                    last_ingested_at=1,
+                    last_changed_at=1,
+                    next_poll_at=1_800_000_000_100,
+                    hot_until=1_800_000_000_100,
+                    home_score=0,
+                    away_score=0,
+                    version_hint=None,
+                    is_finalized=False,
+                    dispatch_tier="tier_1",
+                ),
+            },
+        )
+        daemon = PlannerDaemon(
+            queue=queue,
+            delayed_scheduler=_FakeDelayedScheduler(()),
+            delayed_job_loader=lambda job_id: None,
+            live_state_store=live_state_store,
+            scheduled_targets=(),
+            now_ms_factory=lambda: 1_800_000_000_000,
+        )
+
+        with self.assertRaises(RuntimeError):
+            await daemon.tick(now_ms=1_800_000_000_000)
+
+        self.assertEqual(live_state_store.claim_calls, [(7021, "tier_1")])
+        self.assertEqual(live_state_store.published_tiers, [])
+        # The except branch must still clear the claim with the tier so
+        # the failed-publish doesn't mask a later success in metrics.
+        self.assertEqual(live_state_store.clear_calls, [(7021, "tier_1")])
+
     async def test_planner_daemon_skips_live_refreshes_when_live_backpressure_blocks(self) -> None:
         from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
         from schema_inspector.services.planner_daemon import PlannerDaemon
@@ -575,6 +738,81 @@ class _ClaimingRedisBackend:
             del self.claims[key]
             return 1
         return 0
+
+
+def _make_live_state(event_id: int, dispatch_tier: str) -> LiveEventState:
+    return LiveEventState(
+        event_id=event_id,
+        sport_slug="football",
+        status_type="inprogress",
+        poll_profile="hot",
+        last_seen_at=1,
+        last_ingested_at=1,
+        last_changed_at=1,
+        next_poll_at=1_800_000_000_100,
+        hot_until=1_800_000_000_100,
+        home_score=0,
+        away_score=0,
+        version_hint=None,
+        is_finalized=False,
+        dispatch_tier=dispatch_tier,
+    )
+
+
+class _RecordingLiveStateStore:
+    """Live state store fake that records claim/clear/publish tier args.
+
+    Used by F-7 Phase 0 tests to verify the planner threads dispatch_tier
+    through every metrics-relevant call site.
+    """
+
+    def __init__(
+        self,
+        *,
+        due_by_lane: dict[str, tuple[int, ...]] | None = None,
+        states_by_event: dict[int, LiveEventState] | None = None,
+    ) -> None:
+        self.due_by_lane = dict(due_by_lane or {})
+        self.states_by_event = dict(states_by_event or {})
+        self.claim_calls: list[tuple[int, str | None]] = []
+        self.claim_lease_ms: list[int] = []
+        self.published_tiers: list[str | None] = []
+        self.clear_calls: list[tuple[int, str | None]] = []
+
+    def due_events(self, *, lane: str, now_ms: int) -> tuple[int, ...]:
+        del now_ms
+        return self.due_by_lane.get(lane, ())
+
+    def fetch(self, event_id: int) -> LiveEventState | None:
+        return self.states_by_event.get(event_id)
+
+    def claim_dispatch(self, event_id: int, *, now_ms: int, lease_ms: int, tier: str | None = None) -> bool:
+        del now_ms
+        self.claim_calls.append((int(event_id), tier))
+        self.claim_lease_ms.append(int(lease_ms))
+        return True
+
+    def clear_dispatch_claim(self, event_id: int, *, tier: str | None = None) -> None:
+        self.clear_calls.append((int(event_id), tier))
+
+    def record_published(self, tier: str | None) -> None:
+        self.published_tiers.append(tier)
+
+
+class _RaisingQueue:
+    """Queue that raises on every publish — used to assert except-branch
+    metrics behaviour in the planner."""
+
+    def __init__(self) -> None:
+        self.attempts: list[tuple[str, dict[str, object]]] = []
+
+    def publish(self, stream: str, values: dict[str, object]) -> str:
+        self.attempts.append((stream, dict(values)))
+        raise RuntimeError("simulated publish failure")
+
+    def group_info(self, stream: str, group: str):
+        del stream, group
+        return None
 
 
 if __name__ == "__main__":

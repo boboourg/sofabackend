@@ -39,6 +39,21 @@ LIVE_TIER_1_POLL_SECONDS = _env_int("LIVE_TIER_1_POLL_SECONDS", 5)
 LIVE_TIER_2_POLL_SECONDS = _env_int("LIVE_TIER_2_POLL_SECONDS", 30)
 LIVE_TIER_3_POLL_SECONDS = _env_int("LIVE_TIER_3_POLL_SECONDS", 90)
 
+# F-7: tier-aware dispatch claim lease (Redis SET NX PX TTL inside
+# claim_dispatch). Until F-7 the planner used a single 90_000ms lease
+# for every event regardless of tier, which capped tier_1 cadence at
+# ~90s even with LIVE_TIER_1_POLL_SECONDS=5. Splitting the lease per
+# tier lets ops dial each tier independently from the .env file.
+#
+# Defaults are intentionally identical to the old single-lease value
+# (90_000ms): a code-only deploy is therefore a behaviour no-op. Lower
+# values are rolled out staged via env vars (tier_3 → tier_2 → tier_1)
+# behind a separate ACK so any 403 / timeout / lag regression is
+# attributable to a specific lease change, not a code change.
+LIVE_DISPATCH_LEASE_TIER_1_MS = _env_int("LIVE_DISPATCH_LEASE_TIER_1_MS", 90_000)
+LIVE_DISPATCH_LEASE_TIER_2_MS = _env_int("LIVE_DISPATCH_LEASE_TIER_2_MS", 90_000)
+LIVE_DISPATCH_LEASE_TIER_3_MS = _env_int("LIVE_DISPATCH_LEASE_TIER_3_MS", 90_000)
+
 
 def resolve_live_dispatch_tier(
     *,
@@ -85,6 +100,24 @@ def poll_seconds_for_live_dispatch_tier(dispatch_tier: str | None, *, default_se
     if normalized == LIVE_TIER_3:
         return LIVE_TIER_3_POLL_SECONDS
     return default_seconds
+
+
+def lease_ms_for_dispatch_tier(dispatch_tier: str | None, *, default_ms: int) -> int:
+    """Return the dispatch-claim lease (ms) for the given tier.
+
+    F-7: lets the planner pick a per-tier TTL for the Redis SET NX PX
+    that gates re-publish, instead of the legacy single 90s value.
+    Falls back to ``default_ms`` for unrecognised tier strings so
+    legacy callers without tier context keep their original behaviour.
+    """
+    normalized = normalize_live_dispatch_tier(dispatch_tier)
+    if normalized == LIVE_TIER_1:
+        return LIVE_DISPATCH_LEASE_TIER_1_MS
+    if normalized == LIVE_TIER_2:
+        return LIVE_DISPATCH_LEASE_TIER_2_MS
+    if normalized == LIVE_TIER_3:
+        return LIVE_DISPATCH_LEASE_TIER_3_MS
+    return default_ms
 
 
 def normalize_live_dispatch_tier(value: str | None) -> str:

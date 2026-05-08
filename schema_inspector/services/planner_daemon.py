@@ -19,7 +19,12 @@ from ..jobs.types import (
     JOB_REFRESH_LIVE_EVENT,
     JOB_SYNC_TOURNAMENT_ARCHIVE,
 )
-from ..live_dispatch_policy import LIVE_TIER_3, live_priority_for_dispatch_tier, normalize_live_dispatch_tier
+from ..live_dispatch_policy import (
+    LIVE_TIER_3,
+    lease_ms_for_dispatch_tier,
+    live_priority_for_dispatch_tier,
+    normalize_live_dispatch_tier,
+)
 from ..queue.streams import (
     STREAM_DISCOVERY,
     STREAM_HISTORICAL_DISCOVERY,
@@ -136,11 +141,21 @@ class PlannerDaemon:
                     skip_reasons.add(str(blocking_reason))
                     continue
                 priority = 1 if lane == "warm" else live_priority_for_dispatch_tier(dispatch_tier)
+                # F-7: pick a tier-aware lease for the dispatch claim. With
+                # the default env values (all 90_000ms) this is a no-op vs.
+                # the legacy single-lease behaviour. Lowering one of the
+                # LIVE_DISPATCH_LEASE_TIER_*_MS env vars is what actually
+                # tightens cadence for that tier in prod.
+                tier_lease_ms = lease_ms_for_dispatch_tier(
+                    dispatch_tier,
+                    default_ms=self.live_dispatch_lease_ms,
+                )
                 claim_dispatch = getattr(self.live_state_store, "claim_dispatch", None)
                 if callable(claim_dispatch) and not claim_dispatch(
                     int(event_id),
                     now_ms=now_ms,
-                    lease_ms=self.live_dispatch_lease_ms,
+                    lease_ms=tier_lease_ms,
+                    tier=dispatch_tier,
                 ):
                     continue
                 job = JobEnvelope.create(
@@ -162,8 +177,11 @@ class PlannerDaemon:
                 except Exception:
                     clear_claim = getattr(self.live_state_store, "clear_dispatch_claim", None)
                     if callable(clear_claim):
-                        clear_claim(int(event_id))
+                        clear_claim(int(event_id), tier=dispatch_tier)
                     raise
+                record_published = getattr(self.live_state_store, "record_published", None)
+                if callable(record_published):
+                    record_published(dispatch_tier)
         if skipped_due_backpressure:
             logger.info(
                 "Planner skipped live refresh fanout by stream backpressure: skipped=%s reason=%s",

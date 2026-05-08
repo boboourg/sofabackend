@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,13 @@ LIVE_HOT_ZSET = "zset:live:hot"
 LIVE_WARM_ZSET = "zset:live:warm"
 LIVE_COLD_ZSET = "zset:live:cold"
 LIVE_DISPATCH_CLAIM_PREFIX = "live:dispatch_claim"
+# F-7 Phase 0: cumulative dispatch metrics for diagnosing the 90s lease cap.
+# Survives planner restarts (no reset), HINCRBY-incremented per event from
+# the planner publish path and the live worker claim-clear path. Exposed
+# read-only via /ops/queues/summary. Never read in any hot path — only by
+# the periodic ops poller.
+LIVE_DISPATCH_METRICS_KEY = "live:dispatch_metrics"
+_LIVE_DISPATCH_TIER_FIELDS: tuple[str, ...] = ("tier_1", "tier_2", "tier_3")
 
 
 @dataclass(frozen=True)
@@ -39,11 +47,14 @@ class LiveEventStateStore:
         hot_zset_key: str = LIVE_HOT_ZSET,
         warm_zset_key: str = LIVE_WARM_ZSET,
         cold_zset_key: str = LIVE_COLD_ZSET,
+        metrics_hash_key: str = LIVE_DISPATCH_METRICS_KEY,
     ) -> None:
         self.backend = backend
         self.hot_zset_key = hot_zset_key
         self.warm_zset_key = warm_zset_key
         self.cold_zset_key = cold_zset_key
+        self._metrics_hash_key = metrics_hash_key
+        self._metrics_started_at_recorded = False
 
     def upsert(self, state: LiveEventState, *, lane: str | None = None) -> None:
         _hset_mapping(
@@ -101,28 +112,45 @@ class LiveEventStateStore:
             dispatch_tier=_as_text(payload.get("dispatch_tier")),
         )
 
-    def claim_dispatch(self, event_id: int, *, now_ms: int, lease_ms: int) -> bool:
+    def claim_dispatch(
+        self,
+        event_id: int,
+        *,
+        now_ms: int,
+        lease_ms: int,
+        tier: str | None = None,
+    ) -> bool:
+        self._record_metric("claim_attempts", tier)
         key = self._claim_key(event_id)
         ttl_ms = max(int(lease_ms), 1)
         setter = getattr(self.backend, "set", None)
         if callable(setter):
             try:
-                return bool(setter(key, str(now_ms + ttl_ms), nx=True, px=ttl_ms))
+                ok = bool(setter(key, str(now_ms + ttl_ms), nx=True, px=ttl_ms))
             except TypeError:
-                return bool(setter(key, str(now_ms + ttl_ms), nx=True))
+                ok = bool(setter(key, str(now_ms + ttl_ms), nx=True))
+            if ok:
+                self._record_metric("claim_succeeded", tier)
+            else:
+                self._record_metric("claim_failed_blocked", tier)
+            return ok
 
         claims = _fallback_claims(self.backend)
         existing_expiry = claims.get(key)
         if existing_expiry is not None:
             try:
                 if int(existing_expiry) > int(now_ms):
+                    self._record_metric("claim_failed_blocked", tier)
                     return False
             except (TypeError, ValueError):
+                self._record_metric("claim_failed_blocked", tier)
                 return False
         claims[key] = int(now_ms) + ttl_ms
+        self._record_metric("claim_succeeded", tier)
         return True
 
-    def clear_dispatch_claim(self, event_id: int) -> None:
+    def clear_dispatch_claim(self, event_id: int, *, tier: str | None = None) -> None:
+        self._record_metric("clear_called", tier)
         key = self._claim_key(event_id)
         delete = getattr(self.backend, "delete", None)
         if callable(delete):
@@ -130,6 +158,103 @@ class LiveEventStateStore:
             return
         claims = _fallback_claims(self.backend)
         claims.pop(key, None)
+
+    def record_published(self, tier: str | None) -> None:
+        """Increment per-tier publish counter from the planner publish path."""
+        self._record_metric("published", tier)
+
+    def dispatch_metrics_snapshot(self) -> dict[str, int]:
+        """Return the cumulative dispatch metrics hash as int values.
+
+        Read-only path: only invoked by /ops/queues/summary collection.
+        Returns an empty dict if the backend lacks HGETALL or the hash is
+        empty (e.g., before any claim/publish/clear has happened on a
+        freshly-deployed planner).
+        """
+        hgetall = getattr(self.backend, "hgetall", None)
+        if not callable(hgetall):
+            return {}
+        try:
+            raw = hgetall(self._metrics_hash_key) or {}
+        except Exception:
+            return {}
+        result: dict[str, int] = {}
+        for field, value in raw.items():
+            field_str = (
+                field.decode("utf-8", errors="ignore")
+                if isinstance(field, bytes)
+                else str(field)
+            )
+            text = _as_text(value)
+            if text is None:
+                continue
+            try:
+                result[field_str] = int(text)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def tier_active_counts(self) -> dict[str, int]:
+        """Tally currently-tracked events by dispatch_tier.
+
+        WARNING: iterates all hot/warm/cold zset members and HGETs each
+        event's dispatch_tier field. Caller is /ops/queues/summary only —
+        do NOT invoke from the planner hot path. With ~500 active events
+        this is ~500 HGETs against local Redis (~1-2 ms total).
+        """
+        counts: dict[str, int] = {tier: 0 for tier in _LIVE_DISPATCH_TIER_FIELDS}
+        counts["unknown"] = 0
+        for lane_key in (self.hot_zset_key, self.warm_zset_key, self.cold_zset_key):
+            members = self.backend.zrangebyscore(lane_key, float("-inf"), float("inf"))
+            for raw_member in members:
+                try:
+                    event_id = int(raw_member)
+                except (TypeError, ValueError):
+                    continue
+                payload = self.backend.hgetall(self._key(event_id)) or {}
+                tier = _as_text(payload.get("dispatch_tier"))
+                normalized = (tier or "").strip().lower()
+                if normalized in _LIVE_DISPATCH_TIER_FIELDS:
+                    counts[normalized] += 1
+                else:
+                    counts["unknown"] += 1
+        return counts
+
+    def _record_metric(self, base: str, tier: str | None) -> None:
+        """Increment HINCRBY counters for the given metric base + optional tier.
+
+        Always increments `<base>:total`; if a recognised tier is provided
+        also increments `<base>:<tier>`. Silently no-ops when the backend
+        lacks HINCRBY (e.g., test fakes without metrics support) — metrics
+        MUST NEVER fail the live path.
+        """
+        self._ensure_metrics_started_at()
+        self._hincrby_safe(f"{base}:total", 1)
+        if tier is None:
+            return
+        normalized = str(tier).strip().lower()
+        if normalized in _LIVE_DISPATCH_TIER_FIELDS:
+            self._hincrby_safe(f"{base}:{normalized}", 1)
+
+    def _hincrby_safe(self, field: str, amount: int = 1) -> None:
+        hincrby = getattr(self.backend, "hincrby", None)
+        if not callable(hincrby):
+            return
+        try:
+            hincrby(self._metrics_hash_key, field, amount)
+        except Exception:
+            return
+
+    def _ensure_metrics_started_at(self) -> None:
+        if self._metrics_started_at_recorded:
+            return
+        hsetnx = getattr(self.backend, "hsetnx", None)
+        if callable(hsetnx):
+            try:
+                hsetnx(self._metrics_hash_key, "started_at_ms", str(int(time.time() * 1000)))
+            except Exception:
+                pass
+        self._metrics_started_at_recorded = True
 
     def _lane_key(self, lane: str) -> str:
         normalized = lane.strip().lower()

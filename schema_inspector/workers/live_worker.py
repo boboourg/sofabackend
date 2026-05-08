@@ -93,7 +93,7 @@ class LiveWorker:
             )
             clear_claim = getattr(live_state_store, "clear_dispatch_claim", None)
             if callable(clear_claim):
-                clear_claim(event_id)
+                clear_claim(event_id, tier=dispatch_tier)
 
         stream = _stream_for_lane(decision.lane, dispatch_tier=dispatch_tier)
         del stream_queue, trace_id
