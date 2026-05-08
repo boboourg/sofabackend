@@ -79,11 +79,6 @@ class ResourceRefreshWorker:
         snapshot_reader=None,
         normalize_publisher=None,
         totw_404_store: ToTW404Store | None = None,
-        # P3.2 — defense-in-depth Sportradar coverage gate. None = legacy
-        # behaviour. Gate kill-switch defaults to disabled so this is a
-        # no-op until env-enabled per design doc §11.
-        sportradar_coverage_gate=None,
-        sportradar_gate_resolver=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.delayed_scheduler = delayed_scheduler
@@ -105,9 +100,6 @@ class ResourceRefreshWorker:
         # decoded payload of a freshly inserted snapshot. Tests inject a
         # mock; the production wire-up is in service_app.
         self._snapshot_reader = snapshot_reader
-        # P3.2 — defense-in-depth gate
-        self._sportradar_coverage_gate = sportradar_coverage_gate
-        self._sportradar_gate_resolver = sportradar_gate_resolver
         self._endpoints_by_pattern: dict[str, SofascoreEndpoint] = {
             ep.pattern: ep
             for ep in (endpoints if endpoints is not None else local_api_endpoints())
@@ -179,28 +171,6 @@ class ResourceRefreshWorker:
             # request first.
             prefer_head_probe=bool(getattr(endpoint, "prefer_head_probe", False)),
         )
-
-        # P3.2 — Sportradar coverage gate (defense-in-depth).
-        # Kill-switch off → returns allow without DB lookup (~5us). When
-        # enabled, may short-circuit the fetch when coverage matrix says
-        # the (ut_id, attr) combination is structurally absent.
-        if self._sportradar_coverage_gate is not None and self._sportradar_gate_resolver is not None:
-            try:
-                ctx = await self._sportradar_gate_resolver.resolve(task)
-                decision = await self._sportradar_coverage_gate.should_fetch(
-                    path_template=endpoint.path_template,
-                    ctx=ctx,
-                )
-                if decision.logged_event:
-                    logger.info("sportradar_gate decision: %s", decision.logged_event)
-                if not decision.allow:
-                    # Successful skip — not an error; runtime treats as ack-completed.
-                    return f"sportradar_gate_skipped:{decision.reason}"
-            except Exception as exc:
-                logger.warning(
-                    "sportradar_gate evaluation failed (fail-open): pattern=%s err=%s",
-                    pattern, exc,
-                )
 
         outcome = await self.fetch_executor.execute(task)
         if outcome.http_status is None:

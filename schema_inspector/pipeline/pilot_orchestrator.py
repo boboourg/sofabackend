@@ -191,12 +191,6 @@ class PilotOrchestrator:
         now_ms_factory=None,
         season_widget_gate=None,
         season_widget_structural_gate=None,
-        # P3.2 — Sportradar coverage gate. None = legacy behaviour (no SR
-        # gating). When provided, _fetch_and_parse consults the gate before
-        # issuing a request; if blocked, returns a synthetic skipped outcome.
-        # Kill-switch defaults to disabled so this is no-op until env-enabled.
-        sportradar_coverage_gate=None,
-        sportradar_gate_resolver=None,
         event_endpoint_gate=None,
         live_bootstrap_coordinator=None,
         final_sweep_gate=None,
@@ -221,9 +215,6 @@ class PilotOrchestrator:
         # P0.2 — optional structural pre-filter for season widgets.
         # ``None`` = legacy behaviour (only negative-cache gating).
         self.season_widget_structural_gate = season_widget_structural_gate
-        # P3.2 — Sportradar coverage gate + context resolver pair.
-        self.sportradar_coverage_gate = sportradar_coverage_gate
-        self.sportradar_gate_resolver = sportradar_gate_resolver
         self.event_endpoint_gate = event_endpoint_gate
         self.live_bootstrap_coordinator = live_bootstrap_coordinator
         self.final_sweep_gate = final_sweep_gate
@@ -822,74 +813,6 @@ class PilotOrchestrator:
         snapshot = self.snapshot_store.load_snapshot(snapshot_id)
         return self.normalize_worker.handle(snapshot)
 
-    async def _maybe_skip_via_sportradar_gate(
-        self,
-        *,
-        endpoint: SofascoreEndpoint,
-        sport_slug: str,
-        context_event_id: int | None,
-        context_unique_tournament_id: int | None,
-        context_season_id: int | None,
-    ) -> FetchOutcomeEnvelope | None:
-        """P3.2 — short-circuit if Sportradar coverage gate says skip.
-
-        Returns ``None`` when the request should proceed normally (kill-switch
-        off, sport out of scope, missing context, etc.). Returns a synthetic
-        ``FetchOutcomeEnvelope`` with classification ``sportradar_gate_skipped``
-        when the gate says block.
-
-        Defence-in-depth: any exception from the gate or resolver is logged
-        and the request proceeds (fail-open).
-        """
-        from types import SimpleNamespace
-        try:
-            synthetic_task = SimpleNamespace(
-                endpoint_pattern=endpoint.path_template,
-                sport_slug=sport_slug,
-                context_event_id=context_event_id,
-                context_unique_tournament_id=context_unique_tournament_id,
-                context_season_id=context_season_id,
-            )
-            ctx = await self.sportradar_gate_resolver.resolve(synthetic_task)
-            decision = await self.sportradar_coverage_gate.should_fetch(
-                path_template=endpoint.path_template,
-                ctx=ctx,
-            )
-        except Exception as exc:
-            logger.warning(
-                "sportradar_gate evaluation failed (fail-open): endpoint=%s err=%s",
-                endpoint.path_template, exc,
-            )
-            return None
-
-        if decision.logged_event:
-            logger.info("sportradar_gate decision: %s", decision.logged_event)
-
-        if decision.allow:
-            return None
-
-        # Gate said BLOCK. Return synthetic outcome so caller treats as
-        # successful no-op (NOT failure — we intentionally did not fetch).
-        return FetchOutcomeEnvelope(
-            trace_id=None,
-            job_id=None,
-            endpoint_pattern=endpoint.pattern,
-            source_url=endpoint.build_url(
-                **{k: v for k, v in (
-                    ("event_id", context_event_id),
-                    ("unique_tournament_id", context_unique_tournament_id),
-                    ("season_id", context_season_id),
-                ) if v is not None}
-            ) if hasattr(endpoint, "build_url") else "",
-            resolved_url=None,
-            http_status=None,
-            classification="sportradar_gate_skipped",
-            proxy_id=None,
-            challenge_reason=decision.reason,
-            snapshot_id=None,
-            payload_hash=None,
-        )
-
     async def _fetch_and_parse(
         self,
         *,
@@ -905,21 +828,6 @@ class PilotOrchestrator:
         freshness_key: str | None = None,
         freshness_ttl_seconds: int | None = None,
     ) -> tuple[FetchOutcomeEnvelope, object | None]:
-        # P3.2 — Sportradar coverage gate.
-        # When kill-switch is disabled (default) the gate short-circuits
-        # to allow on entry — this entire block costs ~5us. When enabled,
-        # the gate consults sportradar_coverage and may return a synthetic
-        # skipped outcome (no HTTP, no DB writes, no parse).
-        if self.sportradar_coverage_gate is not None and self.sportradar_gate_resolver is not None:
-            gate_skip = await self._maybe_skip_via_sportradar_gate(
-                endpoint=endpoint,
-                sport_slug=sport_slug,
-                context_event_id=context_event_id,
-                context_unique_tournament_id=context_unique_tournament_id,
-                context_season_id=context_season_id,
-            )
-            if gate_skip is not None:
-                return gate_skip, None
         task = FetchTask(
             trace_id=f"pilot:{sport_slug}:{context_entity_type}:{context_entity_id}",
             job_id=f"{fetch_reason}:{endpoint.pattern}:{context_entity_id}",
