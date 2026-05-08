@@ -748,6 +748,96 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO event_score" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO api_payload_snapshot" in sql for sql in statements))
 
+    async def test_event_upsert_lifecycle_columns_have_terminal_state_guard(self) -> None:
+        """F-8 Phase 1.5: lock the SQL shape so a future refactor cannot
+        silently drop the monotonic guard on lifecycle-sensitive event
+        columns. Status/winner/aggregated_winner/last_period must each
+        gate via event_terminal_state EXISTS before accepting EXCLUDED."""
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        event_upsert_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO event (" in sql
+        )
+        normalized = " ".join(event_upsert_sql.split())
+        # Each guarded column must use a CASE/EXISTS expression keyed off
+        # the same event_terminal_state row, not straight EXCLUDED.
+        for guarded in ("status_code", "winner_code", "aggregated_winner_code", "last_period"):
+            self.assertIn(f"{guarded} = CASE", normalized)
+            self.assertNotRegex(
+                normalized,
+                rf"{guarded}\s*=\s*EXCLUDED\.{guarded}\b",
+            )
+        # Reference data must keep the legacy straight EXCLUDED assignment
+        # to avoid blocking legitimate corrections (slug typo fix, FK
+        # repointing, VAR-reversible red cards, capability flag flips).
+        for unguarded in (
+            "slug",
+            "tournament_id",
+            "home_team_id",
+            "away_team_id",
+            "home_red_cards",
+            "away_red_cards",
+            "has_xg",
+        ):
+            self.assertIn(f"{unguarded} = EXCLUDED.{unguarded}", normalized)
+        # Terminal status types lifted from planner/live.py
+        # ::TERMINAL_STATUS_TYPES — keep both lists in sync.
+        for terminal_type in (
+            "'finished'",
+            "'afterextra'",
+            "'afterpen'",
+            "'cancelled'",
+            "'canceled'",
+            "'postponed'",
+        ):
+            self.assertIn(terminal_type, normalized)
+        self.assertIn("FROM event_terminal_state", normalized)
+
+    async def test_event_score_upsert_all_columns_have_terminal_state_guard(self) -> None:
+        """F-8 Phase 1.5: every event_score column is final after the
+        match is recorded as terminal. A delayed-insert "1-2 1st half"
+        payload must not overwrite the finished "3-2" score row, so all
+        13 score columns gate via event_terminal_state."""
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventListRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        score_upsert_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO event_score" in sql
+        )
+        normalized = " ".join(score_upsert_sql.split())
+        for column in (
+            "current",
+            "display",
+            "aggregated",
+            "normaltime",
+            "overtime",
+            "penalties",
+            "period1",
+            "period2",
+            "period3",
+            "period4",
+            "extra1",
+            "extra2",
+            "series",
+        ):
+            self.assertIn(f"{column} = CASE", normalized)
+            self.assertNotRegex(
+                normalized,
+                rf"{column}\s*=\s*EXCLUDED\.{column}\b",
+            )
+        # FK reference must keep its terminal subquery joining on the
+        # event_score.event_id column (NOT event.id, which is the wrong
+        # alias when upserting a child table).
+        self.assertIn("ets.event_id = event_score.event_id", normalized)
+        self.assertIn("FROM event_terminal_state", normalized)
+
     async def test_event_list_ingest_job_uses_transaction_and_repository(self) -> None:
         bundle = _build_bundle()
         parser = _FakeParser(bundle)

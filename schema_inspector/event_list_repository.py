@@ -11,6 +11,7 @@ import orjson
 from .db import register_post_commit_hook
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
+from .storage._terminal_guard import terminal_guard_case
 from .storage.raw_repository import RawRepository
 from .write_avoidance_cache import ExpiringValueCache
 
@@ -735,9 +736,25 @@ class EventListRepository:
             )
             for item in bundle.events
         ]
+        # F-8 Phase 1.5: lifecycle-sensitive fields (status_code, winner_code,
+        # aggregated_winner_code, last_period) get the terminal_state monotonic
+        # guard so a delayed-insert event-list snapshot whose payload says
+        # "inprogress" cannot overwrite a finished match's terminal status,
+        # winner, or last period name. All other columns retain straight
+        # EXCLUDED assignment — they are either reference data (FK, slug,
+        # detail_id) or correction-legitimate (red cards via VAR review,
+        # AI insight flags, capability flags, coverage signal).
+        status_guard = terminal_guard_case(table="event", event_fk="id", column="status_code")
+        winner_guard = terminal_guard_case(table="event", event_fk="id", column="winner_code")
+        agg_winner_guard = terminal_guard_case(
+            table="event", event_fk="id", column="aggregated_winner_code"
+        )
+        last_period_guard = terminal_guard_case(
+            table="event", event_fk="id", column="last_period"
+        )
         await _executemany(
             executor,
-            """
+            f"""
             INSERT INTO event (
                 id, slug, custom_id, detail_id, tournament_id, unique_tournament_id, season_id,
                 home_team_id, away_team_id, status_code, season_statistics_type, start_timestamp,
@@ -764,12 +781,12 @@ class EventListRepository:
                 season_id = EXCLUDED.season_id,
                 home_team_id = EXCLUDED.home_team_id,
                 away_team_id = EXCLUDED.away_team_id,
-                status_code = EXCLUDED.status_code,
+                status_code = {status_guard},
                 season_statistics_type = EXCLUDED.season_statistics_type,
                 start_timestamp = EXCLUDED.start_timestamp,
                 coverage = EXCLUDED.coverage,
-                winner_code = EXCLUDED.winner_code,
-                aggregated_winner_code = EXCLUDED.aggregated_winner_code,
+                winner_code = {winner_guard},
+                aggregated_winner_code = {agg_winner_guard},
                 home_red_cards = EXCLUDED.home_red_cards,
                 away_red_cards = EXCLUDED.away_red_cards,
                 previous_leg_event_id = EXCLUDED.previous_leg_event_id,
@@ -777,7 +794,7 @@ class EventListRepository:
                 default_period_count = EXCLUDED.default_period_count,
                 default_period_length = EXCLUDED.default_period_length,
                 default_overtime_length = EXCLUDED.default_overtime_length,
-                last_period = EXCLUDED.last_period,
+                last_period = {last_period_guard},
                 correct_ai_insight = EXCLUDED.correct_ai_insight,
                 correct_halftime_ai_insight = EXCLUDED.correct_halftime_ai_insight,
                 feed_locked = EXCLUDED.feed_locked,
@@ -893,28 +910,52 @@ class EventListRepository:
             )
             for item in bundle.event_scores
         ]
+        # F-8 Phase 1.5: every score column is final once event_terminal_state
+        # holds a terminal row. A delayed-insert "1-2 1st half" payload
+        # must NOT overwrite a finished "3-2" event_score row. Each column
+        # gets the same monotonic guard expression — verbose but explicit.
+        score_guards = {
+            column: terminal_guard_case(
+                table="event_score", event_fk="event_id", column=column
+            )
+            for column in (
+                "current",
+                "display",
+                "aggregated",
+                "normaltime",
+                "overtime",
+                "penalties",
+                "period1",
+                "period2",
+                "period3",
+                "period4",
+                "extra1",
+                "extra2",
+                "series",
+            )
+        }
         await _executemany(
             executor,
-            """
+            f"""
             INSERT INTO event_score (
                 event_id, side, current, display, aggregated, normaltime, overtime,
                 penalties, period1, period2, period3, period4, extra1, extra2, series
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (event_id, side) DO UPDATE SET
-                current = EXCLUDED.current,
-                display = EXCLUDED.display,
-                aggregated = EXCLUDED.aggregated,
-                normaltime = EXCLUDED.normaltime,
-                overtime = EXCLUDED.overtime,
-                penalties = EXCLUDED.penalties,
-                period1 = EXCLUDED.period1,
-                period2 = EXCLUDED.period2,
-                period3 = EXCLUDED.period3,
-                period4 = EXCLUDED.period4,
-                extra1 = EXCLUDED.extra1,
-                extra2 = EXCLUDED.extra2,
-                series = EXCLUDED.series
+                current = {score_guards["current"]},
+                display = {score_guards["display"]},
+                aggregated = {score_guards["aggregated"]},
+                normaltime = {score_guards["normaltime"]},
+                overtime = {score_guards["overtime"]},
+                penalties = {score_guards["penalties"]},
+                period1 = {score_guards["period1"]},
+                period2 = {score_guards["period2"]},
+                period3 = {score_guards["period3"]},
+                period4 = {score_guards["period4"]},
+                extra1 = {score_guards["extra1"]},
+                extra2 = {score_guards["extra2"]},
+                series = {score_guards["series"]}
             """,
             rows,
         )

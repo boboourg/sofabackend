@@ -425,6 +425,37 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("INSERT INTO event_player_stat_value " in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_player_rating_breakdown_action " in sql for sql in statements))
 
+    async def test_event_detail_repository_event_upsert_has_terminal_state_guard(self) -> None:
+        """F-8 Phase 1.5: EventDetailRepository overrides _upsert_events
+        with a 37-column statement (adds referee_id +
+        has_event_player_heat_map vs the 35-column EventListRepository
+        version). The same monotonic guard must apply to the four
+        lifecycle-sensitive columns.
+
+        Score columns are not asserted here — EventDetailRepository
+        inherits _upsert_event_scores unchanged from EventListRepository,
+        and the score-guard shape is locked in test_event_list_storage.py."""
+        bundle = _build_bundle()
+        executor = _FakeExecutor()
+        repository = EventDetailRepository()
+
+        await repository.upsert_bundle(executor, bundle)
+
+        event_upsert_sql = next(
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO event (" in sql
+        )
+        normalized = " ".join(event_upsert_sql.split())
+        for guarded in ("status_code", "winner_code", "aggregated_winner_code", "last_period"):
+            self.assertIn(f"{guarded} = CASE", normalized)
+            self.assertNotRegex(
+                normalized,
+                rf"{guarded}\s*=\s*EXCLUDED\.{guarded}\b",
+            )
+        # Detail-only column (referee_id) stays straight EXCLUDED — it's
+        # FK reference data and can be corrected post-match.
+        self.assertIn("referee_id = EXCLUDED.referee_id", normalized)
+        self.assertIn("FROM event_terminal_state", normalized)
+
     async def test_event_detail_repository_drops_orphan_player_team_foreign_keys(self) -> None:
         bundle = _build_bundle()
         bundle = EventDetailBundle(

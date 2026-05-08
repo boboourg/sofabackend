@@ -8,6 +8,7 @@ from typing import Any
 
 from .event_detail_parser import EventDetailBundle
 from .event_list_repository import EventListRepository, SqlExecutor, _executemany, _jsonb
+from .storage._terminal_guard import terminal_guard_case
 
 
 @dataclass(frozen=True)
@@ -598,9 +599,21 @@ class EventDetailRepository(EventListRepository):
             )
             for item in bundle.events
         ]
+        # F-8 Phase 1.5: same monotonic guard as event_list_repository for the
+        # 4 lifecycle-sensitive columns. EventDetailRepository inherits
+        # _upsert_event_scores from EventListRepository, so score columns
+        # are already protected by the change there.
+        status_guard = terminal_guard_case(table="event", event_fk="id", column="status_code")
+        winner_guard = terminal_guard_case(table="event", event_fk="id", column="winner_code")
+        agg_winner_guard = terminal_guard_case(
+            table="event", event_fk="id", column="aggregated_winner_code"
+        )
+        last_period_guard = terminal_guard_case(
+            table="event", event_fk="id", column="last_period"
+        )
         await _executemany(
             executor,
-            """
+            f"""
             INSERT INTO event (
                 id, slug, custom_id, detail_id, tournament_id, unique_tournament_id, season_id,
                 home_team_id, away_team_id, venue_id, referee_id, status_code, season_statistics_type,
@@ -628,12 +641,12 @@ class EventDetailRepository(EventListRepository):
                 away_team_id = EXCLUDED.away_team_id,
                 venue_id = EXCLUDED.venue_id,
                 referee_id = EXCLUDED.referee_id,
-                status_code = EXCLUDED.status_code,
+                status_code = {status_guard},
                 season_statistics_type = EXCLUDED.season_statistics_type,
                 start_timestamp = EXCLUDED.start_timestamp,
                 coverage = EXCLUDED.coverage,
-                winner_code = EXCLUDED.winner_code,
-                aggregated_winner_code = EXCLUDED.aggregated_winner_code,
+                winner_code = {winner_guard},
+                aggregated_winner_code = {agg_winner_guard},
                 home_red_cards = EXCLUDED.home_red_cards,
                 away_red_cards = EXCLUDED.away_red_cards,
                 previous_leg_event_id = EXCLUDED.previous_leg_event_id,
@@ -641,7 +654,7 @@ class EventDetailRepository(EventListRepository):
                 default_period_count = EXCLUDED.default_period_count,
                 default_period_length = EXCLUDED.default_period_length,
                 default_overtime_length = EXCLUDED.default_overtime_length,
-                last_period = EXCLUDED.last_period,
+                last_period = {last_period_guard},
                 correct_ai_insight = EXCLUDED.correct_ai_insight,
                 correct_halftime_ai_insight = EXCLUDED.correct_halftime_ai_insight,
                 feed_locked = EXCLUDED.feed_locked,
