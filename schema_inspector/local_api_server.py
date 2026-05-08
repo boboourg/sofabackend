@@ -2843,16 +2843,6 @@ class LocalApiApplication:
     async def _fetch_ops_snapshots_summary_payload(self) -> dict[str, Any]:
         connection = await self._connect()
         try:
-            # F-5: prefer api_snapshot_head.latest_fetched_at over
-            # api_payload_snapshot.fetched_at when reporting the latest
-            # observed fetch time. ON CONFLICT (scope_key, payload_hash)
-            # DO NOTHING dedupe leaves api_payload_snapshot.fetched_at
-            # pinned to the FIRST insert; api_snapshot_head.latest_fetched_at
-            # is updated on every fetch regardless of dedupe, so it is
-            # the canonical "when did we last actually re-fetch" signal.
-            # Falls back to MAX(api_payload_snapshot.fetched_at) for
-            # snapshots whose head row is missing (legacy data, transient
-            # bootstrap). GREATEST is NULL-safe in PostgreSQL.
             snapshot_row = await connection.fetchrow(
                 """
                 SELECT
@@ -2863,10 +2853,7 @@ class LocalApiApplication:
                     COUNT(*) FILTER (WHERE http_status = 200)::bigint AS http_200_count,
                     COUNT(*) FILTER (WHERE http_status = 404)::bigint AS http_404_count,
                     COUNT(*) FILTER (WHERE http_status >= 500)::bigint AS http_5xx_count,
-                    GREATEST(
-                        (SELECT MAX(latest_fetched_at) FROM api_snapshot_head),
-                        MAX(fetched_at)
-                    ) AS latest_fetched_at
+                    MAX(fetched_at) AS latest_fetched_at
                 FROM api_payload_snapshot
                 """
             )
