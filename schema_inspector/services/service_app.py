@@ -870,6 +870,11 @@ class ServiceApp:
             )
             self.stream_queue.publish(STREAM_NORMALIZE, encode_stream_job(envelope))
 
+        # P3.2 — build Sportradar coverage gate + resolver if env-enabled.
+        # Both default to None when SCHEMA_INSPECTOR_SPORTRADAR_GATE_ENABLED is
+        # not set (or "false"), so the worker skips the gate entirely.
+        sportradar_coverage_gate, sportradar_gate_resolver = self._build_sportradar_gate()
+
         return ResourceRefreshWorker(
             fetch_executor=executor,
             delayed_scheduler=self.delayed_scheduler,
@@ -886,7 +891,40 @@ class ServiceApp:
             snapshot_reader=_snapshot_reader,
             normalize_publisher=_normalize_publisher,
             totw_404_store=self.totw_404_store,
+            sportradar_coverage_gate=sportradar_coverage_gate,
+            sportradar_gate_resolver=sportradar_gate_resolver,
         )
+
+    def _build_sportradar_gate(self):
+        """P3.2 — construct gate + resolver from env. Returns (None, None) when
+        kill-switch disabled (default). Both objects share the worker's lifecycle
+        and reuse the app's database for lookups + resolver caching.
+        """
+        import os
+        if os.getenv("SCHEMA_INSPECTOR_SPORTRADAR_GATE_ENABLED", "false").strip().lower() not in {
+            "1", "true", "yes", "on"
+        }:
+            return None, None
+        try:
+            from ..storage.sportradar_repository import SportradarCoverageLookup
+            from ..services.gate_context_resolver import GateContextResolver
+            from ..services.sportradar_coverage_gate import SportradarCoverageGate
+            lookup = SportradarCoverageLookup(self.app.database)
+            # Resolver borrows a connection per call via app.database.connection().
+            class _DBAdapter:
+                def __init__(self, db): self._db = db
+                async def fetchrow(self, sql, *args):
+                    async with self._db.connection() as conn:
+                        return await conn.fetchrow(sql, *args)
+            resolver = GateContextResolver(database=_DBAdapter(self.app.database))
+            gate = SportradarCoverageGate(coverage_lookup=lookup)
+            return gate, resolver
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "sportradar_gate construction failed; falling open"
+            )
+            return None, None
 
     def build_normalize_worker(
         self,
