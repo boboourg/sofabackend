@@ -874,6 +874,14 @@ class NormalizeRepository:
                     -- cause the live worker to re-bootstrap polling.
                     -- Terminal statuses lifted from
                     -- schema_inspector/planner/live.py::TERMINAL_STATUS_TYPES.
+                    --
+                    -- The COALESCE inside the THEN branch keeps initial
+                    -- NULL→value fills working: if a finalize path inserts
+                    -- the terminal_state row before the parser writes a
+                    -- non-NULL status_code (race), the next parse can
+                    -- still complete the fill (NULL → 100). The guard
+                    -- only blocks once the column already holds a
+                    -- non-NULL value (the actual regression vector).
                     status_code = CASE
                         WHEN EXISTS (
                             SELECT 1 FROM event_terminal_state ets
@@ -887,7 +895,7 @@ class NormalizeRepository:
                                   'postponed'
                               )
                         )
-                        THEN event.status_code
+                        THEN COALESCE(event.status_code, EXCLUDED.status_code)
                         ELSE COALESCE(EXCLUDED.status_code, event.status_code)
                     END,
                     start_timestamp = EXCLUDED.start_timestamp

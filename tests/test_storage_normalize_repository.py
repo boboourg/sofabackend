@@ -260,6 +260,10 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(terminal_type, normalized)
         # Fall-through preserves prior NULL-fallback semantics.
         self.assertIn("COALESCE(EXCLUDED.status_code, event.status_code)", normalized)
+        # F-8 hotfix: the THEN branch ALSO uses COALESCE so an initial
+        # NULL→value fill (a finalize-then-fill race scenario) can still
+        # succeed even when terminal_state is recorded.
+        self.assertIn("COALESCE(event.status_code, EXCLUDED.status_code)", normalized)
 
     async def test_repository_sorts_detail_batch_rows_lexicographically(self) -> None:
         repository = NormalizeRepository()

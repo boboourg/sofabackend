@@ -576,6 +576,216 @@ class NormalizeRepositoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["period1"], 2)
         self.assertEqual(row["period2"], 1)
 
+    async def test_status_code_initial_fill_when_existing_null_with_terminal_state(self) -> None:
+        """F-8 hotfix: COALESCE inside the guarded branch lets a NULL→value
+        initial fill complete even when ``event_terminal_state`` is
+        already recorded. Before the hotfix the guard preserved the
+        existing NULL, leaving 138 events with NULL winner_code in 30
+        minutes on 2026-05-09."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES
+                (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, start_timestamp)
+                VALUES (16141590, 'race-condition-event', NULL, 1778266800);
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45661225, 'k', '/api/v1/event/{event_id}', 200, 'h',
+                        '2026-05-09 00:45:45+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (16141590, 'finished', '2026-05-09 02:00:00+03', 45661225);
+            """
+        )
+
+        # event.status_code = NULL while terminal_state already exists.
+        # A subsequent "finished" parse must be allowed to complete the
+        # initial fill (NULL → 100). Without the COALESCE in the THEN
+        # branch the guard would keep status_code=NULL forever.
+        result = ParseResult(
+            snapshot_id=45661225,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": (
+                    {
+                        "id": 16141590,
+                        "slug": "fill-status-100",
+                        "tournament_id": None,
+                        "unique_tournament_id": None,
+                        "season_id": None,
+                        "home_team_id": None,
+                        "away_team_id": None,
+                        "venue_id": None,
+                        "status_code": 100,
+                        "start_timestamp": 1778266800,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow("SELECT status_code FROM event WHERE id=$1", 16141590)
+        self.assertEqual(row["status_code"], 100)
+
+    async def test_event_winner_initial_fill_when_existing_null_with_terminal_state(self) -> None:
+        """F-8 hotfix: legacy event_list/event_detail UPSERTs must also
+        permit NULL→value initial fill for winner_code / last_period
+        once terminal_state exists. Mirrors the Phase 1 hotfix test
+        above but for the Phase 1.5-guarded columns."""
+        from schema_inspector.storage._terminal_guard import terminal_guard_case
+
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, winner_code, last_period, start_timestamp)
+                VALUES (16141591, 'race-condition-event-2', 100, NULL, NULL, 1778266800);
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45661226, 'k', '/api/v1/event/{event_id}', 200, 'h',
+                        '2026-05-09 00:45:45+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (16141591, 'finished', '2026-05-09 02:00:00+03', 45661226);
+            """
+        )
+
+        winner_guard = terminal_guard_case(table="event", event_fk="id", column="winner_code")
+        period_guard = terminal_guard_case(
+            table="event", event_fk="id", column="last_period"
+        )
+        # Simulate event_list/event_detail repository upsert with both
+        # winner_code and last_period from a "finished" payload landing
+        # after terminal_state was inserted.
+        await self.connection.execute(
+            f"""
+            INSERT INTO event (id, slug, status_code, winner_code, last_period, start_timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO UPDATE SET
+                winner_code = {winner_guard},
+                last_period = {period_guard}
+            """,
+            16141591,
+            "fill-winner-and-period",
+            100,
+            3,
+            "2nd half",
+            1778266800,
+        )
+
+        row = await self.connection.fetchrow(
+            "SELECT winner_code, last_period FROM event WHERE id=$1",
+            16141591,
+        )
+        self.assertEqual(row["winner_code"], 3)
+        self.assertEqual(row["last_period"], "2nd half")
+
+    async def test_event_score_initial_fill_when_existing_null_with_terminal_state(self) -> None:
+        """F-8 hotfix: every event_score column also permits NULL→value
+        initial fill. A finalize parse arriving after terminal_state
+        was inserted must be able to write the final scores even though
+        the row already exists with NULL values."""
+        from schema_inspector.storage._terminal_guard import terminal_guard_case
+
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, start_timestamp)
+                VALUES (16141592, 'race-condition-event-3', 100, 1778266800);
+            -- Pre-existing event_score row with all NULL values (simulating
+            -- a row created during early bootstrap before scores were known).
+            INSERT INTO event_score (event_id, side) VALUES (16141592, 'home'), (16141592, 'away');
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45661227, 'k', '/api/v1/event/{event_id}', 200, 'h',
+                        '2026-05-09 00:45:45+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (16141592, 'finished', '2026-05-09 02:00:00+03', 45661227);
+            """
+        )
+
+        score_columns = (
+            "current",
+            "display",
+            "aggregated",
+            "normaltime",
+            "overtime",
+            "penalties",
+            "period1",
+            "period2",
+            "period3",
+            "period4",
+            "extra1",
+            "extra2",
+            "series",
+        )
+        guards = ",\n".join(
+            f"{col} = {terminal_guard_case(table='event_score', event_fk='event_id', column=col)}"
+            for col in score_columns
+        )
+        await self.connection.execute(
+            f"""
+            INSERT INTO event_score (event_id, side, current, display, aggregated, normaltime, period1, period2)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (event_id, side) DO UPDATE SET
+                {guards}
+            """,
+            16141592, "home", 3, 3, 3, 3, 2, 1,
+        )
+
+        row = await self.connection.fetchrow(
+            "SELECT current, display, aggregated, normaltime, period1, period2 "
+            "FROM event_score WHERE event_id=$1 AND side='home'",
+            16141592,
+        )
+        self.assertEqual(row["current"], 3)
+        self.assertEqual(row["display"], 3)
+        self.assertEqual(row["aggregated"], 3)
+        self.assertEqual(row["normaltime"], 3)
+        self.assertEqual(row["period1"], 2)
+        self.assertEqual(row["period2"], 1)
+
+    async def test_event_winner_null_erasure_blocked_with_terminal_state(self) -> None:
+        """F-8 hotfix idempotence check: when the column already has a
+        non-NULL value and ``event_terminal_state`` exists, a payload
+        with NULL must NOT erase it. The COALESCE inside the guarded
+        branch returns the existing value when EXCLUDED is NULL."""
+        from schema_inspector.storage._terminal_guard import terminal_guard_case
+
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, winner_code, start_timestamp)
+                VALUES (16141593, 'erasure-test', 100, 1, 1778266800);
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45661228, 'k', '/api/v1/event/{event_id}', 200, 'h',
+                        '2026-05-09 00:45:45+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (16141593, 'finished', '2026-05-09 02:00:00+03', 45661228);
+            """
+        )
+
+        winner_guard = terminal_guard_case(table="event", event_fk="id", column="winner_code")
+        await self.connection.execute(
+            f"""
+            INSERT INTO event (id, slug, status_code, winner_code, start_timestamp)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (id) DO UPDATE SET
+                winner_code = {winner_guard}
+            """,
+            16141593,
+            "stale-payload",
+            100,
+            None,  # ← stale payload tries to erase winner
+            1778266800,
+        )
+
+        row = await self.connection.fetchrow("SELECT winner_code FROM event WHERE id=$1", 16141593)
+        # Erasure attempt blocked — existing winner_code=1 preserved.
+        self.assertEqual(row["winner_code"], 1)
+
     async def test_event_lifecycle_columns_normal_update_without_terminal_state(self) -> None:
         """F-8 Phase 1.5 negative: when no terminal_state row exists, the
         guard branch falls through to EXCLUDED and ordinary updates

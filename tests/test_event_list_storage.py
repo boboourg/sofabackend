@@ -752,7 +752,13 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
         """F-8 Phase 1.5: lock the SQL shape so a future refactor cannot
         silently drop the monotonic guard on lifecycle-sensitive event
         columns. Status/winner/aggregated_winner/last_period must each
-        gate via event_terminal_state EXISTS before accepting EXCLUDED."""
+        gate via event_terminal_state EXISTS before accepting EXCLUDED.
+
+        F-8 hotfix shape requirement: the THEN branch must use
+        ``COALESCE(event.<col>, EXCLUDED.<col>)`` so an initial NULL
+        value can still be filled while terminal_state is present.
+        Without that, finalize-then-fill races leave the column NULL
+        (138-events-in-30-min regression observed on 2026-05-09)."""
         bundle = _build_bundle()
         executor = _FakeExecutor()
         repository = EventListRepository()
@@ -770,6 +776,12 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotRegex(
                 normalized,
                 rf"{guarded}\s*=\s*EXCLUDED\.{guarded}\b",
+            )
+            # NULL→value initial fill must remain possible — guard
+            # branch keeps existing value only when it is non-NULL.
+            self.assertIn(
+                f"COALESCE(event.{guarded}, EXCLUDED.{guarded})",
+                normalized,
             )
         # Reference data must keep the legacy straight EXCLUDED assignment
         # to avoid blocking legitimate corrections (slug typo fix, FK
@@ -831,6 +843,12 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotRegex(
                 normalized,
                 rf"{column}\s*=\s*EXCLUDED\.{column}\b",
+            )
+            # F-8 hotfix: NULL→value initial fill stays possible — the
+            # guarded branch returns COALESCE(existing, incoming).
+            self.assertIn(
+                f"COALESCE(event_score.{column}, EXCLUDED.{column})",
+                normalized,
             )
         # FK reference must keep its terminal subquery joining on the
         # event_score.event_id column (NOT event.id, which is the wrong

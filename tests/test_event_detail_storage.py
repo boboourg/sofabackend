@@ -451,6 +451,12 @@ class EventDetailStorageTests(unittest.IsolatedAsyncioTestCase):
                 normalized,
                 rf"{guarded}\s*=\s*EXCLUDED\.{guarded}\b",
             )
+            # F-8 hotfix: COALESCE inside the THEN branch keeps initial
+            # NULL→value fills working when terminal_state already exists.
+            self.assertIn(
+                f"COALESCE(event.{guarded}, EXCLUDED.{guarded})",
+                normalized,
+            )
         # Detail-only column (referee_id) stays straight EXCLUDED — it's
         # FK reference data and can be corrected post-match.
         self.assertIn("referee_id = EXCLUDED.referee_id", normalized)
