@@ -116,6 +116,142 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(result.next_poll_at, 1_800_000_005_000)
         self.assertEqual(store.fetch(15235532).dispatch_tier, "tier_1")
 
+    def test_track_event_skips_upsert_when_existing_state_is_finalized(self) -> None:
+        # F-8 Fix B: defense-in-depth complementing the SQL monotonic
+        # guards. When upstream Sofascore returns a stale "inprogress"
+        # payload after the match was legitimately finalized
+        # (CDN flap or out-of-order delayed-insert snapshot), the
+        # orchestrator's planner switch on parsed status_type will route
+        # to JOB_TRACK_LIVE_EVENT → live_worker.track_event(). Without
+        # this guard, track_event would upsert is_finalized=False back
+        # to the live state store and re-add the event into hot/warm
+        # zsets, burning tier_1 polling resources and producing UI
+        # artifacts on an already-ended match.
+        backend = _FakeLiveBackend()
+        store = LiveEventStateStore(backend)
+        worker = LiveWorker(now_ms_factory=lambda: 1_800_000_000_000)
+        # Pre-populate the live state with a finalized event (as if
+        # finalize_event had run earlier).
+        worker.finalize_event(
+            sport_slug="football",
+            event_id=14083568,
+            status_type="finished",
+            live_state_store=store,
+        )
+        # Sanity: the event is recorded as finalized and not in any zset.
+        finalized = store.fetch(14083568)
+        self.assertIsNotNone(finalized)
+        self.assertTrue(finalized.is_finalized)
+
+        # A stale "inprogress" parse arrives and tries to re-track.
+        result = worker.track_event(
+            sport_slug="football",
+            event_id=14083568,
+            status_type="inprogress",
+            minutes_to_start=0,
+            trace_id="stale-inprogress",
+            detail_id=1,
+            tournament_user_count=317795,
+            live_state_store=store,
+            stream_queue=_FakeStreamQueue(),
+        )
+
+        # Track must short-circuit — no upsert, no zset re-add, no
+        # claim/clear churn. The result conveys that no live state
+        # transition was taken.
+        self.assertIsNone(result.next_poll_at)
+        self.assertIsNone(result.stream)
+        self.assertIsNone(result.job)
+        # State stays terminal — is_finalized=True, removed from zsets.
+        still_finalized = store.fetch(14083568)
+        self.assertTrue(still_finalized.is_finalized)
+        self.assertEqual(still_finalized.poll_profile, "terminal")
+        self.assertNotIn("14083568", backend.zsets.get("zset:live:hot", {}))
+        self.assertNotIn("14083568", backend.zsets.get("zset:live:warm", {}))
+        self.assertNotIn("14083568", backend.zsets.get("zset:live:cold", {}))
+
+    def test_track_event_proceeds_when_existing_state_is_not_finalized(self) -> None:
+        # Negative test for F-8 Fix B: the guard must NOT short-circuit
+        # the normal mid-match status transition flow (e.g., halftime →
+        # 2nd half). Existing state is_finalized=False → track_event
+        # proceeds with the upsert and zset placement.
+        backend = _FakeLiveBackend()
+        store = LiveEventStateStore(backend)
+        worker = LiveWorker(now_ms_factory=lambda: 1_800_000_000_000)
+        # Pre-populate the live state with a NOT finalized event (as if
+        # an earlier track_event for "1st half" had run).
+        from schema_inspector.queue.live_state import LiveEventState
+
+        store.upsert(
+            LiveEventState(
+                event_id=14083568,
+                sport_slug="football",
+                status_type="inprogress",
+                poll_profile="hot",
+                last_seen_at=1_799_999_000_000,
+                last_ingested_at=1_799_999_000_000,
+                last_changed_at=1_799_999_000_000,
+                next_poll_at=1_800_000_000_000,
+                hot_until=1_800_000_000_000,
+                home_score=1,
+                away_score=0,
+                version_hint=None,
+                is_finalized=False,
+                dispatch_tier="tier_1",
+            ),
+            lane="hot",
+        )
+
+        result = worker.track_event(
+            sport_slug="football",
+            event_id=14083568,
+            status_type="inprogress",
+            minutes_to_start=0,
+            trace_id="next-tick",
+            detail_id=1,
+            tournament_user_count=317795,
+            live_state_store=store,
+            stream_queue=_FakeStreamQueue(),
+        )
+
+        # Normal transition: upsert ran, next_poll_at is set, stream
+        # routes to tier_1 hot.
+        self.assertEqual(result.decision.lane, "hot")
+        self.assertEqual(result.stream, "stream:etl:live_tier_1")
+        self.assertEqual(result.next_poll_at, 1_800_000_005_000)
+        # State stays not-finalized.
+        updated = store.fetch(14083568)
+        self.assertFalse(updated.is_finalized)
+
+    def test_track_event_proceeds_when_no_prior_state_exists(self) -> None:
+        # Negative test for F-8 Fix B: a brand-new live event has no
+        # row in the live state store yet — the guard must fall through
+        # so the first track_event call records the initial state.
+        backend = _FakeLiveBackend()
+        store = LiveEventStateStore(backend)
+        worker = LiveWorker(now_ms_factory=lambda: 1_800_000_000_000)
+        # No pre-existing state.
+        self.assertIsNone(store.fetch(14083568))
+
+        result = worker.track_event(
+            sport_slug="football",
+            event_id=14083568,
+            status_type="inprogress",
+            minutes_to_start=0,
+            trace_id="first-track",
+            detail_id=1,
+            tournament_user_count=317795,
+            live_state_store=store,
+            stream_queue=_FakeStreamQueue(),
+        )
+
+        self.assertEqual(result.decision.lane, "hot")
+        self.assertEqual(result.stream, "stream:etl:live_tier_1")
+        new_state = store.fetch(14083568)
+        self.assertIsNotNone(new_state)
+        self.assertFalse(new_state.is_finalized)
+        self.assertEqual(new_state.dispatch_tier, "tier_1")
+
     def test_track_event_clears_dispatch_claim_with_tier(self) -> None:
         # F-7 Phase 0: clear_dispatch_claim must receive the resolved
         # dispatch_tier so the per-tier clear counter reflects which

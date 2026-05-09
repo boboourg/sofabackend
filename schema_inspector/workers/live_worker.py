@@ -72,6 +72,38 @@ class LiveWorker:
         next_poll_at = now_ms + (next_poll_seconds * 1000) if next_poll_seconds is not None else None
 
         if live_state_store is not None:
+            # F-8 Fix B (defense-in-depth, complements Phase 1 + 1.5
+            # SQL guards): if the live state store already has the event
+            # marked terminal, do NOT re-liven it. Without this guard,
+            # a stale upstream payload returning "inprogress" (Sofascore
+            # CDN flap) would call track_event after the match was
+            # legitimately finalized, putting it back into hot/warm
+            # zsets and burning tier_1 polling resources on an ended
+            # match. The Phase 1 + 1.5 SQL guards already prevent the
+            # event row from regressing in DB; this guard prevents the
+            # same regression in Redis live state.
+            #
+            # Defensive on three levels:
+            #   1. fetch attribute may be absent (older test fakes /
+            #      alternate stores) — fall through.
+            #   2. fetch may raise (e.g., backend lacking hgetall in
+            #      a fake) — fall through, guard is best-effort.
+            #   3. existing may be None (no prior state — first track
+            #      for the event) — proceed with normal upsert.
+            fetch = getattr(live_state_store, "fetch", None)
+            if callable(fetch):
+                try:
+                    existing = fetch(event_id)
+                except Exception:
+                    existing = None
+                if existing is not None and existing.is_finalized:
+                    return LiveTrackResult(
+                        decision=decision,
+                        next_poll_at=None,
+                        stream=None,
+                        job=None,
+                    )
+
             live_state_store.upsert(
                 LiveEventState(
                     event_id=event_id,
