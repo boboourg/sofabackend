@@ -50,6 +50,9 @@ class LiveWorkerService:
         in_flight_store=None,
         details_throttle=None,
         details_backpressure_limit: int | None = None,
+        root_in_flight_store=None,
+        edges_throttle=None,
+        edges_backpressure_limit: int | None = None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
         if normalized_lane not in {"hot", "warm", "tier_1", "tier_2", "tier_3"}:
@@ -75,6 +78,27 @@ class LiveWorkerService:
             details_backpressure_limit
             if details_backpressure_limit is not None
             else env_backpressure
+        )
+        # P0(b) tier_1 root-only rollout. ``root_in_flight_store`` is a
+        # ``LiveEventRootInFlightStore`` instance (or None for tests /
+        # legacy). When ``LIVE_TIER_1_ROOT_ONLY=1`` and this worker's
+        # lane is ``tier_1``, ``handle()`` claims this lock instead of
+        # ``in_flight_store`` so root-only fetches don't block on (and
+        # aren't blocked by) full ROOT+edges runs on other lanes.
+        # ``edges_throttle`` rate-limits the follow-up
+        # ``refresh_live_event`` enqueue onto ``stream:etl:live_warm``.
+        # ``edges_backpressure_limit`` (env
+        # ``LIVE_EDGES_STREAM_BACKPRESSURE_LIMIT``) caps the
+        # ``stream:etl:live_warm`` length; above the cap, root-only
+        # workers skip the edges enqueue rather than letting the warm
+        # backlog grow unbounded.
+        self.root_in_flight_store = root_in_flight_store
+        self.edges_throttle = edges_throttle
+        env_edges_backpressure = _env_optional_positive_int("LIVE_EDGES_STREAM_BACKPRESSURE_LIMIT")
+        self.edges_backpressure_limit = (
+            edges_backpressure_limit
+            if edges_backpressure_limit is not None
+            else env_edges_backpressure
         )
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
@@ -110,42 +134,89 @@ class LiveWorkerService:
         if job.entity_id is None:
             raise RuntimeError("Live worker requires event entity_id in stream payload.")
         event_id = int(job.entity_id)
+        sport_slug = job.sport_slug or self.default_sport_slug
+
+        # P0(b) tier_1 root-only fast path. Only kicks in for ``tier_1``
+        # lane workers (NOT tier_2/tier_3/warm/hot) AND only for normal
+        # ``refresh_live_event`` jobs (NOT details follow-ups, etc.). The
+        # path uses an INDEPENDENT lock (``live:root_inflight``) so a
+        # full-refresh holding ``live:refresh_inflight`` (e.g. on
+        # live_warm via the edges follow-up) does not block the next
+        # tier_1 root tick. When the flag is OFF, this worker preserves
+        # legacy behaviour exactly.
+        is_root_only_tier_1 = (
+            self.lane == "tier_1"
+            and job.job_type == JOB_REFRESH_LIVE_EVENT
+            and _env_flag_enabled("LIVE_TIER_1_ROOT_ONLY")
+            and self.root_in_flight_store is not None
+        )
+        active_lock_store = self.root_in_flight_store if is_root_only_tier_1 else self.in_flight_store
+
         lock_owner: str | None = None
-        if self.in_flight_store is not None:
+        if active_lock_store is not None:
             lock_owner = f"{self.runtime.consumer}:{entry.message_id}:{job.job_id}"
-            if not self.in_flight_store.claim(event_id=event_id, owner=lock_owner):
+            if not active_lock_store.claim(event_id=event_id, owner=lock_owner):
                 logger.info(
-                    "Coalesced in-flight live refresh: lane=%s event_id=%s stream=%s message_id=%s consumer=%s",
+                    "Coalesced in-flight live refresh: lane=%s event_id=%s stream=%s message_id=%s consumer=%s%s",
                     self.lane,
                     event_id,
                     entry.stream,
                     entry.message_id,
                     self.runtime.consumer,
+                    " mode=root_only" if is_root_only_tier_1 else "",
                 )
-                return "coalesced_inflight"
-        sport_slug = job.sport_slug or self.default_sport_slug
+                return "coalesced_inflight_root_only" if is_root_only_tier_1 else "coalesced_inflight"
+
+        if is_root_only_tier_1:
+            effective_hydration_mode = "root_only"
+        else:
+            effective_hydration_mode = resolve_live_hydration_mode(
+                requested_mode=job.params.get("hydration_mode") or "live_delta",
+                sport_slug=sport_slug,
+                scope=job.scope,
+            )
+
         report = None
         try:
             report = await self.orchestrator.run_event(
                 event_id=event_id,
                 sport_slug=sport_slug,
-                hydration_mode=resolve_live_hydration_mode(
-                    requested_mode=job.params.get("hydration_mode") or "live_delta",
-                    sport_slug=sport_slug,
-                    scope=job.scope,
-                ),
+                hydration_mode=effective_hydration_mode,
             )
         finally:
             # Release critical lock IMMEDIATELY after run_event returns.
             # Under split-details (P0(a)) the orchestrator returns after
             # ROOT + edges only — releasing now lets the next root poll
             # for this event proceed without waiting for details fanout.
-            if self.in_flight_store is not None and lock_owner is not None:
-                self.in_flight_store.release(event_id=event_id, owner=lock_owner)
+            # Under root-only (P0(b)) this is even shorter — release
+            # the short-TTL ``live:root_inflight`` lock now.
+            if active_lock_store is not None and lock_owner is not None:
+                active_lock_store.release(event_id=event_id, owner=lock_owner)
 
-        # P0(a): if split-details fanout is enabled, enqueue a standalone
-        # ``refresh_live_event_details`` job onto ``stream:etl:live_details``.
-        # Skipped when:
+        # P0(b) root-only: enqueue a follow-up ``refresh_live_event``
+        # (full hydration) onto ``stream:etl:live_warm`` so edges/details
+        # still happen on the slow lane. Skipped when:
+        #   - report missing or edges_pending=False (e.g. terminal payload
+        #     finalized inline this tick)
+        #   - event finalized this tick (already terminal)
+        #   - throttle says we just enqueued for this event (rate-limit
+        #     window default 60 s)
+        #   - live_warm stream length > backpressure cap
+        # Enqueue failure is logged at WARNING but root-only still
+        # returns "completed" — edges enqueue must NOT feed back into
+        # root retry budget.
+        if (
+            is_root_only_tier_1
+            and report is not None
+            and getattr(report, "edges_pending", False)
+            and not getattr(report, "finalized", False)
+        ):
+            self._maybe_enqueue_edges(event_id=event_id, sport_slug=sport_slug, job=job)
+            return "completed"
+
+        # P0(a): if split-details fanout is enabled (legacy non-root-only
+        # path), enqueue a standalone ``refresh_live_event_details`` job
+        # onto ``stream:etl:live_details``. Skipped when:
         #   - report missing (test/early-return paths) or details_pending=False
         #   - event finalized this tick (final sweep already covered details)
         #   - throttle says we just enqueued for this event (rate-limit window)
@@ -215,6 +286,74 @@ class LiveWorkerService:
         except Exception as exc:
             logger.warning(
                 "Failed to enqueue refresh_live_event_details for event_id=%s: %s — root job still completes",
+                event_id,
+                exc,
+            )
+
+    def _maybe_enqueue_edges(self, *, event_id: int, sport_slug: str, job) -> None:
+        """Publish a follow-up ``refresh_live_event`` (full hydration) to
+        ``stream:etl:live_warm`` after a tier_1 root-only run completed
+        cleanly. Throttled per-event and bounded by warm-stream length.
+
+        The follow-up has ``hydration_mode`` UNSET in params (defaults to
+        ``live_delta``) so the live_warm consumer runs the legacy ROOT +
+        edges + details pipeline. Yes — this re-fetches the same
+        ``/event`` endpoint that the root-only run just persisted; the
+        cost is one cheap (~1 s) duplicate fetch in exchange for keeping
+        the worker layer trivially correct (no new edges-only orchestrator
+        path, no new stream/group/worker class)."""
+        if self.edges_throttle is not None:
+            try:
+                allowed = self.edges_throttle.should_enqueue(event_id=event_id)
+            except Exception as exc:
+                logger.warning(
+                    "Edges throttle check failed for event_id=%s: %s — skipping enqueue (fail-closed to avoid duplicate flooding)",
+                    event_id,
+                    exc,
+                )
+                return
+            if not allowed:
+                logger.debug(
+                    "Skipping edges enqueue (throttled): event_id=%s",
+                    event_id,
+                )
+                return
+        if self.edges_backpressure_limit is not None:
+            try:
+                stream_len = self._stream_length(STREAM_LIVE_WARM)
+            except Exception as exc:
+                logger.warning(
+                    "Edges backpressure XLEN check failed: %s — skipping (fail-closed)",
+                    exc,
+                )
+                return
+            if stream_len is not None and stream_len >= self.edges_backpressure_limit:
+                logger.info(
+                    "edges_backpressure_skip: event_id=%s stream_len=%s limit=%s",
+                    event_id,
+                    stream_len,
+                    self.edges_backpressure_limit,
+                )
+                return
+        edges_job = JobEnvelope.create(
+            job_type=JOB_REFRESH_LIVE_EVENT,
+            sport_slug=sport_slug,
+            entity_type="event",
+            entity_id=event_id,
+            scope="warm",
+            params={
+                "live_dispatch_tier": job.params.get("live_dispatch_tier"),
+                "parent_job_id": job.job_id,
+                "edges_followup": True,
+            },
+            priority=1,
+            trace_id=job.trace_id,
+        )
+        try:
+            self.queue.publish(STREAM_LIVE_WARM, _job_to_stream_payload(edges_job))
+        except Exception as exc:
+            logger.warning(
+                "Failed to enqueue edges refresh_live_event for event_id=%s: %s — root-only job still completes",
                 event_id,
                 exc,
             )
@@ -333,6 +472,20 @@ def _job_to_stream_payload(job: JobEnvelope) -> dict[str, object]:
         "capability_hint": job.capability_hint or "",
         "idempotency_key": job.idempotency_key,
     }
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Return True iff env var ``name`` is set to a truthy value.
+
+    Truthy: ``1``, ``true``, ``yes``, ``on`` (case-insensitive). Anything
+    else (unset, empty, ``0``, etc.) returns False. Used for boolean
+    rollout flags like ``LIVE_TIER_1_ROOT_ONLY`` that gate per-worker
+    behaviour at handle() time without restarts of unrelated lanes.
+    """
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_optional_positive_int(name: str) -> int | None:

@@ -11,7 +11,12 @@ from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
 from ..queue.live_details_throttle import LiveDetailsThrottle
-from ..queue.live_inflight import LiveEventDetailsInFlightStore, LiveEventInFlightStore
+from ..queue.live_edges_throttle import LiveEdgesThrottle
+from ..queue.live_inflight import (
+    LiveEventDetailsInFlightStore,
+    LiveEventInFlightStore,
+    LiveEventRootInFlightStore,
+)
 from ..sources import build_source_adapter
 from ..storage.planner_cursor_repository import PlannerCursorRepository
 from ..storage.tournament_registry_repository import TournamentRegistryRepository
@@ -237,6 +242,12 @@ class ServiceApp:
         # worker's ``handle()`` checks the flag at run time.
         self.live_event_details_inflight_store = LiveEventDetailsInFlightStore(self.app.redis_backend)
         self.live_details_throttle = LiveDetailsThrottle(self.app.redis_backend)
+        # P0(b) tier_1 root-only rollout primitives. Constructed
+        # unconditionally so the dependency wiring is stable regardless
+        # of ``LIVE_TIER_1_ROOT_ONLY`` env state — only the live-tier
+        # worker's ``handle()`` checks the flag at run time.
+        self.live_event_root_inflight_store = LiveEventRootInFlightStore(self.app.redis_backend)
+        self.live_edges_throttle = LiveEdgesThrottle(self.app.redis_backend)
         self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
@@ -1088,6 +1099,8 @@ class ServiceApp:
             job_audit_logger=self.job_audit_logger,
             in_flight_store=self.live_event_inflight_store,
             details_throttle=self.live_details_throttle,
+            root_in_flight_store=self.live_event_root_inflight_store,
+            edges_throttle=self.live_edges_throttle,
         )
 
     def build_live_details_worker(self, *, consumer_name: str, block_ms: int = 5_000):

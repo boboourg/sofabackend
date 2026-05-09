@@ -50,6 +50,7 @@ from ..fetch_classifier import (
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
+from ..planner.live import TERMINAL_STATUS_TYPES
 from ..match_center_policy import football_edge_allowed, football_special_allowed
 from ..parsers.sports import resolve_sport_adapter
 from ..services.retry_policy import RetryableJobError
@@ -133,6 +134,17 @@ class PilotRunReport:
     # legacy in-line behaviour.
     details_pending: bool = False
     details_context: dict[str, Any] | None = None
+    # P0(b) tier_1 root-only rollout (``LIVE_TIER_1_ROOT_ONLY``). When the
+    # worker requested ``hydration_mode="root_only"``, the orchestrator
+    # returns *immediately after* ROOT (and inline finalisation if the
+    # status is terminal) without running edges/details fan-out. The
+    # worker layer reads ``edges_pending`` and enqueues a follow-up
+    # ``refresh_live_event`` job (full hydration) onto
+    # ``stream:etl:live_warm`` so edges/details still happen on the slow
+    # lane. ``edges_pending=False`` for legacy modes (``full``, ``core``,
+    # ``live_delta``) and for terminal ``root_only`` runs that have
+    # already finalised.
+    edges_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -434,6 +446,63 @@ class PilotOrchestrator:
                 tournament_tier = _as_int(unique_tournament_row.get("tier"))
                 tournament_user_count = _as_int(unique_tournament_row.get("user_count"))
         status_phase = normalize_event_status_phase(status_type)
+
+        # P0(b) tier_1 root-only fast path (``LIVE_TIER_1_ROOT_ONLY``).
+        # When the worker requested ``hydration_mode="root_only"``, return
+        # IMMEDIATELY after ROOT (and inline finalisation if the status
+        # is terminal). Edges/details fan-out is deferred — the worker
+        # layer enqueues a follow-up ``refresh_live_event`` (full
+        # hydration) job onto ``stream:etl:live_warm`` so the slow lane
+        # picks them up. The point of this branch is to release the
+        # tier_1 critical path within ~1-2 s wall-clock (single ROOT
+        # fetch + parse + persist) instead of the 5-15 min legacy run.
+        # For terminal status payloads (``finished`` / ``cancelled`` /
+        # ``postponed`` / ``afterextra`` / ``afterpen``), inline
+        # finalise + record_terminal_state mirror the existing 404
+        # retire flow above so terminal events stop polling immediately
+        # without waiting for the slow-lane follow-up.
+        if effective_hydration_mode == "root_only":
+            normalized_status_type = (
+                str(status_type).strip().lower() if status_type is not None else ""
+            )
+            is_terminal_status = normalized_status_type in TERMINAL_STATUS_TYPES
+            if is_terminal_status and not finalized:
+                finalized = True
+                self.live_worker.finalize_event(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    status_type=status_type,
+                    live_state_store=self.live_state_store,
+                )
+                await self._record_live_state_history(
+                    event_id=event_id,
+                    status_type=status_type,
+                    poll_profile="terminal",
+                    observed_at=root_outcome.fetched_at,
+                )
+                await self._record_terminal_state(
+                    event_id=event_id,
+                    status_type=status_type,
+                    finalized_at=root_outcome.fetched_at,
+                    final_snapshot_id=root_outcome.snapshot_id,
+                )
+                if self.live_bootstrap_coordinator is not None:
+                    await self.live_bootstrap_coordinator.reset_bootstrap(
+                        self.sql_executor, event_id=event_id
+                    )
+            await self._flush_capabilities()
+            return PilotRunReport(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                fetch_outcomes=tuple(fetch_outcomes),
+                parse_results=tuple(parse_results),
+                live_lane=live_lane,
+                live_stream=live_stream,
+                finalized=finalized,
+                # signal worker to enqueue edges follow-up only when not
+                # finalised — terminal events have nothing left to refresh.
+                edges_pending=not finalized,
+            )
 
         root_job = JobEnvelope.create(
             job_type=JOB_HYDRATE_EVENT_ROOT,
