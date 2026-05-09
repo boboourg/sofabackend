@@ -20,6 +20,14 @@ JOB_HYDRATE_ENTITY_SEASON = "hydrate_entity_season"
 JOB_HYDRATE_SPECIAL_ROUTE = "hydrate_special_route"
 JOB_TRACK_LIVE_EVENT = "track_live_event"
 JOB_REFRESH_LIVE_EVENT = "refresh_live_event"
+# P0(a) split-details rollout: heavy per-player detail fanout is delegated
+# from the live-tier worker to a dedicated ``stream:etl:live_details`` /
+# ``cg:live_details`` worker pool so the tier worker pool is not occupied
+# for several minutes per event by 60+ player-detail URL fetches.
+# Published only when ``LIVE_SPLIT_DETAILS_FANOUT=1`` is set on the
+# publishing live-tier worker. Failure on this job MUST NOT retry the
+# parent ``refresh_live_event`` (root freshness is independent).
+JOB_REFRESH_LIVE_EVENT_DETAILS = "refresh_live_event_details"
 JOB_FINALIZE_EVENT = "finalize_event"
 JOB_NORMALIZE_SNAPSHOT = "normalize_snapshot"
 JOB_RECONCILE_CAPABILITY = "reconcile_capability"

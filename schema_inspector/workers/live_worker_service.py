@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 
-from ..jobs.types import JOB_REFRESH_LIVE_EVENT
+from ..jobs.envelope import JobEnvelope
+from ..jobs.types import JOB_REFRESH_LIVE_EVENT, JOB_REFRESH_LIVE_EVENT_DETAILS
 from ..live_hydration_mode import resolve_live_hydration_mode
 from ..queue.streams import (
     GROUP_LIVE_HOT,
@@ -13,6 +16,7 @@ from ..queue.streams import (
     GROUP_LIVE_TIER_2,
     GROUP_LIVE_TIER_3,
     GROUP_LIVE_WARM,
+    STREAM_LIVE_DETAILS,
     STREAM_LIVE_HOT,
     STREAM_LIVE_TIER_1,
     STREAM_LIVE_TIER_2,
@@ -44,6 +48,8 @@ class LiveWorkerService:
         job_audit_logger=None,
         max_concurrency: int | None = None,
         in_flight_store=None,
+        details_throttle=None,
+        details_backpressure_limit: int | None = None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
         if normalized_lane not in {"hot", "warm", "tier_1", "tier_2", "tier_3"}:
@@ -53,6 +59,23 @@ class LiveWorkerService:
         self.delayed_scheduler = delayed_scheduler
         self.delayed_payload_store = delayed_payload_store
         self.in_flight_store = in_flight_store
+        self.queue = queue
+        # P0(a) split-details rollout: per-event rate-limiter + optional
+        # backpressure on the details stream. ``details_throttle`` is the
+        # ``LiveDetailsThrottle`` instance (or None for tests / legacy).
+        # ``details_backpressure_limit`` (env
+        # ``LIVE_DETAILS_STREAM_BACKPRESSURE_LIMIT``) caps the
+        # ``stream:etl:live_details`` length; above the cap, live-tier
+        # workers skip the details enqueue and log
+        # "details_backpressure_skip" rather than letting the details
+        # backlog grow unbounded.
+        self.details_throttle = details_throttle
+        env_backpressure = _env_optional_positive_int("LIVE_DETAILS_STREAM_BACKPRESSURE_LIMIT")
+        self.details_backpressure_limit = (
+            details_backpressure_limit
+            if details_backpressure_limit is not None
+            else env_backpressure
+        )
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
@@ -101,8 +124,9 @@ class LiveWorkerService:
                 )
                 return "coalesced_inflight"
         sport_slug = job.sport_slug or self.default_sport_slug
+        report = None
         try:
-            await self.orchestrator.run_event(
+            report = await self.orchestrator.run_event(
                 event_id=event_id,
                 sport_slug=sport_slug,
                 hydration_mode=resolve_live_hydration_mode(
@@ -111,10 +135,105 @@ class LiveWorkerService:
                     scope=job.scope,
                 ),
             )
-            return "completed"
         finally:
+            # Release critical lock IMMEDIATELY after run_event returns.
+            # Under split-details (P0(a)) the orchestrator returns after
+            # ROOT + edges only — releasing now lets the next root poll
+            # for this event proceed without waiting for details fanout.
             if self.in_flight_store is not None and lock_owner is not None:
                 self.in_flight_store.release(event_id=event_id, owner=lock_owner)
+
+        # P0(a): if split-details fanout is enabled, enqueue a standalone
+        # ``refresh_live_event_details`` job onto ``stream:etl:live_details``.
+        # Skipped when:
+        #   - report missing (test/early-return paths) or details_pending=False
+        #   - event finalized this tick (final sweep already covered details)
+        #   - throttle says we just enqueued for this event (rate-limit window)
+        #   - details stream length > backpressure cap
+        # Enqueue failure is logged at WARNING but the parent
+        # refresh_live_event job still returns "completed" — the details
+        # path must not feed back into root retry budget.
+        if (
+            report is not None
+            and getattr(report, "details_pending", False)
+            and not getattr(report, "finalized", False)
+        ):
+            self._maybe_enqueue_details(event_id=event_id, sport_slug=sport_slug, job=job, report=report)
+        return "completed"
+
+    def _maybe_enqueue_details(self, *, event_id: int, sport_slug: str, job, report) -> None:
+        if self.details_throttle is not None:
+            try:
+                allowed = self.details_throttle.should_enqueue(event_id=event_id)
+            except Exception as exc:
+                logger.warning(
+                    "Details throttle check failed for event_id=%s: %s — skipping enqueue (fail-closed to avoid duplicate flooding)",
+                    event_id,
+                    exc,
+                )
+                return
+            if not allowed:
+                logger.debug(
+                    "Skipping details enqueue (throttled): event_id=%s",
+                    event_id,
+                )
+                return
+        if self.details_backpressure_limit is not None:
+            try:
+                stream_len = self._stream_length(STREAM_LIVE_DETAILS)
+            except Exception as exc:
+                logger.warning(
+                    "Details backpressure XLEN check failed: %s — skipping (fail-closed)",
+                    exc,
+                )
+                return
+            if stream_len is not None and stream_len >= self.details_backpressure_limit:
+                logger.info(
+                    "details_backpressure_skip: event_id=%s stream_len=%s limit=%s",
+                    event_id,
+                    stream_len,
+                    self.details_backpressure_limit,
+                )
+                return
+        details_context = getattr(report, "details_context", None) or {}
+        details_job = JobEnvelope.create(
+            job_type=JOB_REFRESH_LIVE_EVENT_DETAILS,
+            sport_slug=sport_slug,
+            entity_type="event",
+            entity_id=event_id,
+            scope="details",
+            params={
+                "details_context": details_context,
+                "live_dispatch_tier": job.params.get("live_dispatch_tier"),
+                "parent_job_id": job.job_id,
+            },
+            priority=2,
+            trace_id=job.trace_id,
+        )
+        try:
+            self.queue.publish(STREAM_LIVE_DETAILS, _job_to_stream_payload(details_job))
+        except Exception as exc:
+            logger.warning(
+                "Failed to enqueue refresh_live_event_details for event_id=%s: %s — root job still completes",
+                event_id,
+                exc,
+            )
+
+    def _stream_length(self, stream_name: str) -> int | None:
+        backend = getattr(self.queue, "backend", None) or getattr(self.queue, "_backend", None)
+        if backend is None:
+            return None
+        xlen = getattr(backend, "xlen", None)
+        if not callable(xlen):
+            return None
+        try:
+            value = xlen(stream_name)
+        except Exception:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
         del exc
@@ -191,3 +310,40 @@ def _lane_concurrency_env_names(lane: str) -> tuple[str, ...]:
     if normalized == "hot":
         return ("SOFASCORE_LIVE_HOT_WORKER_MAX_CONCURRENCY",)
     return ("SOFASCORE_LIVE_WARM_WORKER_MAX_CONCURRENCY",)
+
+
+def _job_to_stream_payload(job: JobEnvelope) -> dict[str, object]:
+    """Serialise a JobEnvelope into the same flat dict shape the planner uses
+    when XADDing to a stream. Kept locally (rather than imported from
+    services.planner_daemon) so the live worker module has no service-layer
+    dependency."""
+    return {
+        "job_id": job.job_id,
+        "job_type": job.job_type,
+        "sport_slug": job.sport_slug or "",
+        "entity_type": job.entity_type or "",
+        "entity_id": job.entity_id if job.entity_id is not None else "",
+        "scope": job.scope or "",
+        "params_json": json.dumps(job.params, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        "priority": job.priority,
+        "scheduled_at": job.scheduled_at,
+        "attempt": job.attempt,
+        "parent_job_id": job.parent_job_id or "",
+        "trace_id": job.trace_id or "",
+        "capability_hint": job.capability_hint or "",
+        "idempotency_key": job.idempotency_key,
+    }
+
+
+def _env_optional_positive_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(str(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r; ignoring (no backpressure cap)", name, raw)
+        return None
+    if value < 1:
+        return None
+    return value

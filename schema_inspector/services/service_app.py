@@ -10,7 +10,8 @@ from typing import Any
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
-from ..queue.live_inflight import LiveEventInFlightStore
+from ..queue.live_details_throttle import LiveDetailsThrottle
+from ..queue.live_inflight import LiveEventDetailsInFlightStore, LiveEventInFlightStore
 from ..sources import build_source_adapter
 from ..storage.planner_cursor_repository import PlannerCursorRepository
 from ..storage.tournament_registry_repository import TournamentRegistryRepository
@@ -230,6 +231,12 @@ class ServiceApp:
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
         self.completion_store = DedupeStore(self.app.redis_backend)
         self.live_event_inflight_store = LiveEventInFlightStore(self.app.redis_backend)
+        # P0(a) split-details rollout primitives. Constructed unconditionally
+        # so the dependency wiring is stable regardless of
+        # ``LIVE_SPLIT_DETAILS_FANOUT`` env state — only the live-tier
+        # worker's ``handle()`` checks the flag at run time.
+        self.live_event_details_inflight_store = LiveEventDetailsInFlightStore(self.app.redis_backend)
+        self.live_details_throttle = LiveDetailsThrottle(self.app.redis_backend)
         self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
@@ -1080,6 +1087,24 @@ class ServiceApp:
             block_ms=block_ms,
             job_audit_logger=self.job_audit_logger,
             in_flight_store=self.live_event_inflight_store,
+            details_throttle=self.live_details_throttle,
+        )
+
+    def build_live_details_worker(self, *, consumer_name: str, block_ms: int = 5_000):
+        """Construct the LiveDetailsWorkerService that consumes
+        ``stream:etl:live_details``. Imported lazily so service_app.py
+        does not have a hard dependency on the new module path during
+        import-time class registration."""
+        from ..workers.live_details_worker_service import LiveDetailsWorkerService
+
+        self.ensure_consumer_groups()
+        return LiveDetailsWorkerService(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
+            details_in_flight_store=self.live_event_details_inflight_store,
         )
 
     def build_housekeeping_loop(self) -> HousekeepingLoop | None:
@@ -1331,6 +1356,11 @@ class ServiceApp:
 
     async def run_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_live_worker(lane=lane, consumer_name=consumer_name, block_ms=block_ms)
+        await worker.run_forever()
+
+    async def run_live_details_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        """Run the dedicated details consumer (P0(a) split-details)."""
+        worker = self.build_live_details_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
     async def run_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:

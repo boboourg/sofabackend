@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -120,6 +121,18 @@ class PilotRunReport:
     live_lane: str | None = None
     live_stream: str | None = None
     finalized: bool = False
+    # P0(a) split-details rollout. When ``LIVE_SPLIT_DETAILS_FANOUT=1`` and
+    # the run was a live_delta refresh, the orchestrator returns *after*
+    # the ROOT + edges critical phase and signals the worker to enqueue a
+    # standalone ``refresh_live_event_details`` job onto
+    # ``stream:etl:live_details`` for the dedicated details worker pool to
+    # consume. ``details_context`` carries the runtime values needed by
+    # ``build_event_detail_request_specs`` so the details worker can
+    # rebuild the same fanout without re-parsing the root payload.
+    # ``details_pending=False`` and ``details_context=None`` for the
+    # legacy in-line behaviour.
+    details_pending: bool = False
+    details_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -746,6 +759,51 @@ class PilotOrchestrator:
                     if parsed is not None:
                         parse_results.append(parsed)
 
+        # P0(a): when split-details is enabled and this is a live_delta tick
+        # which has not just been finalized, skip the per-event detail fanout
+        # in this worker. The live-tier worker layer will enqueue a standalone
+        # ``refresh_live_event_details`` job onto ``stream:etl:live_details``
+        # for the dedicated details worker pool to consume. Critical path
+        # (ROOT + edges + track_live + final sweep on finalize) is unchanged
+        # — it has already executed above before this gate.
+        skip_details_in_run_event = (
+            self._split_details_fanout_enabled()
+            and effective_hydration_mode == "live_delta"
+            and not finalized
+        )
+        details_context: dict[str, Any] | None = None
+        if skip_details_in_run_event:
+            details_context = {
+                "status_type": status_type,
+                "status_phase": status_phase,
+                "home_team_id": home_team_id,
+                "away_team_id": away_team_id,
+                "detail_id": detail_id,
+                "custom_id": str(custom_id) if custom_id is not None else None,
+                "start_timestamp": _as_int(start_timestamp),
+                "has_event_player_statistics": has_event_player_statistics,
+                "has_event_player_heat_map": has_event_player_heat_map,
+                "has_global_highlights": has_global_highlights,
+                "has_xg": has_xg,
+                "effective_hydration_mode": effective_hydration_mode,
+                "core_only": core_only,
+            }
+            if should_mark_live_bootstrap and root_outcome.classification in {"success_json", "success_empty_json"}:
+                await self.live_bootstrap_coordinator.mark_bootstrapped(self.sql_executor, event_id=event_id)
+                should_mark_live_bootstrap = False
+            await self._flush_capabilities()
+            return PilotRunReport(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                fetch_outcomes=tuple(fetch_outcomes),
+                parse_results=tuple(parse_results),
+                live_lane=live_lane,
+                live_stream=live_stream,
+                finalized=finalized,
+                details_pending=True,
+                details_context=details_context,
+            )
+
         event_detail_request_specs = build_event_detail_request_specs(
             sport_slug=sport_slug,
             status_type=status_type,
@@ -870,6 +928,168 @@ class PilotOrchestrator:
     def replay_snapshot(self, snapshot_id: int):
         snapshot = self.snapshot_store.load_snapshot(snapshot_id)
         return self.normalize_worker.handle(snapshot)
+
+    def _split_details_fanout_enabled(self) -> bool:
+        """True when ``LIVE_SPLIT_DETAILS_FANOUT=1`` is in the environment.
+
+        Read at call time (not constructor) so a systemd drop-in
+        environment edit + worker restart is the only step needed to
+        flip the behaviour for a given tier.
+        """
+        raw = os.environ.get("LIVE_SPLIT_DETAILS_FANOUT", "0")
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    async def run_event_details(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str,
+        context: dict[str, Any],
+    ) -> PilotRunReport:
+        """Run ONLY the per-event detail fanout phase (P0(a) split-details).
+
+        Consumed by ``LiveDetailsWorkerService`` from
+        ``stream:etl:live_details``. ``context`` carries the values that
+        are normally extracted from the freshly-parsed root payload
+        during ``run_event`` (status_type, team_ids, has_* flags,
+        start_timestamp, detail_id, custom_id, hydration_mode, core_only).
+        Re-running the root parse here would defeat the purpose of the
+        split — we trust the publisher (live-tier worker) to forward an
+        accurate context dict captured at the time of root persist.
+
+        Failure semantics — *intentionally permissive*. Network errors
+        on detail endpoints record their outcome but DO NOT raise
+        ``RetryableJobError``: a failed details fanout must not retry
+        the parent ``refresh_live_event`` job nor block the next root
+        poll. The returned report's ``fetch_outcomes`` carries the
+        per-endpoint outcomes (including network_error rows) for
+        forensics; the caller worker reports
+        ``completed_with_errors`` if any outcome failed.
+        """
+        if self.fetch_executor is None:
+            raise RuntimeError("fetch_executor is required for run_event_details")
+
+        fetch_outcomes: list[FetchOutcomeEnvelope] = []
+        parse_results: list[object] = []
+        baseball_seen_at_bats: set[int] = set()
+
+        status_type = context.get("status_type")
+        status_phase = context.get("status_phase") or normalize_event_status_phase(status_type)
+        home_team_id = _as_int(context.get("home_team_id"))
+        away_team_id = _as_int(context.get("away_team_id"))
+        detail_id = _as_int(context.get("detail_id"))
+        custom_id_raw = context.get("custom_id")
+        custom_id = str(custom_id_raw) if custom_id_raw is not None else None
+        start_timestamp = _as_int(context.get("start_timestamp"))
+        has_event_player_statistics = context.get("has_event_player_statistics")
+        has_event_player_heat_map = context.get("has_event_player_heat_map")
+        has_global_highlights = context.get("has_global_highlights")
+        has_xg = context.get("has_xg")
+        effective_hydration_mode = str(context.get("effective_hydration_mode") or "live_delta").strip().lower()
+        core_only = bool(context.get("core_only", False))
+
+        event_detail_request_specs = build_event_detail_request_specs(
+            sport_slug=sport_slug,
+            status_type=status_type,
+            team_ids=tuple(team_id for team_id in (home_team_id, away_team_id) if isinstance(team_id, int)),
+            provider_ids=(1,),
+            has_event_player_statistics=has_event_player_statistics,
+            has_event_player_heat_map=has_event_player_heat_map,
+            has_global_highlights=has_global_highlights,
+            has_xg=has_xg,
+            detail_id=detail_id,
+            custom_id=custom_id,
+            start_timestamp=start_timestamp,
+            now_timestamp=int(self.now_ms_factory()) // 1000,
+            core_only=core_only,
+            hydration_mode=effective_hydration_mode,
+        )
+        if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
+            detail_specs: list[tuple[Any, _EventEndpointFetchSpec]] = []
+            for request_spec in event_detail_request_specs:
+                endpoint = request_spec.endpoint
+                if (
+                    sport_slug == "baseball"
+                    and endpoint.pattern == "/api/v1/event/{event_id}/comments"
+                    and baseball_seen_at_bats
+                ):
+                    continue
+                detail_specs.append(
+                    (
+                        endpoint,
+                        _EventEndpointFetchSpec(
+                            endpoint=endpoint,
+                            sport_slug=sport_slug,
+                            path_params=request_spec.resolved_path_params(event_id=event_id),
+                            context_entity_type="event",
+                            context_entity_id=event_id,
+                            context_event_id=event_id,
+                            fetch_reason="hydrate_special_route",
+                            status_phase=status_phase,
+                        ),
+                    )
+                )
+            detail_results = await self._fetch_event_endpoint_specs_bounded(
+                [spec for _, spec in detail_specs],
+                phase_name="details_split",
+            )
+            for (endpoint, _), (outcome, parsed) in zip(detail_specs, detail_results, strict=True):
+                if outcome is None:
+                    continue
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
+                child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    parent_endpoint=endpoint,
+                    parent_outcome=outcome,
+                    seen_at_bats=baseball_seen_at_bats,
+                )
+                fetch_outcomes.extend(child_outcomes)
+                parse_results.extend(child_parses)
+        else:
+            for request_spec in event_detail_request_specs:
+                endpoint = request_spec.endpoint
+                if (
+                    sport_slug == "baseball"
+                    and endpoint.pattern == "/api/v1/event/{event_id}/comments"
+                    and baseball_seen_at_bats
+                ):
+                    continue
+                outcome, parsed = await self._fetch_gated_event_endpoint(
+                    endpoint=endpoint,
+                    sport_slug=sport_slug,
+                    path_params=request_spec.resolved_path_params(event_id=event_id),
+                    context_entity_type="event",
+                    context_entity_id=event_id,
+                    context_event_id=event_id,
+                    fetch_reason="hydrate_special_route",
+                    status_phase=status_phase,
+                )
+                if outcome is None:
+                    continue
+                fetch_outcomes.append(outcome)
+                if parsed is not None:
+                    parse_results.append(parsed)
+                child_outcomes, child_parses = await self._run_baseball_pitch_fanout(
+                    sport_slug=sport_slug,
+                    event_id=event_id,
+                    parent_endpoint=endpoint,
+                    parent_outcome=outcome,
+                    seen_at_bats=baseball_seen_at_bats,
+                )
+                fetch_outcomes.extend(child_outcomes)
+                parse_results.extend(child_parses)
+
+        await self._flush_capabilities()
+
+        return PilotRunReport(
+            sport_slug=sport_slug,
+            event_id=event_id,
+            fetch_outcomes=tuple(fetch_outcomes),
+            parse_results=tuple(parse_results),
+        )
 
     async def _fetch_and_parse(
         self,

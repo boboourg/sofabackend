@@ -19,6 +19,12 @@ STREAM_LIVE_TIER_2 = "stream:etl:live_tier_2"
 STREAM_LIVE_TIER_3 = "stream:etl:live_tier_3"
 STREAM_LIVE_HOT = "stream:etl:live_hot"
 STREAM_LIVE_WARM = "stream:etl:live_warm"
+# P0(a): split-details rollout. Heavy per-player detail fanout is delegated
+# from the live-tier worker to a separate consumer group so the live-tier
+# worker pool is not occupied for several minutes by per-player endpoints
+# while the ROOT /event poll waits its turn. Empty until
+# ``LIVE_SPLIT_DETAILS_FANOUT=1`` is set on the publishing side.
+STREAM_LIVE_DETAILS = "stream:etl:live_details"
 STREAM_MAINTENANCE = "stream:etl:maintenance"
 STREAM_STRUCTURE_SYNC = "stream:etl:structure_sync"
 STREAM_RESOURCE_REFRESH = "stream:etl:resource_refresh"
@@ -38,6 +44,7 @@ GROUP_LIVE_TIER_2 = "cg:live_tier_2"
 GROUP_LIVE_TIER_3 = "cg:live_tier_3"
 GROUP_LIVE_HOT = "cg:live_hot"
 GROUP_LIVE_WARM = "cg:live_warm"
+GROUP_LIVE_DETAILS = "cg:live_details"
 GROUP_MAINTENANCE = "cg:maintenance"
 GROUP_STRUCTURE_SYNC = "cg:structure_sync"
 GROUP_RESOURCE_REFRESH = "cg:resource_refresh"
@@ -51,6 +58,7 @@ OPERATIONAL_CONSUMER_GROUPS = (
     (STREAM_LIVE_TIER_3, GROUP_LIVE_TIER_3),
     (STREAM_LIVE_HOT, GROUP_LIVE_HOT),
     (STREAM_LIVE_WARM, GROUP_LIVE_WARM),
+    (STREAM_LIVE_DETAILS, GROUP_LIVE_DETAILS),
     (STREAM_MAINTENANCE, GROUP_MAINTENANCE),
 )
 

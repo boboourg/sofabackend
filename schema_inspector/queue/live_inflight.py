@@ -9,7 +9,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 LIVE_EVENT_INFLIGHT_KEY = "live:refresh_inflight:{event_id}"
+LIVE_EVENT_DETAILS_INFLIGHT_KEY = "live:details_inflight:{event_id}"
 _DEFAULT_TTL_MS = 600_000
+_DEFAULT_DETAILS_TTL_MS = 300_000
 
 _RELEASE_IF_OWNER_SCRIPT = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -38,6 +40,46 @@ class LiveEventInFlightStore:
 
     def release(self, *, event_id: int, owner: str) -> None:
         key = LIVE_EVENT_INFLIGHT_KEY.format(event_id=int(event_id))
+        if _release_with_lua(self.backend, key, str(owner)):
+            return
+        current = _decode_value(_call_backend(getattr(self.backend, "get"), key))
+        if current != str(owner):
+            return
+        _call_backend(getattr(self.backend, "delete"), key)
+
+
+class LiveEventDetailsInFlightStore:
+    """Cross-consumer lock for the *details* fanout of one live event.
+
+    P0(a) split-details rollout: details (per-player heatmap/statistics/
+    rating-breakdown, shotmaps, comments, h2h, ...) run in a dedicated
+    worker pool consuming ``stream:etl:live_details``. This lock prevents
+    duplicate concurrent details fanouts for the same event when multiple
+    enqueues land in the stream before the first details run finishes.
+    Independent from ``LiveEventInFlightStore`` (which guards the live
+    tier ROOT+edges critical path) — release of one does not affect the
+    other. TTL is shorter than the critical lock (5 min default) because
+    a hung details fanout should auto-recover faster than a full live
+    refresh.
+    """
+
+    def __init__(self, backend: Any, *, ttl_ms: int | None = None) -> None:
+        self.backend = backend
+        self.ttl_ms = int(
+            ttl_ms
+            if ttl_ms is not None
+            else _env_positive_int(
+                "SOFASCORE_LIVE_DETAILS_INFLIGHT_TTL_MS",
+                _DEFAULT_DETAILS_TTL_MS,
+            )
+        )
+
+    def claim(self, *, event_id: int, owner: str) -> bool:
+        key = LIVE_EVENT_DETAILS_INFLIGHT_KEY.format(event_id=int(event_id))
+        return bool(_call_backend(self.backend.set, key, str(owner), nx=True, px=self.ttl_ms))
+
+    def release(self, *, event_id: int, owner: str) -> None:
+        key = LIVE_EVENT_DETAILS_INFLIGHT_KEY.format(event_id=int(event_id))
         if _release_with_lua(self.backend, key, str(owner)):
             return
         current = _decode_value(_call_backend(getattr(self.backend, "get"), key))

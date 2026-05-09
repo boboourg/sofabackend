@@ -1319,6 +1319,13 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "worker-live-details":
+                service_app = ServiceApp(app)
+                await service_app.run_live_details_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
             if args.command == "worker-maintenance":
                 service_app = ServiceApp(app)
                 await service_app.run_maintenance_worker(
@@ -1655,6 +1662,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
     worker_live_warm = subparsers.add_parser("worker-live-warm", help="Run the live-warm consumer group loop.")
     worker_live_warm.add_argument("--consumer-name", default="worker-live-warm-1", help="Redis consumer name for the live-warm worker.")
+
+    worker_live_details = subparsers.add_parser(
+        "worker-live-details",
+        help=(
+            "Run the live-details consumer group loop (P0(a) split-details). "
+            "Consumes ``stream:etl:live_details`` published by live-tier "
+            "workers when LIVE_SPLIT_DETAILS_FANOUT=1. Independent capacity "
+            "from tier_1/2/3."
+        ),
+    )
+    worker_live_details.add_argument(
+        "--consumer-name",
+        default="worker-live-details-1",
+        help="Redis consumer name for the live-details worker.",
+    )
+    worker_live_details.add_argument(
+        "--block-ms",
+        type=int,
+        default=5000,
+        help="XREADGROUP block timeout in milliseconds.",
+    )
     worker_live_warm.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_maintenance = subparsers.add_parser("worker-maintenance", help="Run the maintenance/recovery consumer group loop.")
