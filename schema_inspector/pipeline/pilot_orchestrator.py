@@ -40,16 +40,49 @@ from ..endpoints import (
 from ..detail_resource_policy import build_event_detail_request_specs
 from ..event_endpoint_static_denylist import is_static_dead_event_endpoint
 from ..event_endpoint_negative_cache import normalize_event_status_phase
+from ..fetch_classifier import (
+    CLASSIFICATION_ACCESS_DENIED,
+    CLASSIFICATION_CHALLENGE_DETECTED,
+    CLASSIFICATION_NETWORK_ERROR,
+    CLASSIFICATION_RATE_LIMITED,
+)
 from ..fetch_models import FetchOutcomeEnvelope, FetchTask
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
 from ..match_center_policy import football_edge_allowed, football_special_allowed
 from ..parsers.sports import resolve_sport_adapter
+from ..services.retry_policy import RetryableJobError
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
 from ..storage.live_state_repository import EventLiveStateHistoryRecord, EventTerminalStateRecord
 from ..workers.live_worker import LiveWorker
 
 MISSING_ROOT_TERMINAL_STATUS = "not_found"
+
+# Fix A (live freshness): a transient failure (network timeout, SSL,
+# 403 access_denied, 429 rate_limited, bot challenge) on the ROOT
+# `/api/v1/event/{event_id}` request must not be silently swallowed.
+# Without raising, the orchestrator returns an empty PilotRunReport,
+# the worker marks the job ``succeeded``, and the only retry path is
+# the planner's next live cycle (~30-90s away). For live events that
+# means the UI shows stale data while Sofascore advances. Raising
+# RetryableJobError lets WorkerRuntime route the failure through
+# ``retry_handler`` -> ``delayed_scheduler`` for an immediate,
+# visible retry (and proper ``retry_scheduled`` audit row).
+#
+# Scope is the ROOT fetch only — fan-out detail endpoints (statistics,
+# lineups, incidents, graph, ...) keep their current best-effort
+# behaviour: a transient failure on one detail edge does not fail
+# the whole event. The 404 ``not_found`` retire path is unchanged
+# because not_found has retry_recommended=False and is excluded
+# from this set.
+_ROOT_FETCH_RETRYABLE_CLASSIFICATIONS = frozenset(
+    {
+        CLASSIFICATION_NETWORK_ERROR,
+        CLASSIFICATION_ACCESS_DENIED,
+        CLASSIFICATION_RATE_LIMITED,
+        CLASSIFICATION_CHALLENGE_DETECTED,
+    }
+)
 MISSING_ROOT_RETIRE_THRESHOLD = 3
 MISSING_ROOT_RETIRE_LOOKBACK = 20
 PLAYER_PROFILE_FRESHNESS_TTL_SECONDS = 86_400
@@ -277,6 +310,29 @@ class PilotOrchestrator:
             fetch_reason=JOB_HYDRATE_EVENT_ROOT,
         )
         fetch_outcomes.append(root_outcome)
+        # Fix A: surface transient root-fetch failures so the worker
+        # retries instead of marking the job ``succeeded`` with no data.
+        # See ``_ROOT_FETCH_RETRYABLE_CLASSIFICATIONS`` for the included
+        # set. ``not_found`` is not in this set (its classifier sets
+        # retry_recommended=False) so the existing 404 retire path
+        # below is preserved. We do NOT gate on ``snapshot_id is None``
+        # — a 403 / 429 / soft-bot-challenge can land with a small JSON
+        # body that does get persisted for forensics, but still means
+        # "we did not get the data we asked for" and must retry.
+        if (
+            root_outcome.classification in _ROOT_FETCH_RETRYABLE_CLASSIFICATIONS
+            and root_outcome.retry_recommended
+        ):
+            raise RetryableJobError(
+                "Root /event fetch failed (event_id={event_id}, "
+                "classification={classification}, http_status={http_status}): "
+                "{error_message}".format(
+                    event_id=event_id,
+                    classification=root_outcome.classification,
+                    http_status=root_outcome.http_status,
+                    error_message=root_outcome.error_message or "",
+                )
+            )
         should_retire_missing_root = root_outcome.classification == "not_found" and await self._should_retire_missing_root_event(
             root_outcome=root_outcome
         )

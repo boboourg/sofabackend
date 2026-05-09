@@ -26,6 +26,34 @@ class _FakeTransport:
         return self.responses[url]
 
 
+class _RaisingTransport:
+    """Transport that raises for specific URLs (simulating libcurl
+    timeout / SSL failure) and falls back to ``canned`` results for
+    everything else. Used by the Fix A tests to model the production
+    behaviour where ``transport.fetch`` raises on connection failure
+    and FetchExecutor turns that into a ``network_error`` outcome.
+    """
+
+    def __init__(
+        self,
+        *,
+        failing_urls: set[str],
+        canned: dict[str, TransportResult],
+        exception: Exception,
+    ) -> None:
+        self.failing_urls = set(failing_urls)
+        self.canned = canned
+        self.exception = exception
+        self.seen_urls: list[str] = []
+
+    async def fetch(self, url: str, *, headers=None, timeout: float = 20.0) -> TransportResult:
+        del headers, timeout
+        self.seen_urls.append(url)
+        if url in self.failing_urls:
+            raise self.exception
+        return self.canned[url]
+
+
 class _FakeRawSnapshotStore:
     def __init__(self) -> None:
         self.snapshots_by_id = {}
@@ -365,6 +393,160 @@ class PilotLivePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://www.sofascore.com/api/v1/event/15921219/tennis-power", transport.seen_urls)
         self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/lineups", transport.seen_urls)
         self.assertNotIn("https://www.sofascore.com/api/v1/event/15921219/incidents", transport.seen_urls)
+
+    # -- Fix A: root /event fetch failures must be visible to WorkerRuntime --
+    #
+    # Without the orchestrator raise, transport-layer failures on the
+    # root request (timeout / SSL / 403 / 429 / bot-challenge) were
+    # silently swallowed: the orchestrator returned an empty
+    # ``PilotRunReport`` and the live worker marked the job
+    # ``succeeded``. Live events then drifted up to ~30-90s stale
+    # because the only retry path was the planner's next live cycle.
+    # These tests pin down the fix:
+    #   * a transient root failure raises ``RetryableJobError`` so
+    #     ``WorkerRuntime.retry_handler`` -> ``delayed_scheduler``
+    #     reschedules the job (and writes ``retry_scheduled`` audit);
+    #   * the ``not_found`` retire path is preserved (covered by
+    #     ``test_repeated_root_not_found_retires_previously_seen_live_event``
+    #     above — that test still passes because 404 has
+    #     ``retry_recommended=False`` and is excluded from the
+    #     retryable set);
+    #   * a transient failure on a NON-root detail endpoint must NOT
+    #     fail the whole job, only the root.
+
+    async def test_root_network_error_raises_retryable_job_error(self) -> None:
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        now_ms = 1_800_000_000_000
+        event_id = 15921219
+        canned = _tennis_responses(
+            event_id=event_id,
+            status_type="inprogress",
+            start_timestamp=(now_ms // 1000) - 300,
+        )
+        root_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        transport = _RaisingTransport(
+            failing_urls={root_url},
+            canned=canned,
+            exception=RuntimeError(
+                "Failed to perform, ErrCode: 28, Reason: 'Operation timed out after 10000 milliseconds'"
+            ),
+        )
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(_FakeLiveBackend()),
+            stream_queue=RedisStreamQueue(_FakeStreamBackend()),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        with self.assertRaises(RetryableJobError) as cm:
+            await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        self.assertIn(str(event_id), str(cm.exception))
+        self.assertIn("network_error", str(cm.exception))
+        # No detail fan-out should have been issued before the raise.
+        self.assertEqual(transport.seen_urls, [root_url])
+
+    async def test_root_access_denied_raises_retryable_job_error(self) -> None:
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        now_ms = 1_800_000_000_000
+        event_id = 15921219
+        canned = _tennis_responses(
+            event_id=event_id,
+            status_type="inprogress",
+            start_timestamp=(now_ms // 1000) - 300,
+        )
+        # Override the root response with a 403 so the classifier
+        # tags it as ``access_denied`` (retry_recommended=True).
+        root_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        canned[root_url] = _json_result(root_url, {"error": "forbidden"}, status_code=403)
+        transport = _FakeTransport(canned)
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(_FakeLiveBackend()),
+            stream_queue=RedisStreamQueue(_FakeStreamBackend()),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        with self.assertRaises(RetryableJobError) as cm:
+            await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+        self.assertIn("access_denied", str(cm.exception))
+
+    async def test_root_rate_limited_raises_retryable_job_error(self) -> None:
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        now_ms = 1_800_000_000_000
+        event_id = 15921219
+        canned = _tennis_responses(
+            event_id=event_id,
+            status_type="inprogress",
+            start_timestamp=(now_ms // 1000) - 300,
+        )
+        root_url = f"https://www.sofascore.com/api/v1/event/{event_id}"
+        canned[root_url] = _json_result(root_url, {"error": "rate limited"}, status_code=429)
+        transport = _FakeTransport(canned)
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(_FakeLiveBackend()),
+            stream_queue=RedisStreamQueue(_FakeStreamBackend()),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        with self.assertRaises(RetryableJobError):
+            await orchestrator.run_event(event_id=event_id, sport_slug="tennis")
+
+    async def test_optional_detail_endpoint_failure_does_not_fail_whole_job(self) -> None:
+        # A transient failure on a fan-out detail endpoint
+        # (``/statistics``) must NOT raise — the root fetch succeeded
+        # and the orchestrator should continue best-effort. This
+        # regression-tests the SCOPE of Fix A: only the ROOT fetch
+        # should raise, not the fan-out edges.
+        now_ms = 1_800_000_000_000
+        event_id = 15921219
+        canned = _tennis_responses(
+            event_id=event_id,
+            status_type="inprogress",
+            start_timestamp=(now_ms // 1000) - 300,
+        )
+        statistics_url = f"https://www.sofascore.com/api/v1/event/{event_id}/statistics"
+        transport = _RaisingTransport(
+            failing_urls={statistics_url},
+            canned=canned,
+            exception=RuntimeError("Operation timed out after 10000 ms"),
+        )
+        orchestrator = _build_orchestrator(
+            transport=transport,
+            live_state_store=LiveEventStateStore(_FakeLiveBackend()),
+            stream_queue=RedisStreamQueue(_FakeStreamBackend()),
+            now_ms_factory=lambda: now_ms,
+        )
+
+        # Should NOT raise: the root succeeded, only one detail edge
+        # failed. The orchestrator records the failure in fetch_outcomes
+        # but completes the run.
+        report = await orchestrator.run_event(
+            event_id=event_id,
+            sport_slug="tennis",
+            hydration_mode="live_delta",
+        )
+
+        self.assertIsNotNone(report)
+        self.assertIn(
+            f"https://www.sofascore.com/api/v1/event/{event_id}",
+            transport.seen_urls,
+        )
+        self.assertIn(statistics_url, transport.seen_urls)
+        # And classifications should record the network_error
+        # for the detail edge — this is the visibility we want
+        # without failing the whole job.
+        statistics_outcomes = [
+            o for o in report.fetch_outcomes
+            if o.endpoint_pattern.endswith("/statistics")
+        ]
+        self.assertTrue(statistics_outcomes)
+        self.assertEqual(statistics_outcomes[0].classification, "network_error")
 
 
 def _build_orchestrator(
