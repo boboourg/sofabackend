@@ -515,6 +515,233 @@ class HybridAppRunEventDetailsExposureTests(unittest.TestCase):
             "AttributeError.",
         )
 
+    def test_hybrid_app_run_event_details_does_not_use_replay_pipeline(self) -> None:
+        """Regression for canary v2 — ``HybridApp.run_event_details`` was
+        initially implemented via the run_event prefetch+commit+persist
+        pattern. Persist phase calls ``orchestrator.run_event`` to replay,
+        but the prefetch ran ``run_event_details`` only (no ROOT
+        outcome). Replay then raised ``RuntimeError: No prefetched fetch
+        outcome available for task=('hydrate_event_root', ...)``.
+
+        Source-level invariant: the details path must NOT use the replay
+        pipeline. It must drive ``orchestrator.run_event_details``
+        directly under an immediate (non-deferred) ``FetchExecutor``."""
+
+        import ast
+        import inspect
+        import textwrap
+        from schema_inspector.cli import HybridApp
+
+        # ``inspect.getsource`` preserves the original 4-space class-method
+        # indent which trips ``ast.parse`` with IndentationError. Dedent
+        # before parsing.
+        source = textwrap.dedent(inspect.getsource(HybridApp.run_event_details))
+        tree = ast.parse(source)
+
+        # Walk AST to find every Call node and inspect the callee
+        # name/attribute path. Source-text scans are unreliable because
+        # the docstring legitimately mentions ``_persist_prefetched_run``
+        # / ``run_event`` as a description of what this method must
+        # *not* do.
+        called_attrs: list[str] = []
+        called_keywords: list[str] = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    called_attrs.append(func.attr)
+                elif isinstance(func, ast.Name):
+                    called_attrs.append(func.id)
+                for kw in node.keywords:
+                    if kw.arg:
+                        called_keywords.append(kw.arg)
+
+        self.assertNotIn(
+            "_prefetch_event_run_details",
+            called_attrs,
+            "run_event_details must not call _prefetch_event_run_details "
+            "(removed in canary v3 — the replay pattern was the v2 bug).",
+        )
+        self.assertNotIn(
+            "_persist_prefetched_run",
+            called_attrs,
+            "run_event_details must not call _persist_prefetched_run — "
+            "that helper invokes orchestrator.run_event(...) for replay, "
+            "which fails when prefetch only ran details (no ROOT outcome).",
+        )
+        # FetchExecutor must not be constructed with write_mode="deferred"
+        # — details writes are immediate. Search Call nodes for the
+        # ``write_mode`` kwarg with the specific value "deferred".
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "write_mode" and isinstance(kw.value, ast.Constant):
+                        self.assertNotEqual(
+                            kw.value.value,
+                            "deferred",
+                            "FetchExecutor must NOT be deferred mode in details path "
+                            "(replay pipeline is unsupported here).",
+                        )
+        self.assertIn(
+            "run_event_details",
+            called_attrs,
+            "run_event_details must drive orchestrator.run_event_details.",
+        )
+        self.assertNotIn(
+            "run_event",
+            called_attrs,
+            "run_event_details must NOT call orchestrator.run_event "
+            "(canary v2 bug — replay pipeline tries ROOT fetch which "
+            "was never prefetched).",
+        )
+
+
+class HybridAppRunEventDetailsIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Integration test that drives the full ``HybridApp.run_event_details``
+    code path with a spy on ``PilotOrchestrator`` to assert which
+    orchestrator method gets called. Catches the v1+v2 canary failure
+    modes that the unit tests with mock orchestrators missed:
+
+    * v1 — AttributeError because HybridApp lacked run_event_details
+    * v2 — RuntimeError because run_event_details internally invoked
+      run_event via the replay pipeline
+    """
+
+    async def test_hybrid_app_run_event_details_calls_orchestrator_run_event_details_only(self) -> None:
+        import schema_inspector.cli as hybrid_cli
+        from schema_inspector.runtime import RuntimeConfig
+        from unittest import mock as _mock
+
+        run_event_calls: list[dict] = []
+        run_event_details_calls: list[dict] = []
+        constructed_orchestrators: list[dict] = []
+
+        original_pilot_orchestrator = hybrid_cli.PilotOrchestrator
+
+        class _SpyOrchestrator:
+            """Drop-in stand-in for ``PilotOrchestrator``. Records
+            constructor kwargs so we can verify the executor is *not* a
+            replay executor (the v2 bug path), and records every
+            ``run_event(...)`` and ``run_event_details(...)`` call."""
+
+            def __init__(self, **kwargs):
+                constructed_orchestrators.append(kwargs)
+                self._kwargs = kwargs
+
+            async def run_event(self, **kwargs):
+                run_event_calls.append(kwargs)
+                return None
+
+            async def run_event_details(self, **kwargs):
+                run_event_details_calls.append(kwargs)
+                return None
+
+            @property
+            def freshness_skip_keys(self):
+                return frozenset()
+
+        app = hybrid_cli.HybridApp(
+            database=_HybridStubDatabase(),
+            runtime_config=RuntimeConfig(require_proxy=False),
+            redis_backend=None,
+        )
+
+        async def _noop_ensure_endpoint_registry(*args, **kwargs):
+            del args, kwargs
+            return None
+
+        async def _resolve_sport(*args, **kwargs):
+            del args, kwargs
+            return "football"
+
+        with _mock.patch.object(hybrid_cli, "PilotOrchestrator", _SpyOrchestrator), \
+                _mock.patch.object(app, "ensure_endpoint_registry", side_effect=_noop_ensure_endpoint_registry), \
+                _mock.patch.object(app, "resolve_event_sport_slug", side_effect=_resolve_sport):
+            result = await app.run_event_details(
+                event_id=15345941,
+                sport_slug="football",
+                context={
+                    "status_type": "inprogress",
+                    "home_team_id": 1,
+                    "away_team_id": 2,
+                    "has_xg": True,
+                    "effective_hydration_mode": "live_delta",
+                },
+            )
+
+        # Critical assertions for the v1/v2 canary regressions.
+        self.assertEqual(
+            len(run_event_calls), 0,
+            "HybridApp.run_event_details MUST NOT invoke "
+            "orchestrator.run_event (canary v2 bug — _persist_prefetched_run "
+            "replays via run_event and tries to fetch ROOT which was never "
+            "prefetched).",
+        )
+        self.assertEqual(
+            len(run_event_details_calls), 1,
+            "HybridApp.run_event_details MUST drive "
+            "orchestrator.run_event_details exactly once.",
+        )
+        self.assertEqual(run_event_details_calls[0]["event_id"], 15345941)
+        self.assertEqual(run_event_details_calls[0]["sport_slug"], "football")
+        self.assertEqual(run_event_details_calls[0]["context"]["status_type"], "inprogress")
+
+        # Verify the constructed orchestrator was NOT given a
+        # ReplayFetchExecutor — the v2 bug. The fetch_executor must be a
+        # real (immediate-write) FetchExecutor instance.
+        self.assertEqual(len(constructed_orchestrators), 1)
+        executor = constructed_orchestrators[0]["fetch_executor"]
+        self.assertEqual(
+            type(executor).__name__,
+            "FetchExecutor",
+            "run_event_details must use a real FetchExecutor, not "
+            "ReplayFetchExecutor (which only replays prefetched task keys "
+            "and would raise on ROOT replay).",
+        )
+
+
+class _HybridStubDatabase:
+    """Minimal Database-shaped stub for HybridApp construction +
+    transaction context manager. Doesn't actually connect to anything."""
+
+    def __init__(self) -> None:
+        self.connection = _StubConnection()
+        self.transaction_calls = 0
+
+    def transaction(self):
+        self.transaction_calls += 1
+        return _AsyncCM(self.connection)
+
+    def connection_factory(self):
+        return _AsyncCM(self.connection)
+
+
+class _StubConnection:
+    async def fetch(self, *args, **kwargs):
+        del args, kwargs
+        return []
+
+    async def fetchrow(self, *args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def execute(self, *args, **kwargs):
+        del args, kwargs
+        return None
+
+
+class _AsyncCM:
+    def __init__(self, value):
+        self._value = value
+
+    async def __aenter__(self):
+        return self._value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        del exc_type, exc, tb
+        return None
+
 
 if __name__ == "__main__":
     unittest.main()

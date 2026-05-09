@@ -391,101 +391,111 @@ class HybridApp:
         """Run only the per-event detail fanout phase (P0(a) split-details).
 
         Consumed by ``LiveDetailsWorkerService`` from
-        ``stream:etl:live_details``. Reuses the same deferred
-        prefetch+commit+persist pipeline as :py:meth:`run_event` so detail
-        snapshot writes are atomic with the rest of the pipeline. Failure
-        semantics — permissive: this method does NOT raise
-        ``RetryableJobError``, the details worker translates exceptions
-        into ``completed_with_errors`` upstream.
+        ``stream:etl:live_details``. Uses a *direct* (immediate) write
+        ``FetchExecutor`` rather than the prefetch+commit+persist replay
+        pattern that ``run_event`` uses. The replay pattern was attempted
+        in canary v2 and failed: ``_persist_prefetched_run`` invokes
+        ``orchestrator.run_event(...)`` which tries to replay the ROOT
+        ``/event`` fetch via the replay-only executor. Since the prefetch
+        for details fanout never ran ROOT, the replay raised
+        ``RuntimeError: No prefetched fetch outcome available for
+        task=('hydrate_event_root', ...)``. Direct/immediate writes side-
+        step replay entirely — each detail fetch persists raw + normalized
+        rows inline.
+
+        Trade-off vs ``run_event``: details writes lose batch-atomicity
+        (each fetch commits independently within a single transaction
+        block) and lose negative-cache replay snapshots (cache state
+        mutates as fetches happen, not deterministically applied at end).
+        Both are acceptable for details fanout because:
+
+        * detail endpoints are independent (one /heatmap/{team_id} write
+          does not depend on another /player/{player_id}/statistics
+          write being durable);
+        * negative-cache decisions for detail endpoints are read-only
+          during a single details run — there is no replay phase to
+          conflict with.
+
+        Failure semantics — permissive: any exception bubbles out of
+        this method but is caught by ``LiveDetailsWorkerService.handle``
+        which translates it into ``completed_with_errors``. Details
+        failure MUST NOT retry the parent ``refresh_live_event`` job.
         """
 
         resolved_sport_slug = sport_slug or await self.resolve_event_sport_slug(event_id)
         await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
-        prefetched_run = await self._prefetch_event_run_details(
-            event_id=event_id,
-            sport_slug=str(resolved_sport_slug or "football"),
-            context=dict(context or {}),
-        )
-        self._warn_if_prefetched_run_large(prefetched_run)
-        committed_run = await self._commit_prefetched_run(prefetched_run)
-        return await self._persist_prefetched_run(
-            committed_run,
-            hydration_mode="live_delta",
-        )
 
-    async def _prefetch_event_run_details(
-        self,
-        *,
-        event_id: int,
-        sport_slug: str,
-        context: dict,
-    ) -> PrefetchedRun:
-        """Mirror of ``_prefetch_event_run`` but driving
-        ``orchestrator.run_event_details`` instead of ``run_event``.
-        Construction of executors / gates / orchestrator is intentionally
-        identical — only the entry-point method on the orchestrator
-        changes — so detail fanout shares all the same write modes,
-        capability rollup, freshness, negative cache, and final-sweep
-        plumbing as the live tier critical path."""
-
-        initial_capability_rollup = dict(self.capability_rollup)
-        snapshot_store = HybridSnapshotStore(self.raw_repository, None)
-        prefetch_executor = FetchExecutor(
-            transport=self.transport,
-            raw_repository=self.raw_repository,
-            sql_executor=None,
-            snapshot_store=snapshot_store,
-            write_mode="deferred",
-            freshness_store=self.freshness_store,
-        )
-        season_widget_gate = None
-        event_endpoint_gate = None
-        async with self.database.connection() as read_connection:
+        planner = Planner(capability_rollup=dict(self.capability_rollup))
+        async with self.database.transaction() as connection:
+            snapshot_store = HybridSnapshotStore(self.raw_repository, connection)
+            executor = FetchExecutor(
+                transport=self.transport,
+                raw_repository=self.raw_repository,
+                sql_executor=connection,
+                snapshot_store=snapshot_store,
+                freshness_store=self.freshness_store,
+            )
+            season_widget_gate = None
+            event_endpoint_gate = None
             if self.negative_cache_settings.enabled:
                 season_widget_gate = SeasonWidgetNegativeCache(
                     repository=self.endpoint_negative_cache_repository,
-                    sql_executor=read_connection,
+                    sql_executor=connection,
                     settings=self.negative_cache_settings,
                 )
             if self.event_negative_cache_settings.enabled:
                 event_endpoint_gate = EventEndpointNegativeCache(
                     repository=self.event_endpoint_negative_cache_repository,
-                    sql_executor=read_connection,
+                    sql_executor=connection,
                     settings=self.event_negative_cache_settings,
                 )
             orchestrator = PilotOrchestrator(
-                fetch_executor=prefetch_executor,
+                fetch_executor=executor,
                 snapshot_store=snapshot_store,
-                normalize_worker=NormalizeWorker(ParserRegistry.default(), result_sink=None),
-                planner=Planner(capability_rollup=dict(initial_capability_rollup)),
-                capability_repository=None,
-                sql_executor=None,
-                live_state_store=None,
-                live_state_repository=None,
-                stream_queue=None,
+                normalize_worker=NormalizeWorker(
+                    ParserRegistry.default(),
+                    result_sink=DurableNormalizeSink(
+                        self.normalize_repository,
+                        connection,
+                    ),
+                ),
+                planner=planner,
+                capability_repository=self.capability_repository,
+                sql_executor=connection,
+                live_state_store=self.live_state_store,
+                live_state_repository=self.live_state_repository,
+                stream_queue=self.stream_queue,
                 season_widget_gate=season_widget_gate,
                 event_endpoint_gate=event_endpoint_gate,
                 final_sweep_gate=self.final_sweep_gate,
                 freshness_store=self.freshness_store,
                 fanout_max_inflight=_live_fanout_max_inflight_from_env("live_delta"),
             )
-            await orchestrator.run_event_details(
+            result = await orchestrator.run_event_details(
                 event_id=event_id,
-                sport_slug=sport_slug,
-                context=context,
+                sport_slug=str(resolved_sport_slug or "football"),
+                context=dict(context or {}),
             )
-        return PrefetchedRun(
-            event_id=event_id,
-            sport_slug=sport_slug,
-            fetch_records=prefetch_executor.prefetched_records,
-            snapshot_store=snapshot_store,
-            initial_capability_rollup=initial_capability_rollup,
-            widget_negative_cache_events=season_widget_gate.events if season_widget_gate is not None else (),
-            replay_widget_gate=season_widget_gate.build_replay_gate() if season_widget_gate is not None else None,
-            event_negative_cache_events=event_endpoint_gate.events if event_endpoint_gate is not None else (),
-            replay_event_endpoint_gate=event_endpoint_gate.build_replay_gate() if event_endpoint_gate is not None else None,
-            freshness_skip_keys=orchestrator.freshness_skip_keys,
-        )
+            if (
+                self.event_negative_cache_settings.enabled
+                and event_endpoint_gate is not None
+                and event_endpoint_gate.events
+            ):
+                await self.event_endpoint_negative_cache_repository.apply_events(
+                    connection,
+                    event_endpoint_gate.events,
+                )
+            if (
+                self.negative_cache_settings.enabled
+                and season_widget_gate is not None
+                and season_widget_gate.events
+            ):
+                await self.endpoint_negative_cache_repository.apply_events(
+                    connection,
+                    season_widget_gate.events,
+                )
+        self.capability_rollup.update(planner.capability_rollup)
+        return result
     async def _prefetch_event_run(
         self,
         *,
