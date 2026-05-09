@@ -1110,13 +1110,14 @@ async def _dispatch(args) -> int:
                     collect_top_stale_live_events,
                     format_stale_live_events_report,
                 )
-                summary = await collect_stale_live_events_summary(database.connection)
-                top = await collect_top_stale_live_events(
-                    database.connection,
-                    threshold_seconds=int(args.threshold_seconds),
-                    limit=int(args.top),
-                    inprogress_only=not bool(args.all_statuses),
-                )
+                async with database.connection() as connection:
+                    summary = await collect_stale_live_events_summary(connection)
+                    top = await collect_top_stale_live_events(
+                        connection,
+                        threshold_seconds=int(args.threshold_seconds),
+                        limit=int(args.top),
+                        inprogress_only=not bool(args.all_statuses),
+                    )
                 print(
                     format_stale_live_events_report(
                         summary,
