@@ -1077,10 +1077,22 @@ async def _dispatch(args) -> int:
             max_attempts=args.max_attempts,
         )
     else:
+        # P0(b)-followup: per-lane scoped Smartproxy session multiplier.
+        # Workers may opt into a different multiplier than the global
+        # SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER without affecting other
+        # processes. Only `worker-live-tier-1` is scoped today (the
+        # canary lane); add more entries here if other lanes need
+        # independent multipliers later. The fallback chain always
+        # ends in the global env key — if no scoped key is set, the
+        # global value (default 1, no-op) is used.
+        scoped_multiplier_keys: tuple[str, ...] = ()
+        if command == "worker-live-tier-1":
+            scoped_multiplier_keys = ("SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER",)
         runtime_config = load_runtime_config(
             proxy_urls=args.proxy or None,
             user_agent=args.user_agent,
             max_attempts=args.max_attempts,
+            proxy_session_multiplier_env_keys=scoped_multiplier_keys,
         )
     if _normalized_source_slug(getattr(args, "source", None)) is not None:
         runtime_config = replace(runtime_config, source_slug=_normalized_source_slug(args.source))

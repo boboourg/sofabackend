@@ -4,18 +4,178 @@ from __future__ import annotations
 
 import os
 import ssl
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote, urlparse, urlunparse
 
 
-@dataclass(frozen=True)
+_SESSION_ID_USERNAME_MARKER = "-session-"
+_SESSION_ID_LENGTH_CHARS = 8
+
+
+@dataclass
 class ProxyEndpoint:
-    """One proxy endpoint available to the inspector transport."""
+    """One proxy endpoint available to the inspector transport.
+
+    For Smartproxy gateway-style providers, ``is_session_expanded=True``
+    marks this endpoint as a virtual slot synthesised from a base
+    credential by appending ``-session-<id>`` to the username. On
+    request failure, ``regenerate_session()`` swaps the session id (and
+    therefore the upstream Smartproxy exit IP) while keeping the same
+    logical name so worker statistics stay coherent.
+
+    For non-session-expanded endpoints (legacy/static proxy URLs and the
+    default no-op multiplier=1 path), ``regenerate_session()`` is a no-op
+    so behaviour matches the historical single-flight model exactly.
+
+    Mutability: ``url`` is the only field that can change after init,
+    and only via ``regenerate_session()``. ``name`` and structural fields
+    stay stable. Equality / hashing are not used anywhere — the pool
+    indexes by ``name`` via a dict — so a non-frozen dataclass is safe.
+    """
 
     name: str
     url: str
     cooldown_seconds: float = 30.0
+    is_session_expanded: bool = False
+
+    def regenerate_session(self) -> None:
+        """Replace this endpoint's session id with a fresh random one.
+
+        No-op for non-session-expanded endpoints — preserves the legacy
+        behaviour for static proxy URLs and for the default-no-op
+        multiplier=1 path.
+        """
+        if not self.is_session_expanded:
+            return
+        new_id = _generate_session_id()
+        self.url = _set_session_id_in_url(self.url, new_id)
+
+
+def _generate_session_id() -> str:
+    return uuid.uuid4().hex[:_SESSION_ID_LENGTH_CHARS]
+
+
+def _set_session_id_in_url(url: str, session_id: str) -> str:
+    """Return ``url`` with the username's session-id segment set to
+    ``session_id``.
+
+    * If the username already contains ``-session-<old_id>``, the old id
+      is replaced with ``session_id`` (preserving any modifiers that
+      come AFTER the session segment, e.g. ``-sessionduration-30``).
+    * If the username has no session segment, ``-session-<session_id>``
+      is appended.
+    * If the URL has no userinfo (no ``@`` in netloc), returns the URL
+      unchanged. Defensive: the expansion path only generates URLs that
+      already had auth, so this branch is only reached for legacy
+      direct-egress callers.
+    """
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    userinfo, _, hostpart = parsed.netloc.partition("@")
+    if ":" in userinfo:
+        user, _, password = userinfo.partition(":")
+    else:
+        user, password = userinfo, ""
+    new_user = _replace_session_in_username(user, session_id)
+    if password:
+        new_userinfo = f"{quote(new_user, safe='-_.')}:{password}"
+    else:
+        new_userinfo = quote(new_user, safe="-_.")
+    new_netloc = f"{new_userinfo}@{hostpart}"
+    return urlunparse(parsed._replace(netloc=new_netloc))
+
+
+def _replace_session_in_username(username: str, session_id: str) -> str:
+    """Set ``-session-<id>`` in a Smartproxy-style username.
+
+    Pattern: a Smartproxy modifier looks like
+    ``baseuser-modifier-value`` (e.g. ``-country-us``,
+    ``-session-abc``, ``-sessionduration-30``). Multiple modifiers
+    chain. We replace ONLY the session-id value; all other modifiers
+    (whatever appears after the next ``-`` past the session id) are
+    preserved.
+    """
+    marker = _SESSION_ID_USERNAME_MARKER
+    if marker not in username:
+        return f"{username}{marker}{session_id}"
+    prefix, _, after_marker = username.partition(marker)
+    # ``after_marker`` is "<old_id>" or "<old_id>-<rest>"; preserve <rest>.
+    if "-" in after_marker:
+        _, dash, tail = after_marker.partition("-")
+        return f"{prefix}{marker}{session_id}-{tail}"
+    return f"{prefix}{marker}{session_id}"
+
+
+def _expand_proxy_urls_with_sessions(
+    urls: list[str],
+    multiplier: int,
+) -> list[tuple[str, str, bool]]:
+    """Expand a list of base URLs into (name, url, is_session_expanded) tuples.
+
+    * ``multiplier <= 1`` → one endpoint per URL with ``is_session_expanded=False``.
+      Identical to the historical pre-expansion behaviour. This is the default
+      when no env knob is set, so deploying this change with empty env is a no-op.
+    * ``multiplier > 1`` and URL has userinfo → ``multiplier`` virtual slots per URL.
+      Each slot's username gets a unique ``-session-<random>`` segment, so
+      Smartproxy issues an independent rotating exit IP per slot. Slot names
+      are ``proxy_<i>_s<NN>`` for forensics.
+    * ``multiplier > 1`` and URL has NO userinfo → ``multiplier`` slots with the
+      same URL but unique names. ``is_session_expanded=False`` because session
+      regeneration only makes sense for credentialed gateway URLs. Concurrency
+      still grows per slot (different ``in_use`` flags), but a failure won't
+      try to mutate a URL that has nothing to mutate.
+    """
+    cleaned = [url.strip() for url in urls if url.strip()]
+    out: list[tuple[str, str, bool]] = []
+    if multiplier <= 1:
+        for index, url in enumerate(cleaned):
+            out.append((f"proxy_{index + 1}", url, False))
+        return out
+    for index, base_url in enumerate(cleaned):
+        has_auth = "@" in (urlparse(base_url).netloc or "")
+        for slot in range(multiplier):
+            slot_name = f"proxy_{index + 1}_s{slot:02d}"
+            if has_auth:
+                slot_url = _set_session_id_in_url(base_url, _generate_session_id())
+                out.append((slot_name, slot_url, True))
+            else:
+                out.append((slot_name, base_url, False))
+    return out
+
+
+def _resolve_proxy_session_multiplier(
+    env: Mapping[str, str],
+    *,
+    env_keys: tuple[str, ...] = (),
+) -> int:
+    """Resolve the session multiplier from ``env`` using priority order.
+
+    ``env_keys`` is a caller-supplied list of preferred env vars in
+    descending priority (e.g. a per-lane scoped key first). The global
+    ``SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER`` is always appended as
+    the last fallback. If none are set or set to invalid values, returns 1
+    (no-op default).
+
+    Cap to ``[1, 100]`` so a typo cannot accidentally generate
+    thousands of slots.
+    """
+    keys_to_check = list(env_keys) + ["SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER"]
+    for key in keys_to_check:
+        raw = (env.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value < 1:
+            return 1
+        return min(value, 100)
+    return 1
 
 
 @dataclass(frozen=True)
@@ -142,20 +302,35 @@ def load_runtime_config(
     user_agent: str | None = None,
     extra_headers: Mapping[str, str] | None = None,
     max_attempts: int | None = None,
+    proxy_session_multiplier_env_keys: tuple[str, ...] = (),
 ) -> RuntimeConfig:
     """Build a runtime config from explicit arguments and environment.
 
     proxy_env_key: if set and proxy_urls is empty, reads proxy list from this
     env variable instead of the default SCHEMA_INSPECTOR_PROXY_URLS.
     Used to route historical workers to Proxyline without touching live proxies.
+
+    proxy_session_multiplier_env_keys: ordered list of env vars whose value
+    (if set and ≥1) is used as the Smartproxy session multiplier. The global
+    ``SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER`` is always consulted as the
+    last fallback. CLI workers may pass scoped keys (e.g.
+    ``SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER``) to opt this
+    process into a different multiplier without affecting other lanes.
+    Default empty tuple → only the global key is consulted → if absent,
+    multiplier=1 (no-op, behaviour identical to pre-expansion code).
     """
 
     env = _load_project_env() if env is None else env
     configured_proxy_urls = list(proxy_urls or _read_proxy_urls(env, proxy_env_key=proxy_env_key))
+    multiplier = _resolve_proxy_session_multiplier(
+        env, env_keys=proxy_session_multiplier_env_keys
+    )
+    expanded_endpoints = _expand_proxy_urls_with_sessions(
+        configured_proxy_urls, multiplier=multiplier
+    )
     endpoints = tuple(
-        ProxyEndpoint(name=f"proxy_{index + 1}", url=url.strip())
-        for index, url in enumerate(configured_proxy_urls)
-        if url.strip()
+        ProxyEndpoint(name=name, url=url, is_session_expanded=is_expanded)
+        for name, url, is_expanded in expanded_endpoints
     )
     impersonate = env.get("SCHEMA_INSPECTOR_TLS_IMPERSONATE", "chrome110").strip() or "chrome110"
     resolved_user_agent = user_agent or env.get("SCHEMA_INSPECTOR_USER_AGENT", "schema-inspector/1.0")

@@ -124,6 +124,16 @@ class ProxyPool:
                 self.record_success(state.endpoint.name)
             else:
                 self.record_failure(state.endpoint.name)
+                # Smartproxy session-expanded slot: rotate the session
+                # id on failure so the bad upstream exit IP is replaced
+                # before this slot is acquired again. The regular
+                # cooldown still applies to the slot, but the next
+                # acquire (after cooldown expires) will pick a fresh
+                # exit IP via Smartproxy's session router.
+                # No-op for non-session-expanded endpoints — preserves
+                # the legacy single-flight behaviour for static proxy
+                # URLs and the default-no-op multiplier=1 path.
+                state.endpoint.regenerate_session()
             self._condition.notify_all()
 
     def _try_acquire(self) -> ProxyLease | None:
