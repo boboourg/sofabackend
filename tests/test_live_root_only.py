@@ -743,5 +743,343 @@ class LiveWorkerServiceRootOnlyExposureTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# 4. Real PilotOrchestrator end-to-end: hydration_mode="root_only" must
+#    NOT trigger any edge fetches via the actual fetch_executor +
+#    transport, regardless of the inprogress-status payload.
+# ---------------------------------------------------------------------------
+class PilotOrchestratorRealRunRootOnlyTests(unittest.IsolatedAsyncioTestCase):
+    """Reproduces the prod regression by driving the *real*
+    ``PilotOrchestrator.run_event`` against a fake transport. If the
+    orchestrator's root_only branch fires, only the EVENT_DETAIL_ENDPOINT
+    URL is fetched and ``edges_pending=True`` comes back. If for any
+    reason (helper rebuild, fall-through, code path change) the branch
+    does not fire, the test fails because edge URLs end up in
+    ``transport.seen_urls``."""
+
+    async def test_root_only_real_orchestrator_fetches_only_event_root(self) -> None:
+        import json as _json
+
+        from schema_inspector.fetch_executor import FetchExecutor
+        from schema_inspector.normalizers.worker import NormalizeWorker
+        from schema_inspector.parsers.registry import ParserRegistry
+        from schema_inspector.pipeline.pilot_orchestrator import PilotOrchestrator
+        from schema_inspector.planner.planner import Planner
+        from schema_inspector.runtime import TransportAttempt, TransportResult
+
+        event_url = "https://www.sofascore.com/api/v1/event/8001"
+        statistics_url = "https://www.sofascore.com/api/v1/event/8001/statistics"
+        lineups_url = "https://www.sofascore.com/api/v1/event/8001/lineups"
+        incidents_url = "https://www.sofascore.com/api/v1/event/8001/incidents"
+
+        def make_response(url: str, payload: object) -> TransportResult:
+            return TransportResult(
+                resolved_url=url,
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=_json.dumps(payload).encode("utf-8"),
+                attempts=(TransportAttempt(1, "proxy_1", 200, None, None),),
+                final_proxy_name="proxy_1",
+                challenge_reason=None,
+            )
+
+        responses = {
+            event_url: make_response(
+                event_url,
+                {
+                    "event": {
+                        "id": 8001,
+                        "slug": "team-a-team-b",
+                        "detailId": 1,
+                        "tournament": {
+                            "id": 100,
+                            "slug": "test-league",
+                            "name": "Test League",
+                            "uniqueTournament": {
+                                "id": 17,
+                                "slug": "test-league",
+                                "name": "Test League",
+                            },
+                        },
+                        "season": {"id": 76986, "name": "Test 25/26", "year": "25/26"},
+                        "status": {"code": 7, "type": "inprogress", "description": "1st half"},
+                        "homeTeam": {"id": 11, "slug": "home", "name": "Home"},
+                        "awayTeam": {"id": 22, "slug": "away", "name": "Away"},
+                    }
+                },
+            ),
+            # Edge URLs registered so transport doesn't 404 — but if
+            # root_only branch fires, they should NEVER be hit.
+            statistics_url: make_response(statistics_url, {"statistics": []}),
+            lineups_url: make_response(lineups_url, {"home": {"players": []}, "away": {"players": []}}),
+            incidents_url: make_response(incidents_url, {"incidents": []}),
+        }
+
+        class _FakeTransport:
+            def __init__(self, mapping: dict[str, TransportResult]) -> None:
+                self.mapping = mapping
+                self.seen_urls: list[str] = []
+
+            async def fetch(self, url: str, *, headers=None, timeout: float = 20.0) -> TransportResult:
+                del headers, timeout
+                self.seen_urls.append(url)
+                return self.mapping[url]
+
+        class _FakeRawSnapshotStore:
+            def __init__(self) -> None:
+                self.snapshots_by_id: dict[int, object] = {}
+                self._next_id = 1
+
+            async def insert_request_log(self, executor, record) -> None:
+                del executor, record
+
+            async def insert_payload_snapshot_returning_id(self, executor, record) -> int:
+                del executor
+                snapshot_id = self._next_id
+                self._next_id += 1
+                self.snapshots_by_id[snapshot_id] = record
+                return snapshot_id
+
+            async def insert_payload_snapshot_if_missing_returning_id(self, executor, record) -> int:
+                return await self.insert_payload_snapshot_returning_id(executor, record)
+
+            async def upsert_snapshot_head(self, executor, record) -> None:
+                del executor, record
+
+            def load_snapshot(self, snapshot_id: int):
+                from schema_inspector.parsers.base import RawSnapshot
+
+                record = self.snapshots_by_id[snapshot_id]
+                return RawSnapshot(
+                    snapshot_id=snapshot_id,
+                    endpoint_pattern=record.endpoint_pattern,
+                    sport_slug=record.sport_slug,
+                    source_url=record.source_url,
+                    resolved_url=record.resolved_url,
+                    envelope_key=record.envelope_key,
+                    http_status=record.http_status,
+                    payload=record.payload,
+                    fetched_at=record.fetched_at,
+                    context_entity_type=record.context_entity_type,
+                    context_entity_id=record.context_entity_id,
+                    context_unique_tournament_id=record.context_unique_tournament_id,
+                    context_season_id=record.context_season_id,
+                    context_event_id=record.context_event_id,
+                )
+
+        transport = _FakeTransport(responses)
+        raw_store = _FakeRawSnapshotStore()
+        fetch_executor = FetchExecutor(
+            transport=transport, raw_repository=raw_store, sql_executor=object()
+        )
+        orchestrator = PilotOrchestrator(
+            fetch_executor=fetch_executor,
+            snapshot_store=raw_store,
+            normalize_worker=NormalizeWorker(ParserRegistry.default()),
+            planner=Planner(capability_rollup={}),
+            capability_repository=None,
+            sql_executor=object(),
+        )
+
+        report = await orchestrator.run_event(
+            event_id=8001,
+            sport_slug="football",
+            hydration_mode="root_only",
+        )
+
+        # CRITICAL ASSERTION — the orchestrator must NOT fetch any edge
+        # endpoints when running root_only. Only the EVENT_DETAIL_ENDPOINT
+        # URL should be in seen_urls.
+        self.assertEqual(
+            transport.seen_urls,
+            [event_url],
+            (
+                f"root_only must fetch ONLY the event root URL, "
+                f"but got: {transport.seen_urls}"
+            ),
+        )
+        self.assertTrue(report.edges_pending)
+        self.assertFalse(report.finalized)
+        self.assertEqual(report.event_id, 8001)
+
+
+# ---------------------------------------------------------------------------
+# 5. HybridApp.run_event(hydration_mode="root_only") — propagation test.
+#    Mocks the prefetch+commit+persist helpers and verifies each receives
+#    hydration_mode="root_only" verbatim. If any helper sees a different
+#    string (live_delta/full/etc.) the propagation chain is broken.
+# ---------------------------------------------------------------------------
+class HybridAppRootOnlyPropagationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hybrid_app_run_event_propagates_root_only_to_all_helpers(self) -> None:
+        """Propagation chain: HybridApp.run_event → _prefetch_event_run →
+        _persist_prefetched_run. Each link must carry hydration_mode
+        unchanged. If any link substitutes another value the inner
+        PilotOrchestrator will not enter the root_only branch and edges
+        fan-out fires (the prod regression we observed)."""
+        from schema_inspector.cli import HybridApp
+
+        app = HybridApp.__new__(HybridApp)
+        # Capture what each helper receives.
+        prefetch_called_with: list[str] = []
+        persist_called_with: list[str] = []
+
+        async def _resolve_event_sport_slug(event_id):
+            del event_id
+            return "football"
+
+        async def _ensure_endpoint_registry(sport_slug):
+            del sport_slug
+
+        class _StubPrefetchedRun:
+            event_id = 8001
+            sport_slug = "football"
+            total_payload_size_bytes = 1
+            endpoint_count = 1
+
+        async def _prefetch_event_run(*, event_id, sport_slug, hydration_mode):
+            del event_id, sport_slug
+            prefetch_called_with.append(hydration_mode)
+            return _StubPrefetchedRun()
+
+        def _warn_if_prefetched_run_large(prefetched_run):
+            del prefetched_run
+
+        async def _commit_prefetched_run(prefetched_run):
+            return prefetched_run
+
+        async def _persist_prefetched_run(prefetched_run, *, hydration_mode):
+            del prefetched_run
+            persist_called_with.append(hydration_mode)
+            from schema_inspector.pipeline.pilot_orchestrator import PilotRunReport
+
+            return PilotRunReport(
+                sport_slug="football",
+                event_id=8001,
+                fetch_outcomes=(),
+                parse_results=(),
+                edges_pending=(hydration_mode == "root_only"),
+            )
+
+        # Patch instance methods.
+        app.resolve_event_sport_slug = _resolve_event_sport_slug
+        app.ensure_endpoint_registry = _ensure_endpoint_registry
+        app._prefetch_event_run = _prefetch_event_run
+        app._warn_if_prefetched_run_large = _warn_if_prefetched_run_large
+        app._commit_prefetched_run = _commit_prefetched_run
+        app._persist_prefetched_run = _persist_prefetched_run
+        app.live_bootstrap_coordinator = None  # bypass the bootstrap branch
+
+        result = await app.run_event(
+            event_id=8001,
+            sport_slug="football",
+            hydration_mode="root_only",
+        )
+
+        self.assertEqual(prefetch_called_with, ["root_only"])
+        self.assertEqual(persist_called_with, ["root_only"])
+        self.assertTrue(result.edges_pending)
+
+
+# ---------------------------------------------------------------------------
+# 6. Job-type discrimination on tier_1 with flag ON.
+#    `refresh_live_event` MUST go through root_only path.
+#    `hydrate_event_root` (published by discovery worker on newly-live
+#    events) MUST stay on the legacy full-hydration path because new
+#    live events need bootstrap (edges + details fan-out) on the first
+#    sighting. This is the source of the observed `phase=edges` entries
+#    on tier_1 during the canary — they came from hydrate_event_root
+#    jobs, NOT from refresh_live_event runs (which correctly went
+#    through root_only and never emitted phase=edges).
+# ---------------------------------------------------------------------------
+class LiveTier1JobTypeDiscriminationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_live_event_uses_root_only_but_hydrate_event_root_does_not(self) -> None:
+        from schema_inspector.queue.live_edges_throttle import LiveEdgesThrottle
+        from schema_inspector.queue.live_inflight import (
+            LiveEventInFlightStore,
+            LiveEventRootInFlightStore,
+        )
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        spy = _SpyOrchestrator(
+            report=_FakeReport(fetch_outcomes=(), edges_pending=True, finalized=False)
+        )
+
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = LiveWorkerService(
+                orchestrator=spy,
+                delayed_scheduler=_NoopDelayedScheduler(),
+                queue=queue,
+                lane="tier_1",
+                consumer="worker-live-tier-1-1",
+                in_flight_store=LiveEventInFlightStore(backend, ttl_ms=600_000),
+                root_in_flight_store=LiveEventRootInFlightStore(backend, ttl_ms=60_000),
+                edges_throttle=LiveEdgesThrottle(backend, interval_seconds=60),
+            )
+
+            # 1. refresh_live_event → root_only path.
+            refresh_entry = StreamEntry(
+                stream=STREAM_LIVE_TIER_1,
+                message_id="1-refresh",
+                values={
+                    "job_id": "job-refresh-9001",
+                    "job_type": "refresh_live_event",
+                    "sport_slug": "football",
+                    "event_id": "9001",
+                    "lane": "tier_1",
+                    "attempt": "1",
+                    "params_json": json.dumps(
+                        {"hydration_mode": "live_delta", "live_dispatch_tier": "tier_1"}
+                    ),
+                },
+            )
+            await worker.handle(refresh_entry)
+
+            # 2. hydrate_event_root → legacy path (discovery published).
+            hydrate_entry = StreamEntry(
+                stream=STREAM_LIVE_TIER_1,
+                message_id="1-hydrate",
+                values={
+                    "job_id": "job-hydrate-9002",
+                    "job_type": "hydrate_event_root",
+                    "sport_slug": "football",
+                    "event_id": "9002",
+                    "lane": "tier_1",
+                    "attempt": "1",
+                    "params_json": json.dumps(
+                        {"hydration_mode": "live_delta", "live_dispatch_tier": "tier_1"}
+                    ),
+                },
+            )
+            await worker.handle(hydrate_entry)
+
+        # refresh_live_event went through root_only.
+        # hydrate_event_root went through legacy (resolved to live_delta).
+        self.assertEqual(len(spy.calls), 2)
+        # Order: refresh first, then hydrate.
+        refresh_call = spy.calls[0]
+        hydrate_call = spy.calls[1]
+        self.assertEqual(refresh_call[0], 9001)  # event_id
+        self.assertEqual(refresh_call[2], "root_only")  # hydration_mode
+        self.assertEqual(hydrate_call[0], 9002)
+        self.assertEqual(hydrate_call[2], "live_delta")  # NOT root_only
+
+        # refresh_live_event published edges-followup. hydrate_event_root did NOT.
+        warm_publishes = [p for p in queue.published if p[0] == STREAM_LIVE_WARM]
+        self.assertEqual(len(warm_publishes), 1)
+        _, payload = warm_publishes[0]
+        self.assertEqual(payload["entity_id"], 9001)  # only refresh's event triggered followup
+
+        # Lock keys discriminate by path:
+        # - refresh used live:root_inflight (released after run, key absent now)
+        # - hydrate used live:refresh_inflight (also released)
+        # Neither should leak; both released cleanly.
+        self.assertNotIn("live:root_inflight:9001", backend.values)
+        self.assertNotIn("live:refresh_inflight:9001", backend.values)
+        self.assertNotIn("live:root_inflight:9002", backend.values)
+        self.assertNotIn("live:refresh_inflight:9002", backend.values)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
