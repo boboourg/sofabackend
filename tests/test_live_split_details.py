@@ -497,5 +497,24 @@ def _details_entry(*, event_id: int, message_id: str) -> StreamEntry:
     )
 
 
+class HybridAppRunEventDetailsExposureTests(unittest.TestCase):
+    """Regression: ``LiveDetailsWorkerService`` is wired with
+    ``orchestrator=ServiceApp.app`` (= ``HybridApp``). The new public
+    method ``run_event_details`` must therefore exist on ``HybridApp``,
+    not only on ``PilotOrchestrator``. The first canary roll-out hit
+    ``AttributeError: 'HybridApp' object has no attribute
+    'run_event_details'`` — this test pins down the exposure."""
+
+    def test_hybrid_app_class_has_run_event_details(self) -> None:
+        from schema_inspector.cli import HybridApp
+
+        self.assertTrue(
+            hasattr(HybridApp, "run_event_details"),
+            "HybridApp must expose run_event_details so the live-details "
+            "worker can call orchestrator.run_event_details(...) without "
+            "AttributeError.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
