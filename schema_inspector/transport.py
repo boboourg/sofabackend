@@ -52,6 +52,32 @@ class ProxyRequiredError(RuntimeError):
     """Raised when proxy-only mode is enabled and no proxy can be used."""
 
 
+class TransportExhaustedError(RuntimeError):
+    """Raised when the transport retry budget is consumed without a final response.
+
+    Carries the per-attempt log so callers (FetchExecutor) can persist
+    proxy/fingerprint/error/latency information into ``api_request_log``
+    instead of recording an empty ``proxy=NULL`` row. This is purely a
+    forensics improvement: the underlying transport behaviour, retry
+    policy, timeouts, and proxy pool are unchanged.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: tuple[TransportAttempt, ...],
+        final_proxy_name: str | None,
+        final_proxy_address: str | None,
+        original: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.attempts = tuple(attempts)
+        self.final_proxy_name = final_proxy_name
+        self.final_proxy_address = final_proxy_address
+        self.original = original
+
+
 class InspectorTransport:
     """All outbound requests for the inspector pass through this class."""
 
@@ -130,6 +156,7 @@ class InspectorTransport:
                 raise ProxyRequiredError(error_msg)
 
             fingerprint_profile = await self._next_fingerprint_profile()
+            attempt_started_monotonic = self.clock()
             try:
                 attempt_headers = self._apply_fingerprint_headers(request_headers, fingerprint_profile)
                 if lease is not None and lease.pre_request_delay > 0.0:
@@ -145,6 +172,7 @@ class InspectorTransport:
                     ),
                     timeout=timeout,
                 )
+                attempt_latency_ms = int((self.clock() - attempt_started_monotonic) * 1000)
 
                 # 304 Not Modified — data hasn't changed, return cached body.
                 # Proxy transferred only request headers, no response body.
@@ -159,6 +187,7 @@ class InspectorTransport:
                             error=None,
                             challenge_reason=None,
                             proxy_address=proxy_address,
+                            latency_ms=attempt_latency_ms,
                         )
                     )
                     return TransportResult(
@@ -186,6 +215,7 @@ class InspectorTransport:
                         error=None,
                         challenge_reason=challenge_reason,
                         proxy_address=proxy_address,
+                        latency_ms=attempt_latency_ms,
                     )
                 )
 
@@ -229,6 +259,7 @@ class InspectorTransport:
                 )
 
             except (URLError, RequestsError, asyncio.TimeoutError) as exc:
+                attempt_latency_ms = int((self.clock() - attempt_started_monotonic) * 1000)
                 error_msg = _transport_error_message(exc, timeout=timeout)
                 await self._discard_session(proxy_url, fingerprint_profile=fingerprint_profile)
                 attempts.append(
@@ -239,6 +270,7 @@ class InspectorTransport:
                         error=error_msg,
                         challenge_reason=None,
                         proxy_address=proxy_address,
+                        latency_ms=attempt_latency_ms,
                     )
                 )
                 if lease is not None:
@@ -246,13 +278,30 @@ class InspectorTransport:
                 if attempt_number < self._network_attempt_budget():
                     await self._sleep(self.runtime_config.retry_policy.backoff_seconds * attempt_number)
                     continue
-                raise
+                # Transport budget exhausted on a network-level failure.
+                # Wrap the original exception with the per-attempt log so
+                # FetchExecutor can persist proxy/fingerprint/latency info
+                # into api_request_log instead of recording an empty
+                # proxy=NULL row.
+                raise TransportExhaustedError(
+                    error_msg,
+                    attempts=tuple(attempts),
+                    final_proxy_name=proxy_name,
+                    final_proxy_address=proxy_address,
+                    original=exc,
+                ) from exc
             except Exception:
                 if lease is not None:
                     await lease.release(success=False)
                 raise
 
-        raise RuntimeError("Transport exhausted without a final response.")
+        raise TransportExhaustedError(
+            "Transport exhausted without a final response.",
+            attempts=tuple(attempts),
+            final_proxy_name=None,
+            final_proxy_address=None,
+            original=None,
+        )
 
     def _proxy_required_message(self) -> str:
         if not self.runtime_config.proxy_endpoints:

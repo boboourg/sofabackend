@@ -500,5 +500,182 @@ def _fetch_task(**overrides) -> FetchTask:
     return FetchTask(**values)
 
 
+# -- M1: per-attempt forensics on transport exhaustion --
+#
+# Without these we only saw ``proxy=NULL, attempts_json=NULL`` in
+# api_request_log when the transport exhausted its retry budget on a
+# network-level failure (timeout / SSL / DNS / etc.). The transport
+# *did* try multiple proxies and recorded them in its local ``attempts``
+# list, but the bare ``raise`` lost that information by the time
+# FetchExecutor's ``except Exception`` ran. After M1 the transport
+# raises ``TransportExhaustedError`` carrying the per-attempt log, and
+# FetchExecutor unpacks it into the request_log so on-call can see
+# which proxies failed and how slowly each attempt went.
+
+
+class _RaisingTransport:
+    """Simulates a transport that exhausted its retry budget — raises a
+    ``TransportExhaustedError`` carrying per-attempt forensics. Stand-in
+    for the real ``InspectorTransport.fetch`` exhaustion path."""
+
+    def __init__(self, exception: Exception) -> None:
+        self.exception = exception
+        self.calls: list[tuple[str, dict[str, str] | None, float]] = []
+
+    async def fetch(self, url: str, *, headers=None, timeout: float = 20.0):
+        self.calls.append((url, headers, timeout))
+        raise self.exception
+
+
+class FetchExecutorTransportExhaustedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transport_exhausted_error_carries_attempts_into_request_log(self) -> None:
+        from schema_inspector.transport import TransportExhaustedError
+
+        attempts = (
+            TransportAttempt(
+                attempt_number=1,
+                proxy_name="proxy_a",
+                status_code=None,
+                error="request timed out after 10s",
+                challenge_reason=None,
+                proxy_address="10.10.10.10:3120",
+                latency_ms=10043,
+            ),
+            TransportAttempt(
+                attempt_number=2,
+                proxy_name="proxy_b",
+                status_code=None,
+                error="SSL: cert mismatch",
+                challenge_reason=None,
+                proxy_address="10.10.10.11:3120",
+                latency_ms=472,
+            ),
+            TransportAttempt(
+                attempt_number=3,
+                proxy_name="proxy_c",
+                status_code=None,
+                error="request timed out after 10s",
+                challenge_reason=None,
+                proxy_address="10.10.10.12:3120",
+                latency_ms=10009,
+            ),
+        )
+        exhausted = TransportExhaustedError(
+            "request timed out after 10s",
+            attempts=attempts,
+            final_proxy_name="proxy_c",
+            final_proxy_address="10.10.10.12:3120",
+            original=TimeoutError("upstream timeout"),
+        )
+        transport = _RaisingTransport(exhausted)
+        raw_repository = _FakeRawRepository()
+        executor = FetchExecutor(
+            transport=transport,
+            raw_repository=raw_repository,
+            sql_executor=object(),
+        )
+
+        outcome = await executor.execute(
+            FetchTask(
+                trace_id="trace-x",
+                job_id="job-x",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}",
+                source_url="https://www.sofascore.com/api/v1/event/15345941",
+                timeout_profile="pilot",
+                context_entity_type="event",
+                context_entity_id=15345941,
+                context_event_id=15345941,
+                fetch_reason="hydrate_event_root",
+            )
+        )
+
+        # Outcome propagates the network_error classification + retry signal.
+        self.assertEqual(outcome.classification, "network_error")
+        self.assertTrue(outcome.retry_recommended)
+        self.assertIsNone(outcome.snapshot_id)
+        # Critical: the new request_log row carries the attempts log,
+        # not proxy=NULL like before.
+        self.assertEqual(len(raw_repository.request_logs), 1)
+        log = raw_repository.request_logs[0]
+        self.assertEqual(log.proxy_id, "proxy_c")
+        self.assertEqual(log.proxy_address, "10.10.10.12:3120")
+        self.assertEqual(log.transport_attempt, 3)
+        self.assertEqual(len(log.attempts_json), 3)
+        # Each attempt entry carries proxy + latency_ms (the new field).
+        self.assertEqual(log.attempts_json[0]["proxy_name"], "proxy_a")
+        self.assertEqual(log.attempts_json[0]["proxy_address"], "10.10.10.10:3120")
+        self.assertEqual(log.attempts_json[0]["latency_ms"], 10043)
+        self.assertEqual(log.attempts_json[1]["proxy_name"], "proxy_b")
+        self.assertEqual(log.attempts_json[1]["latency_ms"], 472)
+        self.assertEqual(log.attempts_json[2]["proxy_name"], "proxy_c")
+        self.assertEqual(log.attempts_json[2]["latency_ms"], 10009)
+        # error_message preserved from the wrapper exception text.
+        self.assertIn("timed out", log.error_message or "")
+
+    async def test_legacy_exception_without_attempts_falls_back_to_null(self) -> None:
+        # Defensive: any exception that ISN'T a TransportExhaustedError
+        # (e.g. a programming bug raising RuntimeError directly) should
+        # still produce a network_error outcome with proxy=NULL — same
+        # behaviour as before M1. We must not crash if attempts info is
+        # absent.
+        transport = _RaisingTransport(RuntimeError("unrelated bug"))
+        raw_repository = _FakeRawRepository()
+        executor = FetchExecutor(
+            transport=transport,
+            raw_repository=raw_repository,
+            sql_executor=object(),
+        )
+
+        outcome = await executor.execute(
+            FetchTask(
+                trace_id="trace-y",
+                job_id="job-y",
+                sport_slug="football",
+                endpoint_pattern="/api/v1/event/{event_id}",
+                source_url="https://www.sofascore.com/api/v1/event/2",
+                timeout_profile="pilot",
+                context_entity_type="event",
+                context_entity_id=2,
+                context_event_id=2,
+                fetch_reason="hydrate_event_root",
+            )
+        )
+
+        self.assertEqual(outcome.classification, "network_error")
+        self.assertEqual(len(raw_repository.request_logs), 1)
+        log = raw_repository.request_logs[0]
+        self.assertIsNone(log.proxy_id)
+        self.assertIsNone(log.proxy_address)
+        self.assertIsNone(log.transport_attempt)
+        self.assertIsNone(log.attempts_json)
+
+
+class TransportAttemptLatencyFieldTests(unittest.TestCase):
+    def test_default_latency_ms_is_none_for_backwards_compat(self) -> None:
+        attempt = TransportAttempt(
+            attempt_number=1,
+            proxy_name="proxy_x",
+            status_code=200,
+            error=None,
+            challenge_reason=None,
+        )
+        # Existing call sites that don't pass latency_ms still construct
+        # TransportAttempt without errors.
+        self.assertIsNone(attempt.latency_ms)
+
+    def test_latency_ms_roundtrip(self) -> None:
+        attempt = TransportAttempt(
+            attempt_number=2,
+            proxy_name="proxy_y",
+            status_code=None,
+            error="timed out",
+            challenge_reason=None,
+            proxy_address="1.2.3.4:8080",
+            latency_ms=10042,
+        )
+        self.assertEqual(attempt.latency_ms, 10042)
+
+
 if __name__ == "__main__":
     unittest.main()

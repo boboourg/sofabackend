@@ -113,6 +113,17 @@ class FetchExecutor:
         except Exception as exc:
             finished_at = _utc_now()
             latency_ms = int((self.clock() - started_monotonic) * 1000)
+            # M1: when the transport raised a TransportExhaustedError it
+            # carries the per-attempt log (proxy/fingerprint/error/
+            # latency) so we can persist it into api_request_log instead
+            # of recording an empty proxy=NULL row. Behaviour is
+            # otherwise unchanged: the same exception is still raised
+            # downstream conceptually (we still record a failure
+            # outcome with classification="network_error" and
+            # retry_recommended=True), the only difference is forensics.
+            attempts_for_log = getattr(exc, "attempts", None) or ()
+            final_proxy_name = getattr(exc, "final_proxy_name", None)
+            final_proxy_address = getattr(exc, "final_proxy_address", None)
             request_log = ApiRequestLogRecord(
                 trace_id=task.trace_id,
                 job_id=task.job_id,
@@ -123,15 +134,15 @@ class FetchExecutor:
                 endpoint_pattern=task.endpoint_pattern,
                 request_headers_redacted=task.request_headers,
                 query_params=task.query_params,
-                proxy_id=None,
-                proxy_address=None,
-                transport_attempt=None,
+                proxy_id=final_proxy_name,
+                proxy_address=final_proxy_address,
+                transport_attempt=len(attempts_for_log) or None,
                 http_status=None,
                 challenge_reason=None,
                 started_at=started_at,
                 finished_at=finished_at,
                 latency_ms=latency_ms,
-                attempts_json=None,
+                attempts_json=_attempts_json(attempts_for_log) if attempts_for_log else None,
                 payload_bytes=None,
                 error_message=str(exc),
             )
@@ -143,13 +154,13 @@ class FetchExecutor:
                 resolved_url=None,
                 http_status=None,
                 classification="network_error",
-                proxy_id=None,
+                proxy_id=final_proxy_name,
                 challenge_reason=None,
                 snapshot_id=None,
                 payload_hash=None,
                 retry_recommended=True,
                 capability_signal="transient",
-                attempts=(),
+                attempts=tuple(attempts_for_log),
                 fetched_at=finished_at,
                 error_message=str(exc),
             )
@@ -473,6 +484,10 @@ def _attempts_json(attempts: tuple[TransportAttempt, ...]) -> list[dict[str, obj
             "status_code": item.status_code,
             "error": item.error,
             "challenge_reason": item.challenge_reason,
+            # M1: per-attempt wall-clock latency in ms (None for synthesised
+            # attempts where timing is unavailable, e.g. proxy-required
+            # short-circuit).
+            "latency_ms": item.latency_ms,
         }
         for item in attempts
     ]

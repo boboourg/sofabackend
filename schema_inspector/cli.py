@@ -1104,6 +1104,28 @@ async def _dispatch(args) -> int:
                     f"cold={report.restored_cold} terminal={report.restored_terminal}"
                 )
                 return 0
+            if args.command == "stale-live-events":
+                from .ops.stale_live_events import (
+                    collect_stale_live_events_summary,
+                    collect_top_stale_live_events,
+                    format_stale_live_events_report,
+                )
+                summary = await collect_stale_live_events_summary(database.connection)
+                top = await collect_top_stale_live_events(
+                    database.connection,
+                    threshold_seconds=int(args.threshold_seconds),
+                    limit=int(args.top),
+                    inprogress_only=not bool(args.all_statuses),
+                )
+                print(
+                    format_stale_live_events_report(
+                        summary,
+                        top,
+                        threshold_seconds=int(args.threshold_seconds),
+                        inprogress_only=not bool(args.all_statuses),
+                    )
+                )
+                return 0
             if args.command == "planner-daemon":
                 service_app = ServiceApp(app)
                 await service_app.run_planner_daemon(
@@ -1383,6 +1405,39 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
     subparsers.add_parser("proxy-health-monitor", help="Continuously mark unhealthy proxy endpoints from api_request_log traffic.")
     subparsers.add_parser("recover-live-state", help="Rebuild Redis live-state indexes from PostgreSQL history.")
+
+    stale_live = subparsers.add_parser(
+        "stale-live-events",
+        help=(
+            "Read-only detector for inprogress live events whose /event "
+            "snapshot has not advanced past a threshold. Surfaces "
+            "transport / proxy regressions hidden behind FreshnessStore "
+            "dedupe. Returns counts at multiple staleness thresholds plus "
+            "a top-N detail list with success/retry/fail counters."
+        ),
+    )
+    stale_live.add_argument(
+        "--threshold-seconds",
+        type=int,
+        default=300,
+        help="Top-N detail filter: only events with snapshot age > this. Default: 300.",
+    )
+    stale_live.add_argument(
+        "--top",
+        type=int,
+        default=20,
+        help="Top-N detail list size. Default: 20.",
+    )
+    stale_live.add_argument(
+        "--all-statuses",
+        action="store_true",
+        help=(
+            "Include events with terminal status_code (100/110/120/60/70). "
+            "By default only inprogress codes (6/7/8/31/91/92/93) are listed "
+            "in the detail section because terminal events are expected to "
+            "have stale snapshots (upstream payload is frozen post-finalize)."
+        ),
+    )
 
     planner_daemon = subparsers.add_parser("planner-daemon", help="Run the continuous planner loop.")
     planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")

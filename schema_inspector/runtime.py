@@ -111,6 +111,13 @@ class TransportAttempt:
     error: str | None
     challenge_reason: str | None
     proxy_address: str | None = None
+    # Per-attempt wall-clock latency in milliseconds. One attempt =
+    # one HTTP request through curl_cffi (proxy lease + jitter +
+    # request + response or timeout). Excludes inter-attempt backoff
+    # and proxy-pool wait. Unset for synthesised attempts where
+    # timing is not available (e.g. the proxy-required short-circuit
+    # that never executes a request).
+    latency_ms: int | None = None
 
 
 @dataclass(frozen=True)

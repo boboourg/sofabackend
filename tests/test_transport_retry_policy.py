@@ -247,6 +247,15 @@ class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", result.final_proxy_address)
 
     async def test_transport_enforces_wall_clock_timeout_per_attempt(self) -> None:
+        # M1: when the transport budget is exhausted on a network-level
+        # failure (here: per-attempt wall-clock timeout) it now raises
+        # ``TransportExhaustedError`` which carries the per-attempt log.
+        # The original exception is preserved as ``__cause__`` and on the
+        # ``.original`` attribute. The wrapping is purely additive — the
+        # underlying ``asyncio.TimeoutError`` is still the cause, retry
+        # behaviour and proxy pool semantics are unchanged.
+        from schema_inspector.transport import TransportExhaustedError
+
         transport = _SlowTransport(
             RuntimeConfig(
                 retry_policy=RetryPolicy(
@@ -264,10 +273,17 @@ class TransportRetryPolicyTests(unittest.IsolatedAsyncioTestCase):
             sleeper=lambda delay: None,
         )
 
-        with self.assertRaises(asyncio.TimeoutError):
+        with self.assertRaises(TransportExhaustedError) as cm:
             await transport.fetch("https://www.sofascore.com/api/v1/event/1", timeout=0.01)
 
+        # The wrapped exception is the genuine timeout — proves the
+        # transport observed a wall-clock cutoff and didn't silently
+        # swallow it.
+        self.assertIsInstance(cm.exception.__cause__, asyncio.TimeoutError)
         self.assertEqual(transport.calls, 1)
+        # And the per-attempt log is now available for forensics.
+        self.assertEqual(len(cm.exception.attempts), 1)
+        self.assertIsNotNone(cm.exception.attempts[0].latency_ms)
 
     async def test_transport_retries_access_denied_across_extended_proxy_budget(self) -> None:
         transport = _FakeTransport(
