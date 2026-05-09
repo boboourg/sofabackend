@@ -786,6 +786,124 @@ class NormalizeRepositoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # Erasure attempt blocked — existing winner_code=1 preserved.
         self.assertEqual(row["winner_code"], 1)
 
+    async def test_winner_code_initial_fill_no_terminal_state(self) -> None:
+        """F-9a positive: pre-finalize tick with fresh winner_code from
+        /event root payload writes the value when no terminal_state row
+        exists yet. Mirrors the at-finalize race window where the live
+        worker just parsed status='finished' but _record_terminal_state
+        hasn't run yet."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, winner_code, start_timestamp)
+                VALUES (14083568, 'race-pre-terminal', 100, NULL, 1778266800);
+            """
+        )
+
+        result = ParseResult(
+            snapshot_id=45674710,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            metric_rows={
+                "event_winner_code": (
+                    {"event_id": 14083568, "value": 2},
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow(
+            "SELECT winner_code FROM event WHERE id=$1",
+            14083568,
+        )
+        self.assertEqual(row["winner_code"], 2)
+
+    async def test_winner_code_initial_fill_with_terminal_state(self) -> None:
+        """F-9a positive: terminal_state already inserted (typical after
+        finalize sweep) but event.winner_code still NULL — incoming
+        winner_code fills it. The dedicated UPDATE's terminal-state
+        branch returns COALESCE(existing_NULL, $1) = $1, allowing the
+        race-recovery initial fill same as the F-8 hotfix pattern."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, winner_code, start_timestamp)
+                VALUES (14083568, 'race-after-terminal', 100, NULL, 1778266800);
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45674710, 'k', '/api/v1/event/{event_id}', 200, 'h',
+                        '2026-05-09 00:40:24+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (14083568, 'finished', '2026-05-09 02:00:00+03', 45674710);
+            """
+        )
+
+        result = ParseResult(
+            snapshot_id=45674710,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            metric_rows={
+                "event_winner_code": (
+                    {"event_id": 14083568, "value": 3},
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow(
+            "SELECT winner_code FROM event WHERE id=$1",
+            14083568,
+        )
+        self.assertEqual(row["winner_code"], 3)
+
+    async def test_winner_code_regression_blocked_with_terminal_state(self) -> None:
+        """F-9a regression block: terminal_state recorded + existing
+        winner_code already set. A later parse (e.g., stale "finished"
+        snapshot with a corrupted upstream winner) must NOT overwrite
+        the established winner. The dedicated UPDATE's terminal branch
+        returns COALESCE(existing=1, $1=2) = 1."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO event_status (code, description, type) VALUES (100, 'Ended', 'finished');
+            INSERT INTO event (id, slug, status_code, winner_code, start_timestamp)
+                VALUES (14083568, 'regression-attempt', 100, 1, 1778266800);
+            INSERT INTO endpoint_registry (pattern) VALUES ('/api/v1/event/{event_id}');
+            INSERT INTO api_payload_snapshot (id, scope_key, endpoint_pattern, http_status, payload_hash, fetched_at)
+                VALUES (45674710, 'k', '/api/v1/event/{event_id}', 200, 'h',
+                        '2026-05-09 00:40:24+03');
+            INSERT INTO event_terminal_state (event_id, terminal_status, finalized_at, final_snapshot_id)
+                VALUES (14083568, 'finished', '2026-05-09 02:00:00+03', 45674710);
+            """
+        )
+
+        result = ParseResult(
+            snapshot_id=45686328,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            metric_rows={
+                "event_winner_code": (
+                    {"event_id": 14083568, "value": 2},
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow(
+            "SELECT winner_code FROM event WHERE id=$1",
+            14083568,
+        )
+        # Existing winner_code=1 preserved despite incoming=2.
+        self.assertEqual(row["winner_code"], 1)
+
     async def test_event_lifecycle_columns_normal_update_without_terminal_state(self) -> None:
         """F-8 Phase 1.5 negative: when no terminal_state row exists, the
         guard branch falls through to EXCLUDED and ordinary updates

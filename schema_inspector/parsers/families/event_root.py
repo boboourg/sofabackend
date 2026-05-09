@@ -85,6 +85,27 @@ class EventRootParser:
                     },
                 )
 
+        # F-9a: emit a winner_code metric row only when the upstream
+        # payload actually contains a non-null `winnerCode`. The
+        # presence-check (`"winnerCode" in event` + value is not None)
+        # avoids two failure modes:
+        #   1. Pre-finalize parses (winnerCode key absent) must NOT
+        #      emit a NULL row that would erase an existing winner via
+        #      the dedicated UPDATE's ELSE branch.
+        #   2. Sofascore occasionally omits the key on transient
+        #      payload variants — never overwrite a real winner with
+        #      a missing-key NULL.
+        # The dedicated _persist_event_winner_codes UPDATE in
+        # normalize_repository.py is monotonic (COALESCE-in-both-
+        # branches scoped to this column only — no global helper
+        # change required).
+        if event_id is not None and "winnerCode" in event:
+            winner_code = _as_int(event.get("winnerCode"))
+            if winner_code is not None:
+                metric_rows["event_winner_code"] = (
+                    {"event_id": event_id, "value": winner_code},
+                )
+
         return ParseResult(
             snapshot_id=snapshot.snapshot_id,
             parser_family=self.parser_family,

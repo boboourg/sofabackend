@@ -100,6 +100,13 @@ class NormalizeRepository:
         await self._persist_event_statuses(executor, result.metric_rows.get("event_status", ()))
         if not skip_entity_upserts:
             inserted = await self._upsert_minimal_entities(executor, result.entity_upserts)
+        # F-9a: write winner_code from /event root payload AFTER the event
+        # row exists (created/updated by _upsert_minimal_entities). Skipped
+        # naturally when the parser didn't emit the metric row (key absent
+        # in payload OR value was NULL — see EventRootParser).
+        await self._persist_event_winner_codes(
+            executor, result.metric_rows.get("event_winner_code", ())
+        )
         await self._persist_season_rounds(executor, result.metric_rows.get("season_round", ()))
         await self._persist_season_cup_trees(executor, result.metric_rows)
         await self._confirm_lineup_team_refs(executor, result, inserted)
@@ -1057,6 +1064,71 @@ class NormalizeRepository:
 
             if not register_post_commit_hook(_commit_event_status_cache):
                 _commit_event_status_cache()
+
+    async def _persist_event_winner_codes(
+        self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]
+    ) -> None:
+        """F-9a: persist event.winner_code from /event root payload.
+
+        Rows are emitted by ``EventRootParser`` only when the upstream
+        payload contains a non-NULL ``winnerCode``. This means a missing
+        upstream key produces NO update — the existing winner_code is
+        preserved (essential for matches in progress where mid-match
+        ticks have no winnerCode and final-state writes shouldn't be
+        erased on the next regular root fetch).
+
+        Guard semantics (scoped to this method, NOT to the global
+        terminal_guard_case helper):
+
+          * No ``event_terminal_state`` yet: write the incoming value
+            unconditionally — pre-finalize live ticks just write what
+            the upstream returns. Mid-match ``winnerCode`` is normally
+            NULL (parser wouldn't emit) so this branch only fires at
+            the actual finalize tick.
+
+          * ``event_terminal_state`` already exists: COALESCE keeps the
+            existing winner_code if set; falls back to incoming if the
+            existing was NULL (initial fill after a finalize-then-write
+            race — same pattern as F-8 hotfix).
+
+        The terminal status types must stay in sync with
+        ``schema_inspector/planner/live.py::TERMINAL_STATUS_TYPES``.
+        """
+        if not rows:
+            return
+        for row in rows:
+            event_id = _as_int(row.get("event_id"))
+            if event_id is None:
+                continue
+            value = _as_int(row.get("value"))
+            if value is None:
+                # Defensive: parser already filters this out, but keep a
+                # repository-level guard so a regression in the parser
+                # cannot reintroduce NULL erasure here.
+                continue
+            await executor.execute(
+                """
+                UPDATE event SET winner_code = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM event_terminal_state ets
+                        WHERE ets.event_id = event.id
+                          AND ets.terminal_status IN (
+                              'finished',
+                              'afterextra',
+                              'afterpen',
+                              'cancelled',
+                              'canceled',
+                              'postponed'
+                          )
+                    )
+                    THEN COALESCE(event.winner_code, $1)
+                    ELSE $1
+                END
+                WHERE id = $2
+                """,
+                value,
+                event_id,
+            )
 
     async def _persist_event_incidents(self, executor: SqlExecutor, rows: tuple[Mapping[str, object], ...]) -> None:
         if not rows:

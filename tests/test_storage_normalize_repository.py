@@ -212,6 +212,71 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         event_rows = next(rows for sql, rows in executor.executemany_calls if "INSERT INTO event (" in sql)
         self.assertEqual(event_rows[0][8], 100)
 
+    async def test_event_root_parser_emits_winner_code_when_payload_present(self) -> None:
+        # F-9a: when /event root payload contains a non-NULL winnerCode,
+        # the parser must emit a metric_row keyed "event_winner_code"
+        # carrying (event_id, value). This is what unblocks the live
+        # cycle from filling the event row's winner_code.
+        parser = EventRootParser()
+        snapshot = _build_finished_event_snapshot(
+            event_id=14083568,
+            payload_overrides={"winnerCode": 1},
+        )
+
+        result = parser.parse(snapshot)
+
+        rows = result.metric_rows.get("event_winner_code")
+        self.assertIsNotNone(rows)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event_id"], 14083568)
+        self.assertEqual(rows[0]["value"], 1)
+
+    async def test_event_root_parser_emits_winner_code_for_draw_value_three(self) -> None:
+        # winnerCode=3 is the canonical draw marker (verified empirically
+        # 142/579 finished football events). Must be passed through
+        # unchanged — no special-case truthy filtering.
+        parser = EventRootParser()
+        snapshot = _build_finished_event_snapshot(
+            event_id=14083568,
+            payload_overrides={"winnerCode": 3},
+        )
+
+        result = parser.parse(snapshot)
+
+        rows = result.metric_rows.get("event_winner_code")
+        self.assertEqual(rows[0]["value"], 3)
+
+    async def test_event_root_parser_skips_winner_code_when_payload_key_missing(self) -> None:
+        # Pre-finalize ticks (status="inprogress") have winnerCode key
+        # absent from upstream payload (verified 50/50 in sample).
+        # Parser must NOT emit a NULL row that would erase any existing
+        # winner_code via the dedicated UPDATE's ELSE branch.
+        parser = EventRootParser()
+        snapshot = _build_finished_event_snapshot(
+            event_id=14083568,
+            payload_overrides={},  # winnerCode key absent
+            status_type="inprogress",
+        )
+
+        result = parser.parse(snapshot)
+
+        self.assertNotIn("event_winner_code", result.metric_rows)
+
+    async def test_event_root_parser_skips_winner_code_when_payload_value_null(self) -> None:
+        # Defensive: even if Sofascore explicitly serialised
+        # `"winnerCode": null` (never observed in samples but possible),
+        # parser must NOT emit a row carrying NULL — same erasure
+        # avoidance as the missing-key case.
+        parser = EventRootParser()
+        snapshot = _build_finished_event_snapshot(
+            event_id=14083568,
+            payload_overrides={"winnerCode": None},
+        )
+
+        result = parser.parse(snapshot)
+
+        self.assertNotIn("event_winner_code", result.metric_rows)
+
     async def test_event_upsert_status_code_has_terminal_state_monotonic_guard(self) -> None:
         """F-8 P0: lock the SQL shape so the terminal-state monotonic guard
         on event.status_code can't be silently removed in a future refactor.
@@ -1306,6 +1371,54 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(RetriableRepositoryError):
             await repository.persist_parse_result(executor, result)
+
+
+def _build_finished_event_snapshot(
+    *,
+    event_id: int,
+    payload_overrides: dict | None = None,
+    status_type: str = "finished",
+) -> RawSnapshot:
+    """Build a /event root RawSnapshot for parser tests.
+
+    Mirrors the minimal payload shape an EventRootParser would receive
+    from Sofascore. ``payload_overrides`` patches the inner ``event``
+    dict — pass ``{"winnerCode": 1}`` for the present-and-set case,
+    ``{"winnerCode": None}`` for explicit-null, ``{}`` for missing.
+    """
+    inner_event = {
+        "id": event_id,
+        "slug": "test-event",
+        "tournament": {
+            "id": 100,
+            "uniqueTournament": {"id": 17, "slug": "premier-league"},
+        },
+        "season": {"id": 76986, "year": "25/26"},
+        "homeTeam": {"id": 42, "slug": "arsenal", "name": "Arsenal"},
+        "awayTeam": {"id": 43, "slug": "chelsea", "name": "Chelsea"},
+        "status": {
+            "code": 100 if status_type == "finished" else 6,
+            "description": "Ended" if status_type == "finished" else "1st half",
+            "type": status_type,
+        },
+        "startTimestamp": 1_775_779_200,
+    }
+    if payload_overrides is not None:
+        inner_event.update(payload_overrides)
+    return RawSnapshot(
+        snapshot_id=999_900,
+        endpoint_pattern="/api/v1/event/{event_id}",
+        sport_slug="football",
+        source_url=f"https://www.sofascore.com/api/v1/event/{event_id}",
+        resolved_url=f"https://www.sofascore.com/api/v1/event/{event_id}",
+        envelope_key="event",
+        http_status=200,
+        payload={"event": inner_event},
+        fetched_at="2026-05-09T00:40:24+03:00",
+        context_entity_type="event",
+        context_entity_id=event_id,
+        context_event_id=event_id,
+    )
 
 
 if __name__ == "__main__":
