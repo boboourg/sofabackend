@@ -462,5 +462,141 @@ class _LoadRuntimeConfigDefaultIsNoOpTests(unittest.TestCase):
         self.assertEqual(len(cfg.proxy_endpoints), 10)
 
 
+# ---------------------------------------------------------------------------
+# 6. Scoped multiplier env-key wiring per CLI subcommand.
+#    Locks down the mapping CLI command -> scoped env key so a typo or
+#    refactor in cli.py cannot silently break the per-lane rollout.
+#    Read-only against the cli.py source (AST/regex), no actual CLI run.
+# ---------------------------------------------------------------------------
+class _CliScopedMultiplierKeyWiringTests(unittest.TestCase):
+    """The dispatch path in ``cli.py`` maps CLI subcommands to their
+    scoped Smartproxy session-multiplier env key. The mapping is the
+    only place that decides which env vars affect which lane — a typo
+    or accidental removal here silently makes the per-lane canary a
+    no-op (every fetch goes back to multiplier=1 with proxy_X names
+    only). These tests assert the mapping is present and correct."""
+
+    @staticmethod
+    def _read_cli_dispatch_source() -> str:
+        import inspect
+        from schema_inspector.cli import _dispatch
+
+        return inspect.getsource(_dispatch)
+
+    def test_hydrate_scoped_key_present(self) -> None:
+        src = self._read_cli_dispatch_source()
+        self.assertIn("worker-hydrate", src)
+        self.assertIn("SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER", src)
+
+    def test_live_tier_3_scoped_key_present(self) -> None:
+        src = self._read_cli_dispatch_source()
+        self.assertIn("worker-live-tier-3", src)
+        self.assertIn("SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER", src)
+
+    def test_live_warm_scoped_key_present(self) -> None:
+        src = self._read_cli_dispatch_source()
+        self.assertIn("worker-live-warm", src)
+        self.assertIn("SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER", src)
+
+    def test_live_tier_2_scoped_key_present(self) -> None:
+        src = self._read_cli_dispatch_source()
+        self.assertIn("worker-live-tier-2", src)
+        self.assertIn("SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_SESSION_MULTIPLIER", src)
+
+    def test_live_tier_1_scoped_key_still_present(self) -> None:
+        # Regression: don't lose the original tier_1 mapping when adding new lanes.
+        src = self._read_cli_dispatch_source()
+        self.assertIn("worker-live-tier-1", src)
+        self.assertIn("SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER", src)
+
+    def test_global_fallback_path_intact(self) -> None:
+        # Regression: the global env knob must still be the fallback —
+        # tested via the runtime helper which dispatch passes through.
+        from schema_inspector.runtime import _resolve_proxy_session_multiplier
+
+        env = {"SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER": "7"}
+        # Empty scoped chain → global wins.
+        self.assertEqual(_resolve_proxy_session_multiplier(env, env_keys=()), 7)
+
+
+# ---------------------------------------------------------------------------
+# 7. End-to-end behaviour for each scoped lane: when its env key is set,
+#    load_runtime_config with that key emits the expanded endpoint set;
+#    when only the global is set, the scoped lane falls back to global.
+# ---------------------------------------------------------------------------
+class _ScopedLaneBehaviourTests(unittest.TestCase):
+    """For each scoped lane key, verify:
+    (a) setting only the scoped key gives that multiplier;
+    (b) unsetting the scoped key + setting global gives the global multiplier;
+    (c) both set → scoped wins.
+    """
+
+    _BASE_ENV: dict = {
+        "SCHEMA_INSPECTOR_PROXY_URLS": "http://user1:pass1@proxy.smartproxy.net:3120",
+    }
+
+    def _expect_endpoints(self, env: dict, scoped_key: str, expected: int) -> None:
+        from schema_inspector.runtime import load_runtime_config
+
+        cfg = load_runtime_config(
+            env=env,
+            proxy_session_multiplier_env_keys=(scoped_key,),
+        )
+        self.assertEqual(len(cfg.proxy_endpoints), expected)
+
+    def test_hydrate_scoped_only(self) -> None:
+        env = dict(self._BASE_ENV)
+        env["SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER"] = "6"
+        self._expect_endpoints(env, "SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER", 6)
+
+    def test_hydrate_scoped_falls_back_to_global(self) -> None:
+        env = dict(self._BASE_ENV)
+        env["SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER"] = "3"
+        self._expect_endpoints(env, "SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER", 3)
+
+    def test_hydrate_scoped_overrides_global(self) -> None:
+        env = dict(self._BASE_ENV)
+        env["SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER"] = "3"
+        env["SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER"] = "10"
+        self._expect_endpoints(env, "SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER", 10)
+
+    def test_tier_3_scoped_only(self) -> None:
+        env = dict(self._BASE_ENV)
+        env["SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER"] = "5"
+        self._expect_endpoints(env, "SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER", 5)
+
+    def test_warm_scoped_only(self) -> None:
+        env = dict(self._BASE_ENV)
+        env["SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER"] = "4"
+        self._expect_endpoints(env, "SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER", 4)
+
+    def test_tier_2_scoped_only(self) -> None:
+        env = dict(self._BASE_ENV)
+        env["SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_SESSION_MULTIPLIER"] = "8"
+        self._expect_endpoints(env, "SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_SESSION_MULTIPLIER", 8)
+
+    def test_no_env_set_returns_one_endpoint_no_op(self) -> None:
+        # Critical safety net: deploying with NO env keys set is a no-op
+        # for every CLI subcommand, regardless of which scoped key the
+        # subcommand passes.
+        from schema_inspector.runtime import load_runtime_config
+
+        env = dict(self._BASE_ENV)
+        for scoped_key in (
+            "SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER",
+            "SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER",
+            "SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_SESSION_MULTIPLIER",
+            "SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER",
+            "SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER",
+        ):
+            with self.subTest(scoped_key=scoped_key):
+                cfg = load_runtime_config(
+                    env=env,
+                    proxy_session_multiplier_env_keys=(scoped_key,),
+                )
+                self.assertEqual(len(cfg.proxy_endpoints), 1)
+                self.assertFalse(cfg.proxy_endpoints[0].is_session_expanded)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

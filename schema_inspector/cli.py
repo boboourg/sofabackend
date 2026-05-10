@@ -1080,14 +1080,30 @@ async def _dispatch(args) -> int:
         # P0(b)-followup: per-lane scoped Smartproxy session multiplier.
         # Workers may opt into a different multiplier than the global
         # SCHEMA_INSPECTOR_PROXY_SESSION_MULTIPLIER without affecting other
-        # processes. Only `worker-live-tier-1` is scoped today (the
-        # canary lane); add more entries here if other lanes need
-        # independent multipliers later. The fallback chain always
-        # ends in the global env key — if no scoped key is set, the
-        # global value (default 1, no-op) is used.
+        # processes. The fallback chain always ends in the global env
+        # key — if no scoped key is set, the global value (default 1,
+        # no-op) is used.
+        #
+        # Scoped lanes (in priority of expected ROOT-fetch volume —
+        # see /event traffic analysis: hydrate@8 + live-tier-3@9 +
+        # live-warm@3 dominate, tier_1 / tier_2 are minor):
+        #   * worker-hydrate         -> SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER
+        #   * worker-live-tier-3     -> SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER
+        #   * worker-live-warm       -> SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER
+        #   * worker-live-tier-2     -> SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_SESSION_MULTIPLIER
+        #   * worker-live-tier-1     -> SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER
+        # All other CLI subcommands fall back to the global key only.
+        _SCOPED_MULTIPLIER_KEY_BY_COMMAND = {
+            "worker-hydrate": "SCHEMA_INSPECTOR_HYDRATE_PROXY_SESSION_MULTIPLIER",
+            "worker-live-tier-1": "SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER",
+            "worker-live-tier-2": "SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_SESSION_MULTIPLIER",
+            "worker-live-tier-3": "SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER",
+            "worker-live-warm": "SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER",
+        }
         scoped_multiplier_keys: tuple[str, ...] = ()
-        if command == "worker-live-tier-1":
-            scoped_multiplier_keys = ("SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_SESSION_MULTIPLIER",)
+        scoped_key = _SCOPED_MULTIPLIER_KEY_BY_COMMAND.get(command)
+        if scoped_key is not None:
+            scoped_multiplier_keys = (scoped_key,)
         runtime_config = load_runtime_config(
             proxy_urls=args.proxy or None,
             user_agent=args.user_agent,
