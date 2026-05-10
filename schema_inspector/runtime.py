@@ -178,6 +178,37 @@ def _resolve_proxy_session_multiplier(
     return 1
 
 
+def _resolve_proxy_max_in_use_per_endpoint(
+    env: Mapping[str, str],
+    *,
+    env_keys: tuple[str, ...] = (),
+) -> int:
+    """Resolve the per-endpoint concurrent-lease cap from ``env``.
+
+    Mirrors ``_resolve_proxy_session_multiplier`` priority semantics:
+    ``env_keys`` first (per-lane scoped keys), then the global fallback
+    ``SCHEMA_INSPECTOR_PROXY_MAX_IN_USE_PER_ENDPOINT``. If nothing is set
+    or set to invalid values, returns 1 — strict no-op default that
+    preserves the historical single-flight ProxyPool semantics.
+
+    Cap to ``[1, 100]`` so a typo cannot accidentally generate hundreds
+    of concurrent CONNECT tunnels per endpoint.
+    """
+    keys_to_check = list(env_keys) + ["SCHEMA_INSPECTOR_PROXY_MAX_IN_USE_PER_ENDPOINT"]
+    for key in keys_to_check:
+        raw = (env.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value < 1:
+            return 1
+        return min(value, 100)
+    return 1
+
+
 @dataclass(frozen=True)
 class FingerprintProfile:
     """A lightweight browser fingerprint template for one outbound request.
@@ -250,6 +281,14 @@ class RuntimeConfig:
     proxy_endpoints: tuple[ProxyEndpoint, ...] = ()
     proxy_request_cooldown_seconds: float = 1.5
     proxy_request_jitter_seconds: float = 1.0
+    # Variant A-lite: cap on concurrent leases per single ProxyEndpoint
+    # in ``ProxyPool``. Default 1 = legacy single-flight behaviour
+    # (one lease per endpoint at a time). >1 unlocks several concurrent
+    # CONNECT-tunnels through the same Smartproxy gateway credential
+    # (Smartproxy issues independent rotating exit IPs per tunnel —
+    # no username/session-id mutation involved, unlike Variant B which
+    # was rejected by Smartproxy with HTTP 612).
+    proxy_max_in_use_per_endpoint: int = 1
     fingerprint_profiles: tuple[FingerprintProfile, ...] = ()
     challenge_markers: tuple[str, ...] = (
         "captcha",
@@ -303,6 +342,7 @@ def load_runtime_config(
     extra_headers: Mapping[str, str] | None = None,
     max_attempts: int | None = None,
     proxy_session_multiplier_env_keys: tuple[str, ...] = (),
+    proxy_max_in_use_per_endpoint_env_keys: tuple[str, ...] = (),
 ) -> RuntimeConfig:
     """Build a runtime config from explicit arguments and environment.
 
@@ -324,6 +364,9 @@ def load_runtime_config(
     configured_proxy_urls = list(proxy_urls or _read_proxy_urls(env, proxy_env_key=proxy_env_key))
     multiplier = _resolve_proxy_session_multiplier(
         env, env_keys=proxy_session_multiplier_env_keys
+    )
+    max_in_use_per_endpoint = _resolve_proxy_max_in_use_per_endpoint(
+        env, env_keys=proxy_max_in_use_per_endpoint_env_keys
     )
     expanded_endpoints = _expand_proxy_urls_with_sessions(
         configured_proxy_urls, multiplier=multiplier
@@ -371,6 +414,7 @@ def load_runtime_config(
             impersonate=impersonate,
         ),
         proxy_endpoints=endpoints,
+        proxy_max_in_use_per_endpoint=max_in_use_per_endpoint,
         proxy_request_cooldown_seconds=_env_float(env, "SCHEMA_INSPECTOR_PROXY_REQUEST_COOLDOWN_SECONDS", 1.5),
         proxy_request_jitter_seconds=_env_float(env, "SCHEMA_INSPECTOR_PROXY_REQUEST_JITTER_SECONDS", 1.0),
         fingerprint_profiles=fingerprint_profiles,

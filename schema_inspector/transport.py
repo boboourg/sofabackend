@@ -90,6 +90,7 @@ class InspectorTransport:
             clock=self.clock,
             default_success_cooldown_seconds=runtime_config.proxy_request_cooldown_seconds,
             jitter_seconds=runtime_config.proxy_request_jitter_seconds,
+            max_in_use_per_endpoint=runtime_config.proxy_max_in_use_per_endpoint,
             proxy_state_store=proxy_state_store if proxy_state_store is not None else _load_proxy_state_store_from_env(),
         )
         self._session_cache: dict[str, AsyncSession] = {}

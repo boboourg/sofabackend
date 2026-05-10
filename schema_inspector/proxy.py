@@ -16,15 +16,38 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _ProxyState:
+    """Per-endpoint state inside ``ProxyPool``.
+
+    Concurrency model: ``in_use_count`` tracks the number of currently
+    leased ``ProxyLease`` instances for this endpoint, capped at
+    ``max_in_use``. With the default ``max_in_use=1`` the pool behaves
+    exactly like the historical single-flight model (one bool flag,
+    one lease per endpoint at a time). With ``max_in_use>1`` (Variant
+    A-lite for Smartproxy gateway-style providers), several concurrent
+    fetch tasks can share the same proxy_url credential — Smartproxy
+    handles the rotating-exit-IP responsibility upstream, so each
+    concurrent CONNECT-tunnel still gets a distinct exit IP.
+
+    Failure cooldown semantics intentionally unchanged: ``cooldown_until``
+    blocks ALL future acquires on this endpoint (regardless of
+    ``in_use_count``) for ``cooldown_seconds`` after a failure.
+    Documented risk: at ``max_in_use=4`` a single transient failure
+    parks all 4 slots for the cooldown window. If that proves too
+    aggressive in production, a separate
+    ``SCHEMA_INSPECTOR_PROXY_FAILURE_COOLDOWN_SECONDS`` env knob can be
+    added in a follow-up patch.
+    """
+
     endpoint: ProxyEndpoint
     cooldown_until: float = 0.0
     failure_count: int = 0
     success_count: int = 0
     consecutive_failures: int = 0
-    in_use: bool = False
+    in_use_count: int = 0
+    max_in_use: int = 1
 
     def available(self, now: float) -> bool:
-        return (not self.in_use) and now >= self.cooldown_until
+        return (self.in_use_count < self.max_in_use) and now >= self.cooldown_until
 
 
 class ProxyLease:
@@ -58,9 +81,19 @@ class ProxyPool:
         proxy_state_store=None,
         proxy_health_cache_ttl_seconds: float = 5.0,
         now_ms_factory=None,
+        max_in_use_per_endpoint: int = 1,
     ) -> None:
         self._clock = clock or time.monotonic
-        self._states = [_ProxyState(endpoint=item) for item in endpoints]
+        # Variant A-lite: cap concurrent leases per endpoint. Default
+        # max_in_use_per_endpoint=1 preserves the legacy single-flight
+        # semantics exactly. >1 unlocks several concurrent CONNECT
+        # tunnels through the same Smartproxy gateway credential
+        # (Smartproxy issues independent rotating exit IPs per tunnel).
+        self._max_in_use_per_endpoint = max(1, int(max_in_use_per_endpoint))
+        self._states = [
+            _ProxyState(endpoint=item, max_in_use=self._max_in_use_per_endpoint)
+            for item in endpoints
+        ]
         self._by_name = {state.endpoint.name: state for state in self._states}
         self._cursor = 0
         self._success_cooldown_seconds = max(0.0, float(default_success_cooldown_seconds))
@@ -119,20 +152,22 @@ class ProxyPool:
 
     async def _release(self, state: _ProxyState, *, success: bool) -> None:
         async with self._condition:
-            state.in_use = False
+            # Defensive against double-release: clamp at 0 so that an
+            # accidental second ``release()`` call on the same lease
+            # cannot drift in_use_count negative and silently allow an
+            # extra concurrent acquire.
+            state.in_use_count = max(0, state.in_use_count - 1)
             if success:
                 self.record_success(state.endpoint.name)
             else:
                 self.record_failure(state.endpoint.name)
-                # Smartproxy session-expanded slot: rotate the session
-                # id on failure so the bad upstream exit IP is replaced
-                # before this slot is acquired again. The regular
-                # cooldown still applies to the slot, but the next
-                # acquire (after cooldown expires) will pick a fresh
-                # exit IP via Smartproxy's session router.
-                # No-op for non-session-expanded endpoints — preserves
-                # the legacy single-flight behaviour for static proxy
-                # URLs and the default-no-op multiplier=1 path.
+                # Smartproxy session-expanded slot (Variant B, currently
+                # NOT enabled in production after HTTP 612 from upstream
+                # — see commit history): rotate session id on failure to
+                # replace the bad exit IP. No-op for non-session-expanded
+                # endpoints, which is the case for both the legacy
+                # single-flight model and Variant A-lite (max_in_use>1
+                # without session ids).
                 state.endpoint.regenerate_session()
             self._condition.notify_all()
 
@@ -141,11 +176,16 @@ class ProxyPool:
         for offset in range(len(self._states)):
             index = (self._cursor + offset) % len(self._states)
             state = self._states[index]
+            # ``available`` already gates on (in_use_count < max_in_use)
+            # AND (now >= cooldown_until), so the same loop body works
+            # for both default (max_in_use=1, single-flight) and
+            # Variant A-lite (max_in_use>1, several concurrent leases
+            # per endpoint).
             if not state.available(now):
                 continue
             health_available, _ = self._health_status(state.endpoint, now=now)
             if health_available:
-                state.in_use = True
+                state.in_use_count += 1
                 self._cursor = (index + 1) % len(self._states)
                 return ProxyLease(self, state, pre_request_delay=self._request_jitter_delay())
         return None
@@ -158,7 +198,10 @@ class ProxyPool:
         delays: list[float] = []
         has_in_use = False
         for state in self._states:
-            if state.in_use:
+            if state.in_use_count >= state.max_in_use:
+                # Endpoint is saturated. We cannot estimate when a lease
+                # will release (no scheduled time) — caller waits on the
+                # condition's notify_all().
                 has_in_use = True
                 continue
             local_delay = max(0.0, state.cooldown_until - now)

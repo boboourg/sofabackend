@@ -1100,15 +1100,35 @@ async def _dispatch(args) -> int:
             "worker-live-tier-3": "SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_SESSION_MULTIPLIER",
             "worker-live-warm": "SCHEMA_INSPECTOR_LIVE_WARM_PROXY_SESSION_MULTIPLIER",
         }
+        # Variant A-lite (per-endpoint concurrent-lease cap). Same lane
+        # mapping as session-multiplier above so operators can opt in
+        # any single lane independently. Both env knobs may coexist
+        # (multiplier inflates the slot count, max_in_use multiplies
+        # leases per slot — they multiply). On prod today: Variant B
+        # multiplier knobs are NOT set (HTTP 612 from Smartproxy
+        # rejected sessions); Variant A-lite max_in_use knobs ship
+        # default-unset by this commit, no runtime change.
+        _SCOPED_MAX_IN_USE_KEY_BY_COMMAND = {
+            "worker-hydrate": "SCHEMA_INSPECTOR_HYDRATE_PROXY_MAX_IN_USE_PER_ENDPOINT",
+            "worker-live-tier-1": "SCHEMA_INSPECTOR_LIVE_TIER_1_PROXY_MAX_IN_USE_PER_ENDPOINT",
+            "worker-live-tier-2": "SCHEMA_INSPECTOR_LIVE_TIER_2_PROXY_MAX_IN_USE_PER_ENDPOINT",
+            "worker-live-tier-3": "SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_MAX_IN_USE_PER_ENDPOINT",
+            "worker-live-warm": "SCHEMA_INSPECTOR_LIVE_WARM_PROXY_MAX_IN_USE_PER_ENDPOINT",
+        }
         scoped_multiplier_keys: tuple[str, ...] = ()
         scoped_key = _SCOPED_MULTIPLIER_KEY_BY_COMMAND.get(command)
         if scoped_key is not None:
             scoped_multiplier_keys = (scoped_key,)
+        scoped_max_in_use_keys: tuple[str, ...] = ()
+        scoped_max_in_use_key = _SCOPED_MAX_IN_USE_KEY_BY_COMMAND.get(command)
+        if scoped_max_in_use_key is not None:
+            scoped_max_in_use_keys = (scoped_max_in_use_key,)
         runtime_config = load_runtime_config(
             proxy_urls=args.proxy or None,
             user_agent=args.user_agent,
             max_attempts=args.max_attempts,
             proxy_session_multiplier_env_keys=scoped_multiplier_keys,
+            proxy_max_in_use_per_endpoint_env_keys=scoped_max_in_use_keys,
         )
     if _normalized_source_slug(getattr(args, "source", None)) is not None:
         runtime_config = replace(runtime_config, source_slug=_normalized_source_slug(args.source))
