@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Protocol
 
+from .db import register_post_commit_hook
 from .event_list_repository import _executemany, _jsonb, _timestamp
 from .statistics_parser import StatisticsBundle
 from .storage.raw_repository import RawRepository
+from .write_avoidance_cache import ExpiringValueCache as _ExpiringValueCache
 
 
 _RAW_REPOSITORY = RawRepository()
@@ -39,6 +41,14 @@ class StatisticsRepository:
 
     def __init__(self) -> None:
         self._sport_cache: dict[int, tuple[str | None, str | None]] = {}
+        # P0d write-avoidance caches for team + player UPSERTs.
+        # statistics-repository path is hit by live edges fanout
+        # (top-players-per-game, top-teams) — without the cache,
+        # repeated same-payload writes contended with discovery's
+        # country UPSERT and caused deadlocks. See
+        # EventListRepository.__init__ for full bug context.
+        self._team_cache = _ExpiringValueCache[int, tuple[object, ...]]()
+        self._player_cache = _ExpiringValueCache[int, tuple[object, ...]]()
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: StatisticsBundle) -> StatisticsWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
@@ -94,9 +104,20 @@ class StatisticsRepository:
             self._sport_cache[sport_id] = (row[1], row[2])
 
     async def _upsert_teams(self, executor: SqlExecutor, bundle: StatisticsBundle) -> None:
-        rows = [
-            (
-                item.id,
+        # P0d write-avoidance: pre-filter rows whose fingerprint matches
+        # the cache. Note: this UPSERT uses COALESCE semantics (preserve
+        # existing values when EXCLUDED is NULL), so the SQL-side
+        # ``WHERE`` would be tricky to express conservatively. The
+        # process-local cache catches ~95% of duplicate writes regardless
+        # of COALESCE; for the remainder Postgres still does a no-op
+        # update (briefly locks the row but does not modify it), which
+        # is acceptable in low-volume cache-miss paths.
+        rows_by_id: dict[int, tuple[object, ...]] = {}
+        rows: list[tuple[object, ...]] = []
+        for item in bundle.teams:
+            if item.id is None:
+                continue
+            fingerprint = (
                 item.slug,
                 item.name,
                 item.short_name,
@@ -110,8 +131,12 @@ class StatisticsRepository:
                 _jsonb(item.team_colors),
                 _jsonb(item.field_translations),
             )
-            for item in bundle.teams
-        ]
+            row = (item.id,) + fingerprint
+            rows_by_id[int(item.id)] = fingerprint
+            if self._team_cache.get(int(item.id)) != fingerprint:
+                rows.append(row)
+        if not rows:
+            return
         await _executemany(
             executor,
             """
@@ -137,10 +162,21 @@ class StatisticsRepository:
             rows,
         )
 
+        def _commit_team_cache() -> None:
+            for team_id, fingerprint in rows_by_id.items():
+                self._team_cache.set(team_id, fingerprint)
+
+        if not register_post_commit_hook(_commit_team_cache):
+            _commit_team_cache()
+
     async def _upsert_players(self, executor: SqlExecutor, bundle: StatisticsBundle) -> None:
-        rows = [
-            (
-                item.id,
+        # P0d write-avoidance: same pattern as _upsert_teams above.
+        rows_by_id: dict[int, tuple[object, ...]] = {}
+        rows: list[tuple[object, ...]] = []
+        for item in bundle.players:
+            if item.id is None:
+                continue
+            fingerprint = (
                 item.slug,
                 item.name,
                 item.short_name,
@@ -149,8 +185,12 @@ class StatisticsRepository:
                 item.user_count,
                 _jsonb(item.field_translations),
             )
-            for item in bundle.players
-        ]
+            row = (item.id,) + fingerprint
+            rows_by_id[int(item.id)] = fingerprint
+            if self._player_cache.get(int(item.id)) != fingerprint:
+                rows.append(row)
+        if not rows:
+            return
         await _executemany(
             executor,
             """
@@ -169,6 +209,13 @@ class StatisticsRepository:
             """,
             rows,
         )
+
+        def _commit_player_cache() -> None:
+            for player_id, fingerprint in rows_by_id.items():
+                self._player_cache.set(player_id, fingerprint)
+
+        if not register_post_commit_hook(_commit_player_cache):
+            _commit_player_cache()
 
     async def _upsert_configs(self, executor: SqlExecutor, bundle: StatisticsBundle) -> None:
         rows = [

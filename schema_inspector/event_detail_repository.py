@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .db import register_post_commit_hook
 from .event_detail_parser import EventDetailBundle
 from .event_list_repository import EventListRepository, SqlExecutor, _executemany, _jsonb
 from .storage._terminal_guard import terminal_guard_case
@@ -301,9 +302,18 @@ class EventDetailRepository(EventListRepository):
 
     async def _upsert_teams_base(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
         ordered_teams = sorted(bundle.teams, key=lambda item: (item.parent_team_id is not None, item.id))
-        rows = [
-            (
-                item.id,
+        # P0d write-avoidance: pre-filter team rows. Hydrate workers
+        # (this path is invoked from pilot_orchestrator on every ROOT +
+        # edges run = thousands of times per minute cluster-wide) were
+        # the dominant Process B in the discovery↔hydrate deadlock chain.
+        # See the cache comment in EventListRepository.__init__ for
+        # background.
+        rows_by_id: dict[int, tuple[object, ...]] = {}
+        rows: list[tuple[object, ...]] = []
+        for item in ordered_teams:
+            if item.id is None:
+                continue
+            fingerprint = (
                 item.slug,
                 item.name,
                 item.short_name,
@@ -328,8 +338,12 @@ class EventDetailRepository(EventListRepository):
                 _jsonb(item.field_translations),
                 _jsonb(item.time_active),
             )
-            for item in ordered_teams
-        ]
+            row = (item.id,) + fingerprint
+            rows_by_id[int(item.id)] = fingerprint
+            if self._team_cache.get(int(item.id)) != fingerprint:
+                rows.append(row)
+        if not rows:
+            return
         await _executemany(
             executor,
             """
@@ -368,9 +382,39 @@ class EventDetailRepository(EventListRepository):
                 team_colors = EXCLUDED.team_colors,
                 field_translations = EXCLUDED.field_translations,
                 time_active = EXCLUDED.time_active
+            WHERE team.slug IS DISTINCT FROM EXCLUDED.slug
+               OR team.name IS DISTINCT FROM EXCLUDED.name
+               OR team.short_name IS DISTINCT FROM EXCLUDED.short_name
+               OR team.full_name IS DISTINCT FROM EXCLUDED.full_name
+               OR team.name_code IS DISTINCT FROM EXCLUDED.name_code
+               OR team.sport_id IS DISTINCT FROM EXCLUDED.sport_id
+               OR team.category_id IS DISTINCT FROM EXCLUDED.category_id
+               OR team.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR team.venue_id IS DISTINCT FROM EXCLUDED.venue_id
+               OR team.tournament_id IS DISTINCT FROM EXCLUDED.tournament_id
+               OR team.primary_unique_tournament_id IS DISTINCT FROM EXCLUDED.primary_unique_tournament_id
+               OR team.parent_team_id IS DISTINCT FROM EXCLUDED.parent_team_id
+               OR team.gender IS DISTINCT FROM EXCLUDED.gender
+               OR team.type IS DISTINCT FROM EXCLUDED.type
+               OR team.class IS DISTINCT FROM EXCLUDED.class
+               OR team.ranking IS DISTINCT FROM EXCLUDED.ranking
+               OR team.national IS DISTINCT FROM EXCLUDED.national
+               OR team.disabled IS DISTINCT FROM EXCLUDED.disabled
+               OR team.foundation_date_timestamp IS DISTINCT FROM EXCLUDED.foundation_date_timestamp
+               OR team.user_count IS DISTINCT FROM EXCLUDED.user_count
+               OR team.team_colors IS DISTINCT FROM EXCLUDED.team_colors
+               OR team.field_translations IS DISTINCT FROM EXCLUDED.field_translations
+               OR team.time_active IS DISTINCT FROM EXCLUDED.time_active
             """,
             rows,
         )
+
+        def _commit_team_cache() -> None:
+            for team_id, fingerprint in rows_by_id.items():
+                self._team_cache.set(team_id, fingerprint)
+
+        if not register_post_commit_hook(_commit_team_cache):
+            _commit_team_cache()
 
     async def _upsert_managers(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
         rows = [
@@ -478,20 +522,35 @@ class EventDetailRepository(EventListRepository):
 
     async def _upsert_players(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
         known_team_ids = {item.id for item in bundle.teams}
-        rows = [
-            (
-                item.id,
+        # P0d write-avoidance: pre-filter player rows. THE single hottest
+        # UPSERT in the cluster — 18 hydrate workers + 5 tier_1 + 5 tier_2
+        # + 5 tier_3 + 4 warm = 37 workers re-UPSERTing the same player
+        # rows on every per-event ROOT fetch. Without filter this was
+        # ~2000 UPSERTs/min cluster-wide; with cache+WHERE we expect
+        # ~50-100/min (only when player data actually changes). See
+        # EventListRepository.__init__ comment for full bug context.
+        rows_by_id: dict[int, tuple[object, ...]] = {}
+        rows: list[tuple[object, ...]] = []
+        for item in bundle.players:
+            if item.id is None:
+                continue
+            resolved_team_id = item.team_id if item.team_id in known_team_ids else None
+            positions_detailed_value = (
+                list(item.positions_detailed) if item.positions_detailed else None
+            )
+            fingerprint = (
                 item.slug,
                 item.name,
                 item.short_name,
                 item.first_name,
                 item.last_name,
-                item.team_id if item.team_id in known_team_ids else None,
+                resolved_team_id,
                 item.country_alpha2,
                 item.manager_id,
                 item.gender,
                 item.position,
-                list(item.positions_detailed) if item.positions_detailed else None,
+                # tuple representation is hashable and stable for ==
+                tuple(positions_detailed_value) if positions_detailed_value is not None else None,
                 item.preferred_foot,
                 item.jersey_number,
                 item.sofascore_id,
@@ -508,8 +567,40 @@ class EventDetailRepository(EventListRepository):
                 item.order_value,
                 _jsonb(item.field_translations),
             )
-            for item in bundle.players
-        ]
+            row = (
+                item.id,
+                item.slug,
+                item.name,
+                item.short_name,
+                item.first_name,
+                item.last_name,
+                resolved_team_id,
+                item.country_alpha2,
+                item.manager_id,
+                item.gender,
+                item.position,
+                positions_detailed_value,  # list form for $12::text[] cast
+                item.preferred_foot,
+                item.jersey_number,
+                item.sofascore_id,
+                item.date_of_birth,
+                item.date_of_birth_timestamp,
+                item.height,
+                item.weight,
+                item.market_value_currency,
+                _jsonb(item.proposed_market_value_raw),
+                item.rating,
+                item.retired,
+                item.deceased,
+                item.user_count,
+                item.order_value,
+                _jsonb(item.field_translations),
+            )
+            rows_by_id[int(item.id)] = fingerprint
+            if self._player_cache.get(int(item.id)) != fingerprint:
+                rows.append(row)
+        if not rows:
+            return
         await _executemany(
             executor,
             """
@@ -552,9 +643,42 @@ class EventDetailRepository(EventListRepository):
                 user_count = EXCLUDED.user_count,
                 order_value = EXCLUDED.order_value,
                 field_translations = EXCLUDED.field_translations
+            WHERE player.slug IS DISTINCT FROM EXCLUDED.slug
+               OR player.name IS DISTINCT FROM EXCLUDED.name
+               OR player.short_name IS DISTINCT FROM EXCLUDED.short_name
+               OR player.first_name IS DISTINCT FROM EXCLUDED.first_name
+               OR player.last_name IS DISTINCT FROM EXCLUDED.last_name
+               OR player.team_id IS DISTINCT FROM EXCLUDED.team_id
+               OR player.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR player.manager_id IS DISTINCT FROM EXCLUDED.manager_id
+               OR player.gender IS DISTINCT FROM EXCLUDED.gender
+               OR player.position IS DISTINCT FROM EXCLUDED.position
+               OR player.positions_detailed IS DISTINCT FROM EXCLUDED.positions_detailed
+               OR player.preferred_foot IS DISTINCT FROM EXCLUDED.preferred_foot
+               OR player.jersey_number IS DISTINCT FROM EXCLUDED.jersey_number
+               OR player.sofascore_id IS DISTINCT FROM EXCLUDED.sofascore_id
+               OR player.date_of_birth IS DISTINCT FROM EXCLUDED.date_of_birth
+               OR player.date_of_birth_timestamp IS DISTINCT FROM EXCLUDED.date_of_birth_timestamp
+               OR player.height IS DISTINCT FROM EXCLUDED.height
+               OR player.weight IS DISTINCT FROM EXCLUDED.weight
+               OR player.market_value_currency IS DISTINCT FROM EXCLUDED.market_value_currency
+               OR player.proposed_market_value_raw IS DISTINCT FROM EXCLUDED.proposed_market_value_raw
+               OR player.rating IS DISTINCT FROM EXCLUDED.rating
+               OR player.retired IS DISTINCT FROM EXCLUDED.retired
+               OR player.deceased IS DISTINCT FROM EXCLUDED.deceased
+               OR player.user_count IS DISTINCT FROM EXCLUDED.user_count
+               OR player.order_value IS DISTINCT FROM EXCLUDED.order_value
+               OR player.field_translations IS DISTINCT FROM EXCLUDED.field_translations
             """,
             rows,
         )
+
+        def _commit_player_cache() -> None:
+            for player_id, fingerprint in rows_by_id.items():
+                self._player_cache.set(player_id, fingerprint)
+
+        if not register_post_commit_hook(_commit_player_cache):
+            _commit_player_cache()
 
     async def _upsert_events(self, executor: SqlExecutor, bundle: EventDetailBundle) -> None:
         rows = [

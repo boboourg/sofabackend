@@ -59,6 +59,27 @@ class EventListRepository:
         self._unique_tournament_cache = ExpiringValueCache[int, tuple[object, ...]]()
         self._season_cache = ExpiringValueCache[int, tuple[str | None, int | None, str | None, str | None]]()
         self._event_status_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
+        # P0d: write-avoidance caches for team + player UPSERTs.
+        # Background: discovery worker (event_list_repository._upsert_teams)
+        # and hydrate worker (event_detail_repository._upsert_teams_base /
+        # _upsert_players) were deadlocking against each other on shared
+        # rows in country / team chains. Both paths unconditionally
+        # ON CONFLICT DO UPDATE, which acquires row ShareLock even when
+        # the row hasn't changed. With 18 hydrate + 5 tier_1 + 5 tier_2 +
+        # 5 tier_3 + 4 warm workers all repeatedly UPSERTing the same
+        # team/player rows, deadlock probability grew O(N^2) and pegged
+        # discovery success rate to ~4% (96% retry_scheduled). Match
+        # center for ~92% of inprogress events had zero per-event ROOT
+        # snapshots as a result. The cache fingerprints the row's
+        # written columns and skips the UPSERT entirely when the
+        # cached value matches the to-be-written one. Populated post-
+        # commit (via register_post_commit_hook) so an aborted
+        # transaction does not poison the cache. The DB-side
+        # ``WHERE column IS DISTINCT FROM EXCLUDED.column`` clause
+        # added in the matching _upsert_*  methods is a 2nd line of
+        # defense for the case of cache eviction / cold start.
+        self._team_cache = ExpiringValueCache[int, tuple[object, ...]]()
+        self._player_cache = ExpiringValueCache[int, tuple[object, ...]]()
 
     async def load_surface_states(self, executor: SqlExecutor, event_ids: Iterable[int]) -> dict[int, SurfaceEventState]:
         resolved_event_ids = tuple(sorted({int(item) for item in event_ids}))
@@ -615,9 +636,16 @@ class EventListRepository:
 
     async def _upsert_teams(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         ordered_teams = sorted(bundle.teams, key=lambda item: (item.parent_team_id is not None, item.id))
-        rows = [
-            (
-                item.id,
+        # P0d write-avoidance: pre-filter rows whose written columns match
+        # the cache (= row was just UPSERTed with the same content).
+        # ``rows_by_id`` is the post-commit cache update set (all seen
+        # ids), ``rows`` is the DB write set (only changed ids).
+        rows_by_id: dict[int, tuple[object, ...]] = {}
+        rows: list[tuple[object, ...]] = []
+        for item in ordered_teams:
+            if item.id is None:
+                continue
+            fingerprint = (
                 item.slug,
                 item.name,
                 item.short_name,
@@ -633,8 +661,12 @@ class EventListRepository:
                 _jsonb(item.team_colors),
                 _jsonb(item.field_translations),
             )
-            for item in ordered_teams
-        ]
+            row = (item.id,) + fingerprint
+            rows_by_id[int(item.id)] = fingerprint
+            if self._team_cache.get(int(item.id)) != fingerprint:
+                rows.append(row)
+        if not rows:
+            return
         await _executemany(
             executor,
             """
@@ -659,9 +691,30 @@ class EventListRepository:
                 user_count = EXCLUDED.user_count,
                 team_colors = EXCLUDED.team_colors,
                 field_translations = EXCLUDED.field_translations
+            WHERE team.slug IS DISTINCT FROM EXCLUDED.slug
+               OR team.name IS DISTINCT FROM EXCLUDED.name
+               OR team.short_name IS DISTINCT FROM EXCLUDED.short_name
+               OR team.name_code IS DISTINCT FROM EXCLUDED.name_code
+               OR team.sport_id IS DISTINCT FROM EXCLUDED.sport_id
+               OR team.country_alpha2 IS DISTINCT FROM EXCLUDED.country_alpha2
+               OR team.parent_team_id IS DISTINCT FROM EXCLUDED.parent_team_id
+               OR team.gender IS DISTINCT FROM EXCLUDED.gender
+               OR team.type IS DISTINCT FROM EXCLUDED.type
+               OR team.national IS DISTINCT FROM EXCLUDED.national
+               OR team.disabled IS DISTINCT FROM EXCLUDED.disabled
+               OR team.user_count IS DISTINCT FROM EXCLUDED.user_count
+               OR team.team_colors IS DISTINCT FROM EXCLUDED.team_colors
+               OR team.field_translations IS DISTINCT FROM EXCLUDED.field_translations
             """,
             rows,
         )
+
+        def _commit_team_cache() -> None:
+            for team_id, fingerprint in rows_by_id.items():
+                self._team_cache.set(team_id, fingerprint)
+
+        if not register_post_commit_hook(_commit_team_cache):
+            _commit_team_cache()
 
     async def _upsert_event_statuses(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
         rows_by_code = {
