@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +13,7 @@ from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
 from ..queue.live_details_throttle import LiveDetailsThrottle
 from ..queue.live_edges_throttle import LiveEdgesThrottle
+from ..queue.live_tier_1_quarantine import LiveTier1RetryQuarantineStore
 from ..queue.live_inflight import (
     LiveEventDetailsInFlightStore,
     LiveEventInFlightStore,
@@ -248,6 +250,14 @@ class ServiceApp:
         # worker's ``handle()`` checks the flag at run time.
         self.live_event_root_inflight_store = LiveEventRootInFlightStore(self.app.redis_backend)
         self.live_edges_throttle = LiveEdgesThrottle(self.app.redis_backend)
+        # P0(c) tier_1 root-only retry quarantine. Store is constructed
+        # unconditionally so dependency wiring stays stable; the
+        # build_live_worker wiring below only passes it to LiveWorkerService
+        # when ``LIVE_TIER_1_QUARANTINE_ENABLED`` env flag is set. Default
+        # behaviour (flag unset) → store is constructed but never consulted
+        # at the handler layer, so prod sees no behavioural change until a
+        # separate ACK enables the flag on a canary instance.
+        self.live_tier_1_quarantine_store = LiveTier1RetryQuarantineStore(self.app.redis_backend)
         self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
@@ -1087,6 +1097,19 @@ class ServiceApp:
 
     def build_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> LiveWorkerService:
         self.ensure_consumer_groups()
+        # P0(c) gate: pass quarantine store through ONLY when the rollout
+        # flag is on. Keeping the store=None on the disabled path means the
+        # worker's ``handle()`` short-circuits the entire quarantine branch
+        # (cheaper than a per-call env lookup), and no quarantine counters
+        # are written to Redis under default prod config. Flag lookup
+        # happens once at service construction; toggling the flag requires
+        # a worker restart, which is the same pattern as
+        # ``LIVE_TIER_1_ROOT_ONLY``.
+        quarantine_store = (
+            self.live_tier_1_quarantine_store
+            if _service_app_env_flag_enabled("LIVE_TIER_1_QUARANTINE_ENABLED")
+            else None
+        )
         return LiveWorkerService(
             orchestrator=self.app,
             delayed_scheduler=self.delayed_scheduler,
@@ -1101,6 +1124,7 @@ class ServiceApp:
             details_throttle=self.live_details_throttle,
             root_in_flight_store=self.live_event_root_inflight_store,
             edges_throttle=self.live_edges_throttle,
+            quarantine_store=quarantine_store,
         )
 
     def build_live_details_worker(self, *, consumer_name: str, block_ms: int = 5_000):
@@ -1489,3 +1513,19 @@ class _PerConnectionFetchExecutor:
                 recent_200_lookup=_recent_200,
             )
             return await executor.execute(task)
+
+
+def _service_app_env_flag_enabled(name: str) -> bool:
+    """Truthy-flag parser local to service_app.
+
+    Kept in this module rather than imported from workers/live_worker_service
+    to avoid the awkward shape of importing a private helper across module
+    boundaries; ``LIVE_TIER_1_QUARANTINE_ENABLED`` is the only flag this
+    bootstrap layer needs to read, and the parsing rule mirrors the worker
+    layer (1/true/yes/on case-insensitive). Centralising flag parsing
+    further can wait until a third call site appears.
+    """
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}

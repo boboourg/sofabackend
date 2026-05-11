@@ -53,6 +53,8 @@ class LiveWorkerService:
         root_in_flight_store=None,
         edges_throttle=None,
         edges_backpressure_limit: int | None = None,
+        quarantine_store=None,
+        quarantine_inprogress_count_provider=None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
         if normalized_lane not in {"hot", "warm", "tier_1", "tier_2", "tier_3"}:
@@ -100,6 +102,23 @@ class LiveWorkerService:
             if edges_backpressure_limit is not None
             else env_edges_backpressure
         )
+        # P0(c) tier_1 root-only retry quarantine. ``quarantine_store`` is a
+        # ``LiveTier1RetryQuarantineStore`` instance (or None when the
+        # rollout flag ``LIVE_TIER_1_QUARANTINE_ENABLED`` is OFF — the
+        # service-app constructs the store unconditionally but only passes
+        # it through when the flag is enabled, keeping the legacy fast path
+        # branch-free at runtime). When set, the worker checks the store
+        # before claiming the inflight lock and skips+ACKs quarantined
+        # events; on real-work success/failure it updates the store so the
+        # counter and exponential cooldown stay accurate.
+        # ``quarantine_inprogress_count_provider`` is an optional callable
+        # ``() -> int`` returning the current count of inprogress live
+        # events; used by the global-cap brake to fail-open when too
+        # many events are quarantined cluster-wide. None → cap-check is
+        # skipped (treated as "cannot evaluate" → quarantine still works
+        # but no runaway protection); intended for test setups.
+        self.quarantine_store = quarantine_store
+        self.quarantine_inprogress_count_provider = quarantine_inprogress_count_provider
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
@@ -152,6 +171,60 @@ class LiveWorkerService:
         )
         active_lock_store = self.root_in_flight_store if is_root_only_tier_1 else self.in_flight_store
 
+        # P0(c) tier_1 root-only retry quarantine check. Only applies on the
+        # root-only fast path; legacy / live_delta / details paths are
+        # untouched. Performed BEFORE inflight claim so a quarantined event
+        # does not spend the in-flight lock slot on this tick. Skip+ACK
+        # semantics: the worker returns ``quarantined_skip`` so the runtime
+        # treats it as a normal completion (no retry budget), the stream
+        # message is acked, and the next planner-published tick for the
+        # same event will see the cooldown expired (or not) and decide
+        # again. Global-cap brake fails open if too many events are
+        # currently quarantined.
+        if is_root_only_tier_1 and self.quarantine_store is not None:
+            now_ms = int(self.now_ms_factory())
+            until_ms = self.quarantine_store.is_quarantined(event_id=event_id, now_ms=now_ms)
+            if until_ms > now_ms:
+                inprogress_count = 0
+                provider = self.quarantine_inprogress_count_provider
+                if callable(provider):
+                    try:
+                        inprogress_count = int(provider() or 0)
+                    except Exception as exc:
+                        logger.debug(
+                            "Quarantine inprogress-count provider failed: %s — treating as 0 (fail-open cap)",
+                            exc,
+                        )
+                        inprogress_count = 0
+                cap_exceeded = False
+                if inprogress_count > 0:
+                    try:
+                        cap_exceeded = self.quarantine_store.global_cap_exceeded(
+                            inprogress_event_count=inprogress_count
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "Quarantine global_cap_exceeded check failed: %s — treating as not-exceeded",
+                            exc,
+                        )
+                        cap_exceeded = False
+                if cap_exceeded:
+                    logger.warning(
+                        "Tier_1 root-only quarantine global cap exceeded — failing open: "
+                        "event_id=%s inprogress=%s cap_pct=%s",
+                        event_id,
+                        inprogress_count,
+                        self.quarantine_store.global_cap_pct,
+                    )
+                    # fall through to normal flow
+                else:
+                    logger.info(
+                        "Tier_1 root-only quarantine skip: event_id=%s cooldown_remaining_ms=%s",
+                        event_id,
+                        max(0, until_ms - now_ms),
+                    )
+                    return "quarantined_skip"
+
         lock_owner: str | None = None
         if active_lock_store is not None:
             lock_owner = f"{self.runtime.consumer}:{entry.message_id}:{job.job_id}"
@@ -178,11 +251,45 @@ class LiveWorkerService:
 
         report = None
         try:
-            report = await self.orchestrator.run_event(
-                event_id=event_id,
-                sport_slug=sport_slug,
-                hydration_mode=effective_hydration_mode,
-            )
+            try:
+                report = await self.orchestrator.run_event(
+                    event_id=event_id,
+                    sport_slug=sport_slug,
+                    hydration_mode=effective_hydration_mode,
+                )
+            except Exception as exc:
+                # P0(c) quarantine: only count RetryableJobError-class
+                # failures, and only on the root-only fast path. Non-
+                # retryable raises (logic bugs, AttributeError) MUST NOT
+                # feed the quarantine counter — those should surface,
+                # not be silently rerouted. Coalesced returns already
+                # exited earlier via "coalesced_inflight_root_only" and
+                # never reach this block, so the success/failure
+                # bookkeeping below only ever sees real-work outcomes.
+                if (
+                    is_root_only_tier_1
+                    and self.quarantine_store is not None
+                    and _is_retryable_for_quarantine(exc)
+                ):
+                    try:
+                        self.quarantine_store.record_failure(event_id=event_id)
+                    except Exception as q_exc:  # pragma: no cover - defensive
+                        logger.debug(
+                            "Quarantine record_failure failed for event_id=%s: %s",
+                            event_id,
+                            q_exc,
+                        )
+                raise
+            else:
+                if is_root_only_tier_1 and self.quarantine_store is not None:
+                    try:
+                        self.quarantine_store.record_success(event_id=event_id)
+                    except Exception as q_exc:  # pragma: no cover - defensive
+                        logger.debug(
+                            "Quarantine record_success failed for event_id=%s: %s",
+                            event_id,
+                            q_exc,
+                        )
         finally:
             # Release critical lock IMMEDIATELY after run_event returns.
             # Under split-details (P0(a)) the orchestrator returns after
@@ -472,6 +579,27 @@ def _job_to_stream_payload(job: JobEnvelope) -> dict[str, object]:
         "capability_hint": job.capability_hint or "",
         "idempotency_key": job.idempotency_key,
     }
+
+
+def _is_retryable_for_quarantine(exc: Exception) -> bool:
+    """Return True iff ``exc`` is the retryable class that should feed the
+    quarantine counter.
+
+    Imports ``is_retryable_worker_error`` lazily so this module does not
+    grow an import-time dependency on ``services.retry_policy`` (which
+    in turn imports ``curl_cffi``). On import failure we fail closed —
+    return False — so quarantine never triggers on unclassifiable errors
+    and a misconfigured environment cannot silently start quarantining
+    arbitrary events.
+    """
+    try:
+        from ..services.retry_policy import is_retryable_worker_error
+    except Exception:  # pragma: no cover - extremely defensive
+        return False
+    try:
+        return bool(is_retryable_worker_error(exc))
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 def _env_flag_enabled(name: str) -> bool:
