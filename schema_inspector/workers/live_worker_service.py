@@ -171,17 +171,35 @@ class LiveWorkerService:
         )
         active_lock_store = self.root_in_flight_store if is_root_only_tier_1 else self.in_flight_store
 
-        # P0(c) tier_1 root-only retry quarantine check. Only applies on the
-        # root-only fast path; legacy / live_delta / details paths are
-        # untouched. Performed BEFORE inflight claim so a quarantined event
-        # does not spend the in-flight lock slot on this tick. Skip+ACK
-        # semantics: the worker returns ``quarantined_skip`` so the runtime
-        # treats it as a normal completion (no retry budget), the stream
-        # message is acked, and the next planner-published tick for the
-        # same event will see the cooldown expired (or not) and decide
-        # again. Global-cap brake fails open if too many events are
-        # currently quarantined.
-        if is_root_only_tier_1 and self.quarantine_store is not None:
+        # P0(c.2) Quarantine eligibility is INDEPENDENT of the root-only
+        # fast path. The original P0(c) rollout gated quarantine on
+        # ``is_root_only_tier_1`` which required ``job.job_type ==
+        # JOB_REFRESH_LIVE_EVENT``. In practice tier_1 stream also
+        # carries ``JOB_HYDRATE_EVENT_ROOT`` bootstrap jobs published by
+        # the discovery worker for newly-discovered live events
+        # (discovery_worker.py:_stream_for_live_dispatch_tier). Those
+        # bypassed quarantine and burned tier_1 capacity indefinitely on
+        # bad-route events (e.g. event_id 14036755 observed retrying
+        # every ~2 min for hours through curl timeout). Decoupling
+        # quarantine from the root-only branch lets the same per-event
+        # failure counter + cooldown apply to BOTH job types arriving
+        # on the tier_1 lane. The root-only fast path itself (mode
+        # selection, edges follow-up, root_inflight lock) is unchanged.
+        is_quarantine_eligible = (
+            self.lane == "tier_1"
+            and self.quarantine_store is not None
+        )
+
+        # P0(c) tier_1 retry quarantine check. Performed BEFORE inflight
+        # claim so a quarantined event does not spend the in-flight lock
+        # slot on this tick. Skip+ACK semantics: the worker returns
+        # ``quarantined_skip`` so the runtime treats it as a normal
+        # completion (no retry budget), the stream message is acked, and
+        # the next planner- or discovery-published tick for the same
+        # event will see the cooldown expired (or not) and decide again.
+        # Global-cap brake fails open if too many events are currently
+        # quarantined.
+        if is_quarantine_eligible:
             now_ms = int(self.now_ms_factory())
             until_ms = self.quarantine_store.is_quarantined(event_id=event_id, now_ms=now_ms)
             if until_ms > now_ms:
@@ -210,17 +228,19 @@ class LiveWorkerService:
                         cap_exceeded = False
                 if cap_exceeded:
                     logger.warning(
-                        "Tier_1 root-only quarantine global cap exceeded — failing open: "
-                        "event_id=%s inprogress=%s cap_pct=%s",
+                        "Tier_1 quarantine global cap exceeded — failing open: "
+                        "event_id=%s job_type=%s inprogress=%s cap_pct=%s",
                         event_id,
+                        job.job_type,
                         inprogress_count,
                         self.quarantine_store.global_cap_pct,
                     )
                     # fall through to normal flow
                 else:
                     logger.info(
-                        "Tier_1 root-only quarantine skip: event_id=%s cooldown_remaining_ms=%s",
+                        "Tier_1 quarantine skip: event_id=%s job_type=%s cooldown_remaining_ms=%s",
                         event_id,
+                        job.job_type,
                         max(0, until_ms - now_ms),
                     )
                     return "quarantined_skip"
@@ -258,17 +278,21 @@ class LiveWorkerService:
                     hydration_mode=effective_hydration_mode,
                 )
             except Exception as exc:
-                # P0(c) quarantine: only count RetryableJobError-class
-                # failures, and only on the root-only fast path. Non-
-                # retryable raises (logic bugs, AttributeError) MUST NOT
-                # feed the quarantine counter — those should surface,
-                # not be silently rerouted. Coalesced returns already
-                # exited earlier via "coalesced_inflight_root_only" and
-                # never reach this block, so the success/failure
-                # bookkeeping below only ever sees real-work outcomes.
+                # P0(c) quarantine bookkeeping: only count
+                # RetryableJobError-class failures (network_error,
+                # libcurl timeouts, RetryableJobError from upstream
+                # transport). Non-retryable raises (logic bugs,
+                # AttributeError) MUST NOT feed the quarantine counter
+                # — those should surface, not be silently rerouted.
+                # Coalesced returns already exited earlier via
+                # "coalesced_inflight*" and never reach this block, so
+                # the success/failure bookkeeping below only ever sees
+                # real-work outcomes. As of P0(c.2) this applies to
+                # BOTH refresh_live_event AND hydrate_event_root jobs
+                # on the tier_1 lane — see the
+                # ``is_quarantine_eligible`` comment above.
                 if (
-                    is_root_only_tier_1
-                    and self.quarantine_store is not None
+                    is_quarantine_eligible
                     and _is_retryable_for_quarantine(exc)
                 ):
                     try:
@@ -281,7 +305,7 @@ class LiveWorkerService:
                         )
                 raise
             else:
-                if is_root_only_tier_1 and self.quarantine_store is not None:
+                if is_quarantine_eligible:
                     try:
                         self.quarantine_store.record_success(event_id=event_id)
                     except Exception as q_exc:  # pragma: no cover - defensive

@@ -188,6 +188,38 @@ def _live_entry(
     )
 
 
+def _hydrate_root_entry(
+    *,
+    lane_stream: str,
+    event_id: int = 8001,
+    message_id: str = "1-1",
+) -> StreamEntry:
+    """Mirrors a discovery_worker bootstrap publish — same shape as
+    ``_live_entry`` but with ``job_type=hydrate_event_root`` and
+    ``live_bootstrap`` in params, as discovery_worker.py emits for newly-
+    discovered live events. Used by the P0(c.2) regression tests that
+    verify quarantine engages on this job_type too."""
+    return StreamEntry(
+        stream=lane_stream,
+        message_id=message_id,
+        values={
+            "job_id": f"job-hydrate-{event_id}",
+            "job_type": "hydrate_event_root",
+            "sport_slug": "football",
+            "event_id": str(event_id),
+            "lane": "tier_1",
+            "attempt": "1",
+            "params_json": json.dumps(
+                {
+                    "hydration_mode": "live_delta",
+                    "live_dispatch_tier": "tier_1",
+                    "live_bootstrap": True,
+                }
+            ),
+        },
+    )
+
+
 def _build_worker(
     *,
     backend: _FakeRedisBackend,
@@ -305,11 +337,23 @@ class QuarantineFlagOffRegressionTests(unittest.IsolatedAsyncioTestCase):
         # Orchestrator ran the root-only run.
         self.assertEqual(spy.calls[0][2], "root_only")
 
-    async def test_quarantine_only_applies_when_root_only_flag_on(self) -> None:
-        """``LIVE_TIER_1_ROOT_ONLY`` OFF → quarantine check skipped even
-        with quarantine_store wired in (defensive: a stale store instance
-        on a worker built with the flag OFF must NOT silently start
-        skipping events)."""
+    async def test_quarantine_independent_of_root_only_flag(self) -> None:
+        """P0(c.2) contract change: quarantine eligibility is decoupled
+        from the root-only fast path. Previously this test asserted that
+        quarantine ONLY engaged when ``LIVE_TIER_1_ROOT_ONLY=1`` — that
+        coupling caused the bootstrap-deadlock bug (hydrate_event_root
+        jobs bypassed quarantine entirely). The new contract: as long as
+        ``lane=='tier_1'`` and ``quarantine_store`` is wired, quarantine
+        engages regardless of the root-only flag state.
+
+        Rationale: operators may need to disable LIVE_TIER_1_ROOT_ONLY
+        during incident rollback while keeping bootstrap bad-route
+        protection. The two flags now control orthogonal concerns:
+        ``LIVE_TIER_1_ROOT_ONLY`` = hydration mode selection (root_only
+        vs legacy live_delta), ``LIVE_TIER_1_QUARANTINE_ENABLED``
+        (controlled at service_app via passing store=None) = quarantine
+        kill switch.
+        """
         backend = _FakeRedisBackend()
         queue = _RecordingQueue(backend=backend)
         store = _build_store(backend)
@@ -317,17 +361,16 @@ class QuarantineFlagOffRegressionTests(unittest.IsolatedAsyncioTestCase):
             store.record_failure(event_id=8001)
         spy = _SpyOrchestrator(report=_FakeReport(edges_pending=True))
 
-        # Flag OFF — passing quarantine_store should have no effect.
+        # Flag OFF, store wired — quarantine MUST still engage.
         with _patched_env(LIVE_TIER_1_ROOT_ONLY=None):
             worker = _build_worker(
                 backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
             )
             result = await worker.handle(_live_entry(lane_stream=STREAM_LIVE_TIER_1))
 
-        self.assertEqual(result, "completed")
-        # Orchestrator was called — quarantine check did not engage.
-        self.assertEqual(len(spy.calls), 1)
-        self.assertNotEqual(spy.calls[0][2], "root_only")  # legacy mode resolved
+        # Skip path returned — orchestrator never invoked.
+        self.assertEqual(result, "quarantined_skip")
+        self.assertEqual(spy.calls, [])
 
     async def test_quarantine_does_not_apply_on_non_tier_1_lanes(self) -> None:
         """Even with the flag on, lanes other than tier_1 must not consult
@@ -595,6 +638,175 @@ class QuarantineGlobalCapTests(unittest.IsolatedAsyncioTestCase):
             result = await worker.handle(_live_entry(lane_stream=STREAM_LIVE_TIER_1))
 
         self.assertEqual(result, "quarantined_skip")
+
+
+# ---------------------------------------------------------------------------
+# 5. P0(c.2) — quarantine on hydrate_event_root bootstrap path
+# ---------------------------------------------------------------------------
+# Verifies the fix for the bootstrap-deadlock bug where discovery_worker
+# published ``hydrate_event_root`` jobs to stream:etl:live_tier_1 for newly-
+# discovered live events. Those jobs bypassed quarantine because the original
+# P0(c) gate required ``job_type == JOB_REFRESH_LIVE_EVENT``. Event 14036755
+# was observed retrying via libcurl timeout every ~2 min for hours through
+# tier_1 workers with NO quarantine counter / marker ever appearing in
+# Redis. The fix decouples quarantine eligibility from the root-only fast
+# path: any tier_1 lane work, regardless of job_type, now feeds the
+# quarantine counter and respects the skip path.
+# ---------------------------------------------------------------------------
+class QuarantineHydrateEventRootTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retryable_failure_on_hydrate_event_root_records_failure(self) -> None:
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        spy = _SpyOrchestrator(
+            raise_on_run=RetryableJobError("simulated libcurl timeout")
+        )
+
+        # NOTE: LIVE_TIER_1_ROOT_ONLY can be ON or OFF — quarantine for
+        # hydrate_event_root must work either way. We set it ON to mirror
+        # the production canary state.
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            with self.assertRaises(RetryableJobError):
+                await worker.handle(
+                    _hydrate_root_entry(lane_stream=STREAM_LIVE_TIER_1)
+                )
+
+        # Counter must have ticked even though job_type != refresh_live_event.
+        counter_key = "live:tier1_retry_failed:8001"
+        self.assertEqual(int(backend.values.get(counter_key, "0")), 1)
+
+    async def test_three_hydrate_event_root_failures_trigger_quarantine(self) -> None:
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        spy = _SpyOrchestrator(raise_on_run=RetryableJobError("timeout"))
+
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            for _ in range(3):
+                with self.assertRaises(RetryableJobError):
+                    await worker.handle(
+                        _hydrate_root_entry(lane_stream=STREAM_LIVE_TIER_1)
+                    )
+
+        self.assertGreater(store.is_quarantined(event_id=8001), 0)
+
+    async def test_quarantined_hydrate_event_root_returns_quarantined_skip(self) -> None:
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        # Pre-trigger quarantine.
+        for _ in range(3):
+            store.record_failure(event_id=8001)
+        self.assertGreater(store.is_quarantined(event_id=8001), 0)
+
+        spy = _SpyOrchestrator(report=_FakeReport(edges_pending=False))
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            result = await worker.handle(
+                _hydrate_root_entry(lane_stream=STREAM_LIVE_TIER_1)
+            )
+
+        # Quarantined → skip+ACK, NO orchestrator call regardless of job_type.
+        self.assertEqual(result, "quarantined_skip")
+        self.assertEqual(spy.calls, [])
+
+    async def test_coalesced_hydrate_event_root_does_not_feed_counter(self) -> None:
+        """Pre-claim the legacy ``live:refresh_inflight`` lock (used by
+        non-root-only path; hydrate_event_root jobs take this lock since
+        ``is_root_only_tier_1=False`` for them). Subsequent handle()
+        coalesces, returns ``coalesced_inflight`` — and the quarantine
+        counter must remain zero, mirroring the refresh_live_event
+        contract (coalesce is not a fetch attempt)."""
+        from schema_inspector.queue.live_inflight import (
+            LIVE_EVENT_INFLIGHT_KEY,
+        )
+
+        backend = _FakeRedisBackend()
+        # Pre-claim legacy refresh_inflight (used by hydrate_event_root /
+        # live_delta path, NOT root_inflight).
+        backend.values[LIVE_EVENT_INFLIGHT_KEY.format(event_id=8001)] = (
+            "some-other-worker:msg:job"
+        )
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        spy = _SpyOrchestrator(report=_FakeReport())
+
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            result = await worker.handle(
+                _hydrate_root_entry(lane_stream=STREAM_LIVE_TIER_1)
+            )
+
+        self.assertEqual(result, "coalesced_inflight")  # legacy short-circuit
+        self.assertEqual(spy.calls, [])
+        self.assertEqual(
+            int(backend.values.get("live:tier1_retry_failed:8001", "0")), 0
+        )
+
+    async def test_non_retryable_failure_on_hydrate_event_root_does_not_feed_counter(
+        self,
+    ) -> None:
+        """AttributeError / RuntimeError on hydrate_event_root path must
+        surface AND must NOT feed the quarantine counter — same contract
+        as the refresh_live_event path."""
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        spy = _SpyOrchestrator(raise_on_run=AttributeError("logic bug"))
+
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            with self.assertRaises(AttributeError):
+                await worker.handle(
+                    _hydrate_root_entry(lane_stream=STREAM_LIVE_TIER_1)
+                )
+
+        self.assertEqual(
+            int(backend.values.get("live:tier1_retry_failed:8001", "0")), 0
+        )
+
+    async def test_quarantine_engages_for_hydrate_root_even_when_root_only_flag_off(
+        self,
+    ) -> None:
+        """Decoupling regression: quarantine for hydrate_event_root must
+        NOT require LIVE_TIER_1_ROOT_ONLY=1. Even if the operator disables
+        root_only on tier_1 (e.g. during incident rollback), bootstrap
+        bad-route protection should still apply."""
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        spy = _SpyOrchestrator(raise_on_run=RetryableJobError("timeout"))
+
+        # LIVE_TIER_1_ROOT_ONLY OFF — quarantine should STILL work.
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY=None):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            for _ in range(3):
+                with self.assertRaises(RetryableJobError):
+                    await worker.handle(
+                        _hydrate_root_entry(lane_stream=STREAM_LIVE_TIER_1)
+                    )
+
+        self.assertGreater(store.is_quarantined(event_id=8001), 0)
 
 
 if __name__ == "__main__":
