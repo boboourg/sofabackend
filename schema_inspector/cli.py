@@ -276,6 +276,29 @@ class ReplayFetchExecutor:
         raise RuntimeError(f"No prefetched fetch outcome available for task={key!r}")
 
 
+class _PrefetchFailedError(Exception):
+    """Carries the prefetch executor reference so the caller can persist
+    its accumulated request_log records before re-raising the original
+    exception.
+
+    P3 audit-trail fix: ``HybridApp.run_event`` uses a 3-stage pattern
+    (prefetch in deferred-mode FetchExecutor → commit → persist). When
+    Stage 1 raises (e.g. ``RetryableJobError`` from transport timeout),
+    Stage 2 (the only place that writes ``api_request_log`` rows) is
+    skipped and the buffered records die with garbage collection. This
+    exception class wraps the original exception while exposing the
+    executor so the caller can selectively commit ONLY request_log
+    rows (not snapshots, not capability state) for forensic visibility.
+    See ``HybridApp._commit_request_logs_only`` for the partial-commit
+    semantics.
+    """
+
+    def __init__(self, *, executor: "FetchExecutor", original: BaseException) -> None:
+        super().__init__(str(original))
+        self.executor = executor
+        self.original = original
+
+
 class HybridApp:
     def __init__(self, *, database: AsyncpgDatabase, runtime_config, redis_backend) -> None:
         self.database = database
@@ -362,11 +385,31 @@ class HybridApp:
                     )
                 effective_hydration_mode = "full"
                 should_mark_live_bootstrap = True
-        prefetched_run = await self._prefetch_event_run(
-            event_id=event_id,
-            sport_slug=str(resolved_sport_slug or "football"),
-            hydration_mode=effective_hydration_mode,
-        )
+        try:
+            prefetched_run = await self._prefetch_event_run(
+                event_id=event_id,
+                sport_slug=str(resolved_sport_slug or "football"),
+                hydration_mode=effective_hydration_mode,
+            )
+        except _PrefetchFailedError as wrap:
+            # P3 audit-trail fix: persist whatever request_log records the
+            # prefetch executor accumulated (proxy_address, attempts_json,
+            # latency_ms, error_message per attempt) before re-raising.
+            # Snapshots are deliberately skipped — they represent partial
+            # state that the normalize pipeline would never re-process,
+            # and persisting them would leak inconsistent rows that read-
+            # side queries cannot detect.  Without this best-effort
+            # commit, the forensics records die with garbage collection
+            # when ``prefetch_executor`` goes out of scope at the next
+            # stack frame, and api_request_log has zero rows for failed
+            # root fetches on the live tier_1/tier_2/tier_3/warm paths.
+            #
+            # ``_commit_request_logs_only`` is wrapped in its own
+            # try/except so its failure cannot mask the original
+            # exception — at worst we log a warning and lose the audit
+            # trail for that one prefetch.
+            await self._commit_request_logs_only(wrap.executor)
+            raise wrap.original
         self._warn_if_prefetched_run_large(prefetched_run)
         committed_run = await self._commit_prefetched_run(prefetched_run)
         result = await self._persist_prefetched_run(
@@ -544,11 +587,21 @@ class HybridApp:
                 freshness_store=self.freshness_store,
                 fanout_max_inflight=_live_fanout_max_inflight_from_env(hydration_mode),
             )
-            await orchestrator.run_event(
-                event_id=event_id,
-                sport_slug=sport_slug,
-                hydration_mode=hydration_mode,
-            )
+            try:
+                await orchestrator.run_event(
+                    event_id=event_id,
+                    sport_slug=sport_slug,
+                    hydration_mode=hydration_mode,
+                )
+            except Exception as exc:
+                # P3 audit-trail fix: wrap the original exception with the
+                # prefetch_executor reference so ``run_event`` can persist
+                # the accumulated request_log records (forensics: proxy,
+                # latency, error per-attempt) before re-raising. Without
+                # this wrap the records live only in
+                # ``prefetch_executor._prefetched_records`` and die with
+                # the function's local scope at the next stack frame.
+                raise _PrefetchFailedError(executor=prefetch_executor, original=exc) from exc
         return PrefetchedRun(
             event_id=event_id,
             sport_slug=sport_slug,
@@ -561,6 +614,58 @@ class HybridApp:
             replay_event_endpoint_gate=event_endpoint_gate.build_replay_gate() if event_endpoint_gate is not None else None,
             freshness_skip_keys=orchestrator.freshness_skip_keys,
         )
+
+    async def _commit_request_logs_only(self, executor: "FetchExecutor") -> None:
+        """P3 audit-trail fix — partial commit of ``api_request_log``
+        rows accumulated in a failed-prefetch ``FetchExecutor``.
+
+        Called from ``run_event`` when ``_prefetch_event_run`` raises
+        ``_PrefetchFailedError``. Persists ONLY request_log records
+        (the forensics: proxy_address, attempts_json, latency_ms,
+        error_message per-attempt). Snapshot rows are deliberately
+        skipped — they represent partial state that the downstream
+        normalize pipeline would never re-process, and persisting them
+        would leak inconsistent rows.
+
+        The entire operation is wrapped in its own try/except so any
+        DB error here (network, transaction abort, duplicate-key) is
+        logged at WARNING and DOES NOT mask the original prefetch
+        exception. Per-record inserts also each have their own
+        try/except so a single bad record (e.g. row collision via
+        worker retry) cannot prevent other records from landing.
+
+        Idempotency: each ``ApiRequestLogRecord`` has a fresh
+        ``started_at`` timestamp (set inside ``FetchExecutor.execute``
+        at attempt time). A worker_runtime retry produces NEW attempts
+        with NEW timestamps, so re-execution does not generate
+        duplicate-id conflicts. The persisted row appears as one
+        forensics entry per attempt regardless of how many retries the
+        underlying job survives.
+        """
+        records = executor.prefetched_records
+        if not records:
+            return
+        try:
+            async with self.database.transaction() as connection:
+                for record in records:
+                    try:
+                        await self.raw_repository.insert_request_log(
+                            connection, record.request_log
+                        )
+                    except Exception as record_exc:  # pragma: no cover - defensive
+                        logger.debug(
+                            "P3 partial-commit insert_request_log skipped (likely "
+                            "duplicate or transient): %s",
+                            record_exc,
+                        )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "P3 partial-commit transaction failed for %d records: %s — "
+                "audit trail lost for this prefetch, original exception will "
+                "still surface",
+                len(records),
+                exc,
+            )
 
     async def _commit_prefetched_run(self, prefetched_run: PrefetchedRun) -> PrefetchedRun:
         async with self.database.transaction() as connection:
