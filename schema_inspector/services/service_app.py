@@ -11,6 +11,7 @@ from typing import Any
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
 from ..queue.dedupe import DedupeStore
+from ..queue.event_circuit_breaker import EventCircuitBreaker
 from ..queue.live_details_throttle import LiveDetailsThrottle
 from ..queue.live_edges_throttle import LiveEdgesThrottle
 from ..queue.live_tier_1_quarantine import LiveTier1RetryQuarantineStore
@@ -258,6 +259,23 @@ class ServiceApp:
         # at the handler layer, so prod sees no behavioural change until a
         # separate ACK enables the flag on a canary instance.
         self.live_tier_1_quarantine_store = LiveTier1RetryQuarantineStore(self.app.redis_backend)
+        # P5b: generic per-event circuit breaker — extends P0(c).2 quarantine
+        # to hydrate + discovery lanes. Same store class with lane-parameterized
+        # Redis keys, so tier_1 quarantine and hydrate/discovery circuit
+        # breakers operate on disjoint key namespaces and do not interfere.
+        # Wiring is gated by per-lane env flags
+        # (HYDRATE_EVENT_CIRCUIT_BREAKER_ENABLED,
+        # DISCOVERY_EVENT_CIRCUIT_BREAKER_ENABLED) — see build_*_worker
+        # methods below.
+        self.hydrate_circuit_breaker = EventCircuitBreaker(self.app.redis_backend, lane="hydrate")
+        # Note: discovery_worker failures from P3 data are at the bulk
+        # /sport/{X}/events/live list endpoint (not per-event). A
+        # per-event circuit breaker doesn't fit that failure shape, so
+        # discovery is intentionally NOT wired into the circuit breaker
+        # in this iteration. If empirical data after P5b rollout shows
+        # discovery still publishing quarantined-by-hydrate event-ids
+        # in tight loops, we can add ``EventCircuitBreaker(lane="discovery")``
+        # at the per-event publish gate in a follow-up.
         self.freshness_policy = FreshnessPolicy(store=DedupeStore(self.app.redis_backend))
         self.historical_cursor_store = HistoricalCursorStore(self.app.redis_backend)
         self.historical_tournament_cursor_store = HistoricalTournamentCursorStore(self.app.redis_backend)
@@ -943,6 +961,15 @@ class ServiceApp:
 
     def build_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
         self.ensure_consumer_groups()
+        # P5b: pass circuit breaker through only when the rollout flag is
+        # on. Default (flag unset) → store=None → legacy fast path,
+        # branch-free at runtime. Matches LIVE_TIER_1_QUARANTINE_ENABLED
+        # gating pattern.
+        circuit_breaker = (
+            self.hydrate_circuit_breaker
+            if _service_app_env_flag_enabled("HYDRATE_EVENT_CIRCUIT_BREAKER_ENABLED")
+            else None
+        )
         return HydrateWorker(
             orchestrator=self.app,
             delayed_scheduler=self.delayed_scheduler,
@@ -952,6 +979,7 @@ class ServiceApp:
             consumer=consumer_name,
             block_ms=block_ms,
             job_audit_logger=self.job_audit_logger,
+            circuit_breaker=circuit_breaker,
         )
 
     def build_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
