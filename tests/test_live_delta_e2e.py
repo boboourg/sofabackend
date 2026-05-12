@@ -137,11 +137,26 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["hydration_mode"] for row in telemetry], ["full", "live_delta", "live_delta", "live_delta", "final_sweep"])
         # F-3 (2026-05-08): final_sweep now also fetches the 4 final_only_edges
         # for football (comments, best-players/summary, h2h, pregame-form) on
-        # top of the 1 core edge that survives football_edge_allowed gating in
-        # this fixture (status="finished", tier=tier_5 → no core edges allowed,
-        # but pre-F-3 still saw 1 call from the test fake; actual count
-        # observed is 5 = 1 core + 4 final_only).
-        self.assertEqual([row["http_calls"] for row in telemetry], [3, 1, 1, 1, 5])
+        # top of the 1 core edge that survives football_edge_allowed gating.
+        # X'' (2026-05-12): match_center_policy now unlocks /incidents (always)
+        # and /lineups (for inprogress/live/finished status) for non-isEditor
+        # football events even when detailId is missing (tier_5). This fixture
+        # uses event_id=42 without a detailId, so X'' adds +2 calls per delta
+        # poll (incidents+lineups) and +4 to final_sweep (incidents always,
+        # lineups for finished, plus matchcenter follow-ups already counted).
+        # X3 (2026-05-12): football_detail_endpoint_allowed now allows the
+        # pre-match detail bundle (managers, h2h, pregame-form, votes, odds
+        # × 3, team-streaks × 2) for tier_5 (= detailId missing) non-isEditor
+        # events. Empirical: Premier League pre-match event 15999228 — UI
+        # confirmed upstream serves 200 for the full bundle even though
+        # detailId is not on the root payload yet. The "full" step (step 0)
+        # now picks up these 9 additional detail fetches: 5 (X'') + 9 (X3) =
+        # 14 http_calls. The delta polls and final_sweep are status-driven
+        # and were already exercising the X'' path; their counts are
+        # unchanged. final_sweep stays at 9 because it consults
+        # football_edge_allowed (core edges) and final_only_edges, neither
+        # of which goes through football_detail_endpoint_allowed.
+        self.assertEqual([row["http_calls"] for row in telemetry], [14, 3, 3, 3, 9])
         self.assertEqual([row["live_bootstrap_done_at"] for row in telemetry], [True, True, True, True, False])
         self.assertEqual(bootstrap.marked, [event_id])
         self.assertEqual(bootstrap.reset, [event_id])

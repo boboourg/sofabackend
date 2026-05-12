@@ -171,6 +171,19 @@ def _normalize_entity(
             "has_event_player_heat_map": _as_bool(mapping.get("hasEventPlayerHeatMap")),
             "has_global_highlights": _as_bool(mapping.get("hasGlobalHighlights")),
             "has_xg": _as_bool(mapping.get("hasXg")),
+            # X3 patch (2026-05-12): pull SofaEditor / coverage / feed
+            # signals so the registry path (this function) exposes the
+            # same fields as the legacy bundle path in
+            # ``event_detail_parser.py``. ``is_editor`` is the canonical
+            # SofaEditor flag that ``match_center_policy`` HARD-BANs on.
+            # ``coverage`` and the crowdsourcing flags are not gated yet
+            # but are kept here so downstream consumers can audit them.
+            "is_editor": _as_bool(mapping.get("isEditor")),
+            "coverage": _as_int(mapping.get("coverage")),
+            "crowdsourcing_enabled": _as_bool(mapping.get("crowdsourcingEnabled")),
+            "crowdsourcing_data_display_enabled": _as_bool(mapping.get("crowdsourcingDataDisplayEnabled")),
+            "feed_locked": _as_bool(mapping.get("feedLocked")),
+            "final_result_only": _as_bool(mapping.get("finalResultOnly")),
         }
     if entity_type == "team":
         entity_id = _as_int(mapping.get("id"))

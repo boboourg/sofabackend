@@ -421,6 +421,19 @@ class LocalApiApplication:
         # the hot-tier worker, which is the freshest correct shape we have.
         # _fetch_sport_live_events_payload remains as a fallback inside
         # _fetch_normalized_payload for the case when the snapshot is missing.
+        #
+        # X3 TODO (2026-05-12): `isEditor=true` events MAY still appear in
+        # `/sport/{slug}/events/live` and `/sport/{slug}/scheduled-events/{date}`
+        # raw-snapshot passthrough because we serve the upstream payload
+        # verbatim — upstream includes editor events in those lists. The
+        # match-center policy HARD-BAN only affects the ingestion side
+        # (we don't fanout edges/details/specials for editor events). If
+        # downstream consumers must NOT see editor events in the list
+        # response either, a separate filter pass over the snapshot
+        # `event[].isEditor == true` entries is needed here. NOT
+        # implementing in X3 because (a) it changes public API contract
+        # and (b) it would require list-level coverage tests we don't
+        # yet have. Surfaced for explicit ACK before changing.
 
         event_root_id = _extract_event_id_from_entity_root_path(path, "event")
         if event_root_id is not None:

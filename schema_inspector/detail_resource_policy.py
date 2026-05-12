@@ -74,9 +74,22 @@ def build_event_detail_request_specs(
     now_timestamp: int | None = None,
     core_only: bool = False,
     hydration_mode: str = "full",
+    is_editor: bool | None = None,
 ) -> tuple[EventDetailRequestSpec, ...]:
+    """Build the event-detail request specs for a given event.
+
+    X'' patch: ``is_editor=True`` short-circuits the football path to an
+    empty tuple — SofaEditor events do not generate any detail fetches.
+    Non-football sports are unaffected (legacy bypass preserved).
+    """
     normalized_sport_slug = str(sport_slug or "").strip().lower()
     normalized_hydration_mode = str(hydration_mode or "full").strip().lower()
+
+    # X'' HARD BAN: football + isEditor=True → no detail fetches.
+    # Short-circuit before any work is done; the per-spec filter would
+    # also drop everything but bailing here is cheaper and clearer.
+    if normalized_sport_slug == "football" and is_editor is True:
+        return ()
     adapter = resolve_sport_adapter(normalized_sport_slug)
     is_live_detail = supports_live_detail_resources(status_type)
     deduped: list[EventDetailRequestSpec] = []
@@ -107,6 +120,7 @@ def build_event_detail_request_specs(
             has_global_highlights=has_global_highlights,
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
+            is_editor=is_editor,
         )
 
     if not core_only:
@@ -160,6 +174,7 @@ def build_event_detail_request_specs(
             has_global_highlights=has_global_highlights,
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
+            is_editor=is_editor,
         )
 
     if normalized_sport_slug != "tennis":
@@ -175,6 +190,7 @@ def build_event_detail_request_specs(
         has_global_highlights=has_global_highlights,
         start_timestamp=start_timestamp,
         now_timestamp=now_timestamp,
+        is_editor=is_editor,
     ):
         add(EVENT_HIGHLIGHTS_ENDPOINT)
 
@@ -194,6 +210,7 @@ def build_event_detail_request_specs(
             has_global_highlights=has_global_highlights,
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
+            is_editor=is_editor,
         )
 
     add(EVENT_GRAPH_ENDPOINT)
@@ -218,6 +235,7 @@ def build_event_detail_request_specs(
         has_global_highlights=has_global_highlights,
         start_timestamp=start_timestamp,
         now_timestamp=now_timestamp,
+        is_editor=is_editor,
     )
 
 
@@ -242,6 +260,7 @@ def _filter_specs(
     has_global_highlights: bool | None,
     start_timestamp: int | None,
     now_timestamp: int | None,
+    is_editor: bool | None = None,
 ) -> tuple[EventDetailRequestSpec, ...]:
     return filter_football_detail_specs(
         specs,
@@ -254,4 +273,5 @@ def _filter_specs(
         has_global_highlights=has_global_highlights,
         start_timestamp=start_timestamp,
         now_timestamp=now_timestamp,
+        is_editor=is_editor,
     )

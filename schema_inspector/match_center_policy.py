@@ -103,8 +103,32 @@ def football_edge_allowed(
     detail_id: int | None,
     status_type: str | None,
     has_xg: bool | None,
+    is_editor: bool | None = None,
 ) -> bool:
-    """Return whether a planned core edge should be fetched for football."""
+    """Return whether a planned core edge should be fetched for football.
+
+    X'' patch (2026-05-12) introduces two behaviour changes versus the
+    legacy ``detailId``-only gate:
+
+    * ``is_editor=True`` is a **HARD BAN** — events published via the
+      SofaEditor crowdsourcing app are excluded from every matchcenter
+      endpoint regardless of ``detailId``, ``status_type``, or capability
+      flags. Empirical sample (67-event audit) showed 100% of
+      ``isEditor=True`` events are amateur leagues with crowd-sourced
+      coverage; the user policy is to never parse this data path.
+    * ``edge_kind="incidents"`` is unlocked for non-isEditor football
+      events even when ``detailId`` is missing. The 67-event audit
+      confirmed 100% upstream availability of ``/incidents`` regardless
+      of detailId — the legacy ``tier_5`` block was over-conservative.
+    * ``edge_kind="lineups"`` is unlocked for non-isEditor football events
+      regardless of ``detailId`` AND regardless of ``status_type``. The
+      previous "block pre-match" heuristic was wrong: upstream returns
+      ``/lineups`` HTTP 200 with ``confirmed=false`` (probable/predicted
+      lineup) before kickoff and ``confirmed=true`` (official) once the
+      sheet is published. ``confirmed=false`` is real data, not absence.
+
+    All other edges keep the legacy tier-based gating exactly.
+    """
     if _normalize_sport(sport_slug) != "football":
         return True
 
@@ -112,8 +136,32 @@ def football_edge_allowed(
     if normalized_edge == "meta":
         return True
 
+    # X'' HARD BAN — SofaEditor app data is never fetched downstream of
+    # ROOT. Must precede every gate decision so even bypass paths honour it.
+    if is_editor is True:
+        return False
+
     normalized_status = _normalize_status(status_type)
     tier = football_detail_tier(detail_id)
+
+    # X'' /incidents unlock — 100% upstream availability for non-isEditor
+    # football. Bypasses the ``tier_5`` block that previously dropped 98%
+    # of football events (detailId missing) from matchcenter coverage.
+    if normalized_edge == "incidents":
+        return True
+
+    # X'' /lineups unlock for tier_5 (no detailId), all statuses.
+    # Upstream returns 200 with ``confirmed=false`` (probable/predicted)
+    # before kickoff and ``confirmed=true`` (official) once the sheet is
+    # published — both are valid matchcenter data. tier_3 stays blocked
+    # because the legacy ``problem`` cohort had genuinely bad coverage.
+    if normalized_edge == "lineups":
+        if tier in {"tier_1", "tier_2", "tier_5"}:
+            return True
+        # tier_3 stays blocked (legacy ``problem detail`` cohort).
+        return False
+
+    # All other edges: legacy tier-based gating, unchanged semantics.
     if normalized_status in _NOTSTARTED_STATUS_TYPES:
         if tier == "tier_1":
             return normalized_edge in _NOTSTARTED_CORE_EDGES
@@ -137,10 +185,21 @@ def football_special_allowed(
     has_event_player_statistics: bool | None,
     has_event_player_heat_map: bool | None,
     has_xg: bool | None,
+    is_editor: bool | None = None,
 ) -> bool:
-    """Gate per-player/best-player followups generated from lineups."""
+    """Gate per-player/best-player followups generated from lineups.
+
+    X'' patch: ``is_editor=True`` is a **HARD BAN** for all player
+    followups — best-players summary, per-player statistics, rating
+    breakdowns, heatmaps, and shotmaps are skipped for SofaEditor events.
+    Existing tier-based gating is preserved for non-isEditor events.
+    """
     if _normalize_sport(sport_slug) != "football":
         return True
+
+    # X'' HARD BAN.
+    if is_editor is True:
+        return False
 
     normalized_special = str(special_kind or "").strip().lower()
     tier = football_detail_tier(detail_id)
@@ -174,10 +233,21 @@ def football_detail_endpoint_allowed(
     has_global_highlights: bool | None,
     start_timestamp: int | None,
     now_timestamp: int | None,
+    is_editor: bool | None = None,
 ) -> bool:
-    """Return whether a non-core event detail endpoint should be fetched."""
+    """Return whether a non-core event detail endpoint should be fetched.
+
+    X'' patch: ``is_editor=True`` is a **HARD BAN** for football. Every
+    detail endpoint (managers, h2h, pregame-form, votes, odds, comments,
+    best-players, shotmap, heatmap, average-positions, highlights, …) is
+    skipped for SofaEditor events.
+    """
     if _normalize_sport(sport_slug) != "football":
         return True
+
+    # X'' HARD BAN.
+    if is_editor is True:
+        return False
 
     normalized_pattern = str(endpoint_pattern or "").strip()
     normalized_status = _normalize_status(status_type)
@@ -191,11 +261,31 @@ def football_detail_endpoint_allowed(
             has_global_highlights=has_global_highlights,
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
+            is_editor=is_editor,
         )
     allowed_patterns = _allowed_detail_patterns_for_status(normalized_status)
     if normalized_pattern not in allowed_patterns:
         return False
-    if tier in {"tier_3", "tier_5"}:
+    # X3 patch (2026-05-12): tier_5 (= detailId missing on root payload) is
+    # the dominant cohort — empirical UI audit on Premier League pre-match
+    # event 15999228 (uniqueTournament=17) showed `detailId` is simply not
+    # set in the upstream root payload yet, but upstream nevertheless
+    # returns 200 for the pre-match detail bundle (managers, h2h,
+    # pregame-form, votes, odds, winning-odds, team-streaks, h2h/events).
+    # The old "tier_3 OR tier_5 → block everything" rule was wrong: it
+    # collapsed ~93% of football events into the "no coverage" cohort even
+    # though upstream had data. We now allow ``_FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS``
+    # for tier_5; premium endpoints (graph, comments, heatmap, shotmap,
+    # best-players, official-tweets, average-positions, highlights) stay
+    # blocked because those genuinely require tier_1/tier_2 coverage on
+    # the root payload. tier_3 (= detailId ∈ {2, 3, 5}) stays fully blocked
+    # because its empirical cohort is the legacy "problem detail" group
+    # where upstream coverage is genuinely poor.
+    if tier == "tier_5":
+        if normalized_pattern in _FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS:
+            return True
+        return False
+    if tier == "tier_3":
         return False
     if normalized_pattern == _COMMENTS_ENDPOINT and tier != "tier_1":
         return False
@@ -218,9 +308,17 @@ def football_highlights_allowed(
     has_global_highlights: bool | None,
     start_timestamp: int | None,
     now_timestamp: int | None,
+    is_editor: bool | None = None,
 ) -> bool:
-    """Allow highlights only after a finished football match has aged out."""
+    """Allow highlights only after a finished football match has aged out.
+
+    X'' patch: ``is_editor=True`` is a **HARD BAN** — highlights for
+    SofaEditor events are never fetched.
+    """
     if _normalize_sport(sport_slug) != "football":
+        return False
+    # X'' HARD BAN.
+    if is_editor is True:
         return False
     if football_detail_tier(detail_id) not in {"tier_1", "tier_2"}:
         return False
@@ -247,10 +345,21 @@ def filter_football_detail_specs(
     has_global_highlights: bool | None,
     start_timestamp: int | None,
     now_timestamp: int | None,
+    is_editor: bool | None = None,
 ) -> tuple[T, ...]:
-    """Filter EventDetailRequestSpec-like objects by endpoint.pattern."""
+    """Filter EventDetailRequestSpec-like objects by endpoint.pattern.
+
+    X'' patch: ``is_editor=True`` short-circuits the whole list to empty
+    for football (HARD BAN). The per-spec gate via
+    ``football_detail_endpoint_allowed`` also honours ``is_editor`` so
+    this is belt-and-suspenders — short-circuit avoids per-spec overhead.
+    """
     if _normalize_sport(sport_slug) != "football":
         return tuple(specs)
+
+    # X'' HARD BAN — empty tuple.
+    if is_editor is True:
+        return ()
 
     filtered: list[T] = []
     for spec in specs:
@@ -269,6 +378,7 @@ def filter_football_detail_specs(
             has_global_highlights=has_global_highlights,
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
+            is_editor=is_editor,
         ):
             filtered.append(spec)
     return tuple(filtered)

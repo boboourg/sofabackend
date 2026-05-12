@@ -121,10 +121,22 @@ class PilotOrchestratorFreshnessTests(unittest.IsolatedAsyncioTestCase):
         endpoint_patterns = [task.endpoint_pattern for task in fetch_executor.tasks]
         self.assertIn("/api/v1/team/{team_id}", endpoint_patterns)
         self.assertNotIn("/api/v1/player/{player_id}", endpoint_patterns)
+        # X3 patch (2026-05-12): football events with detailId missing
+        # (this fixture's event 123 → tier_5) now allow the pre-match detail
+        # bundle (managers, h2h, pregame-form, votes, odds, team-streaks),
+        # so the freshness store sees additional `event-detail:` keys for
+        # the unlocked endpoints. The team/player/manager profile checks
+        # still occur first; the assertions below verify the entity
+        # profile keys (the focus of this test) without pinning the exact
+        # event-detail tail (which depends on _EVENT_STATIC_DETAIL_FRESHNESS_PATTERNS
+        # ordering and may shift if more patterns are added).
         self.assertEqual(
-            freshness_store.checked,
+            freshness_store.checked[:3],
             ["freshness:team:11", "freshness:player:77", "freshness:manager:33"],
         )
+        # Pre-match detail endpoints now also flow through freshness gate.
+        self.assertIn("freshness:event-detail:123:/api/v1/event/{event_id}/managers", freshness_store.checked)
+        self.assertIn("freshness:event-detail:123:/api/v1/event/{event_id}/h2h", freshness_store.checked)
 
     async def test_team_and_manager_fan_out_skipped_when_profiles_are_fresh(self) -> None:
         fetch_executor = _FakeFetchExecutor()

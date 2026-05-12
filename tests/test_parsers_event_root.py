@@ -83,6 +83,135 @@ class EventRootParserTests(unittest.TestCase):
         self.assertEqual(result.metric_rows["event_status"][0]["type"], "inprogress")
         self.assertEqual(len(result.relation_upserts["event_team"]), 2)
 
+    def test_event_root_parser_extracts_is_editor_and_coverage_flags(self) -> None:
+        """X3 patch (2026-05-12): the registry path must surface SofaEditor /
+        coverage / feed signals into the event row so downstream
+        ``match_center_policy`` HARD-BAN logic sees them. Previously these
+        were only set by the legacy bundle path in
+        ``event_detail_parser.py``; for registry-only callers the fields
+        were missing → HARD BAN did not fire."""
+        parser = EventRootParser()
+        snapshot = RawSnapshot(
+            snapshot_id=202,
+            endpoint_pattern="/api/v1/event/{event_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/99",
+            resolved_url="https://www.sofascore.com/api/v1/event/99",
+            envelope_key="event",
+            http_status=200,
+            payload={
+                "event": {
+                    "id": 99,
+                    "slug": "amateur-vs-amateur",
+                    "tournament": {
+                        "id": 999,
+                        "slug": "amateur-league",
+                        "name": "Amateur Regional Cup",
+                        "category": {
+                            "id": 9,
+                            "slug": "amateur",
+                            "name": "Amateur",
+                            "country": {"alpha2": "DE", "alpha3": "DEU", "slug": "germany", "name": "Germany"},
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                        "uniqueTournament": {"id": 8888, "slug": "amateur-cup", "name": "Amateur Cup"},
+                    },
+                    "season": {"id": 12345, "name": "2025/26", "year": "25/26"},
+                    "homeTeam": {"id": 1, "slug": "a", "name": "A"},
+                    "awayTeam": {"id": 2, "slug": "b", "name": "B"},
+                    "status": {"code": 0, "description": "Not started", "type": "notstarted"},
+                    "startTimestamp": 1_800_000_000,
+                    # X3: new fields the registry path must propagate.
+                    "isEditor": True,
+                    "coverage": -1,
+                    "crowdsourcingEnabled": True,
+                    "crowdsourcingDataDisplayEnabled": True,
+                    "feedLocked": False,
+                    "finalResultOnly": False,
+                    "detailId": None,
+                    "hasXg": False,
+                    "hasEventPlayerStatistics": False,
+                    "hasEventPlayerHeatMap": False,
+                    "hasGlobalHighlights": False,
+                }
+            },
+            fetched_at="2026-05-12T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=99,
+            context_event_id=99,
+        )
+
+        result = parser.parse(snapshot)
+
+        self.assertEqual(result.status, "parsed")
+        event_row = result.entity_upserts["event"][0]
+        # Critical: is_editor must be True so HARD BAN fires downstream.
+        self.assertEqual(event_row.get("is_editor"), True)
+        self.assertEqual(event_row.get("coverage"), -1)
+        self.assertEqual(event_row.get("crowdsourcing_enabled"), True)
+        self.assertEqual(event_row.get("crowdsourcing_data_display_enabled"), True)
+        self.assertEqual(event_row.get("feed_locked"), False)
+        self.assertEqual(event_row.get("final_result_only"), False)
+
+    def test_event_root_parser_missing_new_fields_returns_none(self) -> None:
+        """X3 patch: when the upstream payload omits the new fields (e.g.
+        pre-match Premier League with detailId missing), the registry
+        path returns ``None`` for each, not a magic default. Downstream
+        ``is_editor=None`` is treated as "unknown / not banned"."""
+        parser = EventRootParser()
+        snapshot = RawSnapshot(
+            snapshot_id=203,
+            endpoint_pattern="/api/v1/event/{event_id}",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/100",
+            resolved_url="https://www.sofascore.com/api/v1/event/100",
+            envelope_key="event",
+            http_status=200,
+            payload={
+                "event": {
+                    "id": 100,
+                    "slug": "pre-match",
+                    "tournament": {
+                        "id": 1,
+                        "slug": "premier-league",
+                        "name": "Premier League",
+                        "category": {
+                            "id": 1,
+                            "slug": "england",
+                            "name": "England",
+                            "country": {"alpha2": "EN", "alpha3": "ENG", "slug": "england", "name": "England"},
+                            "sport": {"id": 1, "slug": "football", "name": "Football"},
+                        },
+                        "uniqueTournament": {"id": 17, "slug": "premier-league", "name": "Premier League"},
+                    },
+                    "season": {"id": 76986, "name": "Premier League 25/26", "year": "25/26"},
+                    "homeTeam": {"id": 17, "slug": "man-city", "name": "Manchester City"},
+                    "awayTeam": {"id": 7, "slug": "crystal-palace", "name": "Crystal Palace"},
+                    "status": {"code": 0, "description": "Not started", "type": "notstarted"},
+                    "startTimestamp": 1_800_000_000,
+                    # No isEditor, no coverage, no crowdsourcing*, no feedLocked,
+                    # no finalResultOnly, no detailId, no hasXg, etc. — pre-match
+                    # Premier League payloads omit these entirely.
+                }
+            },
+            fetched_at="2026-05-12T12:00:00+00:00",
+            context_entity_type="event",
+            context_entity_id=100,
+            context_event_id=100,
+        )
+
+        result = parser.parse(snapshot)
+        self.assertEqual(result.status, "parsed")
+        event_row = result.entity_upserts["event"][0]
+        # All new fields default to None when upstream omits them.
+        self.assertIsNone(event_row.get("is_editor"))
+        self.assertIsNone(event_row.get("coverage"))
+        self.assertIsNone(event_row.get("crowdsourcing_enabled"))
+        self.assertIsNone(event_row.get("crowdsourcing_data_display_enabled"))
+        self.assertIsNone(event_row.get("feed_locked"))
+        self.assertIsNone(event_row.get("final_result_only"))
+        self.assertIsNone(event_row.get("detail_id"))
+
 
 if __name__ == "__main__":
     unittest.main()

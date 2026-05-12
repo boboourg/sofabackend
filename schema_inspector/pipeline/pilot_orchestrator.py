@@ -420,6 +420,12 @@ class PilotOrchestrator:
         has_event_player_heat_map = None
         has_global_highlights = None
         has_xg = None
+        # X'' matchcenter policy: ``is_editor`` lifted from the parsed root
+        # event row so every downstream policy call can honour the HARD
+        # BAN on SofaEditor (crowdsourcing-app) events. None → "unknown"
+        # treated as non-banned to preserve legacy paths for events whose
+        # root payload predates the field landing in the parser.
+        is_editor = None
         tournament_tier = None
         tournament_user_count = None
         if root_parse is not None:
@@ -438,6 +444,7 @@ class PilotOrchestrator:
                 has_event_player_heat_map = event_row.get("has_event_player_heat_map")
                 has_global_highlights = event_row.get("has_global_highlights")
                 has_xg = event_row.get("has_xg")
+                is_editor = event_row.get("is_editor")
             if season_rows:
                 season_id = season_rows[0].get("id")
             if unique_tournament_rows:
@@ -533,6 +540,7 @@ class PilotOrchestrator:
                     detail_id=detail_id,
                     status_type=status_type,
                     has_xg=has_xg,
+                    is_editor=is_editor,  # X'' matchcenter ban
                 ):
                     continue
                 endpoint = _endpoint_for_edge_kind(edge_kind)
@@ -565,6 +573,7 @@ class PilotOrchestrator:
                     detail_id=detail_id,
                     status_type=status_type,
                     has_xg=has_xg,
+                    is_editor=is_editor,  # X'' matchcenter ban
                 ):
                     continue
                 endpoint = _endpoint_for_edge_kind(edge_kind)
@@ -595,6 +604,7 @@ class PilotOrchestrator:
                                 has_event_player_statistics=has_event_player_statistics,
                                 has_event_player_heat_map=has_event_player_heat_map,
                                 has_xg=has_xg,
+                                is_editor=is_editor,  # X'' matchcenter ban
                             ):
                                 continue
                             special_outcome, special_parse = await self._run_special_job(
@@ -655,6 +665,7 @@ class PilotOrchestrator:
                         status_type=status_type,
                         has_xg=has_xg,
                         status_phase=status_phase,
+                        is_editor=is_editor,
                     )
 
                 if self.final_sweep_gate is None:
@@ -888,6 +899,7 @@ class PilotOrchestrator:
             now_timestamp=int(self.now_ms_factory()) // 1000,
             core_only=core_only,
             hydration_mode=effective_hydration_mode,
+            is_editor=is_editor,  # X'' matchcenter ban
         )
         if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
             detail_specs: list[tuple[SofascoreEndpoint, _EventEndpointFetchSpec]] = []
@@ -975,6 +987,7 @@ class PilotOrchestrator:
                         status_phase=status_phase,
                         parent_endpoint=endpoint,
                         parent_outcome=outcome,
+                        is_editor=is_editor,
                     )
                     fetch_outcomes.extend(shotmap_outcomes)
                     parse_results.extend(shotmap_parses)
@@ -1339,9 +1352,17 @@ class PilotOrchestrator:
         status_type: str | None = None,
         has_xg: bool | None = None,
         status_phase: str = "unknown",
+        is_editor: bool | None = None,
     ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
         outcomes: list[FetchOutcomeEnvelope] = []
         parses: list[object] = []
+        # X3 patch (2026-05-12): SofaEditor football events get NO final
+        # sweep — neither core edges (already gated by ``football_edge_allowed``
+        # below, which honours ``is_editor``) nor the Phase-2 ``final_only_edges``
+        # set, which would otherwise run unconditionally. Guarding here is the
+        # only way to keep Phase-2 honoured. Non-football sports are unaffected.
+        if str(sport_slug or "").strip().lower() == "football" and is_editor is True:
+            return outcomes, parses
         adapter = resolve_sport_adapter(sport_slug)
         # Phase 1: core edges, gated by football_edge_allowed (existing behaviour).
         for edge_kind in adapter.core_event_edges:
@@ -1351,6 +1372,7 @@ class PilotOrchestrator:
                 detail_id=detail_id,
                 status_type=status_type,
                 has_xg=has_xg,
+                is_editor=is_editor,
             ):
                 continue
             endpoint = _endpoint_for_edge_kind(edge_kind)
@@ -1377,6 +1399,9 @@ class PilotOrchestrator:
         # finished match has the canonical post-match versions of /comments,
         # /best-players/summary, /h2h, /pregame-form. They are NOT in
         # live_delta_edge_kinds, so live polling cadence is unchanged.
+        # X3 patch: ``is_editor=True`` short-circuits before reaching Phase 2
+        # (see guard at top of method), so this loop only runs for non-editor
+        # events.
         for edge_kind in adapter.final_only_edges:
             endpoint = _endpoint_for_final_only_edge(edge_kind)
             if endpoint is None:
@@ -1527,6 +1552,7 @@ class PilotOrchestrator:
         status_phase: str,
         parent_endpoint: SofascoreEndpoint,
         parent_outcome: FetchOutcomeEnvelope,
+        is_editor: bool | None = None,
     ) -> tuple[list[FetchOutcomeEnvelope], list[object]]:
         if (
             sport_slug != "football"
@@ -1549,6 +1575,7 @@ class PilotOrchestrator:
                 has_event_player_statistics=None,
                 has_event_player_heat_map=None,
                 has_xg=has_xg,
+                is_editor=is_editor,
             ):
                 continue
             outcome, parsed = await self._run_special_job(
@@ -1569,6 +1596,7 @@ class PilotOrchestrator:
                 has_event_player_statistics=None,
                 has_event_player_heat_map=None,
                 has_xg=has_xg,
+                is_editor=is_editor,
             ):
                 continue
             outcome, parsed = await self._run_special_job(
