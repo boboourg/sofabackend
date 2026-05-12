@@ -1220,6 +1220,28 @@ async def _dispatch(args) -> int:
             "worker-live-tier-3": "SCHEMA_INSPECTOR_LIVE_TIER_3_PROXY_MAX_IN_USE_PER_ENDPOINT",
             "worker-live-warm": "SCHEMA_INSPECTOR_LIVE_WARM_PROXY_MAX_IN_USE_PER_ENDPOINT",
         }
+        # X' patch: same lane-scoping pattern for the InspectorTransport
+        # session-cache LRU cap. Ships default-unset by this commit — env
+        # unset on every lane means `_resolve_session_cache_max_entries`
+        # returns 0 → unbounded cache → behaviour identical to pre-patch.
+        # Phase 1 canary will enable a single scoped key (e.g.
+        # SCHEMA_INSPECTOR_LIVE_TIER_1_SESSION_CACHE_MAX_ENTRIES=5) on one
+        # worker via a systemd drop-in, without touching this dispatch table.
+        _SCOPED_SESSION_CACHE_KEY_BY_COMMAND = {
+            "worker-hydrate": "SCHEMA_INSPECTOR_HYDRATE_SESSION_CACHE_MAX_ENTRIES",
+            "worker-live-tier-1": "SCHEMA_INSPECTOR_LIVE_TIER_1_SESSION_CACHE_MAX_ENTRIES",
+            "worker-live-tier-2": "SCHEMA_INSPECTOR_LIVE_TIER_2_SESSION_CACHE_MAX_ENTRIES",
+            "worker-live-tier-3": "SCHEMA_INSPECTOR_LIVE_TIER_3_SESSION_CACHE_MAX_ENTRIES",
+            "worker-live-warm": "SCHEMA_INSPECTOR_LIVE_WARM_SESSION_CACHE_MAX_ENTRIES",
+            "worker-live-hot": "SCHEMA_INSPECTOR_LIVE_HOT_SESSION_CACHE_MAX_ENTRIES",
+            "worker-historical-hydrate": "SCHEMA_INSPECTOR_HISTORICAL_HYDRATE_SESSION_CACHE_MAX_ENTRIES",
+            "worker-historical-discovery": "SCHEMA_INSPECTOR_HISTORICAL_DISCOVERY_SESSION_CACHE_MAX_ENTRIES",
+            "worker-historical-tournament": "SCHEMA_INSPECTOR_HISTORICAL_TOURNAMENT_SESSION_CACHE_MAX_ENTRIES",
+            "worker-historical-enrichment": "SCHEMA_INSPECTOR_HISTORICAL_ENRICHMENT_SESSION_CACHE_MAX_ENTRIES",
+            "worker-resource-refresh": "SCHEMA_INSPECTOR_RESOURCE_REFRESH_SESSION_CACHE_MAX_ENTRIES",
+            "worker-discovery": "SCHEMA_INSPECTOR_DISCOVERY_SESSION_CACHE_MAX_ENTRIES",
+            "worker-live-discovery": "SCHEMA_INSPECTOR_LIVE_DISCOVERY_SESSION_CACHE_MAX_ENTRIES",
+        }
         scoped_multiplier_keys: tuple[str, ...] = ()
         scoped_key = _SCOPED_MULTIPLIER_KEY_BY_COMMAND.get(command)
         if scoped_key is not None:
@@ -1228,12 +1250,17 @@ async def _dispatch(args) -> int:
         scoped_max_in_use_key = _SCOPED_MAX_IN_USE_KEY_BY_COMMAND.get(command)
         if scoped_max_in_use_key is not None:
             scoped_max_in_use_keys = (scoped_max_in_use_key,)
+        scoped_session_cache_keys: tuple[str, ...] = ()
+        scoped_session_cache_key = _SCOPED_SESSION_CACHE_KEY_BY_COMMAND.get(command)
+        if scoped_session_cache_key is not None:
+            scoped_session_cache_keys = (scoped_session_cache_key,)
         runtime_config = load_runtime_config(
             proxy_urls=args.proxy or None,
             user_agent=args.user_agent,
             max_attempts=args.max_attempts,
             proxy_session_multiplier_env_keys=scoped_multiplier_keys,
             proxy_max_in_use_per_endpoint_env_keys=scoped_max_in_use_keys,
+            session_cache_max_entries_env_keys=scoped_session_cache_keys,
         )
     if _normalized_source_slug(getattr(args, "source", None)) is not None:
         runtime_config = replace(runtime_config, source_slug=_normalized_source_slug(args.source))

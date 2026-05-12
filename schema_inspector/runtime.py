@@ -209,6 +209,55 @@ def _resolve_proxy_max_in_use_per_endpoint(
     return 1
 
 
+def _resolve_session_cache_max_entries(
+    env: Mapping[str, str],
+    *,
+    env_keys: tuple[str, ...] = (),
+) -> int:
+    """Resolve the per-worker session-cache size cap (X' patch).
+
+    ``InspectorTransport._session_cache`` historically grew unbounded — every
+    distinct ``(proxy_url, fingerprint_name)`` tuple produced one keep-alive
+    ``AsyncSession`` that was retained for the worker's lifetime. With 5 proxy
+    credentials × 5 fingerprint profiles, each worker held 25 cached sessions
+    × N workers in the fleet → ~944 sustained TCP CONNECTs to Smartproxy
+    gateway in production (see /tmp/sofa.pcap analysis 2026-05-12).
+
+    A positive cap activates LRU eviction in
+    :class:`schema_inspector.transport.InspectorTransport`. The semantics:
+
+    * ``0`` (default, set when env unset / invalid): legacy unbounded cache.
+      **Behavioural no-op** — strictly identical to pre-patch behaviour. This
+      is the safety property for the no-op deploy.
+    * ``>0``: cache size capped at this many entries. Oldest IDLE entry is
+      evicted (and its session closed) when a new entry is about to push the
+      size past the cap. In-flight entries (refcount > 0) are never evicted.
+
+    Priority order, same pattern as :func:`_resolve_proxy_session_multiplier`:
+
+    1. Each key in ``env_keys`` in order (caller-supplied per-lane scoped keys,
+       e.g. ``SCHEMA_INSPECTOR_LIVE_TIER_1_SESSION_CACHE_MAX_ENTRIES``).
+    2. ``SCHEMA_INSPECTOR_SESSION_CACHE_MAX_ENTRIES`` (global fallback).
+    3. Default ``0`` when nothing is set or all values are invalid.
+
+    Negative values clamp to ``0``. Values above 10000 clamp to ``10000``
+    (sanity cap — anyone setting > 10k is misconfiguring).
+    """
+    keys_to_check = list(env_keys) + ["SCHEMA_INSPECTOR_SESSION_CACHE_MAX_ENTRIES"]
+    for key in keys_to_check:
+        raw = (env.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value < 0:
+            return 0
+        return min(value, 10000)
+    return 0
+
+
 @dataclass(frozen=True)
 class FingerprintProfile:
     """A lightweight browser fingerprint template for one outbound request.
@@ -289,6 +338,11 @@ class RuntimeConfig:
     # no username/session-id mutation involved, unlike Variant B which
     # was rejected by Smartproxy with HTTP 612).
     proxy_max_in_use_per_endpoint: int = 1
+    # X' patch: per-worker InspectorTransport._session_cache size cap.
+    # 0 (default) = unbounded (legacy). >0 = LRU eviction past this size.
+    # See ``_resolve_session_cache_max_entries`` for the env wiring and
+    # ``InspectorTransport._acquire_session`` for the eviction algorithm.
+    session_cache_max_entries: int = 0
     fingerprint_profiles: tuple[FingerprintProfile, ...] = ()
     challenge_markers: tuple[str, ...] = (
         "captcha",
@@ -343,6 +397,7 @@ def load_runtime_config(
     max_attempts: int | None = None,
     proxy_session_multiplier_env_keys: tuple[str, ...] = (),
     proxy_max_in_use_per_endpoint_env_keys: tuple[str, ...] = (),
+    session_cache_max_entries_env_keys: tuple[str, ...] = (),
 ) -> RuntimeConfig:
     """Build a runtime config from explicit arguments and environment.
 
@@ -358,6 +413,13 @@ def load_runtime_config(
     process into a different multiplier without affecting other lanes.
     Default empty tuple → only the global key is consulted → if absent,
     multiplier=1 (no-op, behaviour identical to pre-expansion code).
+
+    session_cache_max_entries_env_keys: ordered list of env vars consulted
+    for the X' session-cache LRU cap, mirroring the same priority semantics
+    as the other ``*_env_keys`` tuples. ``SCHEMA_INSPECTOR_SESSION_CACHE_MAX_ENTRIES``
+    is the global fallback. Default empty tuple → only the global key is
+    consulted → if absent, returns 0 → InspectorTransport keeps the legacy
+    unbounded cache (no-op deploy).
     """
 
     env = _load_project_env() if env is None else env
@@ -367,6 +429,9 @@ def load_runtime_config(
     )
     max_in_use_per_endpoint = _resolve_proxy_max_in_use_per_endpoint(
         env, env_keys=proxy_max_in_use_per_endpoint_env_keys
+    )
+    session_cache_max_entries = _resolve_session_cache_max_entries(
+        env, env_keys=session_cache_max_entries_env_keys
     )
     expanded_endpoints = _expand_proxy_urls_with_sessions(
         configured_proxy_urls, multiplier=multiplier
@@ -415,6 +480,7 @@ def load_runtime_config(
         ),
         proxy_endpoints=endpoints,
         proxy_max_in_use_per_endpoint=max_in_use_per_endpoint,
+        session_cache_max_entries=session_cache_max_entries,
         proxy_request_cooldown_seconds=_env_float(env, "SCHEMA_INSPECTOR_PROXY_REQUEST_COOLDOWN_SECONDS", 1.5),
         proxy_request_jitter_seconds=_env_float(env, "SCHEMA_INSPECTOR_PROXY_REQUEST_JITTER_SECONDS", 1.0),
         fingerprint_profiles=fingerprint_profiles,

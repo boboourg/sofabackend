@@ -9,7 +9,8 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -46,6 +47,36 @@ class _RawResponse:
     status_code: int
     headers: Mapping[str, str]
     body_bytes: bytes
+
+
+@dataclass
+class _SessionEntry:
+    """One cached ``AsyncSession`` plus its refcount + tombstone flag.
+
+    X' patch: introduced so that LRU eviction and discard-on-error can both
+    avoid closing a session that is **currently being used** by another
+    concurrent caller. Lifecycle:
+
+    * Born with ``refcount=0`` immediately before being inserted into
+      ``InspectorTransport._session_cache``; ``_acquire_session`` then bumps
+      it to 1 and returns ``(session, entry)`` to the caller.
+    * ``_release_session(entry)`` decrements ``refcount``. If the entry is
+      already tombstoned and ``refcount`` reaches 0, the session is closed
+      and the entry is removed from ``_pending_close``.
+    * ``_discard_session(...)`` removes the entry from the active cache.
+      If ``refcount > 0`` at that moment, the entry is appended to
+      ``_pending_close`` (tombstone) and the close is deferred until
+      every in-flight caller releases. Otherwise it is closed immediately.
+    * LRU eviction in ``_acquire_session`` (when ``_session_cache_max > 0``)
+      only considers entries with ``refcount == 0``; in-flight entries
+      are skipped. If every entry is in-flight, the cache temporarily
+      exceeds the cap (logged as a warning); the next idle entry on the
+      next ``_acquire_session`` call will be evicted.
+    """
+
+    session: AsyncSession
+    refcount: int = 0
+    tombstoned: bool = False
 
 
 class ProxyRequiredError(RuntimeError):
@@ -93,7 +124,24 @@ class InspectorTransport:
             max_in_use_per_endpoint=runtime_config.proxy_max_in_use_per_endpoint,
             proxy_state_store=proxy_state_store if proxy_state_store is not None else _load_proxy_state_store_from_env(),
         )
-        self._session_cache: dict[str, AsyncSession] = {}
+        # X' patch: ``OrderedDict`` preserves LRU semantics — ``move_to_end``
+        # on cache hit, evict the oldest idle entry on insert when capped.
+        # Wraps each session in ``_SessionEntry`` so the eviction algorithm
+        # and ``_discard_session`` can both honour an in-flight refcount.
+        # See ``_SessionEntry`` docstring for the lifecycle.
+        self._session_cache: OrderedDict[str, _SessionEntry] = OrderedDict()
+        # Tombstoned entries: removed from the active cache but still held
+        # alive because at least one in-flight caller has them open. When
+        # the final ``_release_session`` decrements refcount to 0, the
+        # session is closed and the entry leaves this list.
+        self._pending_close: list[_SessionEntry] = []
+        # Cap on ``_session_cache`` size. 0 = unbounded (legacy no-op).
+        # Read from ``runtime_config.session_cache_max_entries`` which itself
+        # came from env via ``_resolve_session_cache_max_entries`` — see the
+        # docstring on that resolver for the env priority order.
+        self._session_cache_max: int = max(
+            0, int(getattr(runtime_config, "session_cache_max_entries", 0) or 0)
+        )
         self._session_lock = asyncio.Lock()
         self._fingerprint_lock = asyncio.Lock()
         self._fingerprint_cursor = 0
@@ -345,32 +393,49 @@ class InspectorTransport:
         if parsed.scheme == "file":
             return await asyncio.to_thread(self._execute_local_file_once, url, headers, timeout)
 
-        # 2. STEALTH MODE for HTTP/HTTPS
-        session = await self._get_session(proxy_url, fingerprint_profile=fingerprint_profile)
-        if str(method or "GET").upper() == "HEAD":
-            response = await session.head(
-                url,
-                headers=dict(headers),
-                timeout=timeout,
-            )
-        else:
-            response = await session.get(
-                url,
-                headers=dict(headers),
-                timeout=timeout,
-            )
-
-        return _RawResponse(
-            resolved_url=response.url,
-            status_code=response.status_code,
-            headers=dict(response.headers),
-            body_bytes=response.content,
+        # 2. STEALTH MODE for HTTP/HTTPS — refcount-tracked acquire/release
+        # (X' patch). The refcount holds the entry open for the duration of
+        # this single HTTP call so that a concurrent ``_discard_session``
+        # OR an LRU eviction triggered by another in-flight caller cannot
+        # close the underlying session out from under us.
+        session, entry = await self._acquire_session(
+            proxy_url, fingerprint_profile=fingerprint_profile
         )
+        try:
+            if str(method or "GET").upper() == "HEAD":
+                response = await session.head(
+                    url,
+                    headers=dict(headers),
+                    timeout=timeout,
+                )
+            else:
+                response = await session.get(
+                    url,
+                    headers=dict(headers),
+                    timeout=timeout,
+                )
+
+            return _RawResponse(
+                resolved_url=response.url,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                body_bytes=response.content,
+            )
+        finally:
+            await self._release_session(entry)
 
     async def close(self) -> None:
+        """Close every cached session and drain the tombstone list.
+
+        Used on shutdown — synchronous awaits are safe because no in-flight
+        callers can race a shutdown path (the runtime stops dispatching new
+        work before invoking ``close``).
+        """
         async with self._session_lock:
-            sessions = list(self._session_cache.values())
+            sessions = [entry.session for entry in self._session_cache.values()]
+            sessions.extend(entry.session for entry in self._pending_close)
             self._session_cache.clear()
+            self._pending_close.clear()
         for session in sessions:
             await self._close_session(session)
 
@@ -379,24 +444,91 @@ class InspectorTransport:
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
 
-    async def _get_session(
+    async def _acquire_session(
         self,
         proxy_url: str | None,
         *,
         fingerprint_profile: FingerprintProfile | None = None,
-    ) -> AsyncSession:
-        session_key = self._session_key(proxy_url, fingerprint_profile=fingerprint_profile)
-        cached = self._session_cache.get(session_key)
-        if cached is not None:
-            return cached
+    ) -> tuple[AsyncSession, _SessionEntry]:
+        """Return ``(session, entry)`` for the (proxy_url, fingerprint) key.
 
+        On cache hit: refresh LRU order and bump refcount on the existing
+        entry. On cache miss: evict idle entries to make room for the cap
+        (if set), then create a fresh ``AsyncSession`` and insert it with
+        refcount=1.
+
+        Callers MUST call :meth:`_release_session` on the returned entry
+        exactly once when they are done using the session. ``_execute_once``
+        wraps this in a try/finally — there is no other internal caller.
+        """
+        session_key = self._session_key(proxy_url, fingerprint_profile=fingerprint_profile)
+        evicted_entries: list[_SessionEntry] = []
         async with self._session_lock:
-            cached = self._session_cache.get(session_key)
-            if cached is not None:
-                return cached
-            session = AsyncSession(**self._session_kwargs(proxy_url, fingerprint_profile=fingerprint_profile))
-            self._session_cache[session_key] = session
-            return session
+            entry = self._session_cache.get(session_key)
+            if entry is not None:
+                # Cache hit: LRU-touch and bump refcount.
+                self._session_cache.move_to_end(session_key)
+                entry.refcount += 1
+                return entry.session, entry
+            # Cache miss: evict idle entries to make room when capped.
+            if self._session_cache_max > 0:
+                evicted_entries = self._collect_evictions_locked()
+            new_session = AsyncSession(
+                **self._session_kwargs(proxy_url, fingerprint_profile=fingerprint_profile)
+            )
+            new_entry = _SessionEntry(session=new_session, refcount=1)
+            self._session_cache[session_key] = new_entry
+        # Close evicted sessions outside the lock to avoid blocking other
+        # acquirers on a slow curl close. Errors are swallowed to local logs.
+        for evicted in evicted_entries:
+            asyncio.create_task(self._close_session_swallow(evicted.session))
+        return new_entry.session, new_entry
+
+    def _collect_evictions_locked(self) -> list[_SessionEntry]:
+        """Pop oldest IDLE entries (refcount==0) until size < cap.
+
+        MUST be called with ``self._session_lock`` held. Skips in-flight
+        entries; if every entry is in-flight, returns whatever was already
+        evicted and allows the cache to temporarily exceed the cap (logged
+        as a warning so the operator sees the pressure).
+        """
+        evicted: list[_SessionEntry] = []
+        # +1 because we're about to insert a new entry; eviction must
+        # produce room for that incoming entry, not just match the cap.
+        while len(self._session_cache) >= self._session_cache_max:
+            evict_key = None
+            for candidate_key, candidate_entry in self._session_cache.items():
+                if candidate_entry.refcount == 0:
+                    evict_key = candidate_key
+                    break
+            if evict_key is None:
+                logger.warning(
+                    "Session cache cap exceeded — all entries in-flight; "
+                    "over-cap allowed temporarily (cap=%d size=%d)",
+                    self._session_cache_max,
+                    len(self._session_cache),
+                )
+                return evicted
+            evicted.append(self._session_cache.pop(evict_key))
+        return evicted
+
+    async def _release_session(self, entry: _SessionEntry) -> None:
+        """Decrement refcount. If the entry is tombstoned and now idle, close it.
+
+        Safe to call multiple times — refcount is clamped at 0. Errors from
+        the underlying ``session.close()`` are swallowed (logged at DEBUG).
+        """
+        to_close: AsyncSession | None = None
+        async with self._session_lock:
+            entry.refcount = max(0, entry.refcount - 1)
+            if entry.tombstoned and entry.refcount == 0:
+                try:
+                    self._pending_close.remove(entry)
+                except ValueError:
+                    pass
+                to_close = entry.session
+        if to_close is not None:
+            await self._close_session_swallow(to_close)
 
     async def _discard_session(
         self,
@@ -404,11 +536,27 @@ class InspectorTransport:
         *,
         fingerprint_profile: FingerprintProfile | None = None,
     ) -> None:
+        """Remove the cached session for this (proxy_url, fingerprint) key.
+
+        If the entry is in-flight (refcount > 0), tombstone it: pop from the
+        active cache, move to ``_pending_close``, and defer the actual close
+        until the last in-flight caller releases. This prevents premature
+        ``session.close()`` from racing concurrent ``session.get()`` calls
+        that the caller had already started before the discard fired.
+        """
         session_key = self._session_key(proxy_url, fingerprint_profile=fingerprint_profile)
+        to_close: AsyncSession | None = None
         async with self._session_lock:
-            session = self._session_cache.pop(session_key, None)
-        if session is not None:
-            await self._close_session(session)
+            entry = self._session_cache.pop(session_key, None)
+            if entry is None:
+                return
+            if entry.refcount > 0:
+                entry.tombstoned = True
+                self._pending_close.append(entry)
+            else:
+                to_close = entry.session
+        if to_close is not None:
+            await self._close_session_swallow(to_close)
 
     async def _close_session(self, session: AsyncSession) -> None:
         close = getattr(session, "close", None)
@@ -417,6 +565,20 @@ class InspectorTransport:
         maybe_awaitable = close()
         if inspect.isawaitable(maybe_awaitable):
             await maybe_awaitable
+
+    async def _close_session_swallow(self, session: AsyncSession) -> None:
+        """Same as :meth:`_close_session` but swallows + logs any error.
+
+        Used in fire-and-forget paths (eviction, tombstone close) where an
+        unhandled exception would crash the asyncio loop or surface as an
+        unrelated retry attempt's exception. The legacy synchronous
+        ``_close_session`` is preserved for the shutdown ``close()`` path
+        where errors should propagate to the supervising code.
+        """
+        try:
+            await self._close_session(session)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Background session close failed: %s", exc, exc_info=True)
 
     async def _next_fingerprint_profile(self) -> FingerprintProfile | None:
         profiles = self.runtime_config.fingerprint_profiles
