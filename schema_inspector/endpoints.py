@@ -354,12 +354,23 @@ UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT = season_rounds_endpoint()
 UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT = season_cuptrees_endpoint()
 
 
+UNIQUE_TOURNAMENT_MEDIA_ENDPOINT = SofascoreEndpoint(
+    path_template="/api/v1/unique-tournament/{unique_tournament_id}/media",
+    envelope_key="media",
+    target_table="api_payload_snapshot",
+    notes=(
+        "Synthetic league media feed aggregated from already-ingested "
+        "/api/v1/event/{event_id}/highlights snapshots. DB-only, no upstream fetch."
+    ),
+)
+
 COMPETITION_ENDPOINTS = (
     UNIQUE_TOURNAMENT_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT,
+    UNIQUE_TOURNAMENT_MEDIA_ENDPOINT,
 )
 
 

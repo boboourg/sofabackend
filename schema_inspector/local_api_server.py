@@ -1,4 +1,4 @@
-"""Serve the ingested multi-sport dataset through local Sofascore-style HTTP routes."""
+﻿"""Serve the ingested multi-sport dataset through local Sofascore-style HTTP routes."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,6 +69,11 @@ _SOURCE_TABLES_BY_PATH_TEMPLATE: dict[str, tuple[str, ...]] | None = None
 _SEASON_EVENTS_PAGE_SIZE = 30
 _SEASON_EVENTS_LAST_TEMPLATE = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/last/{page}"
 _SEASON_EVENTS_NEXT_TEMPLATE = "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/next/{page}"
+# Cap the synthetic /unique-tournament/{id}/media payload at this many events
+# so a 1000-match season cannot blow up the response body. Events are sorted
+# newest-first so the most relevant highlights are kept.
+_UNIQUE_TOURNAMENT_MEDIA_EVENT_LIMIT = 200
+_EVENT_HIGHLIGHTS_ENDPOINT_PATTERN = "/api/v1/event/{event_id}/highlights"
 
 
 @dataclass(frozen=True)
@@ -948,6 +953,10 @@ class LocalApiApplication:
                 page=max(int(path_params["page"]), 0),
                 direction="last" if template == _SEASON_EVENTS_LAST_TEMPLATE else "next",
             )
+        if template == "/api/v1/unique-tournament/{unique_tournament_id}/media":
+            return await self._fetch_unique_tournament_media_payload(
+                int(path_params["unique_tournament_id"]),
+            )
         if template in {
             "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
             "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}",
@@ -1073,6 +1082,127 @@ class LocalApiApplication:
             ],
             "hasNextPage": has_next_page,
         }
+
+    async def _fetch_unique_tournament_media_payload(
+        self,
+        unique_tournament_id: int,
+    ) -> dict[str, Any]:
+        """Synthetic ``/api/v1/unique-tournament/{id}/media`` aggregator.
+
+        Reads the latest ``/api/v1/event/{event_id}/highlights`` snapshot per
+        event whose ``unique_tournament_id`` matches the route parameter,
+        suppresses soft-error / 4xx envelopes, drops snapshots with an empty
+        ``highlights`` array, and groups the remaining payloads by event with
+        minimal event context built from normalized tables (event,
+        event_status, team, tournament, unique_tournament, season).
+
+        Sort order (newest-first):
+          1. latest highlight snapshot ``fetched_at`` DESC
+          2. event ``start_timestamp`` DESC
+          3. event ``id`` DESC
+
+        Result is capped at ``_UNIQUE_TOURNAMENT_MEDIA_EVENT_LIMIT`` events.
+
+        Always returns HTTP 200 with at least ``{"media": []}`` so an empty
+        league does not 404 — the call is DB-only and never hits Sofascore.
+        """
+
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT DISTINCT ON (aps.context_entity_id)
+                    aps.context_entity_id AS event_id,
+                    aps.payload AS snapshot_payload,
+                    aps.is_soft_error_payload,
+                    aps.http_status,
+                    aps.fetched_at AS snapshot_fetched_at,
+                    e.slug AS event_slug,
+                    e.custom_id AS event_custom_id,
+                    e.start_timestamp,
+                    e.status_code,
+                    es.type AS status_type,
+                    es.description AS status_description,
+                    e.home_team_id,
+                    ht.slug AS home_team_slug,
+                    ht.name AS home_team_name,
+                    ht.short_name AS home_team_short_name,
+                    e.away_team_id,
+                    at.slug AS away_team_slug,
+                    at.name AS away_team_name,
+                    at.short_name AS away_team_short_name,
+                    e.tournament_id,
+                    t.slug AS tournament_slug,
+                    t.name AS tournament_name,
+                    e.unique_tournament_id,
+                    ut.slug AS unique_tournament_slug,
+                    ut.name AS unique_tournament_name,
+                    e.season_id,
+                    s.name AS season_name,
+                    s.year AS season_year
+                FROM api_payload_snapshot AS aps
+                JOIN event AS e ON e.id = aps.context_entity_id
+                LEFT JOIN event_status AS es ON es.code = e.status_code
+                LEFT JOIN team AS ht ON ht.id = e.home_team_id
+                LEFT JOIN team AS at ON at.id = e.away_team_id
+                LEFT JOIN tournament AS t ON t.id = e.tournament_id
+                LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
+                LEFT JOIN season AS s ON s.id = e.season_id
+                WHERE aps.endpoint_pattern = $1
+                  AND aps.context_entity_type = 'event'
+                  AND e.unique_tournament_id = $2
+                  AND COALESCE(aps.is_soft_error_payload, FALSE) = FALSE
+                  AND COALESCE(aps.http_status, 200) < 400
+                ORDER BY aps.context_entity_id,
+                         aps.fetched_at DESC NULLS LAST,
+                         aps.id DESC
+                """,
+                _EVENT_HIGHLIGHTS_ENDPOINT_PATTERN,
+                unique_tournament_id,
+            )
+        finally:
+            await connection.close()
+
+        # `_snapshot_row_is_soft_error` is double-checked here as a defence in
+        # depth: SQL filter above already excludes such rows, but if a caller
+        # passes a hand-crafted fake row we still want to suppress them.
+        media_items: list[dict[str, Any]] = []
+        for row in rows:
+            if _snapshot_row_is_soft_error(row):
+                continue
+            payload = _decode_snapshot_payload(row["snapshot_payload"])
+            if not isinstance(payload, dict):
+                continue
+            highlights = payload.get("highlights")
+            if not isinstance(highlights, list) or not highlights:
+                continue
+            serialized_highlights = [_serialize_scalar(item) for item in highlights]
+            media_items.append(
+                {
+                    "event": _serialize_media_event_row(row),
+                    "highlights": serialized_highlights,
+                    # Sort scaffolding — stripped before returning.
+                    "_fetched_at": row["snapshot_fetched_at"],
+                    "_start_timestamp": row["start_timestamp"],
+                    "_event_id": row["event_id"],
+                }
+            )
+
+        epoch_floor = datetime.min.replace(tzinfo=timezone.utc)
+        media_items.sort(
+            key=lambda item: (
+                item["_fetched_at"] or epoch_floor,
+                item["_start_timestamp"] or 0,
+                item["_event_id"] or 0,
+            ),
+            reverse=True,
+        )
+        media_items = media_items[:_UNIQUE_TOURNAMENT_MEDIA_EVENT_LIMIT]
+        for item in media_items:
+            item.pop("_fetched_at", None)
+            item.pop("_start_timestamp", None)
+            item.pop("_event_id", None)
+        return {"media": media_items}
 
     async def _fetch_standings_payload(
         self,
@@ -3855,6 +3985,91 @@ def _synthesize_event_root_payload(row: Any) -> dict[str, Any]:
     if season_id is not None:
         event_payload["season"] = {"id": int(season_id)}
     return {"event": event_payload}
+
+
+def _serialize_media_event_row(row: Any) -> dict[str, Any]:
+    """Build the ``event`` envelope used inside the synthetic league media feed.
+
+    Same shape as ``_serialize_season_event_row`` but reads from the aliased
+    columns produced by ``_fetch_unique_tournament_media_payload`` (where the
+    primary key is ``event_id`` rather than ``id`` because the SQL pulls it
+    via ``aps.context_entity_id`` instead of ``e.id``). Adds a top-level
+    ``uniqueTournament`` block alongside the nested ``tournament.uniqueTournament``
+    so the response matches the spec the API consumers asked for.
+    """
+
+    event_id_value = row.get("event_id")
+    event_payload: dict[str, Any] = {"id": int(event_id_value)}
+
+    for source_key, dest_key in (
+        ("event_slug", "slug"),
+        ("event_custom_id", "customId"),
+    ):
+        value = row.get(source_key)
+        if value is not None:
+            event_payload[dest_key] = str(value)
+
+    start_timestamp = row.get("start_timestamp")
+    if start_timestamp is not None:
+        event_payload["startTimestamp"] = int(start_timestamp)
+
+    status_code = row.get("status_code")
+    if status_code is not None:
+        status_payload: dict[str, Any] = {"code": int(status_code)}
+        if row.get("status_type") is not None:
+            status_payload["type"] = str(row["status_type"])
+        if row.get("status_description") is not None:
+            status_payload["description"] = str(row["status_description"])
+        event_payload["status"] = status_payload
+
+    if row.get("home_team_id") is not None:
+        event_payload["homeTeam"] = _minimal_entity_payload(
+            row["home_team_id"],
+            slug=row.get("home_team_slug"),
+            name=row.get("home_team_name"),
+            short_name=row.get("home_team_short_name"),
+        )
+
+    if row.get("away_team_id") is not None:
+        event_payload["awayTeam"] = _minimal_entity_payload(
+            row["away_team_id"],
+            slug=row.get("away_team_slug"),
+            name=row.get("away_team_name"),
+            short_name=row.get("away_team_short_name"),
+        )
+
+    tournament_id = row.get("tournament_id")
+    unique_tournament_id = row.get("unique_tournament_id")
+    if tournament_id is not None or unique_tournament_id is not None:
+        tournament_payload: dict[str, Any] = {}
+        if tournament_id is not None:
+            tournament_payload.update(
+                _minimal_entity_payload(
+                    tournament_id,
+                    slug=row.get("tournament_slug"),
+                    name=row.get("tournament_name"),
+                )
+            )
+        if unique_tournament_id is not None:
+            unique_tournament_payload = _minimal_entity_payload(
+                unique_tournament_id,
+                slug=row.get("unique_tournament_slug"),
+                name=row.get("unique_tournament_name"),
+            )
+            tournament_payload["uniqueTournament"] = unique_tournament_payload
+            event_payload["uniqueTournament"] = unique_tournament_payload
+        event_payload["tournament"] = tournament_payload
+
+    season_id = row.get("season_id")
+    if season_id is not None:
+        season_payload: dict[str, Any] = {"id": int(season_id)}
+        if row.get("season_name") is not None:
+            season_payload["name"] = str(row["season_name"])
+        if row.get("season_year") is not None:
+            season_payload["year"] = str(row["season_year"])
+        event_payload["season"] = season_payload
+
+    return event_payload
 
 
 def _serialize_season_event_row(row: Any) -> dict[str, Any]:

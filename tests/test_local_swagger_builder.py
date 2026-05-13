@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import unittest
@@ -34,6 +34,11 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/statistics", document["paths"])
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds", document["paths"])
         self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees", document["paths"])
+        self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/media", document["paths"])
+        media_op = document["paths"]["/api/v1/unique-tournament/{unique_tournament_id}/media"]["get"]
+        self.assertEqual(media_op["operationId"], "getUniqueTournamentMedia")
+        self.assertIn("api_payload_snapshot", media_op["x-source-tables"])
+        self.assertIn("event", media_op["x-source-tables"])
         self.assertIn("/api/v1/sport/0/event-count", document["paths"])
         self.assertIn("PlayerStatisticsEnvelope", document["components"]["schemas"])
         self.assertIn("SeasonStatisticsEnvelope", document["components"]["schemas"])

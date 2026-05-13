@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import replace
 import concurrent.futures
@@ -60,6 +60,7 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertIn("/api/v1/event/{event_id}/shotmap", patterns)
         self.assertIn("/api/v1/event/{event_id}/esports-games", patterns)
         self.assertIn("/api/v1/sport/0/event-count", patterns)
+        self.assertIn("/api/v1/unique-tournament/{unique_tournament_id}/media", patterns)
 
     def test_compile_path_template_extracts_named_params(self) -> None:
         regex = _compile_path_template(
@@ -1109,6 +1110,302 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["reconcile_policy_summary"]["primary_source_slug"], "sofascore")
         self.assertEqual(payload["reconcile_policy_summary"]["source_count"], 2)
         self.assertEqual(payload["reconcile_policy_summary"]["sources"][0]["source_slug"], "sofascore")
+
+
+class LocalApiUniqueTournamentMediaTests(unittest.IsolatedAsyncioTestCase):
+    """Coverage for ``/api/v1/unique-tournament/{id}/media`` aggregator."""
+
+    @staticmethod
+    def _media_row(
+        *,
+        event_id: int,
+        snapshot_payload: dict,
+        snapshot_fetched_at,
+        start_timestamp: int = 1778678400,
+        is_soft_error_payload: bool = False,
+        http_status: int = 200,
+        status_type: str = "finished",
+        status_description: str = "Ended",
+    ) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "snapshot_payload": snapshot_payload,
+            "is_soft_error_payload": is_soft_error_payload,
+            "http_status": http_status,
+            "snapshot_fetched_at": snapshot_fetched_at,
+            "event_slug": f"home-vs-away-{event_id}",
+            "event_custom_id": f"cid-{event_id}",
+            "start_timestamp": start_timestamp,
+            "status_code": 100,
+            "status_type": status_type,
+            "status_description": status_description,
+            "home_team_id": 10,
+            "home_team_slug": "home",
+            "home_team_name": "Home Team",
+            "home_team_short_name": "Home",
+            "away_team_id": 11,
+            "away_team_slug": "away",
+            "away_team_name": "Away Team",
+            "away_team_short_name": "Away",
+            "tournament_id": 20,
+            "tournament_slug": "premier-league",
+            "tournament_name": "Premier League",
+            "unique_tournament_id": 17,
+            "unique_tournament_slug": "pl",
+            "unique_tournament_name": "Premier League",
+            "season_id": 76986,
+            "season_name": "Premier League 25/26",
+            "season_year": "25/26",
+        }
+
+    async def test_returns_empty_media_when_no_highlights_exist(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        media_connection = _FakeUniqueTournamentMediaConnection([])
+        application._connect = _make_sequence_connector([snapshot_connection, media_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/media",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload, {"media": []})
+        # SQL filter must pin the highlights endpoint pattern and the league id.
+        sql, args = media_connection.fetch_calls[0]
+        self.assertIn("/api/v1/event/{event_id}/highlights", args)
+        self.assertIn(17, args)
+        self.assertIn("aps.endpoint_pattern = $1", sql)
+        self.assertIn("e.unique_tournament_id = $2", sql)
+        self.assertIn("ORDER BY aps.context_entity_id", sql)
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(media_connection.closed)
+
+    async def test_returns_grouped_event_and_highlights_for_known_tournament(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        from datetime import datetime as _dt, timezone as _tz
+
+        media_connection = _FakeUniqueTournamentMediaConnection(
+            [
+                self._media_row(
+                    event_id=15342059,
+                    snapshot_payload={
+                        "highlights": [
+                            {
+                                "id": 7428413,
+                                "url": "https://www.youtube.com/watch?v=abc",
+                                "title": "Goal!",
+                                "subtitle": "Full Highlights",
+                                "mediaType": 6,
+                                "sourceUrl": "https://src.example/abc",
+                                "livestream": False,
+                                "keyHighlight": True,
+                                "thumbnailUrl": "https://img.example/abc.jpg",
+                                "createdAtTimestamp": 1778678404,
+                            }
+                        ]
+                    },
+                    snapshot_fetched_at=_dt(2026, 5, 13, 12, 0, tzinfo=_tz.utc),
+                ),
+            ]
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, media_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/media",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.payload["media"]), 1)
+        media_item = response.payload["media"][0]
+
+        event_payload = media_item["event"]
+        self.assertEqual(event_payload["id"], 15342059)
+        self.assertEqual(event_payload["slug"], "home-vs-away-15342059")
+        self.assertEqual(event_payload["startTimestamp"], 1778678400)
+        self.assertEqual(
+            event_payload["status"],
+            {"code": 100, "type": "finished", "description": "Ended"},
+        )
+        self.assertEqual(
+            event_payload["homeTeam"],
+            {"id": 10, "slug": "home", "name": "Home Team", "shortName": "Home"},
+        )
+        self.assertEqual(event_payload["awayTeam"]["id"], 11)
+        self.assertEqual(event_payload["tournament"]["id"], 20)
+        self.assertEqual(event_payload["tournament"]["uniqueTournament"]["id"], 17)
+        self.assertEqual(event_payload["uniqueTournament"]["id"], 17)
+        self.assertEqual(event_payload["uniqueTournament"]["slug"], "pl")
+        self.assertEqual(event_payload["season"], {"id": 76986, "name": "Premier League 25/26", "year": "25/26"})
+
+        highlights = media_item["highlights"]
+        self.assertEqual(len(highlights), 1)
+        self.assertEqual(highlights[0]["id"], 7428413)
+        self.assertEqual(highlights[0]["keyHighlight"], True)
+        # Sort scaffolding must not leak into the response.
+        self.assertNotIn("_fetched_at", media_item)
+        self.assertNotIn("_start_timestamp", media_item)
+        self.assertNotIn("_event_id", media_item)
+
+    async def test_suppresses_soft_error_and_4xx_snapshots(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        from datetime import datetime as _dt, timezone as _tz
+
+        media_connection = _FakeUniqueTournamentMediaConnection(
+            [
+                self._media_row(
+                    event_id=100,
+                    snapshot_payload={"highlights": [{"id": 1}]},
+                    snapshot_fetched_at=_dt(2026, 5, 13, 9, 0, tzinfo=_tz.utc),
+                    is_soft_error_payload=True,
+                ),
+                self._media_row(
+                    event_id=200,
+                    snapshot_payload={"error": {"code": 404}},
+                    snapshot_fetched_at=_dt(2026, 5, 13, 10, 0, tzinfo=_tz.utc),
+                    http_status=404,
+                ),
+                self._media_row(
+                    event_id=300,
+                    snapshot_payload={"highlights": [{"id": 9}]},
+                    snapshot_fetched_at=_dt(2026, 5, 13, 11, 0, tzinfo=_tz.utc),
+                ),
+            ]
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, media_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/media",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event_ids = [item["event"]["id"] for item in response.payload["media"]]
+        self.assertEqual(event_ids, [300])
+
+    async def test_drops_snapshots_with_empty_highlights_array(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        from datetime import datetime as _dt, timezone as _tz
+
+        media_connection = _FakeUniqueTournamentMediaConnection(
+            [
+                self._media_row(
+                    event_id=400,
+                    snapshot_payload={"highlights": []},
+                    snapshot_fetched_at=_dt(2026, 5, 13, 11, 0, tzinfo=_tz.utc),
+                ),
+                self._media_row(
+                    event_id=500,
+                    snapshot_payload={"highlights": None},
+                    snapshot_fetched_at=_dt(2026, 5, 13, 11, 0, tzinfo=_tz.utc),
+                ),
+                self._media_row(
+                    event_id=600,
+                    snapshot_payload={"highlights": [{"id": 1}]},
+                    snapshot_fetched_at=_dt(2026, 5, 13, 11, 0, tzinfo=_tz.utc),
+                ),
+            ]
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, media_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/media",
+            "",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event_ids = [item["event"]["id"] for item in response.payload["media"]]
+        self.assertEqual(event_ids, [600])
+
+    async def test_sorts_by_fetched_at_then_start_timestamp_then_event_id(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        from datetime import datetime as _dt, timezone as _tz
+
+        latest = _dt(2026, 5, 13, 15, 0, tzinfo=_tz.utc)
+        older = _dt(2026, 5, 12, 15, 0, tzinfo=_tz.utc)
+        media_connection = _FakeUniqueTournamentMediaConnection(
+            [
+                # Older fetched_at — must be last.
+                self._media_row(
+                    event_id=1,
+                    snapshot_payload={"highlights": [{"id": 1}]},
+                    snapshot_fetched_at=older,
+                    start_timestamp=1778000000,
+                ),
+                # Same latest fetched_at as #3, earlier start_timestamp -> after #3.
+                self._media_row(
+                    event_id=2,
+                    snapshot_payload={"highlights": [{"id": 2}]},
+                    snapshot_fetched_at=latest,
+                    start_timestamp=1778000000,
+                ),
+                # Latest fetched_at and latest start_timestamp -> first.
+                self._media_row(
+                    event_id=3,
+                    snapshot_payload={"highlights": [{"id": 3}]},
+                    snapshot_fetched_at=latest,
+                    start_timestamp=1778900000,
+                ),
+                # Tie-breaker on event_id when fetched_at + start_timestamp tie.
+                self._media_row(
+                    event_id=4,
+                    snapshot_payload={"highlights": [{"id": 4}]},
+                    snapshot_fetched_at=latest,
+                    start_timestamp=1778000000,
+                ),
+            ]
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, media_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/media",
+            "",
+        )
+
+        event_ids = [item["event"]["id"] for item in response.payload["media"]]
+        self.assertEqual(event_ids, [3, 4, 2, 1])
+
+    async def test_caps_response_at_200_events(self) -> None:
+        from schema_inspector.local_api_server import _UNIQUE_TOURNAMENT_MEDIA_EVENT_LIMIT
+        from datetime import datetime as _dt, timezone as _tz
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        rows = [
+            self._media_row(
+                event_id=index,
+                snapshot_payload={"highlights": [{"id": index}]},
+                snapshot_fetched_at=_dt(2026, 5, 13, 12, 0, tzinfo=_tz.utc),
+                start_timestamp=1_700_000_000 + index,
+            )
+            for index in range(1, 251)
+        ]
+        media_connection = _FakeUniqueTournamentMediaConnection(rows)
+        application._connect = _make_sequence_connector([snapshot_connection, media_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/17/media",
+            "",
+        )
+
+        self.assertEqual(_UNIQUE_TOURNAMENT_MEDIA_EVENT_LIMIT, 200)
+        self.assertEqual(len(response.payload["media"]), 200)
+        # Sorted newest-first by start_timestamp (fetched_at equal) so the
+        # truncation keeps the highest start_timestamp values.
+        event_ids = [item["event"]["id"] for item in response.payload["media"]]
+        self.assertEqual(event_ids[0], 250)
+        self.assertEqual(event_ids[-1], 51)
 
 
 class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
@@ -2934,6 +3231,28 @@ class _FakeSeasonEventsConnection:
                 extra["id"] = 9000 + index
                 extras.append(extra)
             return [*self.rows, *extras]
+        return self.rows
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeUniqueTournamentMediaConnection:
+    """Stand-in connection for the synthetic
+    ``/api/v1/unique-tournament/{id}/media`` handler.
+
+    Returns the canned rows as-is so the test can shape exactly what the SQL
+    layer would have produced (already DISTINCT ON-ed per event). Captures the
+    query text and parameters so tests can assert filter / pattern correctness.
+    """
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
         return self.rows
 
     async def close(self):

@@ -30,6 +30,7 @@ from .endpoints import (
     EVENT_TENNIS_POWER_ENDPOINT,
     LEADERBOARDS_ENDPOINTS,
     LOCAL_API_SUPPORTED_SPORTS,
+    UNIQUE_TOURNAMENT_MEDIA_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT,
     STANDINGS_ENDPOINTS,
@@ -88,6 +89,7 @@ _RU_PATH_SUMMARIES = {
     "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/info": "Информация о сезоне",
     "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds": "Раунды сезона",
     "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/cuptrees": "Cup tree / playoff сетка сезона",
+    "/api/v1/unique-tournament/{unique_tournament_id}/media": "Медиа турнира из event highlights",
     "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/brackets": "Brackets сезона",
     "/api/v1/unique-tournament/{unique_tournament_id}/scheduled-events/{date}": "Матчи турнира на дату",
     "/api/v1/unique-tournament/{unique_tournament_id}/featured-events": "Избранные матчи турнира",
@@ -1008,6 +1010,31 @@ def _build_core_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
                 _path_param("season_id", "integer", "Sofascore season ID."),
             ],
             source_tables=["api_payload_snapshot"],
+        ),
+        UNIQUE_TOURNAMENT_MEDIA_ENDPOINT.path_template: op(
+            path_template=UNIQUE_TOURNAMENT_MEDIA_ENDPOINT.path_template,
+            tag="Competition",
+            operation_id="getUniqueTournamentMedia",
+            summary_text="Unique tournament media",
+            description=(
+                "Synthetic league media feed built locally from already-ingested "
+                "/api/v1/event/{event_id}/highlights snapshots. Groups every event "
+                "in the tournament that has at least one stored highlight under "
+                "{event, highlights} blocks, sorted newest-first. DB-only, no "
+                "upstream fetch. Returns {\"media\": []} when nothing has been "
+                "ingested yet — never a 404."
+            ),
+            response_schema=_envelope("media", _array(_ref("FreeFormObject"))),
+            parameters=[_path_param("unique_tournament_id", "integer", "Sofascore unique tournament ID.")],
+            source_tables=[
+                "api_payload_snapshot",
+                "event",
+                "event_status",
+                "team",
+                "tournament",
+                "unique_tournament",
+                "season",
+            ],
         ),
         "/api/v1/category/{category_id}/unique-tournaments": op(
             path_template="/api/v1/category/{category_id}/unique-tournaments",
