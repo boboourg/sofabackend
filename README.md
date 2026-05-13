@@ -13,6 +13,99 @@ This repository is no longer a small "inspect one JSON URL and print Markdown" t
 - operational monitoring endpoints exposed by the local API server
 - recovery and replay workflows for delayed and failed jobs
 
+## Project Documentation
+
+Подробная документация проекта (на русском) в [`docs/`](docs/):
+
+| Документ | Что внутри |
+|---|---|
+| [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) | High-level архитектура, Mermaid data flow, external deps, hydration режимы |
+| [docs/SERVICES_AND_WORKERS.md](docs/SERVICES_AND_WORKERS.md) | Все systemd units, daemons, workers — что читает/пишет, какой env, failure modes, restart triggers |
+| [docs/CLI_AND_SCRIPTS.md](docs/CLI_AND_SCRIPTS.md) | Каталог всех `python -m schema_inspector.cli <subcommand>` команд — назначение, аргументы, side effects, safe/mutation |
+| [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) | Полный каталог `.env` переменных — default, где читается, эффект, restart-need |
+| [docs/API_ROUTES.md](docs/API_ROUTES.md) | Local FastAPI: handle_api_get waterfall, specialized handlers, ops routes, OpenAPI |
+| [docs/PARSING_AND_POLICIES.md](docs/PARSING_AND_POLICIES.md) | match_center_policy, detail_resource_policy, live_dispatch_policy, isEditor HARD BAN (3 layers), tier/detail_id mapping, negative caches |
+| [docs/DATABASE_AND_STORAGE.md](docs/DATABASE_AND_STORAGE.md) | Все таблицы по группам, repositories, source-of-truth waterfall, hot rows/known contention, recent migrations |
+| [docs/REDIS_AND_QUEUES.md](docs/REDIS_AND_QUEUES.md) | Streams + consumer groups, live state keys, leases/freshness/dedupe/throttle, dispatch metrics, JobEnvelope, backpressure |
+| [docs/FUNCTION_INDEX.md](docs/FUNCTION_INDEX.md) | Карта ключевых функций/классов по файлам: что делает, кто вызывает, side effects |
+| [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) | Практический playbook: health checks, restart процедуры, rollback, canary, восстановление |
+
+Архитектурный single source of truth — [docs/current-runtime-architecture.md](docs/current-runtime-architecture.md). Cross-cut handoff — [NEXT_CHAT_CONTEXT.md](NEXT_CHAT_CONTEXT.md) и [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md).
+
+## Operator Quickstart
+
+### Local Workspace
+
+Primary local project path:
+
+```powershell
+D:\sofascore
+```
+
+The Codex desktop working directory can sometimes point at a non-repository mirror such as
+`C:\Users\bobur\Desktop\sofascore`. Before editing or committing, verify that you are in the
+real git repository:
+
+```powershell
+cd D:\sofascore
+git rev-parse --show-toplevel
+git status
+```
+
+### Production Access
+
+Production SSH alias:
+
+```powershell
+ssh sofascore-prod
+```
+
+Production project path:
+
+```bash
+cd /opt/sofascore
+```
+
+Common production checks:
+
+```bash
+git log -1 --oneline
+systemctl list-units --type=service --state=running | grep sofascore
+journalctl -u "sofascore-*" --since "5 minutes ago" --no-pager
+```
+
+Database access on production:
+
+```bash
+sudo -u postgres psql -p 5432 -d sofascore_schema_inspector
+```
+
+### Git Workflow
+
+This project currently works directly on `main`. Do not create feature branches or PR branches
+unless explicitly requested.
+
+Expected local flow:
+
+```powershell
+cd D:\sofascore
+git status
+git add <files>
+git commit -m "<short scope>: <summary>"
+git push origin main
+```
+
+Expected production deploy flow:
+
+```bash
+cd /opt/sofascore
+git pull
+git log -1 --oneline
+```
+
+After code changes, restart only the affected systemd units, preferably in small waves. Do not
+restart unrelated workers just because code was pulled.
+
 ## Runtime Pipeline
 
 ```text
