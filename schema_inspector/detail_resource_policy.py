@@ -107,21 +107,37 @@ def build_event_detail_request_specs(
     if normalized_hydration_mode == "live_delta":
         if not is_live_detail:
             return ()
-        for endpoint in live_delta_detail_endpoints(normalized_sport_slug):
-            add(endpoint)
-        return _filter_specs(
-            tuple(deduped),
-            sport_slug=normalized_sport_slug,
-            status_type=status_type,
-            detail_id=detail_id,
-            has_xg=has_xg,
-            has_event_player_heat_map=has_event_player_heat_map,
-            has_event_player_statistics=has_event_player_statistics,
-            has_global_highlights=has_global_highlights,
-            start_timestamp=start_timestamp,
-            now_timestamp=now_timestamp,
-            is_editor=is_editor,
-        )
+        if normalized_sport_slug == "football":
+            # X4 (2026-05-13): football fall-through to the full matchcenter
+            # spec path below. Production probe matrix (event_endpoint_availability_log,
+            # 7d, non-editor football) confirmed managers, h2h, pregame-form, votes,
+            # odds×3, team-streaks, comments, best-players, graph, heatmap, shotmap,
+            # average-positions are all 89-100% useful during inprogress phase.
+            # Prior to X4 this branch returned `()` for football → live polling
+            # fetched only ROOT + 5 core edges → matchcenter populated only at
+            # final_sweep → user-visible "live has no data, appears after match end".
+            # Per-event filtering still happens via _filter_specs →
+            # football_detail_endpoint_allowed, which enforces tier_1/2 vs
+            # tier_3/5 gating and the isEditor HARD BAN. Per-player followups
+            # (heatmap, rating-breakdown, shotmap/player, etc.) are NOT enabled
+            # because `lightweight_only` stays True for live_delta in orchestrator.
+            pass  # intentional fall-through to non-live-delta path
+        else:
+            for endpoint in live_delta_detail_endpoints(normalized_sport_slug):
+                add(endpoint)
+            return _filter_specs(
+                tuple(deduped),
+                sport_slug=normalized_sport_slug,
+                status_type=status_type,
+                detail_id=detail_id,
+                has_xg=has_xg,
+                has_event_player_heat_map=has_event_player_heat_map,
+                has_event_player_statistics=has_event_player_statistics,
+                has_global_highlights=has_global_highlights,
+                start_timestamp=start_timestamp,
+                now_timestamp=now_timestamp,
+                is_editor=is_editor,
+            )
 
     if not core_only:
         if normalized_sport_slug == "tennis":

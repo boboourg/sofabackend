@@ -454,6 +454,151 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.acked, [(STREAM_DISCOVERY, "cg:discovery", ("1-10",))])
 
 
+class DiscoveryWorkerIsEditorFilterTests(unittest.IsolatedAsyncioTestCase):
+    """X4 (2026-05-13) — discovery worker must skip isEditor=true surface events.
+
+    SofaEditor crowdsourced events are banned product data. Discovery should
+    not even publish hydrate jobs for them (saves ~31% of job throughput per
+    7-day prod measurement). The orchestrator HARD BAN at X3 covers fanout
+    after the root fetch; X4 layer 1 here removes the root publish entirely
+    when the surface payload already carries ``isEditor=true``.
+    """
+
+    async def test_live_discovery_skips_editor_events_from_fanout(self) -> None:
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        # Mixed surface: 2 non-editor + 2 editor. Expect only 2 jobs published.
+        live_result = _FakeSurfaceDiscoveryResult(
+            event_ids=(101, 102, 103, 104),
+            corrections=(),
+            event_specs=(
+                _FakeParsedEventSpec(event_id=101, detail_id=1, unique_tournament_id=17, is_editor=False),
+                _FakeParsedEventSpec(event_id=102, detail_id=None, unique_tournament_id=22694, is_editor=True),
+                _FakeParsedEventSpec(event_id=103, detail_id=None, unique_tournament_id=22694, is_editor=True),
+                _FakeParsedEventSpec(event_id=104, detail_id=4, unique_tournament_id=8, is_editor=False),
+            ),
+        )
+        orchestrator = _FakeDiscoveryOrchestrator(event_ids=(101, 102, 103, 104), live_result=live_result)
+        queue = _FakeQueue()
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-live-discovery-1",
+            timeout_s=10.0,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="x4-1",
+                values={
+                    "job_id": "job-x4-1",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "live",
+                    "params_json": "{}",
+                    "attempt": "1",
+                },
+            )
+        )
+
+        # Only 2 published (101 + 104). 102 and 103 skipped due to is_editor=true.
+        self.assertEqual(result, "published:2")
+        published_event_ids = sorted(
+            int(payload["entity_id"]) for payload in queue.published_payloads
+        )
+        self.assertEqual(published_event_ids, [101, 104])
+
+    async def test_scheduled_discovery_skips_editor_events_from_fanout(self) -> None:
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        scheduled_result = _FakeSurfaceDiscoveryResult(
+            event_ids=(201, 202),
+            corrections=(),
+            event_specs=(
+                _FakeParsedEventSpec(event_id=201, detail_id=1, is_editor=False),
+                _FakeParsedEventSpec(event_id=202, detail_id=None, is_editor=True),
+            ),
+        )
+        orchestrator = _FakeDiscoveryOrchestrator(
+            event_ids=(201, 202),
+            scheduled_result=scheduled_result,
+        )
+        queue = _FakeQueue()
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-discovery-x4",
+            timeout_s=8.0,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="x4-2",
+                values={
+                    "job_id": "job-x4-2",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "scheduled",
+                    "params_json": '{"date":"2026-05-13"}',
+                    "attempt": "1",
+                },
+            )
+        )
+
+        self.assertEqual(result, "published:1")
+        published_event_ids = [int(payload["entity_id"]) for payload in queue.published_payloads]
+        self.assertEqual(published_event_ids, [201])
+
+    async def test_discovery_publishes_when_is_editor_unknown_null(self) -> None:
+        """When surface payload omits isEditor field (rare), discovery still
+        publishes — defense-in-depth: orchestrator HARD BAN fires after root
+        fetch if isEditor turns out to be true."""
+        from schema_inspector.workers.discovery_worker import DiscoveryWorker
+
+        live_result = _FakeSurfaceDiscoveryResult(
+            event_ids=(301, 302),
+            corrections=(),
+            event_specs=(
+                _FakeParsedEventSpec(event_id=301, is_editor=None),
+                _FakeParsedEventSpec(event_id=302, is_editor=False),
+            ),
+        )
+        orchestrator = _FakeDiscoveryOrchestrator(event_ids=(301, 302), live_result=live_result)
+        queue = _FakeQueue()
+        worker = DiscoveryWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-live-discovery-x4",
+            timeout_s=10.0,
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_DISCOVERY,
+                message_id="x4-3",
+                values={
+                    "job_id": "job-x4-3",
+                    "job_type": "discover_sport_surface",
+                    "sport_slug": "football",
+                    "entity_type": "sport",
+                    "entity_id": "",
+                    "scope": "live",
+                    "params_json": "{}",
+                    "attempt": "1",
+                },
+            )
+        )
+
+        # Both published when is_editor is unknown (None) or false.
+        self.assertEqual(result, "published:2")
+
+
 class _FakeDiscoveryOrchestrator:
     def __init__(
         self,
@@ -563,17 +708,33 @@ class _FakeBackpressure:
 
 
 class _FakeParsedEvent:
-    def __init__(self, event_id: int, *, detail_id: int | None = None, unique_tournament_id: int | None = None) -> None:
+    def __init__(
+        self,
+        event_id: int,
+        *,
+        detail_id: int | None = None,
+        unique_tournament_id: int | None = None,
+        is_editor: bool | None = None,
+    ) -> None:
         self.id = int(event_id)
         self.detail_id = detail_id
         self.unique_tournament_id = unique_tournament_id
+        self.is_editor = is_editor
 
 
 class _FakeParsedEventSpec:
-    def __init__(self, *, event_id: int, detail_id: int | None = None, unique_tournament_id: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        event_id: int,
+        detail_id: int | None = None,
+        unique_tournament_id: int | None = None,
+        is_editor: bool | None = None,
+    ) -> None:
         self.event_id = int(event_id)
         self.detail_id = detail_id
         self.unique_tournament_id = unique_tournament_id
+        self.is_editor = is_editor
 
 
 class _FakeUniqueTournamentSpec:
@@ -603,6 +764,7 @@ class _FakeParsedBundle:
                     item.event_id,
                     detail_id=item.detail_id,
                     unique_tournament_id=item.unique_tournament_id,
+                    is_editor=item.is_editor,
                 )
                 for item in event_specs
             )

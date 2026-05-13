@@ -116,9 +116,24 @@ class DiscoveryWorker:
                     delay_ms=self.admission_delay_ms,
                 )
         skipped_due_backpressure = 0
+        skipped_due_editor = 0
         skip_reasons: set[str] = set()
         for surface_event in discovery.events:
             event_id = int(surface_event.event_id)
+            # X4 (2026-05-13): discovery-layer isEditor short-circuit.
+            # SofaEditor crowdsourcing events must not generate any hydrate
+            # job — not for /event/{id}, not for matchcenter, nothing. The
+            # downstream orchestrator already drops fanout for is_editor=True
+            # via X3 HARD BAN, but we still wasted ~31% of job throughput on
+            # editor events (37,792/120,673 hydrate+refresh runs in 24h
+            # before this fix). Filtering at discovery removes the noise from
+            # the Redis stream entirely. Field comes from upstream
+            # /sport/{slug}/events/live + /scheduled-events/{date} payload,
+            # which carries `isEditor` per event. Defense-in-depth: the
+            # orchestrator HARD BAN still fires if discovery missed the flag.
+            if surface_event.is_editor is True:
+                skipped_due_editor += 1
+                continue
             correction = corrections.get(int(event_id))
             force_rehydrate = correction is not None and scope != "live"
             if scope == "live":
@@ -176,6 +191,13 @@ class DiscoveryWorker:
                 sport_slug,
                 skipped_due_backpressure,
                 "; ".join(sorted(skip_reasons)) if skip_reasons else blocking_reason,
+            )
+        if skipped_due_editor:
+            logger.info(
+                "Discovery worker skipped hydrate fanout for isEditor=true events: scope=%s sport=%s skipped=%s",
+                scope,
+                sport_slug,
+                skipped_due_editor,
             )
         return f"published:{published}"
 
@@ -279,6 +301,13 @@ class _SurfaceEvent:
     unique_tournament_id: int | None = None
     tournament_tier: int | None = None
     tournament_user_count: int | None = None
+    # X4 (2026-05-13): pulled from surface payload so discovery worker can
+    # short-circuit isEditor=true events BEFORE publishing any hydrate
+    # job. Upstream /events/live and /scheduled-events/{date} payloads do
+    # include the ``isEditor`` field per event (verified in production
+    # snapshot inspection). Falls through to orchestrator HARD BAN as
+    # defense-in-depth when the field is missing/null on the surface row.
+    is_editor: bool | None = None
 
 
 class _SurfaceDiscovery:
@@ -316,6 +345,7 @@ def _normalize_surface_result(value: Any) -> _SurfaceDiscovery:
                     tournament_user_count=(
                         _as_int(getattr(tournament, "user_count", None)) if tournament is not None else None
                     ),
+                    is_editor=_as_bool(getattr(item, "is_editor", None)),
                 )
             )
         corrections = tuple(getattr(value, "corrections", ()) or ())
@@ -343,3 +373,9 @@ def _as_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None

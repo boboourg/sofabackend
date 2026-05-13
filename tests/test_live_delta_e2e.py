@@ -108,7 +108,14 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "step": f"delta_{index + 1}",
                     "http_calls": len(delta_transport.seen_urls),
-                    "hydration_mode": "full" if _url(event_id, "managers") in delta_transport.seen_urls else "live_delta",
+                    # X4 (2026-05-13): live_delta for football now falls through
+                    # to the full matchcenter spec path, so /managers is
+                    # fetched in both bootstrap (full mode) AND delta
+                    # (live_delta mode). To distinguish, we check
+                    # ``/team/{home_team_id}`` which only the full-mode entity
+                    # profile fanout fetches; live_delta keeps ``lightweight_only=True``
+                    # so entity profile fanout is skipped.
+                    "hydration_mode": "full" if "https://www.sofascore.com/api/v1/team/201" in delta_transport.seen_urls else "live_delta",
                     "live_bootstrap_done_at": bootstrap.is_done,
                 }
             )
@@ -135,28 +142,28 @@ class LiveDeltaEndToEndTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([row["hydration_mode"] for row in telemetry], ["full", "live_delta", "live_delta", "live_delta", "final_sweep"])
-        # F-3 (2026-05-08): final_sweep now also fetches the 4 final_only_edges
-        # for football (comments, best-players/summary, h2h, pregame-form) on
-        # top of the 1 core edge that survives football_edge_allowed gating.
-        # X'' (2026-05-12): match_center_policy now unlocks /incidents (always)
-        # and /lineups (for inprogress/live/finished status) for non-isEditor
-        # football events even when detailId is missing (tier_5). This fixture
-        # uses event_id=42 without a detailId, so X'' adds +2 calls per delta
-        # poll (incidents+lineups) and +4 to final_sweep (incidents always,
-        # lineups for finished, plus matchcenter follow-ups already counted).
+        # F-3 (2026-05-08): final_sweep fetches the 4 final_only_edges for
+        # football (comments, best-players/summary, h2h, pregame-form) on top
+        # of the 1 core edge that survives football_edge_allowed gating.
+        # X'' (2026-05-12): match_center_policy unlocks /incidents (always) and
+        # /lineups for all statuses for non-isEditor football regardless of
+        # detailId.
         # X3 (2026-05-12): football_detail_endpoint_allowed now allows the
-        # pre-match detail bundle (managers, h2h, pregame-form, votes, odds
-        # × 3, team-streaks × 2) for tier_5 (= detailId missing) non-isEditor
-        # events. Empirical: Premier League pre-match event 15999228 — UI
-        # confirmed upstream serves 200 for the full bundle even though
-        # detailId is not on the root payload yet. The "full" step (step 0)
-        # now picks up these 9 additional detail fetches: 5 (X'') + 9 (X3) =
-        # 14 http_calls. The delta polls and final_sweep are status-driven
-        # and were already exercising the X'' path; their counts are
-        # unchanged. final_sweep stays at 9 because it consults
-        # football_edge_allowed (core edges) and final_only_edges, neither
-        # of which goes through football_detail_endpoint_allowed.
-        self.assertEqual([row["http_calls"] for row in telemetry], [14, 3, 3, 3, 9])
+        # pre-match detail bundle (managers, h2h, pregame-form, votes, odds×3,
+        # winning-odds, team-streaks×2) for tier_5 (detailId missing).
+        # X4 (2026-05-13): build_event_detail_request_specs in live_delta mode
+        # for football falls through to the full matchcenter spec path
+        # (managers, h2h, pregame-form, votes, odds×3, winning-odds, team-streaks×2 —
+        # 9 endpoints for tier_5 after filter). Pre-X4 football live_delta
+        # returned `()` empty; matchcenter populated only at final_sweep, so
+        # users saw "live matches with no data". Net effect on this fixture
+        # (event_id=14000001, status=inprogress, detail_id=None → tier_5):
+        # delta polls jump from 3 (root + incidents + lineups) to 12 (root + 2
+        # edges + 9 detail). Final_sweep at finished status also picks up the
+        # 9 new details (12) plus original final_only_edges set → 18.
+        # Step 0 (bootstrap) stays 14 because bootstrap was already promoting
+        # live_delta → full and exercising the full path.
+        self.assertEqual([row["http_calls"] for row in telemetry], [14, 12, 12, 12, 18])
         self.assertEqual([row["live_bootstrap_done_at"] for row in telemetry], [True, True, True, True, False])
         self.assertEqual(bootstrap.marked, [event_id])
         self.assertEqual(bootstrap.reset, [event_id])

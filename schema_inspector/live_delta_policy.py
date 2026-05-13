@@ -37,6 +37,15 @@ LIVE_DELTA_DETAIL_ENDPOINTS: dict[str, tuple[SofascoreEndpoint, ...]] = {
     "esports": (EVENT_ESPORTS_GAMES_ENDPOINT,),
     "ice-hockey": (EVENT_SHOTMAP_ENDPOINT,),
     "tennis": (EVENT_POINT_BY_POINT_ENDPOINT, EVENT_TENNIS_POWER_ENDPOINT),
+    # X4 (2026-05-13): football has NO entry here — instead falls through to
+    # the full matchcenter spec path in ``detail_resource_policy.build_event_detail_request_specs``.
+    # That gives parameter-aware fanout (per-provider odds, per-team heatmap)
+    # which a flat list of SofascoreEndpoint cannot express, AND ensures
+    # the full football_detail_endpoint_allowed gate fires per-spec.
+    # Prior to X4 football live_delta was effectively a no-op → "live matches
+    # have no data, data only appears after match finishes". Production probe
+    # matrix (event_endpoint_availability_log, 7d) confirmed 25 endpoints are
+    # 89-100% useful during inprogress phase for non-editor football events.
 }
 
 

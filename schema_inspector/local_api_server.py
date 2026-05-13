@@ -422,18 +422,14 @@ class LocalApiApplication:
         # _fetch_sport_live_events_payload remains as a fallback inside
         # _fetch_normalized_payload for the case when the snapshot is missing.
         #
-        # X3 TODO (2026-05-12): `isEditor=true` events MAY still appear in
-        # `/sport/{slug}/events/live` and `/sport/{slug}/scheduled-events/{date}`
-        # raw-snapshot passthrough because we serve the upstream payload
-        # verbatim — upstream includes editor events in those lists. The
-        # match-center policy HARD-BAN only affects the ingestion side
-        # (we don't fanout edges/details/specials for editor events). If
-        # downstream consumers must NOT see editor events in the list
-        # response either, a separate filter pass over the snapshot
-        # `event[].isEditor == true` entries is needed here. NOT
-        # implementing in X3 because (a) it changes public API contract
-        # and (b) it would require list-level coverage tests we don't
-        # yet have. Surfaced for explicit ACK before changing.
+        # X4 (2026-05-13): `isEditor=true` events are filtered out of all
+        # list payloads (live, scheduled, featured, season events) by the
+        # `_reconcile_snapshot_payload` overlay pass. The fallback path in
+        # `_fetch_sport_live_events_payload` also applies the same filter
+        # at the SQL level. SofaEditor crowdsourced events are banned
+        # product data — they must not appear in any public API list nor
+        # generate hydrate jobs. Discovery worker also pre-filters at
+        # fan-out (see `_SurfaceEvent.is_editor` short-circuit).
 
         event_root_id = _extract_event_id_from_entity_root_path(path, "event")
         if event_root_id is not None:
@@ -779,6 +775,7 @@ class LocalApiApplication:
         # event, override its status with the freshest authoritative terminal
         # status so stale "inprogress" labels get corrected in-place.
         reconciled_items: list[Any] = []
+        editor_filtered = 0
         for item in raw_items:
             if not isinstance(item, dict):
                 reconciled_items.append(item)
@@ -796,6 +793,18 @@ class LocalApiApplication:
                     by_custom_id_surface = surface_by_custom_id.get(str(custom_id))
                     if by_custom_id_surface is not None and _event_item_identity_matches_terminal_row(item, by_custom_id_surface):
                         surface_row = by_custom_id_surface
+            # X4 (2026-05-13): drop isEditor=true events from list payloads
+            # entirely. Upstream returns SofaEditor crowdsourced events in
+            # the same list as canonical events, but we treat editor events
+            # as banned product data — they must not appear in our public
+            # API at all. ``surface_row.is_editor`` is the authoritative
+            # signal (joined from the ``event`` table); the raw item's
+            # ``isEditor`` field is the fallback when DB has no surface row.
+            is_editor_db = bool(surface_row.get("is_editor")) if surface_row else False
+            is_editor_raw = bool(item.get("isEditor"))
+            if is_editor_db or is_editor_raw:
+                editor_filtered += 1
+                continue
             if surface_row is not None:
                 updated = _apply_event_surface_overlay(updated, surface_row)
             terminal_candidate = terminal_by_event.get(event_id)
@@ -810,6 +819,12 @@ class LocalApiApplication:
                 continue
             updated["status"] = terminal_candidate["status"]
             reconciled_items.append(updated)
+        if editor_filtered:
+            logger.debug(
+                "Filtered %s isEditor=true events from list payload (envelope=%s)",
+                editor_filtered,
+                envelope_key,
+            )
 
         reconciled_payload = dict(payload)
         reconciled_payload[envelope_key] = reconciled_items
@@ -1683,6 +1698,11 @@ class LocalApiApplication:
                   AND NOT EXISTS (
                       SELECT 1 FROM event_terminal_state ets WHERE ets.event_id = e.id
                   )
+                  -- X4 (2026-05-13): SofaEditor crowdsourced events are banned
+                  -- product data. They must not appear in public live list
+                  -- responses. ``e.is_editor IS NOT TRUE`` keeps NULL (== unknown,
+                  -- treated as non-editor) and false rows; drops true.
+                  AND e.is_editor IS NOT TRUE
                 ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
                 LIMIT 500
                 """,

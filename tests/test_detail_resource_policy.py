@@ -212,6 +212,117 @@ class EventDetailResourcePolicyTests(unittest.TestCase):
         self.assertNotIn("/api/v1/event/{event_id}/shotmap", patterns)
         self.assertNotIn("/api/v1/event/{event_id}/odds/{provider_id}/all", patterns)
 
+    def test_live_delta_football_falls_through_to_full_matchcenter_path(self) -> None:
+        """X4 (2026-05-13) — football in live_delta mode must fetch the full
+        matchcenter spec set, not the empty live_delta_detail_endpoints tuple.
+
+        Prior to X4 `live_delta_detail_endpoints["football"] = ()` and the
+        live_delta branch returned `()` for football → live polling fetched
+        only ROOT + 5 core edges → matchcenter populated only at final_sweep
+        → user-visible "live matches have no data, appears after match ends".
+
+        Post-X4 football falls through to the regular full-detail spec path
+        where per-tier filtering by `football_detail_endpoint_allowed`
+        decides what's actually allowed. For tier_1 (detail_id=1), the full
+        matchcenter set is allowed during inprogress.
+        """
+        specs = build_event_detail_request_specs(
+            sport_slug="football",
+            status_type="inprogress",
+            team_ids=(2820, 2836),
+            provider_ids=(1,),
+            has_event_player_statistics=True,
+            has_event_player_heat_map=True,
+            has_global_highlights=False,
+            has_xg=True,
+            detail_id=1,  # tier_1
+            custom_id="abc",
+            hydration_mode="live_delta",
+        )
+        patterns = {item.endpoint.pattern for item in specs}
+        # Pre-match-style detail bundle MUST be in the spec list for tier_1 inprogress.
+        for required in (
+            "/api/v1/event/{event_id}/managers",
+            "/api/v1/event/{event_id}/h2h",
+            "/api/v1/event/{event_id}/pregame-form",
+            "/api/v1/event/{event_id}/votes",
+            "/api/v1/event/{event_id}/odds/{provider_id}/all",
+            "/api/v1/event/{event_id}/odds/{provider_id}/featured",
+            "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
+            "/api/v1/event/{event_id}/team-streaks",
+            "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}",
+            "/api/v1/event/{custom_id}/h2h/events",
+            # Live-detail block:
+            "/api/v1/event/{event_id}/comments",
+            "/api/v1/event/{event_id}/graph",
+            "/api/v1/event/{event_id}/average-positions",
+            "/api/v1/event/{event_id}/best-players/summary",
+            "/api/v1/event/{event_id}/heatmap/{team_id}",
+            "/api/v1/event/{event_id}/shotmap",
+        ):
+            self.assertIn(required, patterns, f"X4 must include {required!r} in football live_delta tier_1 spec")
+
+    def test_live_delta_football_tier_5_falls_through_with_prematch_only(self) -> None:
+        """X4 + X3 — football in live_delta + tier_5 (detail_id=None) still
+        only gets the pre-match-style detail set, premium endpoints blocked."""
+        specs = build_event_detail_request_specs(
+            sport_slug="football",
+            status_type="inprogress",
+            team_ids=(2820, 2836),
+            provider_ids=(1,),
+            has_event_player_statistics=None,
+            has_event_player_heat_map=None,
+            has_global_highlights=None,
+            has_xg=None,
+            detail_id=None,  # tier_5 — null detailId
+            hydration_mode="live_delta",
+        )
+        patterns = {item.endpoint.pattern for item in specs}
+        # Pre-match-style detail bundle allowed for tier_5 (X3 unlock).
+        for required in (
+            "/api/v1/event/{event_id}/managers",
+            "/api/v1/event/{event_id}/h2h",
+            "/api/v1/event/{event_id}/pregame-form",
+            "/api/v1/event/{event_id}/votes",
+            "/api/v1/event/{event_id}/odds/{provider_id}/all",
+            "/api/v1/event/{event_id}/team-streaks",
+        ):
+            self.assertIn(required, patterns, f"tier_5 must include {required!r}")
+        # Premium endpoints blocked for tier_5.
+        for blocked in (
+            "/api/v1/event/{event_id}/comments",
+            "/api/v1/event/{event_id}/graph",
+            "/api/v1/event/{event_id}/heatmap/{team_id}",
+            "/api/v1/event/{event_id}/shotmap",
+            "/api/v1/event/{event_id}/best-players/summary",
+            "/api/v1/event/{event_id}/average-positions",
+        ):
+            self.assertNotIn(blocked, patterns, f"tier_5 must block premium {blocked!r}")
+
+    def test_live_delta_football_editor_returns_empty(self) -> None:
+        """X3 HARD BAN still fires inside live_delta path for isEditor=true."""
+        specs = build_event_detail_request_specs(
+            sport_slug="football",
+            status_type="inprogress",
+            team_ids=(1, 2),
+            provider_ids=(1,),
+            detail_id=1,
+            is_editor=True,
+            hydration_mode="live_delta",
+        )
+        self.assertEqual(specs, ())
+
+    def test_live_delta_football_notstarted_returns_empty(self) -> None:
+        """live_delta is only meaningful for inprogress/finished events; for
+        notstarted events live_delta must still return () (no live-detail)."""
+        specs = build_event_detail_request_specs(
+            sport_slug="football",
+            status_type="notstarted",
+            detail_id=1,
+            hydration_mode="live_delta",
+        )
+        self.assertEqual(specs, ())
+
     def test_live_delta_tennis_fetches_only_live_point_feeds(self) -> None:
         specs = build_event_detail_request_specs(
             sport_slug="tennis",
