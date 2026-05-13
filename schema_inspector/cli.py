@@ -1,4 +1,4 @@
-"""Unified cutover CLI for the hybrid ETL backbone."""
+﻿"""Unified cutover CLI for the hybrid ETL backbone."""
 
 from __future__ import annotations
 
@@ -1045,6 +1045,30 @@ class HybridApp:
                 now_ms=int(time.time() * 1000),
             )
 
+    async def rebuild_capability_rollup(
+        self,
+        *,
+        sport_slug: str | None = None,
+        lookback_days: int | None = None,
+    ) -> int:
+        """Out-of-band batch rebuilder for ``endpoint_capability_rollup``.
+
+        Aggregates per-(sport_slug, endpoint_pattern) counts directly from
+        ``endpoint_capability_observation`` and replaces rollup state in a
+        single ON CONFLICT DO UPDATE per key. The inline live/hydrate hot
+        path is gated off by default since 2026-05-13 (see
+        ``SOFASCORE_INLINE_CAPABILITY_ROLLUP_ENABLED``); this command is the
+        canonical way to refresh rollup data without participating in the
+        live deadlock storm.
+        """
+
+        async with self.database.connection() as connection:
+            return await self.capability_repository.rebuild_rollups_from_observations(
+                connection,
+                sport_slug=sport_slug,
+                lookback_days=lookback_days,
+            )
+
 
 async def run_event_command(args, *, orchestrator) -> HydrationBatchReport:
     event_ids = tuple(int(item) for item in args.event_id)
@@ -1400,6 +1424,20 @@ async def _dispatch(args) -> int:
                     f"cold={report.restored_cold} terminal={report.restored_terminal}"
                 )
                 return 0
+            if args.command == "rebuild-capability-rollup":
+                sport_slug = getattr(args, "sport_slug", None) or None
+                lookback_days = getattr(args, "lookback_days", None)
+                rebuilt = await app.rebuild_capability_rollup(
+                    sport_slug=sport_slug,
+                    lookback_days=lookback_days,
+                )
+                print(
+                    "rebuild_capability_rollup "
+                    f"rebuilt_rollup_rows={rebuilt} "
+                    f"sport_slug={sport_slug or 'all'} "
+                    f"lookback_days={lookback_days if lookback_days is not None else 'all'}"
+                )
+                return 0
             if args.command == "stale-live-events":
                 from .ops.stale_live_events import (
                     collect_stale_live_events_summary,
@@ -1709,6 +1747,27 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
     subparsers.add_parser("proxy-health-monitor", help="Continuously mark unhealthy proxy endpoints from api_request_log traffic.")
     subparsers.add_parser("recover-live-state", help="Rebuild Redis live-state indexes from PostgreSQL history.")
+
+    rebuild_capability_rollup_parser = subparsers.add_parser(
+        "rebuild-capability-rollup",
+        help=(
+            "Rebuild endpoint_capability_rollup from endpoint_capability_observation "
+            "aggregates. Use after enabling the firebreak (inline rollup OFF) to "
+            "refresh rollup data out-of-band without participating in the live "
+            "deadlock storm."
+        ),
+    )
+    rebuild_capability_rollup_parser.add_argument(
+        "--sport-slug",
+        default=None,
+        help="Optional: restrict rebuild to one sport slug (e.g. 'football').",
+    )
+    rebuild_capability_rollup_parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=None,
+        help="Optional: only aggregate observations within the last N days (default: full history).",
+    )
 
     stale_live = subparsers.add_parser(
         "stale-live-events",

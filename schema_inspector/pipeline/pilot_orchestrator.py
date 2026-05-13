@@ -1,4 +1,4 @@
-"""Pilot orchestrator wiring planner, fetch, raw snapshots, and normalization."""
+﻿"""Pilot orchestrator wiring planner, fetch, raw snapshots, and normalization."""
 
 from __future__ import annotations
 
@@ -1672,10 +1672,26 @@ class PilotOrchestrator:
         for item in self._pending_capability_records:
             latest_rollups[(item.rollup.sport_slug, item.rollup.endpoint_pattern)] = item.rollup
 
+        # Observations are append-only and lock-free; always written inline.
         for observation in observations:
             await self.capability_repository.insert_observation(self.sql_executor, observation)
-        for rollup in latest_rollups.values():
-            await self.capability_repository.upsert_rollup(self.sql_executor, rollup)
+
+        # Firebreak (2026-05-13): the legacy `upsert_rollup` is a read-modify-
+        # write race against a small 290-row PK space hit by ~20 concurrent
+        # workers. It caused chronic PostgreSQL deadlocks and stalled live
+        # ingestion (live-discovery worker retry loop, hot zset starvation,
+        # missing matchcenter snapshots). The inline rollup path is now OFF by
+        # default. Rollup state is rebuilt out-of-band from observations via
+        # `rebuild-capability-rollup` CLI command. To restore the legacy
+        # behaviour for debugging set `SOFASCORE_INLINE_CAPABILITY_ROLLUP_ENABLED=1`
+        # in the prod .env; that branch sorts keys by (sport_slug,
+        # endpoint_pattern) to avoid lock inversion but still has the underlying
+        # race condition.
+        if _inline_capability_rollup_enabled():
+            for key in sorted(latest_rollups.keys()):
+                await self.capability_repository.upsert_rollup(
+                    self.sql_executor, latest_rollups[key]
+                )
 
         self._pending_capability_records.clear()
 
@@ -1987,3 +2003,20 @@ def _as_int(value: object) -> int | None:
         if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
             return int(stripped)
     return None
+
+
+def _inline_capability_rollup_enabled() -> bool:
+    """Whether to write ``endpoint_capability_rollup`` from the live/hydrate
+    hot path (legacy behaviour).
+
+    Default is **off** to avoid the chronic deadlock / lock-wait storm caused
+    by ~20 concurrent workers all read-modify-writing the same ~290-row PK
+    space. Rollup state is rebuilt out-of-band via the
+    ``rebuild-capability-rollup`` CLI command.
+
+    Set ``SOFASCORE_INLINE_CAPABILITY_ROLLUP_ENABLED=1`` (or ``true``/``yes``/
+    ``on``) in prod ``.env`` to restore the legacy inline path for debugging.
+    """
+
+    raw_value = os.getenv("SOFASCORE_INLINE_CAPABILITY_ROLLUP_ENABLED", "0")
+    return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}

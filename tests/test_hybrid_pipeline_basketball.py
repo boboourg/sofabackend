@@ -1,7 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest import mock
 
 from schema_inspector.fetch_executor import FetchExecutor
 from schema_inspector.normalizers.worker import NormalizeWorker
@@ -80,6 +82,11 @@ class _FakeCapabilityRepository:
 
 
 class BasketballHybridPipelineTests(unittest.IsolatedAsyncioTestCase):
+    # 2026-05-13: this suite exercises the legacy inline capability rollup
+    # path (asserts on capability_repository.rollups). The firebreak deploy
+    # gates inline rollup OFF by default — re-enable it locally so the
+    # legacy assertions stay valid.
+    @mock.patch.dict(os.environ, {"SOFASCORE_INLINE_CAPABILITY_ROLLUP_ENABLED": "1"})
     async def test_basketball_pipeline_fetches_regular_season_widgets(self) -> None:
         event_url = "https://www.sofascore.com/api/v1/event/14439306"
         statistics_url = "https://www.sofascore.com/api/v1/event/14439306/statistics"

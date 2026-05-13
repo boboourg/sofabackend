@@ -1,4 +1,4 @@
-"""Shared runtime loop for continuous Redis Streams workers."""
+﻿"""Shared runtime loop for continuous Redis Streams workers."""
 
 from __future__ import annotations
 
@@ -297,13 +297,30 @@ class WorkerRuntime:
                 if self.retry_handler is not None and is_retryable_worker_error(exc):
                     delay_ms = retry_delay_ms(attempt=_entry_attempt(entry), exc=exc)
                     retry_status = retry_audit_status(exc)
+                    # Structured retry diagnostics (2026-05-13 firebreak):
+                    # raw `exc=%s` for empty-args exceptions (TimeoutError())
+                    # produced "exc=" with no signal. The new fields expose
+                    # the exception class, full repr, asyncpg SQLSTATE (e.g.
+                    # 40P01 for DeadlockDetectedError) and elapsed work time
+                    # so deadlock vs. timeout vs. transient I/O is decidable
+                    # from journal alone.
+                    exc_type_name = type(exc).__name__
+                    exc_repr = repr(exc)
+                    if len(exc_repr) > 240:
+                        exc_repr = exc_repr[:240] + "...(truncated)"
+                    sqlstate = getattr(exc, "sqlstate", None)
+                    duration_ms = _duration_ms(started_perf)
                     logger.warning(
-                        "Worker %s scheduling retry: stream=%s message_id=%s delay_ms=%s exc=%s",
+                        "Worker %s scheduling retry: stream=%s message_id=%s "
+                        "delay_ms=%s exc_type=%s exc=%s sqlstate=%s duration_ms=%s",
                         self.name,
                         entry.stream,
                         entry.message_id,
                         delay_ms,
-                        exc,
+                        exc_type_name,
+                        exc_repr,
+                        sqlstate,
+                        duration_ms,
                     )
                     await _await_maybe(self.retry_handler(entry, exc, delay_ms=delay_ms))
                     await self._record_job_run(
