@@ -1204,6 +1204,8 @@ async def _dispatch(args) -> int:
     command = getattr(args, "command", None)
     if command == "monitoring-daemon":
         return await _run_monitoring_daemon(args)
+    if command == "api-cache-warmer":
+        return await _run_cache_warmer(args)
     if command in _HISTORICAL_COMMANDS:
         historical_env = None
         if args.proxy:
@@ -2059,6 +2061,20 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_historical_maintenance.add_argument("--consumer-name", default="worker-historical-maintenance-1", help="Redis consumer name for the archival maintenance worker.")
     worker_historical_maintenance.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
+    cache_warmer = subparsers.add_parser(
+        "api-cache-warmer",
+        help=(
+            "Run the N4 Layer C cache warmer: periodically fetches hot "
+            "sport-level API endpoints so the Redis response cache stays "
+            "populated. See docs/N4_API_PERFORMANCE_PLAN.md."
+        ),
+    )
+    cache_warmer.add_argument(
+        "--consumer-name",
+        default="api-cache-warmer-1",
+        help="Opaque daemon instance label for logs and systemd naming.",
+    )
+
     monitoring_daemon = subparsers.add_parser(
         "monitoring-daemon",
         help=(
@@ -2186,6 +2202,37 @@ def _normalized_source_slug(value: str | None) -> str | None:
         return None
     normalized = str(value).strip().lower()
     return normalized or None
+
+
+async def _run_cache_warmer(args) -> int:
+    """Standalone entry point for the N4 Layer C cache-warmer daemon."""
+
+    import httpx
+
+    from .cache_warmer import CacheWarmerConfig, CacheWarmerDaemon
+
+    del args  # consumer-name is purely for logs/systemd labeling
+    env = _load_project_env()
+    config = CacheWarmerConfig.from_env(env)
+    if not config.enabled:
+        logger.info(
+            "api-cache-warmer: SOFASCORE_CACHE_WARMER_ENABLED=0, exiting."
+        )
+        return 0
+
+    http_client = httpx.AsyncClient(timeout=config.request_timeout_seconds)
+    daemon = CacheWarmerDaemon(
+        config=config,
+        http_client=http_client,
+    )
+    try:
+        await daemon.run_forever()
+    finally:
+        try:
+            await http_client.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
 
 
 async def _run_monitoring_daemon(args) -> int:

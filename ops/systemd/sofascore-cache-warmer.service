@@ -1,0 +1,16 @@
+[Unit]
+Description=Sofascore API Cache Warmer (N4 Layer C)
+After=network-online.target sofascore-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.cli api-cache-warmer --consumer-name prod-cache-warmer
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
