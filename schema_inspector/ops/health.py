@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -112,6 +113,39 @@ class GoLiveSummary:
 
 
 @dataclass(frozen=True)
+class LiveFreshnessSlo:
+    """Single SLO measurement (live freshness P0.C, 2026-05-14)."""
+
+    name: str
+    actual: float | int | None
+    threshold: float | int
+    breached: bool
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class LiveFreshnessSummary:
+    """Live-path freshness signals exposed at /ops/health.
+
+    Status is ``healthy`` when no SLO is breached, ``degraded`` when at least
+    one is breached. SLOs are deliberately observability-only — they do NOT
+    change runtime behaviour, only surface live signals to operators.
+    See docs/ARCHITECTURE_AUDIT.md (Part 3 P0.C).
+    """
+
+    status: str = "unknown"
+    slos: tuple[LiveFreshnessSlo, ...] = field(default_factory=tuple)
+    # Raw metrics surfaced even when SLO is not breached, for trend analysis:
+    oldest_hot_score_age_seconds: int | None = None
+    refresh_live_event_success_rate_5min: float | None = None
+    tier_1_blocked_rate_cumulative: float | None = None
+    tier_1_active_events: int = 0
+    refresh_live_event_succeeded_5min: int = 0
+    refresh_live_event_retry_5min: int = 0
+    refresh_live_event_failed_5min: int = 0
+
+
+@dataclass(frozen=True)
 class HealthReport:
     snapshot_count: int
     capability_rollup_count: int
@@ -131,6 +165,7 @@ class HealthReport:
     )
     queue_summary: QueueSummary = QueueSummary(redis_backend_kind="none")
     go_live: GoLiveSummary = GoLiveSummary(ready=False)
+    live_freshness: LiveFreshnessSummary = LiveFreshnessSummary()
 
 
 _SNAPSHOT_FRESHNESS_MAX_AGE_SECONDS = 300
@@ -142,6 +177,18 @@ _HISTORICAL_ENRICHMENT_GO_LIVE_MAX_LAG = _env_int(
 )
 _HISTORICAL_RETRY_SHARE_MAX = 0.01
 _LIVE_SNAPSHOT_TERMINAL_GRACE_SECONDS = 30
+
+# Live freshness SLO thresholds (P0.C 2026-05-14). All env-overridable.
+# Defaults sourced from docs/ARCHITECTURE_AUDIT.md Part 5 (revised 24/7 gates).
+_LIVE_FRESHNESS_OLDEST_HOT_AGE_MAX_SECONDS = _env_int(
+    "LIVE_FRESHNESS_OLDEST_HOT_AGE_MAX_SECONDS", 900
+)  # 15 minutes — see ARCHITECTURE_AUDIT.md C.2
+_LIVE_FRESHNESS_SUCCESS_RATE_MIN_BASIS_POINTS = _env_int(
+    "LIVE_FRESHNESS_SUCCESS_RATE_MIN_BASIS_POINTS", 9500
+)  # 95% (basis points to avoid float env parse)
+_LIVE_FRESHNESS_TIER_1_BLOCKED_MAX_BASIS_POINTS = _env_int(
+    "LIVE_FRESHNESS_TIER_1_BLOCKED_MAX_BASIS_POINTS", 8000
+)  # 80%
 
 
 async def collect_health_report(
@@ -184,6 +231,12 @@ async def collect_health_report(
         housekeeping_dry_run=resolved_housekeeping_dry_run,
         now=now_utc,
     )
+    live_freshness = await _build_live_freshness_summary(
+        sql_executor=sql_executor,
+        redis_backend=redis_backend,
+        queue_summary=queue_summary,
+        now=now_utc,
+    )
     return HealthReport(
         snapshot_count=snapshot_count,
         capability_rollup_count=capability_rollup_count,
@@ -199,7 +252,226 @@ async def collect_health_report(
         reconcile_policy_summary=reconcile_policy_summary,
         queue_summary=queue_summary,
         go_live=go_live,
+        live_freshness=live_freshness,
     )
+
+
+async def _build_live_freshness_summary(
+    *,
+    sql_executor,
+    redis_backend,
+    queue_summary: QueueSummary,
+    now: datetime,
+) -> LiveFreshnessSummary:
+    """Compose the live freshness summary (P0.C 2026-05-14).
+
+    Parallel-fetches:
+      * oldest score age in ``zset:live:hot`` (Redis)
+      * refresh_live_event status counts over the last 5 minutes (Postgres)
+
+    The third SLO (tier_1 blocked rate) is derived from already-collected
+    ``queue_summary.live_dispatch_metrics`` without an extra round trip.
+
+    Best-effort: any underlying probe failure returns ``None`` for that
+    metric and a single SLO that is not breached for it. Health endpoint
+    must never fail because one sub-probe could not complete.
+    """
+
+    oldest_age_task = asyncio.create_task(
+        _fetch_oldest_hot_score_age_seconds(redis_backend, now)
+    )
+    counts_task = asyncio.create_task(
+        _fetch_refresh_live_event_counts_5min(sql_executor)
+    )
+    try:
+        oldest_age_seconds, counts_5min = await asyncio.gather(
+            oldest_age_task, counts_task
+        )
+    except Exception:
+        oldest_age_seconds = None
+        counts_5min = {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+
+    tier_1_blocked = _tier_1_blocked_rate(queue_summary)
+    tier_1_active = int((queue_summary.live_tier_counts or {}).get("tier_1", 0))
+    success_rate = _refresh_success_rate(counts_5min)
+
+    age_threshold = _LIVE_FRESHNESS_OLDEST_HOT_AGE_MAX_SECONDS
+    success_threshold = _LIVE_FRESHNESS_SUCCESS_RATE_MIN_BASIS_POINTS / 10_000.0
+    blocked_threshold = _LIVE_FRESHNESS_TIER_1_BLOCKED_MAX_BASIS_POINTS / 10_000.0
+
+    slos: list[LiveFreshnessSlo] = [
+        LiveFreshnessSlo(
+            name="oldest_hot_score_age_seconds",
+            actual=oldest_age_seconds,
+            threshold=age_threshold,
+            breached=(
+                oldest_age_seconds is not None and oldest_age_seconds > age_threshold
+            ),
+            note=(
+                "stale entries in zset:live:hot indicate cleanup is lagging "
+                "(see ARCHITECTURE_AUDIT.md C.2)"
+                if oldest_age_seconds is not None and oldest_age_seconds > age_threshold
+                else None
+            ),
+        ),
+        LiveFreshnessSlo(
+            name="refresh_live_event_success_rate_5min",
+            actual=success_rate,
+            threshold=success_threshold,
+            breached=(
+                success_rate is not None and success_rate < success_threshold
+            ),
+            note=(
+                "live refresh success rate dropped — check retry log + "
+                "stream:etl:live_tier_* downstream"
+                if success_rate is not None and success_rate < success_threshold
+                else None
+            ),
+        ),
+        LiveFreshnessSlo(
+            name="tier_1_blocked_rate_cumulative",
+            actual=tier_1_blocked,
+            # tier_1 SLO is only meaningful when tier_1 events are actually
+            # being polled. With zero active tier_1 events the metric is
+            # cumulative (since planner restart) and not a current signal.
+            threshold=blocked_threshold,
+            breached=(
+                tier_1_active > 0
+                and tier_1_blocked is not None
+                and tier_1_blocked > blocked_threshold
+            ),
+            note=(
+                "tier_1 dispatch lease likely too long for current poll cadence"
+                if (
+                    tier_1_active > 0
+                    and tier_1_blocked is not None
+                    and tier_1_blocked > blocked_threshold
+                )
+                else None
+            ),
+        ),
+    ]
+
+    if any(slo.breached for slo in slos):
+        status = "degraded"
+    elif (
+        oldest_age_seconds is None
+        and success_rate is None
+        and tier_1_blocked is None
+    ):
+        status = "unknown"
+    else:
+        status = "healthy"
+
+    return LiveFreshnessSummary(
+        status=status,
+        slos=tuple(slos),
+        oldest_hot_score_age_seconds=oldest_age_seconds,
+        refresh_live_event_success_rate_5min=success_rate,
+        tier_1_blocked_rate_cumulative=tier_1_blocked,
+        tier_1_active_events=tier_1_active,
+        refresh_live_event_succeeded_5min=counts_5min["succeeded"],
+        refresh_live_event_retry_5min=counts_5min["retry_scheduled"],
+        refresh_live_event_failed_5min=counts_5min["failed"],
+    )
+
+
+async def _fetch_oldest_hot_score_age_seconds(
+    redis_backend, now: datetime
+) -> int | None:
+    """Return age in seconds of the oldest entry in ``zset:live:hot``.
+
+    Returns 0 when the oldest score is in the future (event scheduled, not
+    stale). Returns ``None`` when Redis is unavailable or the zset is empty.
+    """
+
+    if redis_backend is None:
+        return None
+    zrange = getattr(redis_backend, "zrange", None)
+    if not callable(zrange):
+        return None
+    try:
+        result = zrange("zset:live:hot", 0, 0, withscores=True)
+    except Exception:
+        return None
+    if not result:
+        return None
+    try:
+        member, score = result[0]
+        del member
+        score_ms = int(float(score))
+    except (TypeError, ValueError, IndexError):
+        return None
+    now_ms = int(now.timestamp() * 1000)
+    age_ms = now_ms - score_ms
+    if age_ms <= 0:
+        return 0
+    return age_ms // 1000
+
+
+async def _fetch_refresh_live_event_counts_5min(sql_executor) -> dict[str, int]:
+    """Return counts of refresh_live_event jobs by status over last 5 min."""
+
+    fetchrow = getattr(sql_executor, "fetchrow", None)
+    if not callable(fetchrow):
+        return {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+    try:
+        row = await fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded,
+                COUNT(*) FILTER (WHERE status = 'retry_scheduled') AS retry_scheduled,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed
+            FROM etl_job_run
+            WHERE started_at >= NOW() - INTERVAL '5 minutes'
+              AND job_type = 'refresh_live_event'
+            """
+        )
+    except Exception:
+        return {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+    if row is None:
+        return {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+    return {
+        "succeeded": int(_row_field(row, "succeeded") or 0),
+        "retry_scheduled": int(_row_field(row, "retry_scheduled") or 0),
+        "failed": int(_row_field(row, "failed") or 0),
+    }
+
+
+def _row_field(row: Any, name: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[name]
+    except (KeyError, TypeError, IndexError):
+        return None
+
+
+def _tier_1_blocked_rate(queue_summary: QueueSummary) -> float | None:
+    """Compute tier_1 ``claim_failed_blocked`` / ``claim_attempts`` ratio.
+
+    Returns cumulative ratio since the planner started (the metrics are
+    HINCRBY-stored in Redis). Not a rolling window — surface it as such to
+    operators via the SLO ``note`` field when breached.
+    """
+
+    metrics = queue_summary.live_dispatch_metrics or {}
+    attempts = int(metrics.get("claim_attempts:tier_1") or 0)
+    blocked = int(metrics.get("claim_failed_blocked:tier_1") or 0)
+    if attempts <= 0:
+        return None
+    return min(1.0, blocked / attempts)
+
+
+def _refresh_success_rate(counts: dict[str, int]) -> float | None:
+    total = (
+        int(counts.get("succeeded") or 0)
+        + int(counts.get("retry_scheduled") or 0)
+        + int(counts.get("failed") or 0)
+    )
+    if total <= 0:
+        return None
+    return int(counts.get("succeeded") or 0) / total
 
 
 async def _fetch_count(sql_executor, query: str) -> int:
