@@ -122,6 +122,58 @@ Update history:
 
 ---
 
+## Operational facts (corrections to my own mental model)
+
+### Smartproxy account structure (clarified 2026-05-15 by Bobur)
+
+`SCHEMA_INSPECTOR_PROXY_URLS` in `.env` contains **5 subaccount endpoints**, NOT 5 fixed IPs:
+
+```
+http://smart-tzlmu48zn14x:PW@proxy.smartproxy.net:3120
+http://smart-uyuqluud045n:PW@proxy.smartproxy.net:3120
+http://smart-yec88qsar9q3:PW@proxy.smartproxy.net:3120
+http://smart-f4mvh2lb5h9z:PW@proxy.smartproxy.net:3120
+http://smart-zqhuuetlnopm:PW@proxy.smartproxy.net:3120
+```
+
+Each `smart-XXXX` is a **residential proxy subaccount**. Behavior:
+- Each request through a subaccount goes through a **different residential IP** (rotated automatically by Smartproxy).
+- A subaccount can handle up to ~500 requests before its allocated pool rotates further.
+- **Implication for incident diagnosis:** "IP banned" hypothesis is mostly invalid — every retry uses a fresh IP. If Sofascore is throttling, it must be by some other signal: User-Agent, TLS fingerprint, endpoint pattern, request rate per session, or geo-distribution of the residential pool.
+- "5 IPs banned" interpretation in the event 14083649 postmortem below is **partially incorrect** — what's actually banned (or selectively throttled) is most likely the *pattern* or *geographic class* of our requests, not specific IPs.
+
+### Sofascore has three working base domains
+
+All three return real data and can serve as transport fallback targets:
+
+| Domain | Notes |
+| --- | --- |
+| `https://www.sofascore.com/api/v1/...` | What browsers use, most user-facing path |
+| `https://api.sofascore.com/api/v1/...` | Canonical API host |
+| `https://mobile.sofascore.com/api/v1/...` | Mobile-flavoured host (does exist, confirmed 2026-05-15) |
+
+**Idea (not yet implemented):** transport-layer fallback chain. If first attempt returns 403/timeout, retry against the next domain in the chain. Cheap defensive layer — when upstream selectively throttles one host, the alternates often still respond.
+
+**Tracking ID:** N5 future work — see "Future work" section below.
+
+---
+
+## Future work (post-current-session ideas)
+
+### N5 — Transport fallback chain across 3 Sofascore base domains
+
+Add to `schema_inspector/sofascore_client.py` (or wherever the HTTP client lives) a fallback ladder:
+
+1. Primary: `https://www.sofascore.com/api/v1/...`
+2. Fallback 1: `https://api.sofascore.com/api/v1/...`
+3. Fallback 2: `https://mobile.sofascore.com/api/v1/...`
+
+Trigger fallback on: 403, 5xx, or timeout > 10s. Stop on 2xx, 404 (actual not-found).
+
+Estimated effort: 0.5-1 day. Mostly testing. Could fix the event 14083649 class of incidents (selective per-host throttling).
+
+---
+
 ## Incident postmortems
 
 ### 2026-05-14 23:46 EEST — Selective upstream throttling on event 14083649 (Real Oviedo vs Real Madrid)
