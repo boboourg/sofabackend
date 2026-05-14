@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import orjson
 from fastapi import FastAPI, Request, Response
 
+from .api_cache import CachedResponse, ResponseCache, build_response_cache
 from .db import DatabaseConfig, create_pool_with_fallback, load_database_config
 from .endpoints import (
     SPORT_ALL_EVENT_COUNT_ENDPOINT,
@@ -210,8 +211,15 @@ class LocalApiApplication:
         self._openapi_build_future: concurrent.futures.Future[bytes] | None = None
         self._openapi_warmup_future: concurrent.futures.Future[None] | None = None
         self._openapi_build_lock = threading.Lock()
-        self._response_cache: dict[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _CachedSerializedResponse] = {}
-        self._response_cache_lock: threading.Lock | None = threading.Lock()
+        # N4 Layer B (2026-05-14): response cache backend now pluggable.
+        # Default = InProcessResponseCache (preserves legacy behavior).
+        # Flip SOFASCORE_API_RESPONSE_CACHE_BACKEND=redis in .env to enable
+        # shared Redis cache across uvicorn workers, surviving restart.
+        # See docs/N4_API_PERFORMANCE_PLAN.md.
+        self._response_cache_v2: ResponseCache = build_response_cache(
+            redis_backend=redis_backend,
+            env=_load_project_env(),
+        )
         self._cache_now = time.monotonic
         self.swagger_html = _build_viewer_html("openapi.json")
         self._openapi_json = load_cached_openapi_bytes(base_urls=self.openapi_base_urls)
@@ -3179,20 +3187,20 @@ class LocalApiApplication:
         self,
         key: tuple[str, tuple[tuple[str, tuple[str, ...]], ...]],
     ) -> SerializedApiResponse | None:
-        now = self._cache_now()
-        lock = self._response_cache_lock
-        if lock is None:
-            entry = self._response_cache.get(key)
-            if entry is None or entry.expires_at <= now:
-                self._response_cache.pop(key, None)
-                return None
-            return entry.response
-        with lock:
-            entry = self._response_cache.get(key)
-            if entry is None or entry.expires_at <= now:
-                self._response_cache.pop(key, None)
-                return None
-            return entry.response
+        # ``getattr`` for safety: some tests build LocalApiApplication via
+        # __new__() and skip the cache initialisation. Treat missing
+        # backend as "no cache" — same behavior as the legacy empty dict.
+        cache: ResponseCache | None = getattr(self, "_response_cache_v2", None)
+        if cache is None:
+            return None
+        cached = cache.get(key)
+        if cached is None:
+            return None
+        return SerializedApiResponse(
+            status_code=cached.status_code,
+            body=cached.body,
+            cache_control=cached.cache_control,
+        )
 
     def _cache_put(
         self,
@@ -3200,13 +3208,18 @@ class LocalApiApplication:
         response: SerializedApiResponse,
         ttl_seconds: float,
     ) -> None:
-        entry = _CachedSerializedResponse(response=response, expires_at=self._cache_now() + ttl_seconds)
-        lock = self._response_cache_lock
-        if lock is None:
-            self._response_cache[key] = entry
+        cache: ResponseCache | None = getattr(self, "_response_cache_v2", None)
+        if cache is None:
             return
-        with lock:
-            self._response_cache[key] = entry
+        cache.put(
+            key,
+            CachedResponse(
+                status_code=response.status_code,
+                body=response.body,
+                cache_control=response.cache_control,
+            ),
+            ttl_seconds,
+        )
 
 
 class LocalApiHttpServer(ThreadingHTTPServer):

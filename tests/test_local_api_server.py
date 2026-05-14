@@ -1423,12 +1423,16 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.release_calls, 1)
 
     async def test_handle_api_get_http_response_caches_live_bytes_for_two_seconds(self) -> None:
+        from schema_inspector.api_cache import InProcessResponseCache
+
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()
-        application._response_cache = {}
-        application._response_cache_lock = None
         current_time = [1000.0]
         application._cache_now = lambda: current_time[0]
+        # N4 Layer B (2026-05-14): cache backend now pluggable. Use the
+        # in-process implementation directly here so the test still
+        # measures TTL-driven cache invalidation deterministically.
+        application._response_cache_v2 = InProcessResponseCache(clock=lambda: current_time[0])
         calls: list[tuple[str, str]] = []
 
         async def fake_handle_api_get(path: str, raw_query: str) -> ApiResponse:
