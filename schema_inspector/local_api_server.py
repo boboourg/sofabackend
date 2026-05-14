@@ -1,4 +1,4 @@
-﻿"""Serve the ingested multi-sport dataset through local Sofascore-style HTTP routes."""
+"""Serve the ingested multi-sport dataset through local Sofascore-style HTTP routes."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from .endpoints import (
     SofascoreEndpoint,
     local_api_endpoints,
 )
-from .ops.health import collect_health_report
+from .ops.health import _build_live_freshness_summary, collect_health_report
 from .ops.queue_summary import collect_queue_summary
 from .queue.live_state import LiveEventStateStore
 from .queue.streams import ALL_CONSUMER_GROUPS, RedisStreamQueue
@@ -489,6 +489,8 @@ class LocalApiApplication:
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_job_runs_payload(limit))
         if path == "/ops/coverage/summary":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_coverage_summary_payload())
+        if path == "/ops/live-freshness":
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_live_freshness_payload())
         return ApiResponse(
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
@@ -3041,6 +3043,30 @@ class LocalApiApplication:
             live_state_store=getattr(self, "live_state_store", None),
             redis_backend=getattr(self, "redis_backend", None),
             now_ms=time.time() * 1000.0,
+        )
+        return dataclasses.asdict(summary)
+
+    async def _fetch_ops_live_freshness_payload(self) -> dict[str, Any]:
+        """Standalone live-freshness endpoint (P0.C 2026-05-14).
+
+        ``/ops/health`` aggregates many slow DB queries (snapshot_count,
+        drift_summary, ...) and can time out independently of live state.
+        This endpoint surfaces the live freshness SLO summary without
+        touching slow DB paths — it uses only Redis (ZRANGE zset:live:hot)
+        and the existing queue summary (live_dispatch_metrics).
+        """
+
+        queue_summary = await collect_queue_summary(
+            stream_queue=getattr(self, "stream_queue", None),
+            live_state_store=getattr(self, "live_state_store", None),
+            redis_backend=getattr(self, "redis_backend", None),
+            now_ms=time.time() * 1000.0,
+        )
+        summary = await _build_live_freshness_summary(
+            sql_executor=None,
+            redis_backend=getattr(self, "redis_backend", None),
+            queue_summary=queue_summary,
+            now=datetime.now(timezone.utc),
         )
         return dataclasses.asdict(summary)
 
