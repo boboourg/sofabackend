@@ -1829,6 +1829,85 @@ class LocalApiNormalizedFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("source_slug = $2", connection.fetch_calls[0][0])
         self.assertEqual(connection.fetch_calls[0][1][1], "sofascore")
 
+    async def test_fetch_snapshot_no_entity_scope_filters_by_source_url(self) -> None:
+        """N4 Layer D D.2 regression guard.
+
+        Sport-level endpoints without context_entity_type must add a
+        ``source_url LIKE '<canonical-prefix>%'`` filter in SQL so the
+        composite partial index ``idx_api_payload_snapshot_source_url_lookup``
+        can serve the lookup in 1-2 rows instead of returning 500 latest
+        rows for the whole pattern (different dates) and JSON-parsing all
+        of them in Python.
+
+        See ``docs/PROGRESS.md`` Layer D D.2 entry.
+        """
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        path = "/api/v1/sport/tennis/scheduled-events/2026-05-15"
+        result = match_route(path, routes)
+        assert result is not None
+        route, path_params = result
+        connection = _FakeSnapshotConnection(
+            rows=[
+                {
+                    "source_url": f"https://www.sofascore.com{path}",
+                    "payload": {"events": [{"id": 7}]},
+                    "is_soft_error_payload": False,
+                    "http_status": 200,
+                }
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+        application._reconcile_snapshot_payload = _passthrough_reconcile
+
+        await application._fetch_snapshot_payload(route, path, "", path_params)
+
+        query, args = connection.fetch_calls[0]
+        # Must include the source_url filter
+        self.assertIn("source_url LIKE", query)
+        # Must NOT add a context_entity_type clause (this is a no-scope route)
+        self.assertNotIn("context_entity_type", query)
+        # The LIKE argument must be the canonical prefix + '%'
+        self.assertIn(f"https://www.sofascore.com{path}%", args)
+
+    async def test_fetch_snapshot_with_entity_scope_skips_source_url_filter(self) -> None:
+        """N4 Layer D D.2 regression guard (negative).
+
+        Entity-scoped routes (event/{id}/lineups, team/{id}, ...) must
+        keep their existing ``context_entity_type = ... AND
+        context_entity_id = ...`` filter and must NOT also add the
+        source_url LIKE filter — they already hit a dedicated entity
+        index and the LIKE would only slow them down.
+        """
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        routes = build_route_specs()
+        path = "/api/v1/event/123456/lineups"
+        result = match_route(path, routes)
+        assert result is not None
+        route, path_params = result
+        connection = _FakeSnapshotConnection(
+            rows=[
+                {
+                    "source_url": f"https://www.sofascore.com{path}",
+                    "payload": {"home": []},
+                    "is_soft_error_payload": False,
+                    "http_status": 200,
+                }
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+        application._reconcile_snapshot_payload = _passthrough_reconcile
+
+        await application._fetch_snapshot_payload(route, path, "", path_params)
+
+        query, _ = connection.fetch_calls[0]
+        self.assertIn("context_entity_type", query)
+        self.assertIn("context_entity_id", query)
+        # Layer D D.2 filter must NOT apply here:
+        self.assertNotIn("source_url LIKE", query)
+
 
 class LocalApiSnapshotReconciliationTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_events_snapshot_keeps_terminal_events_with_status_override(self) -> None:

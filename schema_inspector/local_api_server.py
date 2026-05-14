@@ -524,6 +524,21 @@ class LocalApiApplication:
         if route.context_entity_type is not None and context_value is not None:
             query += f" AND context_entity_type = ${len(arguments) + 1} AND context_entity_id = ${len(arguments) + 2}"
             arguments.extend([route.context_entity_type, context_value])
+        else:
+            # N4 Layer D D.2 (2026-05-15): for sport-level / no-entity-scope
+            # endpoints (e.g. /api/v1/sport/{slug}/scheduled-events/{date}),
+            # push a source_url prefix into SQL so we do not pull and JSON-
+            # parse hundreds of irrelevant rows (different dates) in Python.
+            # EXPLAIN ANALYZE on prod showed the legacy plan returned 500
+            # latest rows for the pattern across ALL dates; Python parsed
+            # them all to find 1-2 matching ``path``. With this filter the
+            # planner uses the composite (endpoint_pattern, source_url,
+            # id DESC) partial index and returns 1-2 rows directly.
+            # _query_maps_equal in the row loop below still does the final
+            # query-param comparison since their order may differ between
+            # captures.
+            query += f" AND source_url LIKE ${len(arguments) + 1}"
+            arguments.append(f"https://www.sofascore.com{path}%")
         query += " ORDER BY id DESC LIMIT 500"
 
         connection = await self._connect()
