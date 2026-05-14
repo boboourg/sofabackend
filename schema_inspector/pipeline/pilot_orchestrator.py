@@ -1296,12 +1296,43 @@ class PilotOrchestrator:
         *,
         phase_name: str,
     ) -> list[tuple[FetchOutcomeEnvelope | None, object | None]]:
+        # Fix #1 (2026-05-15, "tier 1 subs empty" boл):
+        # Previously a single sub-endpoint exception would either break the
+        # sequential loop or trigger ``raise errors[0]`` after the parallel
+        # gather, aborting the whole event run. That meant: 24 of 25 subs
+        # OK, 1 raises → whole event marked failed → quarantine 60s →
+        # /lineups, /statistics, /incidents etc stayed empty in the DB.
+        # Now individual sub failures are captured and converted into
+        # ``(None, None)`` placeholders so the run continues for the rest.
+        # Callers already skip ``None`` outcomes when appending to
+        # ``fetch_outcomes`` / ``parse_results``, so partial success is
+        # safe end-to-end.
         if not specs:
             return []
         if self._fanout_max_inflight <= 1:
             results: list[tuple[FetchOutcomeEnvelope | None, object | None]] = []
+            sequential_errors = 0
             for spec in specs:
-                results.append(await self._fetch_event_endpoint_spec(spec))
+                try:
+                    results.append(await self._fetch_event_endpoint_spec(spec))
+                except Exception as exc:  # noqa: BLE001 — graceful per-sub failure
+                    sequential_errors += 1
+                    logger.warning(
+                        "Event endpoint sequential fetch raised: phase=%s pattern=%s err=%r",
+                        phase_name,
+                        getattr(getattr(spec, "endpoint", None), "pattern", "?"),
+                        exc,
+                    )
+                    results.append((None, None))
+            if sequential_errors:
+                logger.info(
+                    "Event endpoint sequential fanout finished with errors: phase=%s "
+                    "total=%s ok=%s errors=%s",
+                    phase_name,
+                    len(specs),
+                    sum(1 for outcome, _ in results if outcome is not None),
+                    sequential_errors,
+                )
             return results
 
         started = time.monotonic()
@@ -1312,8 +1343,20 @@ class PilotOrchestrator:
                 return await self._fetch_event_endpoint_spec(spec)
 
         gathered = await asyncio.gather(*(run_one(spec) for spec in specs), return_exceptions=True)
-        errors = [item for item in gathered if isinstance(item, Exception)]
-        results = [item for item in gathered if not isinstance(item, Exception)]
+        results = []
+        error_count = 0
+        for item, spec in zip(gathered, specs):
+            if isinstance(item, Exception):
+                error_count += 1
+                logger.warning(
+                    "Event endpoint parallel fetch raised: phase=%s pattern=%s err=%r",
+                    phase_name,
+                    getattr(getattr(spec, "endpoint", None), "pattern", "?"),
+                    item,
+                )
+                results.append((None, None))
+            else:
+                results.append(item)
         duration_ms = int((time.monotonic() - started) * 1000)
         ok_count = sum(1 for outcome, _ in results if outcome is not None)
         logger.info(
@@ -1323,10 +1366,10 @@ class PilotOrchestrator:
             self._fanout_max_inflight,
             duration_ms,
             ok_count,
-            len(errors),
+            error_count,
         )
-        if errors:
-            raise errors[0]
+        # Fix #1: do NOT raise here. Partial results acceptable; the next
+        # live tick will retry the missing subs naturally.
         return results
 
     async def _fetch_event_endpoint_spec(
@@ -1521,8 +1564,19 @@ class PilotOrchestrator:
                 *(bounded_fetch(at_bat_id) for at_bat_id in discovered_at_bats),
                 return_exceptions=True,
             )
-            errors = [item for item in gathered if isinstance(item, Exception)]
-            pitch_results = [item for item in gathered if not isinstance(item, Exception)]
+            # Fix #1 (2026-05-15): per-sub-endpoint resilience also for the
+            # baseball pitch fanout. See _fetch_event_endpoint_specs_bounded
+            # for the wider context.
+            pitch_results = []
+            error_count = 0
+            for item in gathered:
+                if isinstance(item, Exception):
+                    error_count += 1
+                    logger.warning(
+                        "Baseball pitch fanout sub-fetch raised: err=%r", item
+                    )
+                else:
+                    pitch_results.append(item)
             duration_ms = int((time.monotonic() - started) * 1000)
             logger.info(
                 "live_delta phase=%s endpoints=%s max_inflight=%s duration_ms=%s ok=%s errors=%s",
@@ -1531,10 +1585,8 @@ class PilotOrchestrator:
                 self._fanout_max_inflight,
                 duration_ms,
                 len(pitch_results),
-                len(errors),
+                error_count,
             )
-            if errors:
-                raise errors[0]
 
         for outcome, parsed in pitch_results:
             outcomes.append(outcome)

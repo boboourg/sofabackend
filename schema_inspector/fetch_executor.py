@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -105,10 +106,9 @@ class FetchExecutor:
         started_monotonic = self.clock()
         started_at = _utc_now()
         try:
-            transport_result = await self.transport.fetch(
-                task.source_url,
-                headers=dict(task.request_headers or {}),
-                timeout=task.timeout_seconds,
+            transport_result = await _fetch_with_host_fallback(
+                transport=self.transport,
+                task=task,
             )
         except Exception as exc:
             finished_at = _utc_now()
@@ -471,6 +471,85 @@ def _scope_key(task: FetchTask) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Fix #2 (2026-05-15) — host fallback for transport failures.
+# Sofascore exposes three working API hosts (www.sofascore.com,
+# api.sofascore.com, mobile.sofascore.com). Each one can be selectively
+# throttled by Sofascore anti-scrape (esp. on tier_1 events). When the
+# primary host's response cannot be obtained at all (network_error /
+# timeout / connection refused), retry the same URL against the
+# fallback hosts. If all hosts fail, raise the last exception so the
+# existing failure path records the outcome normally.
+#
+# Env knob:
+#   SCHEMA_INSPECTOR_FALLBACK_HOSTS=api.sofascore.com,mobile.sofascore.com
+# Empty / unset = feature disabled (default for safety — flip on prod
+# after deploy + a few minutes of observation).
+_PRIMARY_SOFASCORE_HOST = "www.sofascore.com"
+
+
+def _resolved_fallback_hosts() -> tuple[str, ...]:
+    raw = os.environ.get("SCHEMA_INSPECTOR_FALLBACK_HOSTS") or ""
+    return tuple(
+        item.strip()
+        for item in raw.split(",")
+        if item.strip() and item.strip() != _PRIMARY_SOFASCORE_HOST
+    )
+
+
+async def _fetch_with_host_fallback(*, transport: Any, task: FetchTask):
+    """Fetch ``task.source_url`` with optional host fallback ladder.
+
+    When fallback is disabled (default) this is a transparent single-call
+    pass-through. With fallback enabled, on raised network errors we
+    retry against the configured fallback hosts; if all attempts raise,
+    the last exception propagates.
+    """
+
+    fallback_hosts = _resolved_fallback_hosts()
+    if not fallback_hosts or _PRIMARY_SOFASCORE_HOST not in task.source_url:
+        return await transport.fetch(
+            task.source_url,
+            headers=dict(task.request_headers or {}),
+            timeout=task.timeout_seconds,
+        )
+
+    urls_to_try = [task.source_url]
+    for host in fallback_hosts:
+        candidate = task.source_url.replace(_PRIMARY_SOFASCORE_HOST, host, 1)
+        if candidate != task.source_url and candidate not in urls_to_try:
+            urls_to_try.append(candidate)
+
+    last_exc: Exception | None = None
+    for attempt_idx, url in enumerate(urls_to_try):
+        try:
+            result = await transport.fetch(
+                url,
+                headers=dict(task.request_headers or {}),
+                timeout=task.timeout_seconds,
+            )
+            if attempt_idx > 0:
+                logger.info(
+                    "Host fallback succeeded: pattern=%s attempt=%s host=%s",
+                    task.endpoint_pattern,
+                    attempt_idx + 1,
+                    url.split("/", 3)[2] if "/" in url else url,
+                )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt_idx < len(urls_to_try) - 1:
+                logger.warning(
+                    "Host fallback try %s/%s failed: pattern=%s url_host=%s err=%r",
+                    attempt_idx + 1,
+                    len(urls_to_try),
+                    task.endpoint_pattern,
+                    url.split("/", 3)[2] if "/" in url else url,
+                    exc,
+                )
+    assert last_exc is not None
+    raise last_exc
 
 
 def _attempts_json(attempts: tuple[TransportAttempt, ...]) -> list[dict[str, object]] | None:

@@ -51,7 +51,13 @@ class PilotOrchestratorParallelFanoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, ["endpoint-0", "endpoint-1", "endpoint-2", "endpoint-3"])
         self.assertEqual(max_active, 1)
 
-    async def test_bounded_fanout_re_raises_unexpected_exception_after_other_tasks_finish(self) -> None:
+    async def test_bounded_fanout_swallows_unexpected_exception_after_other_tasks_finish(self) -> None:
+        # Fix #1 (2026-05-15): a single sub-endpoint exception must NOT
+        # abort the whole event run. Failed sub becomes a (None, None)
+        # placeholder in the results, the rest finish normally. Previously
+        # this test asserted the opposite (re-raise) — that was the
+        # original cause of "tier-1 subs empty" in production, since one
+        # transient parse error torpedoed all 24 sibling sub-endpoints.
         orchestrator = _parallel_orchestrator(max_inflight=4)
         seen: list[str] = []
 
@@ -65,10 +71,40 @@ class PilotOrchestratorParallelFanoutTests(unittest.IsolatedAsyncioTestCase):
 
         orchestrator._fetch_gated_event_endpoint = fake_fetch
 
-        with self.assertRaisesRegex(RuntimeError, "boom"):
-            await orchestrator._fetch_event_endpoint_specs_bounded(_specs(4), phase_name="test")
+        results = await orchestrator._fetch_event_endpoint_specs_bounded(_specs(4), phase_name="test")
 
         self.assertEqual(set(seen), {"endpoint-0", "endpoint-1", "endpoint-2", "endpoint-3"})
+        # All 4 specs produced a result slot (placeholder for the failed one).
+        self.assertEqual(len(results), 4)
+        # The 3 healthy specs return (endpoint, None); the failed one becomes (None, None).
+        none_slots = [i for i, (outcome, _) in enumerate(results) if outcome is None]
+        self.assertEqual(len(none_slots), 1)
+
+    async def test_sequential_fanout_swallows_per_spec_exception(self) -> None:
+        # Fix #1: sequential mode (max_inflight=1) must also handle a
+        # per-spec exception gracefully. Previously raised straight out
+        # of the for-loop and aborted the whole event run.
+        orchestrator = _parallel_orchestrator(max_inflight=1)
+        seen: list[str] = []
+
+        async def fake_fetch(**kwargs):
+            endpoint = kwargs["endpoint"]
+            seen.append(endpoint)
+            if endpoint == "endpoint-2":
+                raise RuntimeError("seq boom")
+            return endpoint, None
+
+        orchestrator._fetch_gated_event_endpoint = fake_fetch
+
+        results = await orchestrator._fetch_event_endpoint_specs_bounded(_specs(4), phase_name="test")
+
+        # All four were attempted (no break on first exception)
+        self.assertEqual(seen, ["endpoint-0", "endpoint-1", "endpoint-2", "endpoint-3"])
+        self.assertEqual(len(results), 4)
+        self.assertEqual(results[0], ("endpoint-0", None))
+        self.assertEqual(results[1], ("endpoint-1", None))
+        self.assertEqual(results[2], (None, None))  # placeholder for raised exception
+        self.assertEqual(results[3], ("endpoint-3", None))
 
     async def test_event_endpoint_gate_decisions_are_serialized_before_parallel_fetches(self) -> None:
         orchestrator = _parallel_orchestrator(max_inflight=4)
