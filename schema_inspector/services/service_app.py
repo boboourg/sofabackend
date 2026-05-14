@@ -398,7 +398,12 @@ class ServiceApp:
         async def _sweep(now_ms: int) -> None:
             from datetime import datetime, timezone as _tz
             now_dt = datetime.fromtimestamp(now_ms / 1000, tz=_tz.utc)
-            async with self.database.connection() as conn:
+            # 2026-05-14 fix: was `self.database.connection()` which raised
+            # AttributeError on prod every minute since the P0.B deploy —
+            # ServiceApp holds the database on `self.app.database`, not
+            # directly. See service_app.py lines 789/929 for the pattern
+            # the rest of the module uses.
+            async with self.app.database.connection() as conn:
                 report = await sweeper.run_once(sql_executor=conn, now=now_dt)
             if report.removed_event_count > 0 or report.error is not None:
                 logger.info(
