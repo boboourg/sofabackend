@@ -69,6 +69,8 @@ Status: **4/6 done = ~67%** → contributes **6.7%** to overall.
 | N4 Layer A composite snapshot index | ✅ | Migration `2026-05-14_api_payload_snapshot_lookup_v2.sql` applied, 31.6% → 63.2% endpoints fast |
 | N4 Layer B Redis response cache | ✅ | `schema_inspector/api_cache.py`, deployed with `SOFASCORE_API_RESPONSE_CACHE_BACKEND=redis` |
 | N4 Layer C cache warmer daemon | ⚠ | Shipped + deployed, **disabled 2026-05-14 23:11** after caused Postgres OOM kill via heavy sport-level timeout queries. Re-enable only after Layer D fix OR skip-on-timeout safeguard. See "Incident postmortems" section. |
+| N4 Layer D D.2 SQL filter + text_pattern_ops index | ✅ | Shipped commit `aea7fc0` 2026-05-15. SQL exec went from 146ms to 12ms after ANALYZE. Warm-cache for previously-failing tennis/football/basketball scheduled-events: 10-13ms. SQL is no longer the bottleneck. |
+| N4 Layer D D.3 Python payload decode for large responses | ❌ | First-hit (cold cache) for football scheduled-events (794KB) is still 30s+, basketball ~35s. SQL returns rows in 12ms but Python JSONB decompression + parse + re-serialize takes 30+ seconds. **Needs follow-up:** profile the decode path, consider orjson, lazy field access, or response payload pruning. |
 | 95%+ endpoints under 50ms | ❌ | Currently 79.5% warm cache. Blocker = Layer D (see §"Layer D plan") |
 | Layer D (sport-level scheduled-events DB optimization) | ❌ | **Plan ready below**. Estimated 0.5-2 days. |
 | API p95 latency signal в N1 monitoring | ❌ | Planned. Простой `/ops/api-latency` endpoint + Telegram alert if p95 > 100ms |
@@ -119,6 +121,7 @@ Update history:
 | --- | --- | --- | --- |
 | 2026-05-14 | **71%** | 0/24h | Initial baseline after N1 + sweeper fix + N4 A/B/C + Codex season fix |
 | 2026-05-14 23:20 | **65%** | 0/24h | Cache warmer disabled after OOM incident — Layer C effectively off pending Layer D or warmer skip-on-timeout safeguard. See "Incident postmortems" section. |
+| 2026-05-15 01:30 | **78%** | 0/24h | N4 Layer D D.2 shipped (commit `aea7fc0`) + migration corrected to text_pattern_ops. Real impact: TIMEOUT 7→3, CATASTROPHIC 12→4. Warm-cache for previously-failing endpoints now 10-13ms (tennis 5.9s cold→13ms warm; football 35s cold→12ms warm; basketball 35s cold→10ms warm). Cold-cache first hit for biggest payloads (football 794KB) still 30s+ — Layer D.3 needed for Python decompression speed. |
 
 ---
 

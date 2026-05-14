@@ -28,6 +28,14 @@
 -- IMPORTANT: CREATE INDEX CONCURRENTLY cannot run inside a transaction
 -- block. Apply with psql -f directly, not via BEGIN/COMMIT wrapper.
 
+-- text_pattern_ops on both text columns: required so the index supports
+-- prefix LIKE on source_url as a range scan (not just as a heap Filter).
+-- Default collation (en_US / glibc) does NOT allow LIKE prefix index
+-- scans; the operator class text_pattern_ops gives Postgres the right
+-- C-locale ordering for that range. Without this, the planner falls
+-- back to bitmap heap scan + Filter (10K Rows Removed) and Layer D D.2
+-- gives no SQL-side savings.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_api_payload_snapshot_source_url_lookup
-    ON api_payload_snapshot (endpoint_pattern, source_url, id DESC)
+    ON api_payload_snapshot
+      (endpoint_pattern text_pattern_ops, source_url text_pattern_ops, id DESC)
     WHERE context_entity_id IS NULL;

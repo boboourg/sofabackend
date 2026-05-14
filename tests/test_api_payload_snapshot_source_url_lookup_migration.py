@@ -38,9 +38,19 @@ class ApiPayloadSnapshotSourceUrlLookupMigrationTests(unittest.TestCase):
             "must use CONCURRENTLY IF NOT EXISTS for safe rollout",
         )
         self.assertIn(
-            "ON api_payload_snapshot (endpoint_pattern, source_url, id DESC)",
+            "endpoint_pattern text_pattern_ops",
             sql,
-            "composite key must match the new _fetch_snapshot_payload query shape",
+            "first column must use text_pattern_ops for LIKE-prefix index scans",
+        )
+        self.assertIn(
+            "source_url text_pattern_ops",
+            sql,
+            "source_url must use text_pattern_ops or Postgres falls back to heap Filter",
+        )
+        self.assertIn(
+            "id DESC",
+            sql,
+            "third column id DESC supports ORDER BY without sort step",
         )
         self.assertIn(
             "WHERE context_entity_id IS NULL",
