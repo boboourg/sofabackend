@@ -68,7 +68,7 @@ Status: **4/6 done = ~67%** → contributes **6.7%** to overall.
 | --- | --- | --- |
 | N4 Layer A composite snapshot index | ✅ | Migration `2026-05-14_api_payload_snapshot_lookup_v2.sql` applied, 31.6% → 63.2% endpoints fast |
 | N4 Layer B Redis response cache | ✅ | `schema_inspector/api_cache.py`, deployed with `SOFASCORE_API_RESPONSE_CACHE_BACKEND=redis` |
-| N4 Layer C cache warmer daemon | ✅ | `sofascore-cache-warmer.service`, 42 hot URLs across 14 sports |
+| N4 Layer C cache warmer daemon | ⚠ | Shipped + deployed, **disabled 2026-05-14 23:11** after caused Postgres OOM kill via heavy sport-level timeout queries. Re-enable only after Layer D fix OR skip-on-timeout safeguard. See "Incident postmortems" section. |
 | 95%+ endpoints under 50ms | ❌ | Currently 79.5% warm cache. Blocker = Layer D (see §"Layer D plan") |
 | Layer D (sport-level scheduled-events DB optimization) | ❌ | **Plan ready below**. Estimated 0.5-2 days. |
 | API p95 latency signal в N1 monitoring | ❌ | Planned. Простой `/ops/api-latency` endpoint + Telegram alert if p95 > 100ms |
@@ -118,6 +118,48 @@ Update history:
 | Date | Implementation | Proof | Note |
 | --- | --- | --- | --- |
 | 2026-05-14 | **71%** | 0/24h | Initial baseline after N1 + sweeper fix + N4 A/B/C + Codex season fix |
+| 2026-05-14 23:20 | **65%** | 0/24h | Cache warmer disabled after OOM incident — Layer C effectively off pending Layer D or warmer skip-on-timeout safeguard. See "Incident postmortems" section. |
+
+---
+
+## Incident postmortems
+
+### 2026-05-14 23:03 EEST — PostgreSQL OOM kill (CRIT alert from N1 monitoring)
+
+**Trigger:** N1 monitoring channel FLOWSCORE MONITORING received CRIT alert: `oldest_hot_score_age_seconds = 1906s` (threshold 1800s) at 19:51 UTC.
+
+**Root cause:** PostgreSQL cluster `16-main` killed by Linux OOM killer. Peak memory before kill: **57.1 GB** out of 62 GB total RAM on server.
+
+**Why memory ballooned:** N4 Layer C cache warmer (`sofascore-cache-warmer.service`) was triggering 14 heavy `sport/{slug}/scheduled-events/{date}` queries every 60s. These are exactly the endpoints that timeout in DB (still requiring Layer D). Each fetch attempt opened a server-side query that allocated work_mem buffers before failing. Cumulative effect: ~80 minutes of cache-warmer accumulated ~40 GB of unreclaimed query memory in Postgres backend processes.
+
+**Cascade:**
+1. 21:39 — cache warmer deployed and enabled
+2. 21:39 — 23:03 — heavy queries fired periodically, Postgres memory grew
+3. 23:03:06 — kernel OOM-killer hit `postgresql@16-main` — process killed
+4. 23:03:13 — service unit reported `Failed with result 'oom-kill'`
+5. 23:03 — 23:16 — sofascore services in retry loop (cannot acquire DB connections); `oldest_hot_score_age_seconds` climbed because sweeper couldn't fetch finalized events
+6. 23:11 — operator (we) noticed via Telegram alert, diagnosed via journalctl + `pg_lsclusters`
+7. 23:11 — cache warmer stopped + disabled (`sudo systemctl disable sofascore-cache-warmer`)
+8. 23:12 — Postgres cluster restarted (`sudo systemctl reset-failed postgresql@16-main && systemctl start ...`)
+9. 23:12 — 23:15 — WAL replay (~2 min — manageable for our DB size)
+10. 23:15 — Postgres accepts connections; sofascore services connect automatically via systemd retry
+11. 23:16 — sweeper resumed; `oldest_hot_score_age` 1906s → 108s within one tick
+
+**Total downtime:** ~12 minutes (23:03 to 23:15). API returned 500 for cache-miss requests during this window. Cache hits (Layer B Redis) continued serving stale-but-recent data.
+
+**N1 monitoring did its job:** alert arrived at 19:51 UTC (within 5 minutes of breach), gave operator the right signal to diagnose. Without N1, we would have noticed when frontend started serving 500s mass.
+
+**Immediate mitigation:**
+- ✅ Cache warmer stopped + disabled — root cause removed.
+- ✅ Postgres restarted + recovered.
+- ✅ sofascore services auto-reconnected via systemd.
+
+**Permanent mitigation (pending — see below):**
+1. **Cache warmer: skip timeout endpoints.** Track per-target failure count; auto-disable a target after N consecutive timeouts. Pull request needed in `schema_inspector/cache_warmer/daemon.py`.
+2. **OR Layer D first.** Once sport-level scheduled-events queries are fast (D.1 + D.2 plan below), cache warmer is safe to re-enable.
+3. **Postgres config hardening.** Set `statement_timeout` (e.g. 30s) at role level — prevents any single query from holding work_mem indefinitely. Operator decision, separate from Sofascore code.
+
+**Status:** Layer C cache warmer **remains disabled** until either of the two permanent mitigations ships. This brings API performance achievement from 79.5% back toward 67% (loss of warm-cache benefits for sport-level endpoints), but stability > raw perf %.
 
 ---
 
