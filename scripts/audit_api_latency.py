@@ -146,16 +146,26 @@ async def sample_ids(pool: asyncpg.Pool) -> dict[str, list[str]]:
             logger.warning("sample %s failed: %r", key, exc)
             samples[key] = []
 
+    # event.start_timestamp is BIGINT (unix epoch seconds), not TIMESTAMPTZ.
+    # Recent-by-id is good enough — id is auto-increment so newer = higher.
+    # We pick rows that actually have data attached (has terminal_state or
+    # api_payload_snapshot) so endpoint reconstructions work.
     await asyncio.gather(
         fetch_ids(
-            "SELECT id FROM event WHERE start_timestamp >= now() - interval '7 days' "
-            "ORDER BY start_timestamp DESC NULLS LAST LIMIT 3",
+            "SELECT e.id FROM event e "
+            "WHERE EXISTS ("
+            "  SELECT 1 FROM api_payload_snapshot aps "
+            "  WHERE aps.context_entity_type = 'event' "
+            "    AND aps.context_entity_id = e.id "
+            "    AND aps.endpoint_pattern = '/api/v1/event/{event_id}'"
+            ") "
+            "ORDER BY e.id DESC LIMIT 3",
             "event_id",
         ),
         fetch_ids(
-            "SELECT custom_id FROM event WHERE custom_id IS NOT NULL "
-            "AND start_timestamp >= now() - interval '7 days' "
-            "ORDER BY start_timestamp DESC LIMIT 3",
+            "SELECT custom_id FROM event "
+            "WHERE custom_id IS NOT NULL AND custom_id <> '' "
+            "ORDER BY id DESC LIMIT 3",
             "custom_id",
         ),
         fetch_ids("SELECT id FROM team WHERE id IS NOT NULL ORDER BY id DESC LIMIT 3", "team_id"),
