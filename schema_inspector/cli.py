@@ -53,6 +53,15 @@ from .services.historical_archive_service import (
 from .services.historical_archive_service import (
     run_historical_tournament_enrichment as run_historical_tournament_enrichment_service,
 )
+from .monitoring import (
+    MonitoringConfig,
+    MonitoringDaemon,
+    NullAlertSink,
+    NullDedupeStore,
+    RedisDedupeStore,
+    TelegramAlertSink,
+    fetch_all_signals_from_api,
+)
 from .services.proxy_health_monitor import ProxyHealthMonitor, ProxyHealthMonitorConfig
 from .services.stage_audit_logger import StageAuditLogger
 from .services.structure_sync_service import (
@@ -1193,6 +1202,8 @@ _HISTORICAL_COMMANDS = frozenset({
 
 async def _dispatch(args) -> int:
     command = getattr(args, "command", None)
+    if command == "monitoring-daemon":
+        return await _run_monitoring_daemon(args)
     if command in _HISTORICAL_COMMANDS:
         historical_env = None
         if args.proxy:
@@ -2047,6 +2058,45 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_historical_maintenance = subparsers.add_parser("worker-historical-maintenance", help="Run the archival maintenance/recovery consumer group loop.")
     worker_historical_maintenance.add_argument("--consumer-name", default="worker-historical-maintenance-1", help="Redis consumer name for the archival maintenance worker.")
     worker_historical_maintenance.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    monitoring_daemon = subparsers.add_parser(
+        "monitoring-daemon",
+        help=(
+            "Run the N1 monitoring daemon: poll /ops/* SLO endpoints, "
+            "classify against env-tunable thresholds, send deduplicated "
+            "Telegram alerts. See docs/N1_MONITORING_PLAN.md."
+        ),
+    )
+    monitoring_daemon.add_argument(
+        "--consumer-name",
+        default="monitoring-daemon-1",
+        help="Opaque daemon instance label for logs and systemd naming.",
+    )
+    monitoring_daemon.add_argument(
+        "--base-url",
+        default=None,
+        help=(
+            "Override the local API base URL (default uses env "
+            "SOFASCORE_MONITORING_BASE_URL or http://127.0.0.1:8000)."
+        ),
+    )
+    monitoring_daemon.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Override poll interval in seconds (default uses env "
+            "SOFASCORE_MONITORING_INTERVAL_SECONDS or 60.0)."
+        ),
+    )
+    monitoring_daemon.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help=(
+            "Send a synthetic CRIT alert immediately and exit. Used to "
+            "verify the Telegram channel is wired up after initial deploy."
+        ),
+    )
     return parser
 
 
@@ -2136,6 +2186,171 @@ def _normalized_source_slug(value: str | None) -> str | None:
         return None
     normalized = str(value).strip().lower()
     return normalized or None
+
+
+async def _run_monitoring_daemon(args) -> int:
+    """Standalone entry point for the N1 monitoring daemon.
+
+    Does not open the asyncpg pool — the daemon only reads /ops/*
+    endpoints over HTTP and writes dedupe state to Redis. Decoupling
+    from the DB pool keeps the daemon from interacting with planner
+    transactions or sharing /ops/health's connection.
+    """
+
+    import httpx
+
+    env = _load_project_env()
+    config = MonitoringConfig.from_env(env)
+    if args.base_url:
+        from dataclasses import replace as _replace
+
+        config = _replace(config, base_url=str(args.base_url))
+    if args.interval_seconds is not None:
+        from dataclasses import replace as _replace
+
+        config = _replace(config, interval_seconds=float(args.interval_seconds))
+    if not config.enabled and not args.smoke_test:
+        logger.info(
+            "monitoring-daemon: SOFASCORE_MONITORING_ENABLED=0, exiting."
+        )
+        return 0
+
+    if config.has_telegram():
+        sink = TelegramAlertSink(
+            bot_token=config.telegram_bot_token or "",
+            chat_id=config.telegram_chat_id or "",
+            timeout_seconds=config.telegram_timeout_seconds,
+        )
+    else:
+        logger.warning(
+            "monitoring-daemon: Telegram credentials missing — using NullAlertSink "
+            "(set SOFASCORE_MONITORING_TELEGRAM_BOT_TOKEN and "
+            "SOFASCORE_MONITORING_TELEGRAM_CHAT_ID)."
+        )
+        sink = NullAlertSink()
+
+    # Smoke-test mode: send one synthetic message and exit. Used right
+    # after a fresh deploy to confirm the Telegram channel works without
+    # waiting for a real SLO breach.
+    if args.smoke_test:
+        from datetime import datetime, timezone
+
+        message = (
+            f"[SMOKE] sofascore monitoring-daemon online\n"
+            f"Time: {datetime.now(timezone.utc).isoformat()}\n"
+            f"Host: {config.host_label}\n"
+            f"Consumer: {args.consumer_name}\n"
+            f"Note: this is a synthetic smoke-test alert (--smoke-test)."
+        )
+        ok = await sink.send(message)
+        aclose = getattr(sink, "aclose", None)
+        if callable(aclose):
+            await aclose()
+        return 0 if ok else 1
+
+    # Dedupe store: Redis when available, NullDedupeStore (fail-open) when
+    # we cannot reach Redis. The fail-open dedupe is intentional — better
+    # to risk a duplicate alert than to suppress a real breach silently.
+    dedupe_store = NullDedupeStore()
+    redis_backend = None
+    try:
+        redis_backend = _load_redis_backend(
+            getattr(args, "redis_url", None),
+            allow_memory_fallback=bool(getattr(args, "allow_memory_redis", False)),
+        )
+        dedupe_store = RedisDedupeStore(redis_backend)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "monitoring-daemon: Redis unavailable, using NullDedupeStore "
+            "(duplicates may slip through): %r",
+            exc,
+        )
+
+    http_client = httpx.AsyncClient(timeout=config.http_request_timeout_seconds)
+
+    thresholds_overrides = {
+        "oldest_hot_score_age_seconds": {
+            "warn": config.oldest_hot_age_warn_seconds,
+            "crit": config.oldest_hot_age_crit_seconds,
+        },
+        "tier_1_blocked_rate_cumulative": {
+            "warn": config.tier_1_blocked_warn_rate,
+            "crit": config.tier_1_blocked_crit_rate,
+        },
+        "refresh_live_event_success_rate_5min": {
+            "warn": config.refresh_success_warn_rate,
+            "crit": config.refresh_success_crit_rate,
+        },
+        # Phase 2 — queue XLEN thresholds.
+        "hydrate_xlen": {
+            "warn": config.hydrate_xlen_warn,
+            "crit": config.hydrate_xlen_crit,
+        },
+        "live_hot_xlen": {
+            "warn": config.live_hot_xlen_warn,
+            "crit": config.live_hot_xlen_crit,
+        },
+        "live_warm_xlen": {
+            "warn": config.live_warm_xlen_warn,
+            "crit": config.live_warm_xlen_crit,
+        },
+        "live_discovery_xlen": {
+            "warn": config.live_discovery_xlen_warn,
+            "crit": config.live_discovery_xlen_crit,
+        },
+        "discovery_xlen": {
+            "warn": config.discovery_xlen_warn,
+            "crit": config.discovery_xlen_crit,
+        },
+        # Phase 3 — job signal thresholds.
+        "failed_jobs_15min": {
+            "warn": config.failed_jobs_warn,
+            "crit": config.failed_jobs_crit,
+        },
+        "retry_rate_15min": {
+            "warn": config.retry_rate_warn,
+            "crit": config.retry_rate_crit,
+        },
+        "no_recent_jobs_age_seconds": {
+            "warn": config.no_recent_jobs_warn_seconds,
+            "crit": config.no_recent_jobs_crit_seconds,
+        },
+    }
+
+    async def _signal_source() -> list:
+        return await fetch_all_signals_from_api(
+            base_url=config.base_url,
+            http_client=http_client,
+            timeout_seconds=config.http_request_timeout_seconds,
+            overrides=thresholds_overrides,
+            include_job_signals=config.job_signals_enabled,
+        )
+
+    daemon = MonitoringDaemon(
+        config=config,
+        signal_source=_signal_source,
+        sink=sink,
+        dedupe=dedupe_store,
+    )
+    try:
+        await daemon.run_forever()
+    finally:
+        aclose = getattr(sink, "aclose", None)
+        if callable(aclose):
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await http_client.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        if redis_backend is not None:
+            try:
+                await _close_redis_backend(redis_backend)
+            except Exception:  # noqa: BLE001
+                pass
+    return 0
 
 
 def _prefetched_run_size_limit_bytes() -> int:
