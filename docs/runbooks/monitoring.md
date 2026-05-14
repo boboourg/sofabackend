@@ -84,6 +84,31 @@ sudo systemctl restart sofascore-monitoring
 | `retry_rate_15min` | 0.02 / 0.05 |
 | `no_recent_jobs_age_seconds` | 300 / 600 |
 
+## Active tuning (2026-05-14, prod baseline calibration)
+
+After the daemon first started on prod (commit fd59951), it flagged
+sustained degraded baseline that would spam the channel every tick under
+default thresholds. Operators applied env-overridden thresholds to
+`/opt/sofascore/.env` so alerts fire only when state worsens beyond
+current baseline. **These are not new SLO targets** — the original
+defaults in `docs/N1_MONITORING_PLAN.md` remain the actual goals; the
+overrides are a temporary truce until N2 (decompose live-discovery
+persist) lands.
+
+| Signal | Default WARN/CRIT | Tuned WARN/CRIT | Baseline 2026-05-14 |
+| --- | --- | --- | --- |
+| `oldest_hot_score_age_seconds` | 120 / 300 | **900 / 1800** | 603-970s |
+| `tier_1_blocked_rate_cumulative` | 0.20 / 0.50 | **0.95 / 0.99** | 0.91 (cumulative) |
+| `hydrate_xlen` | 1k / 5k | **800k / 1.5M** | 665k |
+| `live_warm_xlen` | 500 / 2k | **800k / 1.5M** | 627k |
+| `live_discovery_xlen` | 200 / 1k | **200k / 350k** | 146k |
+| `discovery_xlen` | 200 / 1k | **50k / 100k** | 29k |
+| `live_hot_xlen` | 500 / 2k | (unchanged) | 0 |
+
+To **restore the true SLO targets** after N2 reduces queue depth back to
+normal: remove the corresponding `SOFASCORE_MONITORING_*_WARN` /
+`*_CRIT` lines from `/opt/sofascore/.env`, then restart the daemon.
+
 ## Tuning thresholds
 
 Tune by editing `/opt/sofascore/.env` then `systemctl restart sofascore-monitoring`.
