@@ -1112,6 +1112,119 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["reconcile_policy_summary"]["sources"][0]["source_slug"], "sofascore")
 
 
+class LocalApiUniqueTournamentSeasonsTests(unittest.IsolatedAsyncioTestCase):
+    """Coverage for ``/api/v1/unique-tournament/{id}/seasons`` reconstruction.
+
+    Regression guard: prior to 2026-05-15 this endpoint fell through to the
+    generic normalized fallback which serialized rows from the
+    ``unique_tournament_season`` junction table directly, producing
+    ``{"seasons": [{"seasonId":..., "uniqueTournamentId":...}]}`` — wrong
+    shape, breaks frontend rendering. The dedicated handler now JOINs
+    through to ``season`` and produces the proper Sofascore shape:
+    ``{"seasons": [{"id":..., "name":..., "year":..., "editor":bool, ...}]}``.
+    """
+
+    @staticmethod
+    def _season_row(
+        *,
+        season_id: int,
+        name: str,
+        year: str,
+        editor: bool = False,
+        season_coverage_info: dict | None = None,
+    ) -> dict[str, object]:
+        return {
+            "id": season_id,
+            "name": name,
+            "year": year,
+            "editor": editor,
+            "season_coverage_info": season_coverage_info,
+        }
+
+    async def test_returns_sofascore_shape_with_real_season_data(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeSeasonsConnection(
+            rows=[
+                self._season_row(season_id=77559, name="LaLiga 25/26", year="25/26"),
+                self._season_row(season_id=61643, name="LaLiga 24/25", year="24/25"),
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_unique_tournament_seasons_payload(8)
+
+        self.assertEqual(payload["seasons"][0]["id"], 77559)
+        self.assertEqual(payload["seasons"][0]["name"], "LaLiga 25/26")
+        self.assertEqual(payload["seasons"][0]["year"], "25/26")
+        self.assertFalse(payload["seasons"][0]["editor"])
+        # Confirm regression: NO "seasonId" or "uniqueTournamentId" keys
+        for entry in payload["seasons"]:
+            self.assertNotIn("seasonId", entry)
+            self.assertNotIn("uniqueTournamentId", entry)
+        self.assertTrue(connection.closed)
+
+    async def test_empty_tournament_returns_empty_seasons_array(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeSeasonsConnection(rows=[])
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_unique_tournament_seasons_payload(99999)
+
+        self.assertEqual(payload, {"seasons": []})
+
+    async def test_null_editor_coerced_to_false(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeSeasonsConnection(
+            rows=[
+                self._season_row(season_id=12, name="S 03/04", year="03/04", editor=False),
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_unique_tournament_seasons_payload(7)
+
+        self.assertFalse(payload["seasons"][0]["editor"])
+
+    async def test_season_coverage_info_passthrough(self) -> None:
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        connection = _FakeSeasonsConnection(
+            rows=[
+                self._season_row(
+                    season_id=77559,
+                    name="LaLiga 25/26",
+                    year="25/26",
+                    season_coverage_info={"matches": True, "lineups": True},
+                ),
+            ]
+        )
+        application._connect = _make_fake_connector(connection)
+
+        payload = await application._fetch_unique_tournament_seasons_payload(8)
+
+        self.assertEqual(
+            payload["seasons"][0]["seasonCoverageInfo"],
+            {"matches": True, "lineups": True},
+        )
+
+
+class _FakeSeasonsConnection:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.closed = False
+
+    async def fetch(self, query: str, *args):
+        self.fetch_calls.append((query, args))
+        return self.rows
+
+    async def close(self):
+        self.closed = True
+
+
 class LocalApiUniqueTournamentMediaTests(unittest.IsolatedAsyncioTestCase):
     """Coverage for ``/api/v1/unique-tournament/{id}/media`` aggregator."""
 

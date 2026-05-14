@@ -982,6 +982,10 @@ class LocalApiApplication:
             return await self._fetch_unique_tournament_media_payload(
                 int(path_params["unique_tournament_id"]),
             )
+        if template == "/api/v1/unique-tournament/{unique_tournament_id}/seasons":
+            return await self._fetch_unique_tournament_seasons_payload(
+                int(path_params["unique_tournament_id"]),
+            )
         if template in {
             "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/standings/{scope}",
             "/api/v1/tournament/{tournament_id}/season/{season_id}/standings/{scope}",
@@ -1107,6 +1111,66 @@ class LocalApiApplication:
             ],
             "hasNextPage": has_next_page,
         }
+
+    async def _fetch_unique_tournament_seasons_payload(
+        self,
+        unique_tournament_id: int,
+    ) -> dict[str, Any]:
+        """Reconstruct ``/api/v1/unique-tournament/{utid}/seasons`` from normalized
+        tables when no raw snapshot is captured.
+
+        Sofascore upstream shape:
+          ``{"seasons": [{"id":..., "name":..., "year":..., "editor":bool, ...}]}``
+
+        Previously this endpoint fell through to ``_fetch_generic_normalized_payload``
+        which serialized rows from the ``unique_tournament_season`` junction table
+        directly and produced ``{"seasons": [{"seasonId":..., "uniqueTournamentId":...}]}``
+        — wrong shape, breaks frontend rendering. This handler JOINs through to
+        ``season`` so we return real season metadata.
+
+        Sort order: ``season.id DESC`` (newest first, matches Sofascore convention
+        observed in the LaLiga UT=8 snapshot).
+
+        Always returns ``{"seasons": []}`` rather than 404 so an empty UT does not
+        break callers — the dispatcher promotes a None return to 404 separately.
+        """
+
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    s.year,
+                    COALESCE(s.editor, false) AS editor,
+                    s.season_coverage_info
+                FROM unique_tournament_season uts
+                JOIN season s ON s.id = uts.season_id
+                WHERE uts.unique_tournament_id = $1
+                ORDER BY s.id DESC
+                """,
+                unique_tournament_id,
+            )
+        finally:
+            await connection.close()
+
+        seasons: list[dict[str, Any]] = []
+        for row in rows:
+            season_entry: dict[str, Any] = {
+                "id": int(row["id"]),
+                "name": str(row["name"]) if row["name"] is not None else "",
+                "year": str(row["year"]) if row["year"] is not None else "",
+                "editor": bool(row["editor"]),
+            }
+            coverage_info = row["season_coverage_info"]
+            if coverage_info is not None:
+                # season_coverage_info is JSONB; pass through as-is so structure
+                # is preserved when present (matches Sofascore's
+                # "seasonCoverageInfo": {...} envelope).
+                season_entry["seasonCoverageInfo"] = _decode_snapshot_payload(coverage_info)
+            seasons.append(season_entry)
+        return {"seasons": seasons}
 
     async def _fetch_unique_tournament_media_payload(
         self,
