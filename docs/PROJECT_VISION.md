@@ -4,10 +4,11 @@
 
 | Поле | Значение |
 | --- | --- |
-| Версия | v1 (2026-05-14) |
+| Версия | **v2** (2026-05-14, evening update) |
 | Автор | Бобур (vision), Claude (текст) |
 | Статус | Living document — обновляется когда меняется vision, scope или приоритеты |
 | Зачем | Зафиксировать ответы на 11 вопросов о проекте, чтобы Claude (и сам автор) не теряли контекст между сессиями |
+| Что в v2 | (1) Главная P0 боль уточнена — гипотеза "decompose persist" оказалась неточной; реальная причина была sweeper regression от P0.B, fixed коммитом 724d77f. (2) Defenses таблица в §5 пополнена. (3) Эпоха 1 N2 закрыта. (4) Новый раздел §11 "Lessons / Hypothesis updates" — зафиксированы методологические уроки. |
 
 ---
 
@@ -17,11 +18,11 @@
 
 **Главное обещание:** live-данные с задержкой ≤5 секунд, downtime >30 минут — катастрофа.
 
-**Главная боль сегодня (2026-05-14):** live-матчи не переходят в статус "live" → пайплан ручек не работает в реальном времени → продукт ломается в моменте.
+**Главная боль на 2026-05-14 утром:** live-матчи не переходят в статус "live". **На 2026-05-14 вечером:** реальная корневая причина выявлена через N1 monitoring + Phase 0 diagnose — это была регрессия P0.B sweeper (`AttributeError` каждую минуту в planner, sweeper не запускался). Fix задеплоен (commit 724d77f), `oldest_hot_score_age_seconds` упал с 970s до 97s. **Гипотеза "decompose live-discovery persist" из v1 этого документа оказалась неверной** — см. §11.
 
 **Mode сотрудничества с Claude:** implement + educate. Я (Claude) реализую решения и **попутно объясняю**, чтобы Бобур учился вдоль пути. Без излишней теории, без длинных нотаций — пояснения короткие, по делу.
 
-**Текущая фаза (Эпоха 1, 1-2 недели):** monitoring + decompose live-discovery persist. Без этих двух вещей всё остальное (history backfill, scale на 5K, новые спорты) — преждевременная оптимизация.
+**Текущая фаза (Эпоха 1, 1-2 недели):** N1 monitoring **готов и в проде** (commit `fd59951` + `c473276`). N2 переосмыслен — **гипотеза была устаревшей**, реальный fix занял one-line edit + 2 теста (commit `724d77f`). Эпоха 1 фактически закрыта раньше, чем планировалось. Следующий шаг — N3 sentinel probe (защита от тихих регрессий Sofascore) или переход к Эпохе 2.
 
 ---
 
@@ -110,13 +111,14 @@
 
 ### P0 (катастрофа сейчас)
 
-1. **Live-матчи не переходят в статус "live".** Пайплан ручек не отрабатывает в realtime. Конкретно: `event.status.type = inprogress` upstream → но наш `/api/v1/event/{id}` либо возвращает `notstarted`, либо данные lag-нут больше 5 секунд.
-   - **Корневая причина (гипотеза):** `live_discovery_planner` персистит большие батчи в одной транзакции → блокировки → backpressure → matchcenter не получает свежий snapshot вовремя.
-   - **Defenses уже стоят:** firebreak `endpoint_capability_rollup` (deadlock storm fixed), tier_1 lease waterfall, P0.B sweeper (oldest_hot 5949s → 96s, 62x), `/ops/live-freshness` SLO endpoint.
-   - **Что ещё надо:** N2 — decompose live-discovery persist transaction (P0.A в audit).
+1. **Live-матчи не переходят в статус "live".** ✅ **Закрыто 2026-05-14 вечером.** Пайплан ручек не отрабатывал в realtime: `event.status.type = inprogress` upstream → наш `/api/v1/event/{id}` показывал stale данные.
+   - **Гипотеза v1 (неверная):** `live_discovery_planner` персистит большие батчи в одной транзакции → блокировки. Reconnaissance показал что **такой транзакции в коде нет** — planner просто publishes в Redis streams.
+   - **Реальная корневая причина:** Регрессия P0.B sweeper deploy (commit `97ce25c`, 2026-05-14 утром). Callback в `ServiceApp._build_live_state_sweep_wiring` обращался к `self.database`, но database живёт на `self.app.database`. Planner логировал `AttributeError` каждую минуту — sweeper **никогда не выполнял ни одной cycle**. Finalised events накапливались в `zset:live:hot`, `oldest_hot_score_age` пробил 970s.
+   - **Fix:** commit `724d77f` — one-line edit `self.database` → `self.app.database` + 2 integration теста, которые would have поймали bug. После deploy: `oldest_hot_score_age` 970s → 97s (~10× reduction).
+   - **Как нашли:** N1 monitoring через 30 минут после старта поднял WARN на `oldest_hot_score_age`. Phase 0 diagnose (15 мин чтения логов планнера) сразу выявил `AttributeError` в journal.
+   - **Defenses теперь стоят:** firebreak `endpoint_capability_rollup`, tier_1 lease waterfall, P0.B sweeper (теперь реально работает), `/ops/live-freshness` SLO endpoint, **N1 monitoring → Telegram канал FLOWSCORE MONITORING**.
 
-2. **Никакого мониторинга.** "Никак" — буквальный ответ Бобура. Нет Telegram alerts, нет watchdog daemon, нет page при падении сервиса. Падает что-то в 3 ночи — узнаём утром.
-   - **Что надо:** N1 — monitoring daemon (Telegram bot + watchdog cron + checks для XLEN/SLO/retry rate).
+2. **Никакого мониторинга.** ✅ **Закрыто 2026-05-14.** Был "никак" — Telegram alerts отсутствовали. Сейчас работает `sofascore-monitoring.service` (commit `fd59951`): 11 сигналов (3 SLO + 5 queue + 3 job, последние opt-in), Telegram bot `@flowscore_monitoring_bot`, dedupe в Redis, severity OK/WARN/CRIT. На этом мониторинге сразу же был обнаружен bug №1 выше.
 
 ### P1 (не катастрофа, но критично к запуску)
 
@@ -146,6 +148,9 @@
 | 8 | `rebuild-capability-rollup` CLI subcommand | Альтернатива inline rollup — пересчёт rollup state из observations асинхронно | 2026-05-12 |
 | 9 | Architecture audit v3 (`docs/ARCHITECTURE_AUDIT.md`) | Risk register с Evidence column (verified/inferred/unknown) | 2026-05-14 |
 | 10 | Полная документация (10 файлов, ~3155 строк) в `docs/` | PROJECT_OVERVIEW, SERVICES_AND_WORKERS, CLI_AND_SCRIPTS, ENVIRONMENT, API_ROUTES, PARSING_AND_POLICIES, DATABASE_AND_STORAGE, REDIS_AND_QUEUES, FUNCTION_INDEX, OPERATIONS_RUNBOOK | 2026-05-13 |
+| 11 | **N1 monitoring daemon** (commits `fd59951` + `c473276`) | 11 сигналов в FLOWSCORE MONITORING Telegram канал; dedupe в Redis; severity OK/WARN/CRIT; systemd unit `sofascore-monitoring.service`. **Сразу же поймал bug №12 ниже.** | 2026-05-14 |
+| 12 | **Sweeper regression fix** (commit `724d77f`) | `oldest_hot_score_age` 970s → 97s. P0.B sweeper не выполнял ни одной cycle 20+ минут на проде; one-line edit + 2 integration теста. | 2026-05-14 |
+| 13 | **BRIN index** `idx_etl_job_run_started_at_brin` (commit `fd59951` migration) | Time-windowed queries на `etl_job_run.started_at` без полного сканирования. Открывает путь к monitoring Phase 3 (job signals) — `SOFASCORE_MONITORING_JOB_SIGNALS_ENABLED=1`. | 2026-05-14 |
 
 **Verified post-9h:**
 - 0 deadlocks
@@ -157,23 +162,23 @@
 
 ## 6. Roadmap (по эпохам)
 
-### Эпоха 1: Stabilize (1-2 недели) — *идёт сейчас*
+### Эпоха 1: Stabilize (1-2 недели) — **частично закрыта 2026-05-14**
 
 Цель: остановить кровотечение из главной боли и поставить мониторинг.
 
-| Tag | Item | Описание | Ack? |
+| Tag | Item | Описание | Статус |
 | --- | --- | --- | --- |
-| N1 | **Monitoring daemon + Telegram alerts** | Watchdog cron `prod_readiness_check.py` каждые 5 мин + Telegram bot для алертов когда: SLO нарушен, retry rate > 2%, XLEN hydrate > 1000, любой `/ops/health` non-200 | _pending_ |
-| N2 | **P0.A: decompose live-discovery persist** | Разбить одну большую транзакцию `live_discovery_planner` на: (а) write observations + (б) async upsert event rows. Главный фикс для "live матчи не переходят в live". | _pending_ |
-| N3 | **Daily sentinel probe** | Cron job: ходит на 5-10 опорных Sofascore URL, валидирует JSON schema. Алерт в Telegram если schema drift. Защита от тихих регрессий. | _pending_ |
+| N1 | **Monitoring daemon + Telegram alerts** | `sofascore-monitoring.service`, 11 сигналов (3 SLO + 5 queue + 3 job opt-in), dedupe в Redis, Telegram канал FLOWSCORE MONITORING. | ✅ **Done** 2026-05-14 (commits `fd59951`, `c473276`) |
+| N2 | ~~**Decompose live-discovery persist**~~ → **Sweeper regression fix** | **Гипотеза была неверной** — такой транзакции в коде нет. Реальный fix: исправлен `AttributeError` в P0.B sweeper wiring. `oldest_hot_score_age` 970s → 97s. | ✅ **Done** 2026-05-14 (commit `724d77f`); подробности §11 |
+| N3 | **Daily sentinel probe** | Cron: ходит на 5-10 опорных Sofascore URL, валидирует JSON schema. Алерт в Telegram если schema drift. Защита от тихих регрессий. | _pending_ |
 | P0.X | Завершить остаток P0 из ARCHITECTURE_AUDIT.md | См. документ — там детали | partially done |
 
 **Definition of Done для Эпохи 1:**
-- SLO `oldest_hot_score_age` < 60s sustained 7 дней
-- `tier_1_blocked_rate` < 50%
-- Telegram alert приходит в течение 2 минут после нарушения SLO
-- Sentinel probe запущен и зелёный 7 дней
-- `live матчи не переходят в live` voice-test от Бобура: "выглядит ок"
+- SLO `oldest_hot_score_age` < 60s sustained 7 дней — **в процессе наблюдения** (текущее 97s)
+- `tier_1_blocked_rate` < 50% — **cumulative metric**, требует `HDEL live:dispatch_metrics` для пересчёта (см. open items)
+- Telegram alert приходит в течение 2 минут после нарушения SLO ✅
+- Sentinel probe запущен и зелёный 7 дней — _pending_ (N3)
+- `live матчи не переходят в live` voice-test от Бобура: "выглядит ок" — _pending verification_
 
 ### Эпоха 2: Productionize (1-2 месяца)
 
@@ -293,6 +298,59 @@
 
 ---
 
+## 11. Lessons / Hypothesis updates
+
+Раздел добавлен в v2 (2026-05-14). Каждый раз когда гипотеза о проекте обновляется на основе новых данных — фиксируем здесь. Это **анти-паттерн против** "вечно неактуальной документации": если PROJECT_VISION твердит что-то, что reconnaissance опроверг, мы это **явно** маркируем.
+
+### Update #1 — N2 "decompose live-discovery persist" гипотеза была неверной (2026-05-14)
+
+**Что v1 утверждал (§4 пункт 1):**
+> Корневая причина (гипотеза): `live_discovery_planner` персистит большие батчи в одной транзакции → блокировки → backpressure → matchcenter не получает свежий snapshot вовремя.
+>
+> Что ещё надо: N2 — decompose live-discovery persist transaction (P0.A в audit).
+
+**Что recon показал:**
+
+1. `schema_inspector/services/live_discovery_planner.py` — **только publish** в `stream:etl:live_discovery`. Никаких DB-вызовов в hot-path.
+2. `schema_inspector/services/planner_daemon.py` — **только publish** + live refresh schedule. Никакой `BEGIN/COMMIT`, никакой большой транзакции.
+3. `schema_inspector/workers/discovery_worker.py` — **только publish** в hydrate/tier streams.
+4. DB writes реально происходят дальше: в `DurableNormalizeSink.persist_parse_result` (storage/normalize_repository.py) — sequence of ~30 SQL ops. Но это **не "одна большая транзакция"**, и это запускается из `hydrate-worker`, а не из planner.
+
+**Что было реальной болью:**
+- Регрессия после P0.B sweeper deploy (commit `97ce25c`): callback в `ServiceApp._build_live_state_sweep_wiring` написан как `self.database.connection()` где `self` это `ServiceApp` instance, а `.database` живёт на `self.app.database`.
+- Прод-planner логировал `AttributeError("'ServiceApp' object has no attribute 'database'")` каждую минуту. Sweeper **никогда не выполнял ни одной cycle** с момента deploy.
+- Finalised events накапливались в `zset:live:hot` без удаления → `oldest_hot_score_age_seconds` пробил 970s.
+- P0.B sweeper unit-тесты использовали моки, integration-уровень (ServiceApp wiring) не был покрыт.
+
+**Что Fix:**
+- Commit `724d77f`: one-line edit `self.database` → `self.app.database`.
+- Добавлены 2 integration теста в `tests/test_service_app.py::LiveStateSweepWiringTests`, которые конструируют реальный ServiceApp и **вызывают callback** — это уровень который would have поймал bug изначально.
+- После deploy на prod: `oldest_hot_score_age_seconds` 970s → 97s (~10× reduction).
+
+**Методологические выводы:**
+
+1. **Гипотезы стареют.** Когда vision-документ говорит про root cause со словами "(гипотеза)" — это **сигнал** что нужно verify через recon перед code.
+2. **Unit tests + моки ≠ integration coverage.** P0.B sweeper тесты были полные и зелёные. Bug был в **call site** где closure обращался к `self.X`. Тип теста, который would have поймал: "construct the real wiring, invoke the wired callable end-to-end".
+3. **Мониторинг проявил bug за минуты.** Без N1 daemon мы бы продолжили жить с дохлым sweeper неделями. N1 окупил себя на первом же тике.
+4. **Mode (g) educate работает.** Я сначала **сказал** "стоп, гипотеза неверна, давай diagnose" вместо реакционно писать "decompose persist" код. Это спасло 4-8 часов работы в неверном направлении.
+
+**Pattern для запоминания:**
+- Если ты внедряешь зависимость через `self` в closure внутри service-application класса — **обязательно** напиши тест который вызовет closure после `__init__`. Mock receiver класса (ServiceApp) недостаточно если closure ссылается на атрибуты другого объекта (self.app.X).
+
+### Update #2 — XLEN ≠ backlog (2026-05-14)
+
+Когда N1 monitoring впервые сработал, я думал что `XLEN stream:etl:hydrate = 665 000` это backlog. На самом деле:
+
+- `XLEN` — это **total messages ever published** в Redis stream. После ACK сообщения не удаляются автоматически.
+- Реальный backlog = **`lag`** consumer group (новые сообщения, ещё не доставленные).
+- При `pending_total = 0` и `lag = 0` — все сообщения обработаны, despite огромного XLEN.
+
+**Следствие:** queue thresholds в monitoring config должны таргетить `lag`, не `XLEN`. Phase 2 был построен на XLEN потому что это что отдаёт `/ops/queues/summary`. Это **частично misleading** — но XLEN всё ещё полезен для **memory leak detection** (растёт бесконечно если нет XTRIM policy).
+
+**Action item (вне scope сейчас):** добавить `lag` сигналы либо XTRIM policy в Redis (MAXLEN ~ 100k per stream). См. open items в §6.
+
+---
+
 ## 10. Как этим документом пользоваться
 
 ### Когда читать
@@ -307,8 +365,9 @@
 - Изменение mode сотрудничества → раздел 8.
 
 ### Версионирование
-- `v1` (2026-05-14): первая версия, по итогам 11-вопросного questionnaire.
-- Следующие версии: `v2`, `v3` ... с указанием даты в шапке и кратким "что изменилось" в начале документа.
+- `v1` (2026-05-14 утром): первая версия, по итогам 11-вопросного questionnaire.
+- `v2` (2026-05-14 вечером): N1 monitoring deployed; N2 переосмыслен — гипотеза о "decompose persist" опровергнута через Phase 0 diagnose, реальный fix = sweeper regression (commit `724d77f`). Добавлен §11 для отслеживания обновлений гипотез.
+- Следующие версии: `v3`, `v4` ... с указанием даты в шапке и кратким "что изменилось" в начале документа.
 
 ---
 
