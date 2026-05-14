@@ -160,6 +160,45 @@ All three return real data and can serve as transport fallback targets:
 
 ## Future work (post-current-session ideas)
 
+### Layer D D.2 — Sport-level scheduled-events SQL filter + partial index
+
+**Diagnosis (2026-05-15 from EXPLAIN ANALYZE on prod):**
+
+For `/api/v1/sport/{slug}/scheduled-events/{date}` endpoints, the query in `local_api_server._fetch_snapshot_payload` is:
+
+```sql
+SELECT source_url, payload, is_soft_error_payload, http_status
+FROM api_payload_snapshot
+WHERE endpoint_pattern = '/api/v1/sport/tennis/scheduled-events/{date}'
+ORDER BY id DESC LIMIT 500;
+```
+
+EXPLAIN ANALYZE: 146ms SQL execution (fast), index hit via `idx_api_payload_snapshot_endpoint_pattern`.
+
+The **client-side** cost is the bottleneck. SQL returns 500 latest snapshots **regardless of date**. Python then loops, parses each `payload` (JSONB decompress + JSON parse, ~50-100 KB each), and filters by `source_url`. Out of 500 rows, typically 1-2 match the target date. Effective cost: 500 × ~10ms parse = 5-10 seconds, often timeout via uvicorn 30s default.
+
+**Fix plan:** push the date filter into SQL by matching `source_url` exactly when no entity scope is present.
+
+Code (in `local_api_server._fetch_snapshot_payload`):
+
+```python
+if not (route.context_entity_type and context_value):
+    query += f" AND source_url = ${len(arguments) + 1}"
+    arguments.append(self._build_source_url(path, raw_query))
+```
+
+Companion migration `2026-05-15_api_payload_snapshot_source_url_lookup.sql`:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_api_payload_snapshot_source_url_lookup
+ON api_payload_snapshot (endpoint_pattern, source_url, id DESC)
+WHERE context_entity_id IS NULL;
+```
+
+Expected impact: sport-level scheduled-events first-hit latency 30s → 5-10ms. All 20+ timeout endpoints in the audit move to the FAST band. % toward 50ms target jumps from 65% to ~95%.
+
+Tracking ID: **N4 Layer D D.2**. Effort 2-3 hours. Low risk (defensive, behind context_entity_id check). Ready for ACK.
+
 ### N5 — Transport fallback chain across 3 Sofascore base domains
 
 Add to `schema_inspector/sofascore_client.py` (or wherever the HTTP client lives) a fallback ladder:
