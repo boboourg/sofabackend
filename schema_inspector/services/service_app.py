@@ -150,6 +150,21 @@ from ..workers.structure_worker import StructureSyncWorker
 
 logger = logging.getLogger(__name__)
 
+
+def _env_int_local(name: str, default: int) -> int:
+    """Local copy of the ``_env_int`` pattern. Keeps this module's env reads
+    independent from ``backpressure_config`` so callers can inspect a single
+    canonical source for live-state sweep tuning.
+    """
+
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 DELAYED_ENVELOPE_HASH = "hash:etl:delayed_envelopes"
 DEFAULT_SERVICE_SPORT_SLUGS = SUPPORTED_SPORT_SLUGS
 
@@ -324,6 +339,7 @@ class ServiceApp:
             )
             for sport_slug in normalized_sports
         )
+        sweep_callback, sweep_interval_ms = self._build_live_state_sweep_wiring()
         return PlannerDaemon(
             queue=self.stream_queue,
             delayed_scheduler=self.delayed_scheduler,
@@ -347,7 +363,57 @@ class ServiceApp:
                     BackpressureLimit(stream=STREAM_LIVE_WARM, group=GROUP_LIVE_WARM, max_lag=LIVE_WARM_MAX_LAG),
                 ),
             ),
+            live_state_sweep_callback=sweep_callback,
+            live_state_sweep_interval_ms=sweep_interval_ms,
         )
+
+    def _build_live_state_sweep_wiring(self):
+        """Construct the LiveStateSweeper + callback closure (P0.B 2026-05-14).
+
+        Returns ``(callback, interval_ms)``. Callback is an awaitable
+        ``async f(now_ms)`` that acquires a Postgres connection from the
+        shared pool and runs one sweep cycle. The PlannerDaemon stores
+        this callback and calls it on its own schedule so the daemon
+        does not need direct database access. Interval defaults to 60s
+        and can be tuned via ``SOFASCORE_LIVE_STATE_SWEEP_INTERVAL_MS``.
+        """
+
+        from .live_state_sweeper import LiveStateSweeper
+
+        interval_ms = _env_int_local("SOFASCORE_LIVE_STATE_SWEEP_INTERVAL_MS", 60_000)
+        grace_seconds = _env_int_local(
+            "SOFASCORE_LIVE_STATE_SWEEP_GRACE_SECONDS", 300
+        )
+        max_remove = _env_int_local(
+            "SOFASCORE_LIVE_STATE_SWEEP_MAX_REMOVE_PER_TICK", 500
+        )
+        if interval_ms <= 0:
+            return None, 0
+        sweeper = LiveStateSweeper(
+            live_state_store=self.live_state_store,
+            grace_seconds=grace_seconds,
+            max_remove_per_tick=max_remove,
+        )
+
+        async def _sweep(now_ms: int) -> None:
+            from datetime import datetime, timezone as _tz
+            now_dt = datetime.fromtimestamp(now_ms / 1000, tz=_tz.utc)
+            async with self.database.connection() as conn:
+                report = await sweeper.run_once(sql_executor=conn, now=now_dt)
+            if report.removed_event_count > 0 or report.error is not None:
+                logger.info(
+                    "live_state_sweep done: scanned=%d removed=%d "
+                    "lane_hot=%d lane_warm=%d lane_cold=%d elapsed_ms=%d error=%s",
+                    report.scanned_finalized_count,
+                    report.removed_event_count,
+                    report.lane_removed_counts.get("hot", 0),
+                    report.lane_removed_counts.get("warm", 0),
+                    report.lane_removed_counts.get("cold", 0),
+                    report.elapsed_ms,
+                    report.error,
+                )
+
+        return _sweep, interval_ms
 
     def build_live_discovery_planner_daemon(
         self,

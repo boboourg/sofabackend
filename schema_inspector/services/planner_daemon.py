@@ -66,6 +66,8 @@ class PlannerDaemon:
         live_dispatch_lease_ms: int = 90_000,
         scheduled_backpressure=None,
         live_backpressure=None,
+        live_state_sweep_callback=None,
+        live_state_sweep_interval_ms: int = 60_000,
     ) -> None:
         self.queue = queue
         self.delayed_scheduler = delayed_scheduler
@@ -79,6 +81,13 @@ class PlannerDaemon:
         self.live_backpressure = live_backpressure
         self.shutdown_requested = False
         self._last_planned_at_ms: dict[str, int] = {}
+        # P0.B (2026-05-14): periodic sweep of finalised events from
+        # zset:live:hot/warm/cold. Callback is an awaitable
+        # `async f(now_ms) -> Any` injected by service_app so the daemon
+        # does not need direct database access. ``None`` disables sweep.
+        self.live_state_sweep_callback = live_state_sweep_callback
+        self.live_state_sweep_interval_ms = max(0, int(live_state_sweep_interval_ms))
+        self._next_live_state_sweep_ms: int | None = None
 
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
@@ -99,6 +108,34 @@ class PlannerDaemon:
             logger.info("Planner paused scheduled planning by backpressure: %s", scheduled_reason)
         await self._publish_due_delayed_jobs(observed_now)
         await self._publish_live_refreshes(observed_now)
+        await self._maybe_sweep_live_state(observed_now)
+
+    async def _maybe_sweep_live_state(self, now_ms: int) -> None:
+        """Trigger one ``LiveStateSweeper.run_once`` cycle if the configured
+        interval has elapsed. No-op when the callback is not wired in
+        (legacy callers / tests).
+
+        Best-effort: any exception is logged and swallowed so the planner
+        tick never crashes because of a stale-cleanup hiccup. Schedules
+        the next attempt regardless of outcome.
+        """
+
+        callback = self.live_state_sweep_callback
+        if callback is None or self.live_state_sweep_interval_ms <= 0:
+            return
+        if self._next_live_state_sweep_ms is None:
+            # Defer first sweep by one interval so we never piggy-back on
+            # the very first planner tick before live state is populated.
+            self._next_live_state_sweep_ms = now_ms + self.live_state_sweep_interval_ms
+            return
+        if now_ms < self._next_live_state_sweep_ms:
+            return
+        try:
+            await callback(now_ms)
+        except Exception as exc:  # noqa: BLE001 — sweep must never crash planner
+            logger.warning("live_state_sweep callback failed: %r", exc)
+        finally:
+            self._next_live_state_sweep_ms = now_ms + self.live_state_sweep_interval_ms
 
     async def _publish_scheduled_targets(self, now_ms: int) -> None:
         for target in self.scheduled_targets:
