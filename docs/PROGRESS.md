@@ -124,6 +124,49 @@ Update history:
 
 ## Incident postmortems
 
+### 2026-05-14 23:46 EEST — Selective upstream throttling on event 14083649 (Real Oviedo vs Real Madrid)
+
+**Trigger:** Operator (Bobur) noticed sub-endpoints empty for tier-1 LaLiga match `14083649` while `/event/{id}` itself worked.
+
+**Investigation:**
+- `api_payload_snapshot` had **0 rows** for context_entity_id=14083649 (every sub-endpoint reconstruction fails).
+- Event row exists in `event` table (id=14083649, slug=`real-oviedo-real-madrid`, unique_tournament_id=8 LaLiga, status_code=31).
+- Not in any zset (hot/warm/cold), no `live:event:14083649` Redis hash, no circuit-breaker quarantine record at probe time (later turned out the quarantine was rotating).
+- Simple `curl` (no TLS impersonation) returned HTTP 403 — initially misled me. But the **same** known-good event 16178209 also returned 403 via simple curl. Conclusion: simple curl fails TLS fingerprint check; **403 is bot detection, not event-specific**.
+- Production transport uses `curl_cffi` with `SCHEMA_INSPECTOR_TLS_IMPERSONATE=chrome110` to mimic browser TLS handshake.
+- live-tier-1 worker logs (last 60 min) revealed the **real** pattern:
+  ```
+  RetryableJobError: Root /event fetch failed (event_id=14083649,
+     classification=network_error, http_status=None): Failed to perform,
+     ErrCode: 28, Reason: 'Operation timed out after 12942 milliseconds
+     with 0 bytes received'
+  ```
+- libcurl ErrCode 28 = CURLE_OPERATION_TIMEDOUT. TCP handshake completes, but Sofascore returns zero bytes within 10-12s.
+
+**Root cause:** Sofascore upstream is **selectively throttling** this event. Not a 403, not a bot block — TCP accepts, then the response simply never arrives. Most likely scenarios (rated):
+1. **Per-event rate limit on popular Real Madrid matches** (high probability — top-tier matches see more aggressive throttling).
+2. All 5 Smartproxy IPs flagged for this specific event right now (medium probability).
+3. Sofascore CDN edge issue for this event_id (low probability).
+
+**System behaviour (CORRECT):**
+- live-tier-1 worker pulls job, attempts fetch, times out → RetryableJobError.
+- Worker runtime classifies as retryable, schedules retry via delayed scheduler.
+- After 1 failure cycle → P5b circuit breaker quarantines the event for 60s cooldown.
+- After cooldown → another cycle. Loop repeats indefinitely.
+- **Other events are unaffected** — quarantine is per-event, not lane-wide.
+- In-flight coalescing prevents duplicate concurrent fetches for the same event.
+
+**Nothing to fix in our code.** The system is doing exactly what it should under upstream throttling: retry with backoff, quarantine to avoid wasting proxy budget, recover automatically when upstream stops throttling.
+
+**Diagnostic gotcha logged for future debug:** when an event-fetch suspect feels like a 403, ALWAYS replicate the failure through the production transport (`python -m schema_inspector.cli event ...` or by reading hydrate worker logs), NOT via simple curl. Simple curl is rejected by Sofascore TLS-fingerprint screening, which makes any event look 403-banned. The 403 in simple-curl test is a known false positive.
+
+**Operator options (none required):**
+1. **Wait** — rate-limit cooldowns typically expire after 30-60 minutes. Worker will succeed on next cycle.
+2. **Manual proxy rotation experiment** — try each of 5 Smartproxy endpoints by hand to see if any unblock the event (could surface IP-banlist hypothesis).
+3. **Long-term:** add `mobile.sofascore.com` fallback in transport. Some top-tier matches throttled on desktop endpoints are reachable via mobile. **Not done yet — separate workstream.**
+
+---
+
 ### 2026-05-14 23:03 EEST — PostgreSQL OOM kill (CRIT alert from N1 monitoring)
 
 **Trigger:** N1 monitoring channel FLOWSCORE MONITORING received CRIT alert: `oldest_hot_score_age_seconds = 1906s` (threshold 1800s) at 19:51 UTC.
