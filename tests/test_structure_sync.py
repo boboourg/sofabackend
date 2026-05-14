@@ -1109,6 +1109,76 @@ class StructureSyncServiceTests(unittest.IsolatedAsyncioTestCase):
         event_list_job.run_featured.assert_not_awaited()
         event_list_job.run_unique_tournament_scheduled.assert_not_awaited()
 
+    async def test_structure_sync_uses_first_upstream_season_as_current_not_largest_id(self) -> None:
+        from schema_inspector.competition_parser import UniqueTournamentRecord
+        from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament
+
+        competition_job = mock.Mock()
+        competition_job.run = mock.AsyncMock(
+            side_effect=[
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=8,
+                            slug="laliga",
+                            name="LaLiga",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    # Sofascore returns seasons newest-first. Some historical
+                    # LaLiga season ids are numerically greater than the
+                    # current season id, so max(id) is not a valid proxy for
+                    # "current season".
+                    season_ids=(77559, 61643, 91246),
+                ),
+                _competition_result(
+                    tournaments=(
+                        UniqueTournamentRecord(
+                            id=8,
+                            slug="laliga",
+                            name="LaLiga",
+                            category_id=1,
+                            has_rounds=True,
+                        ),
+                    ),
+                    season_ids=(77559,),
+                ),
+            ]
+        )
+        event_list_job = mock.Mock()
+        event_list_job.run_round = mock.AsyncMock(
+            side_effect=[
+                _event_result((101,)),
+                _event_result(()),
+            ]
+        )
+        event_list_job.run_featured = mock.AsyncMock()
+        event_list_job.run_unique_tournament_scheduled = mock.AsyncMock()
+
+        with mock.patch(
+            "schema_inspector.services.structure_sync_service.build_source_adapter",
+            return_value=_FakeStructureSourceAdapter(competition_job, event_list_job),
+        ):
+            result = await run_structure_sync_for_tournament(
+                _FakeStructureApp(),
+                unique_tournament_id=8,
+                sport_slug="football",
+                runtime_config=SimpleNamespace(source_slug="sofascore"),
+                transport=object(),
+                max_rounds_probe=2,
+            )
+
+        self.assertEqual(result.season_ids, (77559, 61643, 91246))
+        self.assertEqual(competition_job.run.await_args_list[1].kwargs["season_id"], 77559)
+        event_list_job.run_round.assert_any_await(
+            unique_tournament_id=8,
+            season_id=77559,
+            round_number=1,
+            sport_slug="football",
+            timeout=20.0,
+        )
+
     async def test_structure_sync_rounds_mode_stops_after_consecutive_missing_round_404s(self) -> None:
         from schema_inspector.competition_parser import UniqueTournamentRecord
         from schema_inspector.services.structure_sync_service import run_structure_sync_for_tournament

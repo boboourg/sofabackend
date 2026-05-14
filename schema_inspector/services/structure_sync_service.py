@@ -116,7 +116,13 @@ async def run_structure_sync_for_tournament(
         timeout=timeout,
     )
     tournament_record = _pick_tournament(competition_result.parsed.unique_tournaments, unique_tournament_id)
-    season_ids = tuple(sorted({int(s.id) for s in competition_result.parsed.seasons}, reverse=True))
+    seen_season_ids: set[int] = set()
+    season_ids = tuple(
+        season_id
+        for season in competition_result.parsed.seasons
+        for season_id in (int(season.id),)
+        if season_id not in seen_season_ids and not seen_season_ids.add(season_id)
+    )
 
     if not season_ids:
         return StructureSyncResult(
@@ -127,8 +133,9 @@ async def run_structure_sync_for_tournament(
             reason="no seasons reported by Sofascore — skeleton not produced",
         )
 
-    # Phase 2 — pull season_info for the current (largest-id) season so we
-    # normalise season metadata before we touch event-list surfaces.
+    # Phase 2 — Sofascore returns seasons newest-first; season ids are not
+    # chronological for every tournament (for example LaLiga historical
+    # seasons can have ids greater than the current one).
     current_season_id = int(season_ids[0])
     await competition_job.run(
         unique_tournament_id=int(unique_tournament_id),
