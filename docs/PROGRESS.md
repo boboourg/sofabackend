@@ -5,7 +5,7 @@
 | Поле | Значение |
 | --- | --- |
 | Версия | v1 (2026-05-14) |
-| Текущий статус | **Implementation: ~71% / Proof window: not yet started** |
+| Текущий статус | **Implementation: ~85% / Proof window: not yet started** |
 | Источник критериев | `docs/24x7-exit-criteria.md` + `docs/PROJECT_VISION.md` §2 SLO + §6 Roadmap |
 | Когда `100%`? | Когда **все** capabilities в таблице ниже = ✅ **И** 24-часовое proof window прошло без regressions |
 
@@ -13,7 +13,7 @@
 
 ## TL;DR
 
-**Overall: 71% implementation done, 0 hours of proof window accumulated.**
+**Overall: 85% implementation done, 0 hours of proof window accumulated.**
 
 Что уже работает 24/7 без нашего внимания:
 - ✅ N1 monitoring → Telegram канал FLOWSCORE MONITORING. Алерты приходят за минуты.
@@ -122,6 +122,7 @@ Update history:
 | 2026-05-14 | **71%** | 0/24h | Initial baseline after N1 + sweeper fix + N4 A/B/C + Codex season fix |
 | 2026-05-14 23:20 | **65%** | 0/24h | Cache warmer disabled after OOM incident — Layer C effectively off pending Layer D or warmer skip-on-timeout safeguard. See "Incident postmortems" section. |
 | 2026-05-15 01:30 | **78%** | 0/24h | N4 Layer D D.2 shipped (commit `aea7fc0`) + migration corrected to text_pattern_ops. Real impact: TIMEOUT 7→3, CATASTROPHIC 12→4. Warm-cache for previously-failing endpoints now 10-13ms (tennis 5.9s cold→13ms warm; football 35s cold→12ms warm; basketball 35s cold→10ms warm). Cold-cache first hit for biggest payloads (football 794KB) still 30s+ — Layer D.3 needed for Python decompression speed. |
+| 2026-05-15 02:30 | **85%** | 0/24h | Commit `a4b2f02` — per-sub-endpoint resilience (Fix #1) + 3-host transport fallback (Fix #2). Real impact: FAST band 79.5% → 84.2%; SLOW band 5 → 0; CATASTROPHIC 7 → 4; TIMEOUT 3 → 2. Crucially: **event 14083649 (the tier-1 example) now has 22 distinct sub-endpoint patterns captured (was 0)**. Host fallback `api.sofascore.com,mobile.sofascore.com` enabled in `.env` on prod. Host fallback firing in logs as expected. |
 
 ---
 
