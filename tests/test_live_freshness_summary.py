@@ -82,8 +82,10 @@ def _slo(summary: LiveFreshnessSummary, name: str) -> LiveFreshnessSlo:
 
 
 class LiveFreshnessSummaryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_healthy_when_all_signals_under_threshold(self) -> None:
-        # all within SLO: oldest = 100s, success_rate = 100%, tier_1 blocked = 50%
+    async def test_healthy_when_redis_signals_under_threshold(self) -> None:
+        # oldest = 100s, tier_1 blocked = 50% with active events
+        # success_rate is None (helper does not query DB after 2026-05-14
+        # to avoid the 30s etl_job_run scan); SLO not breached when None.
         now_ms = 1_700_000_000_000
         now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
         summary = await _build_live_freshness_summary(
@@ -96,9 +98,9 @@ class LiveFreshnessSummaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(summary.status, "healthy")
         self.assertEqual(summary.oldest_hot_score_age_seconds, 100)
-        self.assertEqual(summary.refresh_live_event_success_rate_5min, 1.0)
+        self.assertIsNone(summary.refresh_live_event_success_rate_5min)
         self.assertEqual(summary.tier_1_blocked_rate_cumulative, 0.5)
-        self.assertEqual(summary.refresh_live_event_succeeded_5min, 200)
+        self.assertEqual(summary.refresh_live_event_succeeded_5min, 0)
         # No SLO breached
         self.assertFalse(any(slo.breached for slo in summary.slos))
 
@@ -119,19 +121,20 @@ class LiveFreshnessSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(slo.threshold, 900)
         self.assertIsNotNone(slo.note)
 
-    async def test_degraded_when_refresh_success_rate_below_threshold(self) -> None:
+    async def test_success_rate_slo_inactive_post_2026_05_14(self) -> None:
+        """The success_rate SLO is reported as None until the etl_job_run
+        index lands (see health.py docstring). Confirm it never breaches."""
+
         now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
-        # success rate 50% — below default 95%
         summary = await _build_live_freshness_summary(
             sql_executor=_StubExecutor(succeeded=50, retry_scheduled=40, failed=10),
             redis_backend=_StubRedis(),
             queue_summary=_make_queue_summary(),
             now=now,
         )
-        self.assertEqual(summary.status, "degraded")
         slo = _slo(summary, "refresh_live_event_success_rate_5min")
-        self.assertTrue(slo.breached)
-        self.assertEqual(slo.actual, 0.5)
+        self.assertIsNone(slo.actual)
+        self.assertFalse(slo.breached)
 
     async def test_tier_1_blocked_breach_requires_active_events(self) -> None:
         """Without active tier_1 events the metric is cumulative noise and
@@ -193,28 +196,25 @@ class LiveFreshnessSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(summary.status, {"healthy", "unknown"})
         self.assertIsNone(summary.oldest_hot_score_age_seconds)
 
-    async def test_db_query_timeout_returns_empty_counts(self) -> None:
-        """The prod etl_job_run scan can take ~30s; the helper must hard-
-        timeout at 2s so /ops/health never blocks on it."""
+    async def test_does_not_call_sql_executor(self) -> None:
+        """Post-2026-05-14: the helper is Redis-only. Confirm the executor
+        is not invoked even if it would otherwise raise/hang."""
 
         import asyncio
 
-        class _SlowExecutor:
+        class _ForbiddenExecutor:
             async def fetchrow(self, query: str):
-                await asyncio.sleep(5)  # > 2s timeout
-                return {"succeeded": 999, "retry_scheduled": 0, "failed": 0}
+                raise AssertionError("sql executor must not be called")
 
         now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
         summary = await _build_live_freshness_summary(
-            sql_executor=_SlowExecutor(),
+            sql_executor=_ForbiddenExecutor(),
             redis_backend=_StubRedis(),
             queue_summary=_make_queue_summary(),
             now=now,
         )
-        # Did not block forever; returned zero counts
+        # Counts always zero because the helper does not query DB
         self.assertEqual(summary.refresh_live_event_succeeded_5min, 0)
-        self.assertEqual(summary.refresh_live_event_retry_5min, 0)
-        self.assertEqual(summary.refresh_live_event_failed_5min, 0)
         # Success rate becomes None -> SLO not breached
         slo = _slo(summary, "refresh_live_event_success_rate_5min")
         self.assertFalse(slo.breached)

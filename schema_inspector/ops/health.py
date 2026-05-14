@@ -265,31 +265,34 @@ async def _build_live_freshness_summary(
 ) -> LiveFreshnessSummary:
     """Compose the live freshness summary (P0.C 2026-05-14).
 
-    Parallel-fetches:
-      * oldest score age in ``zset:live:hot`` (Redis)
-      * refresh_live_event status counts over the last 5 minutes (Postgres)
-
-    The third SLO (tier_1 blocked rate) is derived from already-collected
-    ``queue_summary.live_dispatch_metrics`` without an extra round trip.
+    All signals are sourced from Redis or the already-collected
+    ``queue_summary`` so this helper adds **zero** new Postgres round-trips
+    to ``/ops/health``. Adding a 5-minute job-count query was attempted
+    first but caused a 30s full scan on ``etl_job_run`` (no usable index
+    on ``started_at``) which blocked the shared health-report connection.
+    ``refresh_live_event_success_rate_5min`` is therefore reported as
+    ``None`` until the index lands; the SLO simply does not breach.
 
     Best-effort: any underlying probe failure returns ``None`` for that
-    metric and a single SLO that is not breached for it. Health endpoint
-    must never fail because one sub-probe could not complete.
+    metric. Health endpoint must never fail because one sub-probe could
+    not complete.
+
+    Sources:
+      * oldest score age in ``zset:live:hot`` (Redis ZRANGE, fast)
+      * tier_1 blocked rate (from QueueSummary.live_dispatch_metrics)
+      * refresh_live_event success rate — NOT FETCHED here (placeholder).
+        See module-level docstring for the index-once-then-restore plan.
     """
 
-    oldest_age_task = asyncio.create_task(
-        _fetch_oldest_hot_score_age_seconds(redis_backend, now)
+    # ``sql_executor`` is intentionally unused for now — kept in the
+    # signature so callers do not need to rewire and the future restore
+    # of the success-rate query is a one-line change.
+    del sql_executor
+
+    oldest_age_seconds = await _fetch_oldest_hot_score_age_seconds(
+        redis_backend, now
     )
-    counts_task = asyncio.create_task(
-        _fetch_refresh_live_event_counts_5min(sql_executor)
-    )
-    try:
-        oldest_age_seconds, counts_5min = await asyncio.gather(
-            oldest_age_task, counts_task
-        )
-    except Exception:
-        oldest_age_seconds = None
-        counts_5min = {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+    counts_5min = dict(_EMPTY_REFRESH_COUNTS)
 
     tier_1_blocked = _tier_1_blocked_rate(queue_summary)
     tier_1_active = int((queue_summary.live_tier_counts or {}).get("tier_1", 0))
@@ -409,61 +412,14 @@ async def _fetch_oldest_hot_score_age_seconds(
     return age_ms // 1000
 
 
-_REFRESH_COUNTS_QUERY_TIMEOUT_SECONDS = 2.0
+# refresh_live_event_count_5min query path was removed 2026-05-14: prod
+# probe showed a 30s full scan on etl_job_run (no usable started_at
+# index), which blocked the shared /ops/health connection. The Redis-
+# sourced metrics below are enough for the current SLO contract.
+# When etl_job_run(started_at) or etl_job_run(started_at, job_type) is
+# indexed in a future migration, restore the count query via a separate
+# pool acquire so it cannot starve the main health connection.
 _EMPTY_REFRESH_COUNTS = {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
-
-
-async def _fetch_refresh_live_event_counts_5min(sql_executor) -> dict[str, int]:
-    """Return counts of refresh_live_event jobs by status over last 5 min.
-
-    Hard-bounded at 2s via ``asyncio.wait_for`` because ``etl_job_run`` on
-    prod is a ~5M-row table without a usable index on ``started_at`` —
-    a full scan with the 5-minute filter took ~30s in production probe
-    on 2026-05-14. Without this bound the entire ``/ops/health`` endpoint
-    blocks for 30s and uvicorn workers time out (HTTP 500). Best-effort:
-    on timeout, return zero counts so other SLOs still surface; a missing
-    success rate becomes ``None`` and the SLO is not breached.
-
-    Long-term fix: add an index on ``etl_job_run(started_at)`` or
-    ``etl_job_run(started_at, job_type)`` and remove the wait_for.
-    """
-
-    fetchrow = getattr(sql_executor, "fetchrow", None)
-    if not callable(fetchrow):
-        return dict(_EMPTY_REFRESH_COUNTS)
-    query = """
-        SELECT
-            COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded,
-            COUNT(*) FILTER (WHERE status = 'retry_scheduled') AS retry_scheduled,
-            COUNT(*) FILTER (WHERE status = 'failed') AS failed
-        FROM etl_job_run
-        WHERE started_at >= NOW() - INTERVAL '5 minutes'
-          AND job_type = 'refresh_live_event'
-    """
-    try:
-        row = await asyncio.wait_for(
-            fetchrow(query), timeout=_REFRESH_COUNTS_QUERY_TIMEOUT_SECONDS
-        )
-    except asyncio.TimeoutError:
-        return dict(_EMPTY_REFRESH_COUNTS)
-    except Exception:
-        return dict(_EMPTY_REFRESH_COUNTS)
-    if row is None:
-        return dict(_EMPTY_REFRESH_COUNTS)
-    return {
-        "succeeded": int(_row_field(row, "succeeded") or 0),
-        "retry_scheduled": int(_row_field(row, "retry_scheduled") or 0),
-        "failed": int(_row_field(row, "failed") or 0),
-    }
-
-
-def _row_field(row: Any, name: str) -> Any:
-    if isinstance(row, dict):
-        return row.get(name)
-    try:
-        return row[name]
-    except (KeyError, TypeError, IndexError):
-        return None
 
 
 def _tier_1_blocked_rate(queue_summary: QueueSummary) -> float | None:
