@@ -193,6 +193,32 @@ class LiveFreshnessSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(summary.status, {"healthy", "unknown"})
         self.assertIsNone(summary.oldest_hot_score_age_seconds)
 
+    async def test_db_query_timeout_returns_empty_counts(self) -> None:
+        """The prod etl_job_run scan can take ~30s; the helper must hard-
+        timeout at 2s so /ops/health never blocks on it."""
+
+        import asyncio
+
+        class _SlowExecutor:
+            async def fetchrow(self, query: str):
+                await asyncio.sleep(5)  # > 2s timeout
+                return {"succeeded": 999, "retry_scheduled": 0, "failed": 0}
+
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+        summary = await _build_live_freshness_summary(
+            sql_executor=_SlowExecutor(),
+            redis_backend=_StubRedis(),
+            queue_summary=_make_queue_summary(),
+            now=now,
+        )
+        # Did not block forever; returned zero counts
+        self.assertEqual(summary.refresh_live_event_succeeded_5min, 0)
+        self.assertEqual(summary.refresh_live_event_retry_5min, 0)
+        self.assertEqual(summary.refresh_live_event_failed_5min, 0)
+        # Success rate becomes None -> SLO not breached
+        slo = _slo(summary, "refresh_live_event_success_rate_5min")
+        self.assertFalse(slo.breached)
+
     async def test_resilient_to_db_failure(self) -> None:
         now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
         summary = await _build_live_freshness_summary(

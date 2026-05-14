@@ -409,28 +409,47 @@ async def _fetch_oldest_hot_score_age_seconds(
     return age_ms // 1000
 
 
+_REFRESH_COUNTS_QUERY_TIMEOUT_SECONDS = 2.0
+_EMPTY_REFRESH_COUNTS = {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+
+
 async def _fetch_refresh_live_event_counts_5min(sql_executor) -> dict[str, int]:
-    """Return counts of refresh_live_event jobs by status over last 5 min."""
+    """Return counts of refresh_live_event jobs by status over last 5 min.
+
+    Hard-bounded at 2s via ``asyncio.wait_for`` because ``etl_job_run`` on
+    prod is a ~5M-row table without a usable index on ``started_at`` —
+    a full scan with the 5-minute filter took ~30s in production probe
+    on 2026-05-14. Without this bound the entire ``/ops/health`` endpoint
+    blocks for 30s and uvicorn workers time out (HTTP 500). Best-effort:
+    on timeout, return zero counts so other SLOs still surface; a missing
+    success rate becomes ``None`` and the SLO is not breached.
+
+    Long-term fix: add an index on ``etl_job_run(started_at)`` or
+    ``etl_job_run(started_at, job_type)`` and remove the wait_for.
+    """
 
     fetchrow = getattr(sql_executor, "fetchrow", None)
     if not callable(fetchrow):
-        return {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+        return dict(_EMPTY_REFRESH_COUNTS)
+    query = """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded,
+            COUNT(*) FILTER (WHERE status = 'retry_scheduled') AS retry_scheduled,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed
+        FROM etl_job_run
+        WHERE started_at >= NOW() - INTERVAL '5 minutes'
+          AND job_type = 'refresh_live_event'
+    """
     try:
-        row = await fetchrow(
-            """
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded,
-                COUNT(*) FILTER (WHERE status = 'retry_scheduled') AS retry_scheduled,
-                COUNT(*) FILTER (WHERE status = 'failed') AS failed
-            FROM etl_job_run
-            WHERE started_at >= NOW() - INTERVAL '5 minutes'
-              AND job_type = 'refresh_live_event'
-            """
+        row = await asyncio.wait_for(
+            fetchrow(query), timeout=_REFRESH_COUNTS_QUERY_TIMEOUT_SECONDS
         )
+    except asyncio.TimeoutError:
+        return dict(_EMPTY_REFRESH_COUNTS)
     except Exception:
-        return {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+        return dict(_EMPTY_REFRESH_COUNTS)
     if row is None:
-        return {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+        return dict(_EMPTY_REFRESH_COUNTS)
     return {
         "succeeded": int(_row_field(row, "succeeded") or 0),
         "retry_scheduled": int(_row_field(row, "retry_scheduled") or 0),
