@@ -232,6 +232,34 @@ class FormatAlertMessageTests(unittest.TestCase):
         msg = format_alert_message(snapshot, host_label="prod")
         self.assertIn("tier_1_active_events: 4", msg)
 
+    def test_severity_emoji_prefix(self) -> None:
+        """One-glance severity read: 🔴 CRIT, 🟡 WARN, 🟢 RESOLVED."""
+
+        crit_msg = format_alert_message(self.snapshot_crit, host_label="prod")
+        self.assertIn("🔴", crit_msg)
+        # Brackets prefix still kept for backwards-compat parsers.
+        self.assertIn("[CRIT]", crit_msg)
+
+        warn_snapshot = make_snapshot(
+            definition=SIGNAL_OLDEST_HOT_AGE,
+            value=150,
+            timestamp=datetime(2026, 5, 14, 18, 24, 0, tzinfo=timezone.utc),
+        )
+        warn_msg = format_alert_message(warn_snapshot, host_label="prod")
+        self.assertIn("🟡", warn_msg)
+        self.assertIn("[WARN]", warn_msg)
+
+        ok_snapshot = make_snapshot(
+            definition=SIGNAL_OLDEST_HOT_AGE,
+            value=80,
+            timestamp=datetime(2026, 5, 14, 18, 48, 0, tzinfo=timezone.utc),
+        )
+        resolved_msg = format_alert_message(
+            ok_snapshot, host_label="prod", resolved=True
+        )
+        self.assertIn("🟢", resolved_msg)
+        self.assertIn("RESOLVED", resolved_msg)
+
     def test_message_is_plain_text(self) -> None:
         """No Markdown — avoids parse_mode accidents from dynamic notes."""
 

@@ -312,23 +312,26 @@ def format_alert_message(
     """Render a Telegram-friendly message for one signal snapshot.
 
     Plain text only (no Markdown) — avoids `*`/`_` parsing accidents when
-    a note happens to contain them.
+    a note happens to contain them. The leading emoji gives the operator
+    a one-glance severity read without parsing the bracketed prefix:
+      🟢 RESOLVED — signal returned to OK.
+      🟡 WARN     — over WARN threshold, attention.
+      🔴 CRIT     — over CRIT threshold, action needed.
     """
 
     if resolved:
         return (
-            f"RESOLVED: {snapshot.name}\n"
+            f"🟢 RESOLVED: {snapshot.name}\n"
             f"Value: {_format_value(snapshot.value, snapshot.unit)}\n"
             f"Time: {snapshot.timestamp.isoformat()}\n"
             f"Host: {host_label}"
         )
-    prefix = _SEVERITY_PREFIX.get(snapshot.severity, snapshot.severity)
     if snapshot.severity == "CRIT":
         threshold = snapshot.threshold_crit
-        prefix = "[CRIT]"
+        prefix = "🔴 [CRIT]"
     elif snapshot.severity == "WARN":
         threshold = snapshot.threshold_warn
-        prefix = "[WARN]"
+        prefix = "🟡 [WARN]"
     else:
         threshold = snapshot.threshold_warn
         prefix = f"[{snapshot.severity}]"
