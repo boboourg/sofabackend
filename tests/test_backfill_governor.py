@@ -21,6 +21,41 @@ from schema_inspector.queue.backfill_governor import (
 )
 
 
+class BackfillGovernorThresholdsFromEnvTests(unittest.TestCase):
+    def test_defaults_when_env_missing(self) -> None:
+        thresholds = BackfillGovernorThresholds.from_env(env={})
+        self.assertEqual(thresholds.oldest_hot_score_age_max_seconds, 1800)
+        self.assertEqual(thresholds.tier_1_quarantined_max_events, 10)
+
+    def test_env_overrides_oldest_hot_age(self) -> None:
+        thresholds = BackfillGovernorThresholds.from_env(
+            env={"SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS": "2400"}
+        )
+        self.assertEqual(thresholds.oldest_hot_score_age_max_seconds, 2400)
+        self.assertEqual(thresholds.tier_1_quarantined_max_events, 10)
+
+    def test_env_overrides_tier_1_quarantined(self) -> None:
+        thresholds = BackfillGovernorThresholds.from_env(
+            env={"SOFASCORE_BACKFILL_GOVERNOR_TIER_1_QUARANTINED_MAX": "25"}
+        )
+        self.assertEqual(thresholds.tier_1_quarantined_max_events, 25)
+        self.assertEqual(thresholds.oldest_hot_score_age_max_seconds, 1800)
+
+    def test_unparseable_env_falls_back_to_default(self) -> None:
+        thresholds = BackfillGovernorThresholds.from_env(
+            env={"SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS": "not-an-int"}
+        )
+        self.assertEqual(thresholds.oldest_hot_score_age_max_seconds, 1800)
+
+    def test_zero_or_negative_clamped_to_default(self) -> None:
+        for raw in ("0", "-100"):
+            with self.subTest(raw=raw):
+                thresholds = BackfillGovernorThresholds.from_env(
+                    env={"SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS": raw}
+                )
+                self.assertEqual(thresholds.oldest_hot_score_age_max_seconds, 1800)
+
+
 class _StubBackend:
     """In-memory Redis stub. Hot zset member->score + keys store."""
 

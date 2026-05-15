@@ -207,8 +207,27 @@ async def collect_health_report(
     now: datetime | None = None,
 ) -> HealthReport:
     now_utc = now or datetime.now(timezone.utc)
-    snapshot_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM api_payload_snapshot"))
-    capability_rollup_count = int(await _fetch_count(sql_executor, "SELECT COUNT(*) FROM endpoint_capability_rollup"))
+    # Post-review fix (2026-05-15): SELECT COUNT(*) on api_payload_snapshot
+    # (~5M rows) full-scans for 30-60s and was the dominant /ops/health
+    # latency. Use pg_class.reltuples — instant catalog read that returns
+    # the planner's autovacuum-maintained row estimate. Accurate enough
+    # for a health dashboard (it does not need exact precision); the
+    # autovacuum cadence on prod keeps drift under ~5%. Fallback to 0 if
+    # the catalog read fails (best-effort — never crash /ops/health).
+    snapshot_count = int(
+        await _fetch_count(
+            sql_executor,
+            "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class "
+            "WHERE relname = 'api_payload_snapshot'",
+        )
+    )
+    capability_rollup_count = int(
+        await _fetch_count(
+            sql_executor,
+            "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class "
+            "WHERE relname = 'endpoint_capability_rollup'",
+        )
+    )
     drift_summary = await _fetch_drift_summary(sql_executor)
     coverage_summary = await _fetch_coverage_summary(sql_executor)
     coverage_alert_summary = _build_coverage_alert_summary(coverage_summary)

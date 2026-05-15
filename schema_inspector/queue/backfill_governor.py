@@ -1,4 +1,4 @@
-"""Backfill governor — task 5 (2026-05-15).
+"""Backfill governor — task 5 (2026-05-15, env-override added 2026-05-15 post-review).
 
 Live data freshness must never be starved by historical/structure
 backfill. The pre-existing ``QueueBackpressure`` covers ONE failure
@@ -25,9 +25,19 @@ Signals checked:
    selectively throttling top-tier matches; we should not burn proxy
    budget on history while live tier_1 is starving.
 
-Both thresholds are env-overridable via SOFASCORE_BACKFILL_GOVERNOR_*
-on MonitoringConfig (re-used so we have ONE source of truth for live
-thresholds; see ``schema_inspector/monitoring/config.py``).
+Both thresholds are env-overridable via ``SOFASCORE_BACKFILL_GOVERNOR_*``:
+
+  SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS  (default 1800)
+  SOFASCORE_BACKFILL_GOVERNOR_TIER_1_QUARANTINED_MAX      (default 10)
+
+Note on threshold semantics: ``/ops/live-freshness`` reports
+``breached=true`` at the WARN threshold (e.g. 900s on prod), but the
+governor pauses backfill only at the CRIT threshold (1800s on prod).
+That gap is intentional: WARN signals "operator attention" and is
+expected to bounce as the sweeper catches up; pausing backfill at
+WARN would be too aggressive and would never let historical lanes
+drain. CRIT means "live is actually degrading" — that is the right
+moment to yield proxy budget.
 
 The governor is best-effort: any Redis exception falls back to "not
 blocked" (we do NOT want a transient Redis hiccup to grind history
@@ -37,9 +47,10 @@ to a halt while live is actually fine).
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +61,9 @@ logger = logging.getLogger(__name__)
 LIVE_HOT_ZSET_KEY = "zset:live:hot"
 TIER_1_QUARANTINE_KEY_PATTERN = "live:tier1_quarantine:*"
 
+_ENV_OLDEST_HOT_AGE_MAX = "SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS"
+_ENV_TIER_1_QUARANTINED_MAX = "SOFASCORE_BACKFILL_GOVERNOR_TIER_1_QUARANTINED_MAX"
+
 
 @dataclass(frozen=True)
 class BackfillGovernorThresholds:
@@ -57,11 +71,61 @@ class BackfillGovernorThresholds:
 
     Defaults mirror the live-freshness SLO CRIT thresholds in
     docs/N1_MONITORING_PLAN.md so a single bad signal blocks
-    backfill without any additional tuning.
+    backfill without any additional tuning. Both fields are
+    env-overridable through :meth:`from_env`.
     """
 
     oldest_hot_score_age_max_seconds: int = 1800
     tier_1_quarantined_max_events: int = 10
+
+    @classmethod
+    def from_env(
+        cls, env: Mapping[str, str] | None = None
+    ) -> "BackfillGovernorThresholds":
+        """Build thresholds from environment variables.
+
+        Falls back to the dataclass defaults when an env var is missing
+        or unparseable. Negative / zero values are silently clamped to
+        the default to keep an operator typo from disabling the
+        governor.
+        """
+
+        resolved = dict(os.environ) if env is None else dict(env)
+        default_age = cls.__dataclass_fields__["oldest_hot_score_age_max_seconds"].default
+        default_quarantine = cls.__dataclass_fields__["tier_1_quarantined_max_events"].default
+
+        def _parse_positive_int(key: str, default: int) -> int:
+            raw = resolved.get(key)
+            if raw is None:
+                return int(default)
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "BackfillGovernor env %s=%r is not int — using default %d",
+                    key,
+                    raw,
+                    default,
+                )
+                return int(default)
+            if value <= 0:
+                logger.warning(
+                    "BackfillGovernor env %s=%s must be positive — using default %d",
+                    key,
+                    value,
+                    default,
+                )
+                return int(default)
+            return value
+
+        return cls(
+            oldest_hot_score_age_max_seconds=_parse_positive_int(
+                _ENV_OLDEST_HOT_AGE_MAX, default_age
+            ),
+            tier_1_quarantined_max_events=_parse_positive_int(
+                _ENV_TIER_1_QUARANTINED_MAX, default_quarantine
+            ),
+        )
 
 
 class BackfillGovernor:

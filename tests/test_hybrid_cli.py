@@ -16,8 +16,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         report = await collect_health_report(
             sql_executor=_FakeSqlExecutor(
                 {
-                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
-                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'api_payload_snapshot'": 7,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'endpoint_capability_rollup'": 3,
                 }
             ),
             live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({"live:hot": ("1", "2"), "live:warm": ("3",)})),
@@ -39,8 +39,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         report = await collect_health_report(
             sql_executor=_FakeSqlExecutor(
                 {
-                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
-                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'api_payload_snapshot'": 7,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'endpoint_capability_rollup'": 3,
                 },
                 rows_by_query={
                     "health_drift": [
@@ -73,8 +73,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         report = await collect_health_report(
             sql_executor=_FakeSqlExecutor(
                 {
-                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
-                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'api_payload_snapshot'": 7,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'endpoint_capability_rollup'": 3,
                 },
                 rows_by_query={
                     "health_coverage": [
@@ -110,8 +110,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         report = await collect_health_report(
             sql_executor=_FakeSqlExecutor(
                 {
-                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
-                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'api_payload_snapshot'": 7,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'endpoint_capability_rollup'": 3,
                 },
                 rows_by_query={
                     "health_coverage": [
@@ -143,8 +143,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         report = await collect_health_report(
             sql_executor=_FakeSqlExecutor(
                 {
-                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
-                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'api_payload_snapshot'": 7,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'endpoint_capability_rollup'": 3,
                 },
                 rows_by_query={
                     "health_coverage": [
@@ -174,8 +174,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         report = await collect_health_report(
             sql_executor=_FakeSqlExecutor(
                 {
-                    "SELECT COUNT(*) FROM api_payload_snapshot": 7,
-                    "SELECT COUNT(*) FROM endpoint_capability_rollup": 3,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'api_payload_snapshot'": 7,
+                    "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'endpoint_capability_rollup'": 3,
                 }
             ),
             live_state_store=_FakeLiveStateStore(_FakeLaneRedisBackend({})),

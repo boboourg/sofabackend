@@ -10,7 +10,11 @@ from typing import Any
 
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
-from ..queue.backfill_governor import BackfillGovernor, CompositeBackpressure
+from ..queue.backfill_governor import (
+    BackfillGovernor,
+    BackfillGovernorThresholds,
+    CompositeBackpressure,
+)
 from ..queue.dedupe import DedupeStore
 from ..queue.event_circuit_breaker import EventCircuitBreaker
 from ..queue.live_details_throttle import LiveDetailsThrottle
@@ -580,7 +584,10 @@ class ServiceApp:
                             ),
                         ),
                     ),
-                    BackfillGovernor(redis_backend=self.app.redis_backend),
+                    BackfillGovernor(
+                        redis_backend=self.app.redis_backend,
+                        thresholds=BackfillGovernorThresholds.from_env(),
+                    ),
                 ),
             ),
         )
@@ -653,7 +660,10 @@ class ServiceApp:
                             ),
                         ),
                     ),
-                    BackfillGovernor(redis_backend=self.app.redis_backend),
+                    BackfillGovernor(
+                        redis_backend=self.app.redis_backend,
+                        thresholds=BackfillGovernorThresholds.from_env(),
+                    ),
                 ),
             ),
         )
@@ -730,7 +740,10 @@ class ServiceApp:
                             ),
                         ),
                     ),
-                    BackfillGovernor(redis_backend=self.app.redis_backend),
+                    BackfillGovernor(
+                        redis_backend=self.app.redis_backend,
+                        thresholds=BackfillGovernorThresholds.from_env(),
+                    ),
                 ),
             ),
         )

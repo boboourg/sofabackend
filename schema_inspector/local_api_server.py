@@ -3249,17 +3249,22 @@ class LocalApiApplication:
             overall_row = await connection.fetchrow(
                 """
                 SELECT
-                    COUNT(*)::bigint                                      AS total,
-                    COUNT(*) FILTER (WHERE has_info_snapshot)::bigint     AS has_info,
-                    COUNT(*) FILTER (WHERE has_rounds_snapshot)::bigint   AS has_rounds_snap,
-                    COUNT(*) FILTER (WHERE has_rounds_rows)::bigint       AS has_rounds_rows,
-                    COUNT(*) FILTER (WHERE has_standings_total_snapshot)::bigint AS has_standings_total,
-                    COUNT(*) FILTER (WHERE has_cuptrees_snapshot)::bigint AS has_cuptrees,
-                    COUNT(*) FILTER (WHERE has_top_players_snapshot)::bigint AS has_top_players,
-                    COUNT(*) FILTER (WHERE has_top_teams_snapshot)::bigint AS has_top_teams,
-                    COUNT(*) FILTER (WHERE has_season_stats_rows)::bigint AS has_season_stats,
-                    COUNT(*) FILTER (WHERE event_count_in_db > 0)::bigint AS with_events,
-                    MAX(refreshed_at)                                     AS refreshed_at
+                    COUNT(*)::bigint                                              AS total,
+                    COUNT(*) FILTER (WHERE has_info_snapshot)::bigint             AS has_info,
+                    COUNT(*) FILTER (WHERE has_rounds_snapshot)::bigint           AS has_rounds_snap,
+                    COUNT(*) FILTER (WHERE has_rounds_rows)::bigint               AS has_rounds_rows,
+                    COUNT(*) FILTER (WHERE has_standings_total_snapshot)::bigint  AS has_standings_total,
+                    COUNT(*) FILTER (WHERE has_cuptrees_snapshot)::bigint         AS has_cuptrees,
+                    COUNT(*) FILTER (WHERE has_top_players_snapshot)::bigint      AS has_top_players,
+                    COUNT(*) FILTER (WHERE has_top_teams_snapshot)::bigint        AS has_top_teams,
+                    COUNT(*) FILTER (WHERE has_events_last_snapshot)::bigint      AS has_events_last,
+                    COUNT(*) FILTER (WHERE has_events_next_snapshot)::bigint      AS has_events_next,
+                    COUNT(*) FILTER (WHERE has_events_round_snapshot)::bigint     AS has_events_round,
+                    COUNT(*) FILTER (WHERE has_team_events_last_snapshot)::bigint AS has_team_events_last,
+                    COUNT(*) FILTER (WHERE has_team_events_next_snapshot)::bigint AS has_team_events_next,
+                    COUNT(*) FILTER (WHERE has_season_stats_rows)::bigint         AS has_season_stats,
+                    COUNT(*) FILTER (WHERE event_count_in_db > 0)::bigint         AS with_events,
+                    MAX(refreshed_at)                                             AS refreshed_at
                 FROM mv_season_coverage
                 """
             )
@@ -3320,6 +3325,26 @@ class LocalApiApplication:
                 "top_teams": {
                     "covered": int(overall_row["has_top_teams"] or 0),
                     "ratio": _ratio(int(overall_row["has_top_teams"] or 0)),
+                },
+                "events_last": {
+                    "covered": int(overall_row["has_events_last"] or 0),
+                    "ratio": _ratio(int(overall_row["has_events_last"] or 0)),
+                },
+                "events_next": {
+                    "covered": int(overall_row["has_events_next"] or 0),
+                    "ratio": _ratio(int(overall_row["has_events_next"] or 0)),
+                },
+                "events_round": {
+                    "covered": int(overall_row["has_events_round"] or 0),
+                    "ratio": _ratio(int(overall_row["has_events_round"] or 0)),
+                },
+                "team_events_last": {
+                    "covered": int(overall_row["has_team_events_last"] or 0),
+                    "ratio": _ratio(int(overall_row["has_team_events_last"] or 0)),
+                },
+                "team_events_next": {
+                    "covered": int(overall_row["has_team_events_next"] or 0),
+                    "ratio": _ratio(int(overall_row["has_team_events_next"] or 0)),
                 },
                 "season_stats_rows": {
                     "covered": int(overall_row["has_season_stats"] or 0),
