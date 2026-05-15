@@ -138,6 +138,25 @@ class UniqueTournamentSeasonRecord:
 
 
 @dataclass(frozen=True)
+class SeasonRoundRecord:
+    """One row of /unique-tournament/{ut}/season/{s}/rounds payload.
+
+    Task 3 (2026-05-15): structural rounds get parsed inline during
+    competition ingest because the normalize stream path is reserved
+    for hydrate snapshots — structural snapshots are written directly
+    to api_payload_snapshot and normalised via competition_repository.
+    """
+
+    unique_tournament_id: int
+    season_id: int
+    round_number: int
+    round_name: str | None = None
+    round_slug: str | None = None
+    round_prefix: str | None = None
+    is_current: bool = False
+
+
+@dataclass(frozen=True)
 class CompetitionBundle:
     registry_entries: tuple[EndpointRegistryEntry, ...]
     payload_snapshots: tuple[ApiPayloadSnapshotRecord, ...]
@@ -151,6 +170,7 @@ class CompetitionBundle:
     unique_tournament_most_title_teams: tuple[UniqueTournamentMostTitleTeamRecord, ...]
     seasons: tuple[SeasonRecord, ...]
     unique_tournament_seasons: tuple[UniqueTournamentSeasonRecord, ...]
+    season_rounds: tuple[SeasonRoundRecord, ...] = ()
 
 
 class CompetitionParserError(RuntimeError):
@@ -371,10 +391,8 @@ class CompetitionParser:
             )
             return
 
-        # Persist the full upstream response. SeasonRoundsParser parses
-        # the snapshot in the normalize stream — no extra accumulator
-        # work needed here (season_round is a metric table, not an
-        # entity table).
+        # Persist the full upstream response so /api/v1/.../rounds keeps
+        # 1:1 shape with sofascore via the raw snapshot waterfall.
         state.add_payload_snapshot(
             endpoint_pattern=endpoint.pattern,
             response=response,
@@ -387,6 +405,94 @@ class CompetitionParser:
                 fallback_value=response.payload.get(endpoint.envelope_key, []),
             ),
         )
+
+        # Inline normalize. We cannot rely on the normalize stream here
+        # because structural snapshots are persisted directly via
+        # competition_repository (the stream path is reserved for
+        # hydrate-side snapshots). Parse the rounds array right now and
+        # let the repository upsert them in the same transaction.
+        rounds_payload = response.payload.get(endpoint.envelope_key)
+        if not isinstance(rounds_payload, list):
+            return
+        current_round_block = response.payload.get("currentRound")
+        current_round_number: int | None = None
+        current_round_meta: Mapping[str, Any] | None = None
+        if isinstance(current_round_block, Mapping):
+            candidate = current_round_block.get("round")
+            if isinstance(candidate, bool):
+                candidate = None
+            if isinstance(candidate, int):
+                current_round_number = candidate
+            elif isinstance(candidate, float) and candidate.is_integer():
+                current_round_number = int(candidate)
+            current_round_meta = current_round_block
+
+        seen_round_numbers: set[int] = set()
+        for item in rounds_payload:
+            if not isinstance(item, Mapping):
+                continue
+            raw = item.get("round")
+            if isinstance(raw, bool):
+                continue
+            if isinstance(raw, int):
+                round_number = raw
+            elif isinstance(raw, float) and raw.is_integer():
+                round_number = int(raw)
+            else:
+                continue
+            if round_number in seen_round_numbers:
+                continue
+            seen_round_numbers.add(round_number)
+            name = item.get("name") if isinstance(item.get("name"), str) else None
+            slug = item.get("slug") if isinstance(item.get("slug"), str) else None
+            prefix = item.get("prefix") if isinstance(item.get("prefix"), str) else None
+            is_current = current_round_number is not None and round_number == current_round_number
+            # currentRound block can carry name/slug/prefix that the
+            # rounds[] list omits — copy them in for the matching row.
+            if is_current and current_round_meta is not None:
+                if name is None and isinstance(current_round_meta.get("name"), str):
+                    name = current_round_meta["name"]
+                if slug is None and isinstance(current_round_meta.get("slug"), str):
+                    slug = current_round_meta["slug"]
+                if prefix is None and isinstance(current_round_meta.get("prefix"), str):
+                    prefix = current_round_meta["prefix"]
+            state.season_rounds.append(
+                SeasonRoundRecord(
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                    round_number=round_number,
+                    round_name=name,
+                    round_slug=slug,
+                    round_prefix=prefix,
+                    is_current=is_current,
+                )
+            )
+
+        # If currentRound has a round_number not represented in the
+        # rounds[] list (rare but possible for cup tournaments), add it
+        # so the row carries is_current=True.
+        if (
+            current_round_number is not None
+            and current_round_number not in seen_round_numbers
+        ):
+            name = None
+            slug = None
+            prefix = None
+            if current_round_meta is not None:
+                name = current_round_meta.get("name") if isinstance(current_round_meta.get("name"), str) else None
+                slug = current_round_meta.get("slug") if isinstance(current_round_meta.get("slug"), str) else None
+                prefix = current_round_meta.get("prefix") if isinstance(current_round_meta.get("prefix"), str) else None
+            state.season_rounds.append(
+                SeasonRoundRecord(
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                    round_number=current_round_number,
+                    round_name=name,
+                    round_slug=slug,
+                    round_prefix=prefix,
+                    is_current=True,
+                )
+            )
 
 
 class _CompetitionAccumulator:
@@ -402,6 +508,9 @@ class _CompetitionAccumulator:
         self.unique_tournament_most_title_teams: set[tuple[int, int]] = set()
         self.seasons: dict[int, dict[str, Any]] = {}
         self.unique_tournament_seasons: set[tuple[int, int]] = set()
+        # Task 3 (2026-05-15): structural rounds parsed inline (no
+        # normalize stream involvement).
+        self.season_rounds: list[SeasonRoundRecord] = []
 
     def add_payload_snapshot(
         self,
@@ -643,6 +752,12 @@ class _CompetitionAccumulator:
             unique_tournament_seasons=tuple(
                 UniqueTournamentSeasonRecord(unique_tournament_id=unique_tournament_id, season_id=season_id)
                 for unique_tournament_id, season_id in sorted(self.unique_tournament_seasons)
+            ),
+            season_rounds=tuple(
+                sorted(
+                    self.season_rounds,
+                    key=lambda row: (row.unique_tournament_id, row.season_id, row.round_number),
+                )
             ),
         )
 

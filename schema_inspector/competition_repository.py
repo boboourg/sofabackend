@@ -54,6 +54,7 @@ class CompetitionRepository:
 
     async def upsert_bundle(self, executor: SqlExecutor, bundle: CompetitionBundle) -> CompetitionWriteResult:
         await self._upsert_endpoint_registry(executor, bundle)
+        await self._upsert_season_rounds(executor, bundle)
         await self._upsert_image_assets(executor, bundle)
         await self._upsert_sports(executor, bundle)
         await self._upsert_countries(executor, bundle)
@@ -487,6 +488,58 @@ class CompetitionRepository:
             ON CONFLICT (unique_tournament_id, team_id) DO NOTHING
             """,
             rows,
+        )
+
+    async def _upsert_season_rounds(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
+        """Inline upsert for /season/{s}/rounds rows.
+
+        Task 3 (2026-05-15): structural snapshots do not pass through
+        the normalize stream, so the SeasonRoundsParser family never
+        ran for these endpoints. Parsing happens inline in
+        ``CompetitionParser._fetch_season_rounds``; this method writes
+        the parsed rows to the same transaction as the snapshot itself.
+
+        Scope is bounded by the (ut_id, season_id) pairs present in the
+        bundle, so a partial fan-out can never wipe rows for an
+        unrelated tournament.
+        """
+
+        rows = bundle.season_rounds
+        if not rows:
+            return
+        scope_pairs = sorted(
+            {(row.unique_tournament_id, row.season_id) for row in rows}
+        )
+        for unique_tournament_id, season_id in scope_pairs:
+            await executor.execute(
+                """
+                DELETE FROM season_round
+                WHERE unique_tournament_id = $1 AND season_id = $2
+                """,
+                unique_tournament_id,
+                season_id,
+            )
+        await _executemany(
+            executor,
+            """
+            INSERT INTO season_round (
+                unique_tournament_id, season_id, round_number,
+                round_name, round_slug, round_prefix, is_current
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            [
+                (
+                    row.unique_tournament_id,
+                    row.season_id,
+                    row.round_number,
+                    row.round_name,
+                    row.round_slug,
+                    row.round_prefix,
+                    row.is_current,
+                )
+                for row in rows
+            ],
         )
 
     async def _insert_payload_snapshots(self, executor: SqlExecutor, bundle: CompetitionBundle) -> None:
