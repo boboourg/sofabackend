@@ -4,10 +4,52 @@
 
 | Поле | Значение |
 | --- | --- |
-| Версия | v1 (2026-05-14) |
-| Текущий статус | **Implementation: ~85% / Proof window: not yet started** |
+| Версия | v2 (2026-05-15) |
+| Текущий статус | **Implementation: ~88% / Proof window: not yet started** |
 | Источник критериев | `docs/24x7-exit-criteria.md` + `docs/PROJECT_VISION.md` §2 SLO + §6 Roadmap |
 | Когда `100%`? | Когда **все** capabilities в таблице ниже = ✅ **И** 24-часовое proof window прошло без regressions |
+
+---
+
+## 2026-05-15 session: 5 tasks + post-review pass
+
+| # | Task | Status | Commits |
+| --- | --- | --- | --- |
+| 1 | Sweeper DESC + LIMIT 5000 (drain zombie_stale events) | ✅ | `b6b48ae` |
+| 2 | `/ops/live-freshness` источник правды (restore success_rate, tier_1_quarantined signal, job_signals enabled) | ✅ | `1f12e58`, `c1968d2` + env |
+| 3 | Season-leaf fan-out (rounds end-to-end через structure-sync + inline normalize) | ✅ | `413741a`, `5a88fe4` |
+| 4 | Coverage ledger (mv_season_coverage + `/ops/coverage/season-leaves`) | ✅ | `2ab28c7` |
+| 5 | Backfill governor (BackfillGovernor + CompositeBackpressure для 3 planners) | ✅ | `8d171a2`, `6486161` |
+| Post-review A1 | Env-override для governor thresholds | ✅ | `26622e8` |
+| Post-review A2 | `.env` untracked from git index | ✅ | `26622e8` |
+| Post-review B | Coverage view расширен на events/last,next,round + team-events/last,next | ✅ | `26622e8` |
+| Post-review C | `/ops/health` reltuples fix (snapshot_count: 60s → 1.4ms; aggregate ещё медленный — открытый item) | 🟡 partial | `26622e8` |
+| Post-review D | PROGRESS.md update | ✅ | (this commit) |
+
+### Что осталось от ревьюера (open items)
+
+- **`.env` credentials в git history**. Untrack помог forward, но Telegram bot token уже опубликован в commit `ce53781` (от 10 апреля). Action: **смена Telegram bot token** через `@BotFather` (operator action, not code).
+- **`/ops/health` aggregate latency**. После reltuples-fix `snapshot_count`/`capability_rollup_count` стали instant. Но endpoint всё ещё 30s+ (DB queries individually 1-56ms, значит проблема в Python-side aggregation или connection pool contention). Требует cProfile/asyncio-profile.
+- **Queue backlog накопленный**. `historical_hydrate=50,610`, `historical_enrichment=21,913`, `structure_sync=12,987`. Governor предотвращает рост, не очистит сам. Operator решение — пропускать sweep циклы или явно drain.
+
+### Coverage snapshot (post-task-5, post-review v2)
+
+| Leaf | Covered | Ratio | Comment |
+|---|---|---|---|
+| `info` | 9,218 | 19.8% | normal structure-sync sweep |
+| `rounds_rows` | 76 | 0.16% | Task 3 fan-out выползает (был 0) |
+| `events_last` | 10,831 | **23.3%** | strongest leaf via `_append_current_season_event_surfaces` |
+| `events_next` | 3,006 | 6.5% | partial |
+| `cuptrees` | 2,588 | 5.6% | partial |
+| `top_players` | 2,936 | 6.3% | partial |
+| `top_teams` | 2,952 | 6.3% | partial |
+| `season_stats_rows` | 6,965 | 15.0% | partial |
+| **`standings_total`** | **0** | **0%** | 🔴 never fetched (future fan-out, mirror Task 3 pattern) |
+| **`events_round`** | **0** | **0%** | 🔴 never fetched |
+| **`team_events_last`** | **0** | **0%** | 🔴 never fetched |
+| **`team_events_next`** | **0** | **0%** | 🔴 never fetched |
+
+Three "0%" leaves — actionable backlog for "Task 6 wave" (apply Task 3 pattern to standings/events-round/team-events).
 
 ---
 
