@@ -1699,9 +1699,9 @@ class NormalizeRepository:
             executor,
             """
             INSERT INTO season_round (
-                unique_tournament_id, season_id, round_number, round_name, round_slug, is_current
+                unique_tournament_id, season_id, round_number, round_name, round_slug, round_prefix, is_current
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             [
                 (
@@ -1710,6 +1710,7 @@ class NormalizeRepository:
                     row.get("round_number"),
                     row.get("round_name"),
                     row.get("round_slug"),
+                    row.get("round_prefix"),
                     row.get("is_current"),
                 )
                 for row in sorted(

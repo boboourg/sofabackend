@@ -331,6 +331,7 @@ class ParserRegistryTests(unittest.TestCase):
                 "rounds": [
                     {"round": 32, "name": "Round 32", "slug": "round-32"},
                     {"round": 33, "name": "Round 33", "slug": "round-33"},
+                    {"round": 636, "name": "Playoff round", "slug": "playoff-round", "prefix": "Qualification"},
                 ],
             },
             fetched_at="2026-04-23T00:00:00+00:00",
@@ -347,8 +348,16 @@ class ParserRegistryTests(unittest.TestCase):
         round_rows = sorted(result.metric_rows["season_round"], key=lambda row: row["round_number"])
         self.assertEqual(round_rows[0]["round_number"], 32)
         self.assertFalse(round_rows[0]["is_current"])
+        self.assertIsNone(round_rows[0]["round_prefix"])
         self.assertEqual(round_rows[1]["round_number"], 33)
         self.assertTrue(round_rows[1]["is_current"])
+        self.assertIsNone(round_rows[1]["round_prefix"])
+        playoff_row = round_rows[2]
+        self.assertEqual(playoff_row["round_number"], 636)
+        self.assertEqual(playoff_row["round_name"], "Playoff round")
+        self.assertEqual(playoff_row["round_slug"], "playoff-round")
+        self.assertEqual(playoff_row["round_prefix"], "Qualification")
+        self.assertFalse(playoff_row["is_current"])
 
     def test_registry_dispatches_season_cuptrees_snapshot(self) -> None:
         registry = ParserRegistry.default()

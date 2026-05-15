@@ -622,6 +622,7 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                         "round_number": 27,
                         "round_name": "Quarterfinals",
                         "round_slug": "quarterfinals",
+                        "round_prefix": None,
                         "is_current": False,
                     },
                     {
@@ -630,7 +631,17 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
                         "round_number": 28,
                         "round_name": "Semifinals",
                         "round_slug": "semifinals",
+                        "round_prefix": None,
                         "is_current": True,
+                    },
+                    {
+                        "unique_tournament_id": 336,
+                        "season_id": 80287,
+                        "round_number": 636,
+                        "round_name": "Playoff round",
+                        "round_slug": "playoff-round",
+                        "round_prefix": "Qualification",
+                        "is_current": False,
                     },
                 ),
                 "season_cup_tree": (

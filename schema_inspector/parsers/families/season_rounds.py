@@ -38,6 +38,7 @@ class SeasonRoundsParser:
                 "round_number": round_number,
                 "round_name": _as_str(item.get("name")),
                 "round_slug": _as_str(item.get("slug")),
+                "round_prefix": _as_str(item.get("prefix")),
                 "is_current": round_number == current_round_number,
             }
 
@@ -50,12 +51,14 @@ class SeasonRoundsParser:
                     "round_number": current_round_number,
                     "round_name": None,
                     "round_slug": None,
+                    "round_prefix": None,
                     "is_current": True,
                 },
             )
             if current_round is not None:
                 existing["round_name"] = existing.get("round_name") or _as_str(current_round.get("name"))
                 existing["round_slug"] = existing.get("round_slug") or _as_str(current_round.get("slug"))
+                existing["round_prefix"] = existing.get("round_prefix") or _as_str(current_round.get("prefix"))
             existing["is_current"] = True
             rows_by_round[current_round_number] = existing
 

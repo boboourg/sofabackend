@@ -814,8 +814,8 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         snapshot_connection = _FakeSnapshotConnection([])
         normalized_connection = _FakeReportNormalizedConnection(
             rounds=[
-                {"round_number": 1, "round_name": None, "round_slug": None, "is_current": False},
-                {"round_number": 32, "round_name": None, "round_slug": None, "is_current": True},
+                {"round_number": 1, "round_name": None, "round_slug": None, "round_prefix": None, "is_current": False},
+                {"round_number": 32, "round_name": None, "round_slug": None, "round_prefix": None, "is_current": True},
             ],
         )
         application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
@@ -827,6 +827,66 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.payload["rounds"], [{"round": 1}, {"round": 32}])
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
+
+    async def test_handle_api_get_rebuilds_cup_rounds_with_name_slug_prefix(self) -> None:
+        # Cup tournament rounds carry name/slug and optionally prefix
+        # (e.g. {"round": 636, "name": "Playoff round",
+        #        "slug": "playoff-round", "prefix": "Qualification"}).
+        # League rounds remain bare {"round": N} via the test above.
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+        normalized_connection = _FakeReportNormalizedConnection(
+            rounds=[
+                {
+                    "round_number": 1,
+                    "round_name": "Qualification Round 1",
+                    "round_slug": "qualification-round-1",
+                    "round_prefix": None,
+                    "is_current": False,
+                },
+                {
+                    "round_number": 636,
+                    "round_name": "Playoff round",
+                    "round_slug": "playoff-round",
+                    "round_prefix": "Qualification",
+                    "is_current": False,
+                },
+                {
+                    "round_number": 28,
+                    "round_name": "Semifinals",
+                    "round_slug": "semifinals",
+                    "round_prefix": None,
+                    "is_current": True,
+                },
+            ],
+        )
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/unique-tournament/7/season/76953/rounds", ""
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.payload["currentRound"],
+            {"round": 28, "name": "Semifinals", "slug": "semifinals"},
+        )
+        # Round 1 has name+slug but no prefix
+        self.assertEqual(
+            response.payload["rounds"][0],
+            {"round": 1, "name": "Qualification Round 1", "slug": "qualification-round-1"},
+        )
+        # Round 636 includes the prefix field
+        self.assertEqual(
+            response.payload["rounds"][1],
+            {
+                "round": 636,
+                "name": "Playoff round",
+                "slug": "playoff-round",
+                "prefix": "Qualification",
+            },
+        )
 
     async def test_handle_api_get_rebuilds_season_next_events_with_pagination(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)

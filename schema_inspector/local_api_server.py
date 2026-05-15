@@ -1431,7 +1431,7 @@ class LocalApiApplication:
         try:
             rows = await connection.fetch(
                 """
-                SELECT round_number, round_name, round_slug, is_current
+                SELECT round_number, round_name, round_slug, round_prefix, is_current
                 FROM season_round
                 WHERE unique_tournament_id = $1
                   AND season_id = $2
@@ -1453,6 +1453,8 @@ class LocalApiApplication:
                 item["name"] = str(row["round_name"])
             if row["round_slug"] is not None:
                 item["slug"] = str(row["round_slug"])
+            if row["round_prefix"] is not None:
+                item["prefix"] = str(row["round_prefix"])
             rounds.append(item)
             if bool(row["is_current"]):
                 current_round = dict(item)
