@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Live tier overrides — Sofascore Admin{% endblock %}
+
+{% block content %}
+<h2>Live tier overrides</h2>
+<p class="text-muted">
+  Принудительный тир live-polling для конкретного <code>unique_tournament</code>.
+  Если строка есть — она побеждает эвристику <code>resolve_live_dispatch_tier</code>
+  (detail_id / tournament_tier / user_count). Если нет — обычная логика.
+</p>
+
+{% if flash %}<div class="flash {{ flash_kind }}">{{ flash }}</div>{% endif %}
+
+<div class="toolbar">
+  <a class="btn" href="/admin/tier-overrides/new">+ Добавить override</a>
+  <form method="get" action="/admin/tier-overrides" style="flex:1; display:flex; gap:8px;">
+    <input type="search" name="q" placeholder="Поиск по UT name / id…" value="{{ query or '' }}">
+    {% if query %}<a class="btn btn-secondary btn-sm" href="/admin/tier-overrides">Сбросить</a>{% endif %}
+  </form>
+</div>
+
+<div class="card">
+  <h3>{{ rows|length }} {% if query %}найдено{% else %}override-ов всего{% endif %}</h3>
+  {% if rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>UT id</th>
+        <th>Tournament</th>
+        <th>Category</th>
+        <th>Sport</th>
+        <th>Override tier</th>
+        <th>Reason</th>
+        <th>Создано</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td><code>{{ row.unique_tournament_id }}</code></td>
+        <td>{{ row.ut_name or '—' }}</td>
+        <td>{{ row.category_name or '—' }}</td>
+        <td>{{ row.sport_slug or '—' }}</td>
+        <td><span class="tier-pill {{ row.override_tier }}">{{ row.override_tier }}</span></td>
+        <td class="text-muted">{{ row.reason or '—' }}</td>
+        <td class="text-muted">{{ row.created_at_iso or '—' }}</td>
+        <td>
+          <a class="btn btn-sm btn-secondary" href="/admin/tier-overrides/{{ row.unique_tournament_id }}/edit">Edit</a>
+          <form method="post" action="/admin/tier-overrides/{{ row.unique_tournament_id }}/delete" style="display:inline" onsubmit="return confirm('Удалить override для UT {{ row.unique_tournament_id }}?')">
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    {% if query %}Ничего не нашлось по запросу <code>{{ query }}</code>.{% else %}Пока ни одного override-а. <a href="/admin/tier-overrides/new">Добавить первый</a>.{% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Как это влияет на runtime</h3>
+  <p class="text-muted">
+    После INSERT/UPDATE/DELETE override применится на следующий перезапуск live workers.
+    Live workers загружают snapshot из таблицы один раз на boot
+    (<code>HybridApp.ensure_tier_override_registry</code>) — поэтому после правки
+    нужно <code>sudo systemctl restart sofascore-live-tier-*@*</code>.
+  </p>
+</div>
+{% endblock %}

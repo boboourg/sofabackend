@@ -3651,6 +3651,20 @@ def create_asgi_app(
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.local_api_application = local_application
 
+    # Admin UI (Admin-0 + Admin-1, 2026-05-16): mount /admin/* routes ahead
+    # of the catch-all GET handler so the admin's CRUD pages take precedence.
+    # The factory returns None when SOFASCORE_ADMIN_PASSWORD is unset, which
+    # keeps the public API surface unchanged on default deployments.
+    try:
+        from .admin import build_admin_router as _build_admin_router
+
+        _admin_router = _build_admin_router(local_application)
+    except Exception:  # noqa: BLE001 — admin must never break the API
+        logger.exception("admin router build failed; admin disabled")
+        _admin_router = None
+    if _admin_router is not None:
+        app.include_router(_admin_router)
+
     @app.api_route("/{path:path}", methods=["OPTIONS"])
     async def _options(path: str) -> Response:
         del path

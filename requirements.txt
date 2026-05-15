@@ -4,3 +4,8 @@ orjson==3.11.8
 fastapi==0.115.12
 httpx==0.28.1
 uvicorn[standard]==0.34.2
+# Admin UI (Admin-0+1, 2026-05-16). Required when SOFASCORE_ADMIN_PASSWORD
+# is set; harmless to install otherwise. Jinja2 renders the admin pages,
+# python-multipart parses HTML form submissions used by the CRUD POST handlers.
+jinja2==3.1.6
+python-multipart==0.0.28
