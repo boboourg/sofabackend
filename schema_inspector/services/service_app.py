@@ -580,7 +580,7 @@ class ServiceApp:
                             ),
                         ),
                     ),
-                    BackfillGovernor(redis_backend=self.redis_backend),
+                    BackfillGovernor(redis_backend=self.app.redis_backend),
                 ),
             ),
         )
@@ -653,7 +653,7 @@ class ServiceApp:
                             ),
                         ),
                     ),
-                    BackfillGovernor(redis_backend=self.redis_backend),
+                    BackfillGovernor(redis_backend=self.app.redis_backend),
                 ),
             ),
         )
@@ -730,7 +730,7 @@ class ServiceApp:
                             ),
                         ),
                     ),
-                    BackfillGovernor(redis_backend=self.redis_backend),
+                    BackfillGovernor(redis_backend=self.app.redis_backend),
                 ),
             ),
         )
