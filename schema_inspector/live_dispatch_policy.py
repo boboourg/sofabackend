@@ -61,7 +61,21 @@ def resolve_live_dispatch_tier(
     detail_id: int | None,
     tournament_tier: int | None,
     tournament_user_count: int | None,
+    unique_tournament_id: int | None = None,
+    tier_override_registry: object = None,
 ) -> str:
+    # A3 Phase 0 (2026-05-16): operator-controlled per-UT override.
+    # If ``live_tier_override`` has a row for this UT, return its
+    # tier immediately, bypassing the heuristics below. Backwards-
+    # compatible: when no registry is provided (e.g. unit tests),
+    # the override lookup is skipped.
+    if tier_override_registry is not None and unique_tournament_id is not None:
+        override_getter = getattr(tier_override_registry, "get", None)
+        if callable(override_getter):
+            override = override_getter(unique_tournament_id)
+            if override:
+                return str(override)
+
     normalized_sport = str(sport_slug or "").strip().lower()
     if normalized_sport == "football":
         football_tier = football_detail_tier(detail_id)

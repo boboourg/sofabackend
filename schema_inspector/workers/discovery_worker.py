@@ -148,6 +148,12 @@ class DiscoveryWorker:
                     detail_id=surface_event.detail_id,
                     tournament_tier=surface_event.tournament_tier,
                     tournament_user_count=surface_event.tournament_user_count,
+                    # A3 Phase 0: surface_event already carries the UT id
+                    # for live events; pass it through so the override
+                    # registry can short-circuit the heuristic when
+                    # operator forced a tier for this tournament.
+                    unique_tournament_id=getattr(surface_event, "unique_tournament_id", None),
+                    tier_override_registry=getattr(self, "tier_override_registry", None),
                 )
             if correction is not None and force_rehydrate:
                 params["force_rehydrate"] = True

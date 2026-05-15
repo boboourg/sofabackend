@@ -20,8 +20,14 @@ class LiveTrackResult:
 
 
 class LiveWorker:
-    def __init__(self, *, now_ms_factory=None) -> None:
+    def __init__(self, *, now_ms_factory=None, tier_override_registry=None) -> None:
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
+        # A3 Phase 0 (2026-05-16): optional registry for per-UT live-tier
+        # overrides. When provided, ``track_event`` consults it before the
+        # detail_id/user_count heuristics in resolve_live_dispatch_tier.
+        # None keeps backwards-compat for unit tests and callers that have
+        # not been wired through the new path yet.
+        self.tier_override_registry = tier_override_registry
 
     def handle(
         self,
@@ -47,6 +53,7 @@ class LiveWorker:
         detail_id: int | None = None,
         tournament_tier: int | None = None,
         tournament_user_count: int | None = None,
+        unique_tournament_id: int | None = None,
         live_state_store=None,
         stream_queue=None,
     ) -> LiveTrackResult:
@@ -61,6 +68,8 @@ class LiveWorker:
             detail_id=detail_id,
             tournament_tier=tournament_tier,
             tournament_user_count=tournament_user_count,
+            unique_tournament_id=unique_tournament_id,
+            tier_override_registry=self.tier_override_registry,
         )
         next_poll_seconds = decision.next_poll_seconds
         normalized_status = str(status_type or "").strip().lower()
