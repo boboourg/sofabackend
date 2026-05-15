@@ -40,13 +40,23 @@ class CompetitionIngestJob:
         *,
         season_id: int | None = None,
         include_seasons: bool = True,
+        include_season_rounds: bool | None = None,
         timeout: float = 20.0,
     ) -> CompetitionIngestResult:
+        # Task 3 (2026-05-15): when season_id is provided we now also
+        # fetch /season/{s}/rounds as part of the same competition
+        # ingest pass. Default mirrors include_season_info: on when a
+        # season_id is known, off otherwise. Caller can override.
         bundle = await self.parser.fetch_bundle(
             unique_tournament_id,
             season_id=season_id,
             include_seasons=include_seasons,
             include_season_info=season_id is not None,
+            include_season_rounds=(
+                include_season_rounds
+                if include_season_rounds is not None
+                else season_id is not None
+            ),
             timeout=timeout,
         )
 

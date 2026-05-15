@@ -8,6 +8,7 @@ from schema_inspector.endpoints import (
     COMPETITION_ENDPOINTS,
     UNIQUE_TOURNAMENT_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
 )
 from schema_inspector.runtime import RuntimeConfig, TransportAttempt
@@ -63,6 +64,11 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
         tournament_url = UNIQUE_TOURNAMENT_ENDPOINT.build_url(unique_tournament_id=17)
         seasons_url = UNIQUE_TOURNAMENT_SEASONS_ENDPOINT.build_url(unique_tournament_id=17)
         info_url = UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT.build_url(unique_tournament_id=17, season_id=76986)
+        # Task 3 (2026-05-15): season-leaf fan-out — fetch_bundle auto-includes
+        # /season/{s}/rounds when season_id is provided.
+        rounds_url = UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT.build_url(
+            unique_tournament_id=17, season_id=76986
+        )
 
         fake_client = _FakeSofascoreClient(
             {
@@ -159,6 +165,13 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
                         {"id": 72958, "name": "Premier League 24/25", "year": "24/25", "editor": False},
                     ]
                 },
+                rounds_url: {
+                    "currentRound": {"round": 7, "name": "Round 7", "slug": "round-7"},
+                    "rounds": [
+                        {"round": 1},
+                        {"round": 7, "name": "Round 7", "slug": "round-7"},
+                    ],
+                },
                 info_url: {
                     "info": {
                         "id": 49510,
@@ -199,9 +212,20 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
         parser = CompetitionParser(fake_client)
         bundle = await parser.fetch_bundle(17, season_id=76986)
 
-        self.assertEqual(fake_client.seen_urls, [tournament_url, seasons_url, info_url])
+        self.assertEqual(
+            fake_client.seen_urls,
+            [tournament_url, seasons_url, info_url, rounds_url],
+        )
         self.assertEqual(len(bundle.registry_entries), len(COMPETITION_ENDPOINTS))
-        self.assertEqual(len(bundle.payload_snapshots), 3)
+        # 4 snapshots now: tournament + seasons + info + rounds (Task 3).
+        self.assertEqual(len(bundle.payload_snapshots), 4)
+        rounds_snapshot = next(
+            snap for snap in bundle.payload_snapshots
+            if snap.endpoint_pattern == UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT.pattern
+        )
+        self.assertEqual(rounds_snapshot.context_entity_type, "season")
+        self.assertEqual(rounds_snapshot.context_entity_id, 76986)
+        self.assertIn("rounds", rounds_snapshot.payload)
 
         # Snapshots must keep the upstream wrapper so the local API can serve
         # them 1:1 with sofascore. Historically the parser stored only the
@@ -281,6 +305,9 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
         tournament_url = UNIQUE_TOURNAMENT_ENDPOINT.build_url(unique_tournament_id=17)
         seasons_url = UNIQUE_TOURNAMENT_SEASONS_ENDPOINT.build_url(unique_tournament_id=17)
         info_url = UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT.build_url(unique_tournament_id=17, season_id=76986)
+        rounds_url = UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT.build_url(
+            unique_tournament_id=17, season_id=76986
+        )
         fake_client = _FakeSofascoreClient(
             {
                 tournament_url: {
@@ -301,12 +328,21 @@ class CompetitionParserTests(unittest.IsolatedAsyncioTestCase):
                     "not found",
                     transport_result=SimpleNamespace(status_code=404),
                 ),
+                # Task 3 (2026-05-15): same sport without rounds — 404 is
+                # the expected response and should be silently swallowed
+                # just like the info 404 above.
+                rounds_url: SofascoreHttpError(
+                    "not found",
+                    transport_result=SimpleNamespace(status_code=404),
+                ),
             }
         )
 
         bundle = await CompetitionParser(fake_client).fetch_bundle(17, season_id=76986)
 
-        self.assertEqual(fake_client.seen_urls, [tournament_url, seasons_url, info_url])
+        self.assertEqual(
+            fake_client.seen_urls, [tournament_url, seasons_url, info_url, rounds_url]
+        )
         self.assertEqual({item.id for item in bundle.unique_tournaments}, {17})
         self.assertEqual({item.id for item in bundle.seasons}, {76986})
         self.assertEqual(

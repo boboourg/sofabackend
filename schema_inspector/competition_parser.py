@@ -10,6 +10,7 @@ from .endpoints import (
     EndpointRegistryEntry,
     UNIQUE_TOURNAMENT_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_INFO_ENDPOINT,
+    UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASONS_ENDPOINT,
     competition_registry_entries,
 )
@@ -170,12 +171,18 @@ class CompetitionParser:
         season_id: int | None = None,
         include_seasons: bool = True,
         include_season_info: bool | None = None,
+        include_season_rounds: bool | None = None,
         timeout: float = 20.0,
     ) -> CompetitionBundle:
         """Fetch a normalized competition bundle from exact Sofascore paths."""
 
         if include_season_info is None:
             include_season_info = season_id is not None
+        # Task 3 (2026-05-15): season rounds leaf — fan-out from
+        # structure-sync. Auto-on when a season_id is provided. Failure-
+        # tolerant (404 swallowed) for sports without rounds.
+        if include_season_rounds is None:
+            include_season_rounds = season_id is not None
 
         state = _CompetitionAccumulator()
 
@@ -186,6 +193,10 @@ class CompetitionParser:
             if season_id is None:
                 raise CompetitionParserError("season_id is required when include_season_info=True")
             await self._fetch_season_info(unique_tournament_id, season_id, state, timeout=timeout)
+        if include_season_rounds:
+            if season_id is None:
+                raise CompetitionParserError("season_id is required when include_season_rounds=True")
+            await self._fetch_season_rounds(unique_tournament_id, season_id, state, timeout=timeout)
 
         self.logger.info(
             "Competition bundle collected: tournaments=%s seasons=%s teams=%s",
@@ -294,6 +305,88 @@ class CompetitionParser:
             payload=_full_response_payload(response, fallback_key=endpoint.envelope_key, fallback_value=envelope),
         )
         state.ingest_season_info(envelope, unique_tournament_id=unique_tournament_id)
+
+    async def _fetch_season_rounds(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        state: "_CompetitionAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        """Fetch /unique-tournament/{ut}/season/{s}/rounds (Task 3 fan-out).
+
+        Stores snapshot only. The normalize stream picks it up via the
+        SeasonRoundsParser family — populates the season_round table with
+        ``{round_number, round_name, round_slug, round_prefix, is_current}``.
+
+        Sports without round structure (tennis, table-tennis, etc.) return
+        404 and the fan-out is silently skipped. Other HTTP errors are
+        re-raised so the orchestrator can surface them.
+
+        Unlike the other competition endpoints, the rounds payload uses an
+        ARRAY envelope (``{"rounds": [...]}``) rather than an object — so
+        we do not call ``_require_mapping`` on it. We still validate that
+        the top-level response is a mapping and that the envelope key is
+        present.
+        """
+
+        endpoint = UNIQUE_TOURNAMENT_SEASON_ROUNDS_ENDPOINT
+        url = endpoint.build_url(unique_tournament_id=unique_tournament_id, season_id=season_id)
+        try:
+            response = await self.client.get_json(url, timeout=timeout)
+        except SofascoreHttpError as exc:
+            status_code = exc.transport_result.status_code if exc.transport_result is not None else None
+            if status_code == 404:
+                self.logger.info(
+                    "Competition optional 404: context=unique_tournament:%s season:%s endpoint=%s url=%s",
+                    unique_tournament_id,
+                    season_id,
+                    endpoint.pattern,
+                    url,
+                )
+                return
+            raise
+
+        # Soft validation only: the response must be a mapping carrying
+        # the envelope key. The value of envelope_key="rounds" is an
+        # array, which is fine — the normalize parser handles array
+        # payloads natively.
+        if not isinstance(response.payload, Mapping):
+            self.logger.warning(
+                "Season rounds payload not a mapping: context=unique_tournament:%s season:%s url=%s type=%s",
+                unique_tournament_id,
+                season_id,
+                url,
+                type(response.payload).__name__,
+            )
+            return
+        if endpoint.envelope_key not in response.payload:
+            self.logger.warning(
+                "Season rounds payload missing envelope key '%s': context=unique_tournament:%s season:%s url=%s",
+                endpoint.envelope_key,
+                unique_tournament_id,
+                season_id,
+                url,
+            )
+            return
+
+        # Persist the full upstream response. SeasonRoundsParser parses
+        # the snapshot in the normalize stream — no extra accumulator
+        # work needed here (season_round is a metric table, not an
+        # entity table).
+        state.add_payload_snapshot(
+            endpoint_pattern=endpoint.pattern,
+            response=response,
+            envelope_key=endpoint.envelope_key,
+            context_entity_type="season",
+            context_entity_id=season_id,
+            payload=_full_response_payload(
+                response,
+                fallback_key=endpoint.envelope_key,
+                fallback_value=response.payload.get(endpoint.envelope_key, []),
+            ),
+        )
 
 
 class _CompetitionAccumulator:

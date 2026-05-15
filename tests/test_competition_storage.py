@@ -50,6 +50,7 @@ class _FakeParser:
         season_id=None,
         include_seasons: bool = True,
         include_season_info=None,
+        include_season_rounds=None,
         timeout=20.0,
     ):
         self.calls.append((unique_tournament_id, season_id, include_seasons, include_season_info, timeout))
