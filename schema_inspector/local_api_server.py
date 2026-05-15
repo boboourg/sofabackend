@@ -3136,13 +3136,16 @@ class LocalApiApplication:
         return dataclasses.asdict(summary)
 
     async def _fetch_ops_live_freshness_payload(self) -> dict[str, Any]:
-        """Standalone live-freshness endpoint (P0.C 2026-05-14).
+        """Standalone live-freshness endpoint (P0.C 2026-05-14, expanded 2026-05-15).
 
-        ``/ops/health`` aggregates many slow DB queries (snapshot_count,
-        drift_summary, ...) and can time out independently of live state.
-        This endpoint surfaces the live freshness SLO summary without
-        touching slow DB paths — it uses only Redis (ZRANGE zset:live:hot)
-        and the existing queue summary (live_dispatch_metrics).
+        Composes the live freshness SLO summary. Until 2026-05-15 this
+        endpoint was Redis-only (zset:live:hot + queue_summary) because
+        the 5-min refresh-success-rate SQL needed a 30s seq scan. With
+        the BRIN index ``idx_etl_job_run_started_at_brin`` shipped, the
+        query is low-double-digit-ms, so a DB connection is now passed
+        through. _build_live_freshness_summary is best-effort: any DB
+        failure returns the empty refresh counts so this endpoint never
+        fails because of a transient hiccup.
         """
 
         queue_summary = await collect_queue_summary(
@@ -3151,12 +3154,16 @@ class LocalApiApplication:
             redis_backend=getattr(self, "redis_backend", None),
             now_ms=time.time() * 1000.0,
         )
-        summary = await _build_live_freshness_summary(
-            sql_executor=None,
-            redis_backend=getattr(self, "redis_backend", None),
-            queue_summary=queue_summary,
-            now=datetime.now(timezone.utc),
-        )
+        connection = await self._connect()
+        try:
+            summary = await _build_live_freshness_summary(
+                sql_executor=connection,
+                redis_backend=getattr(self, "redis_backend", None),
+                queue_summary=queue_summary,
+                now=datetime.now(timezone.utc),
+            )
+        finally:
+            await connection.close()
         return dataclasses.asdict(summary)
 
     async def _fetch_ops_job_runs_payload(self, limit: int) -> dict[str, Any]:
