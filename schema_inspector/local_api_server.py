@@ -514,11 +514,40 @@ class LocalApiApplication:
         path_params: dict[str, str],
     ) -> Any | None:
         context_value = _parse_context_value(route, path_params)
+        # 2026-05-15 hotfix (Task B): the routing layer holds the template
+        # pattern with {sport_slug}/{date}/etc placeholders, but the live
+        # discovery / scheduled / structure workers store snapshots under
+        # the *concrete* endpoint_pattern (e.g.
+        # ``/api/v1/sport/football/events/live`` rather than
+        # ``/api/v1/sport/{sport_slug}/events/live``). Without
+        # substitution this lookup matches zero rows, the snapshot
+        # waterfall falls through to the slow SQL synthesiser, and the
+        # endpoint TTFB blows past 30 s on prod
+        # (``/sport/football/events/live`` audit 2026-05-15).
+        #
+        # We probe the concrete pattern first; if there are zero rows we
+        # fall back to the template form so any legacy
+        # endpoint_pattern='/api/v1/.../{placeholder}/...' rows are still
+        # found.
+        concrete_pattern = route.endpoint.pattern
+        for placeholder_name, placeholder_value in path_params.items():
+            token = "{" + placeholder_name + "}"
+            if token in concrete_pattern:
+                concrete_pattern = concrete_pattern.replace(
+                    token, str(placeholder_value)
+                )
+        if concrete_pattern != route.endpoint.pattern:
+            pattern_candidates: tuple[str, ...] = (
+                concrete_pattern,
+                route.endpoint.pattern,
+            )
+        else:
+            pattern_candidates = (concrete_pattern,)
         query = (
             "SELECT source_url, payload, is_soft_error_payload, http_status "
-            "FROM api_payload_snapshot WHERE endpoint_pattern = $1"
+            "FROM api_payload_snapshot WHERE endpoint_pattern = ANY($1::text[])"
         )
-        arguments: list[Any] = [route.endpoint.pattern]
+        arguments: list[Any] = [list(pattern_candidates)]
         source_slug = getattr(route.endpoint, "source_slug", None)
         if source_slug:
             query += f" AND source_slug = ${len(arguments) + 1}"
