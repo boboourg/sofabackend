@@ -132,7 +132,40 @@ class LiveStateSweeperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(executor.fetch_args), 1)
         cutoff, limit = executor.fetch_args[0]
         self.assertEqual(cutoff, now - timedelta(seconds=600))
-        self.assertEqual(limit, 500)
+        # Default raised 500 -> 5000 on 2026-05-15: a 24k/6h finalisation
+        # backlog meant LIMIT 500 ASC burned its budget on long-finalised
+        # events that were no longer in the zset, leaving fresh
+        # zombie_stale entries stuck. See _fetch_finalized_event_ids
+        # docstring for the DESC + bigger LIMIT rationale.
+        self.assertEqual(limit, 5000)
+
+    async def test_query_orders_finalized_desc_to_target_fresh_entries(self) -> None:
+        """Sweep MUST query freshest finalisations first.
+
+        Previously ORDER BY finalized_at ASC wasted the LIMIT budget on
+        events finalised hours ago that were no longer in the zsets;
+        recent zombie_stale entries (10-40 min) were never reached and
+        kept oldest_hot_score_age permanently above the CRIT threshold.
+        """
+
+        store = _StubLiveStateStore()
+        sweeper = LiveStateSweeper(live_state_store=store)
+        captured_query: list[str] = []
+
+        class _QueryCapturingExecutor:
+            async def fetch(self, query: str, *args):
+                captured_query.append(query)
+                del args
+                return []
+
+        executor = _QueryCapturingExecutor()
+        now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+        await sweeper.run_once(sql_executor=executor, now=now)
+
+        self.assertEqual(len(captured_query), 1)
+        normalised = " ".join(captured_query[0].split()).upper()
+        self.assertIn("ORDER BY FINALIZED_AT DESC", normalised)
+        self.assertNotIn("ORDER BY FINALIZED_AT ASC", normalised)
 
     async def test_idempotent_second_run_is_noop(self) -> None:
         store = _StubLiveStateStore()

@@ -56,7 +56,7 @@ class LiveStateSweeper:
         *,
         live_state_store: Any,
         grace_seconds: int = 300,
-        max_remove_per_tick: int = 500,
+        max_remove_per_tick: int = 5000,
     ) -> None:
         if grace_seconds < 0:
             raise ValueError("grace_seconds must be >= 0")
@@ -135,6 +135,17 @@ class LiveStateSweeper:
         Only fetches the id column. The query is bounded by
         ``max_remove_per_tick`` so a one-off backlog cannot stall the
         sweeper for long.
+
+        2026-05-15 hotfix: changed from ORDER BY finalized_at ASC to
+        DESC. The ASC order picked the oldest finalised events first —
+        events that finalised many hours ago and have long since been
+        removed from the zsets by previous sweep cycles. The LIMIT
+        budget burned on those wasted lookups, never reaching freshly-
+        finalised events (e.g. zombie_stale 30-40 minutes ago) that
+        were still occupying the hot zset. DESC order covers the
+        recently-finalised events first — those have the highest
+        probability of still being in the zset, so the sweep budget
+        is spent where it actually removes things.
         """
 
         if cutoff.tzinfo is None:
@@ -146,7 +157,7 @@ class LiveStateSweeper:
             WHERE terminal_status IS NOT NULL
               AND finalized_at IS NOT NULL
               AND finalized_at < $1
-            ORDER BY finalized_at ASC
+            ORDER BY finalized_at DESC
             LIMIT $2
             """,
             cutoff,

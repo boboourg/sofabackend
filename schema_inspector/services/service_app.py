@@ -385,7 +385,7 @@ class ServiceApp:
             "SOFASCORE_LIVE_STATE_SWEEP_GRACE_SECONDS", 300
         )
         max_remove = _env_int_local(
-            "SOFASCORE_LIVE_STATE_SWEEP_MAX_REMOVE_PER_TICK", 500
+            "SOFASCORE_LIVE_STATE_SWEEP_MAX_REMOVE_PER_TICK", 5000
         )
         if interval_ms <= 0:
             return None, 0
