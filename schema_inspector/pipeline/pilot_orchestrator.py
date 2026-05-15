@@ -253,6 +253,7 @@ class PilotOrchestrator:
         season_widget_structural_gate=None,
         event_endpoint_gate=None,
         live_bootstrap_coordinator=None,
+        tier_override_registry=None,
         final_sweep_gate=None,
         freshness_store=None,
         player_profile_freshness_ttl_seconds: int = PLAYER_PROFILE_FRESHNESS_TTL_SECONDS,
@@ -265,7 +266,14 @@ class PilotOrchestrator:
         self.capability_repository = capability_repository
         self.sql_executor = sql_executor
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
-        self.live_worker = live_worker or LiveWorker(now_ms_factory=self.now_ms_factory)
+        # A3 Phase 0 (2026-05-16): inject the per-UT tier-override registry
+        # into the LiveWorker so dispatch_tier resolution short-circuits
+        # to the operator-set value when one exists.
+        self.tier_override_registry = tier_override_registry
+        self.live_worker = live_worker or LiveWorker(
+            now_ms_factory=self.now_ms_factory,
+            tier_override_registry=tier_override_registry,
+        )
         if hasattr(self.live_worker, "now_ms_factory"):
             self.live_worker.now_ms_factory = self.now_ms_factory
         self.live_state_store = live_state_store

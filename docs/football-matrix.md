@@ -199,9 +199,55 @@ Per-event lower bound (event level):
 
 ---
 
+## Phase 0 progress
+
+### A1 (2026-05-16) — priority-aware backfill ✅
+
+`select_unique_tournament_ids_after_cursor` (cli.py) теперь сортирует
+по `category.priority DESC NULLS LAST, ut.user_count DESC NULLS LAST, ut.id`.
+Backfill cycle забирает FIFA World Cup → UEFA → Premier League первыми,
+amateur Chile в конце.
+
+Verified on prod:
+- Top-10: World category (priority=20) UT'ы, ordered by user_count
+- Bottom: Chile amateur tournaments (priority=0)
+
+Commit: `fe62b26`.
+
+### A3 (2026-05-16) — per-UT live tier override (backend готов, wiring pending) 🟡
+
+Table `live_tier_override` создана:
+```sql
+CREATE TABLE live_tier_override (
+    unique_tournament_id BIGINT PRIMARY KEY REFERENCES unique_tournament(id),
+    override_tier TEXT NOT NULL CHECK in {tier_1, tier_2, tier_3},
+    reason TEXT, created_at, created_by
+);
+```
+
+Code `LiveTierOverrideRegistry` в `schema_inspector/live_tier_override.py`.
+`resolve_live_dispatch_tier` принимает optional `tier_override_registry`
+и `unique_tournament_id` — если registry имеет row для UT → returns
+override, skipping heuristic.
+
+**Wiring through `cli.py` 3 orchestrator constructions — pending** (Task A3b).
+Без wiring registry **не auto-loaded**. Operator workflow для активации:
+
+1. Insert override rows (Phase 0 — через psql):
+   ```sql
+   INSERT INTO live_tier_override (unique_tournament_id, override_tier, reason, created_by)
+   VALUES (17, 'tier_1', 'Premier League: tournament.tier upstream NULL', 'bobur');
+   ```
+2. Wiring через `service_app.py` (Task A3b): construct + load registry, pass
+   into all PilotOrchestrator instances.
+3. Restart live workers → registry loads → override takes effect.
+
+Commit: `ec2b9b1`.
+
 ## Changelog
 
 | Date | Что | Кто |
 |---|---|---|
 | 2026-05-15 | Создан после Task 6 (bootstrap fix) | Claude (Bobur ACK) |
+| 2026-05-16 | Phase 0 A1 deployed (priority backfill), A3 backend ready (wiring pending) | Claude (Bobur ACK) |
 | (пиши сюда manual entries) | | |
