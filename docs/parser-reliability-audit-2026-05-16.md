@@ -11,15 +11,16 @@
 Сами по себе парсеры **работают**. Главные проблемы — НЕ в parser-логике:
 
 1. **Upstream 404 для 4 endpoints катастрофические** — `/managers` 70%, `/official-tweets` 90%, и т.д. Снапшоты в БД не падают, но мы тратим proxy budget на запросы которые заведомо безрезультатные.
+   * 🟡 **Уже работает negative cache:** скрывает 80-87% повторных probes (3.6k реальных fetch'ей вместо 30k теоретических для `/managers`). Но cooldown в `inprogress` фазе слишком короткий — на 2-часовом матче выходит ~12 wasted probes per event. См. §6.0 + §6.1.
 2. **9 endpoints без парсера** — fetched и сохраняются только в `api_payload_snapshot` (raw passthrough), normalized rows нет. Включая `/highlights`, `/team-streaks`, `/average-positions`, player-level `/heatmap`, `/shotmap`, `/goalkeeper-shotmap`. См. §2.
 3. **DeadlockDetectedError 39× / TimeoutError 13× за 24h** в hydrate-worker → primary cause "silent drops" по факту, а не парсер.
-4. **`ReplayFetchExecutor soft-skipping`** для player rating-breakdown/heatmap — десятки случаев / час. Это сломанный fan-out, не parser.
-5. **Player parser nullify'ит `player.team_id`** когда parent team ещё не загружен. Player сохраняется без team_id, потом back-fill вручную не происходит.
+4. **`/event/h2h` парсер имеет 11.5% silent drops** — 13 из 113 events за 2h. Единственный парсер с реальной проблемой. См. §4.
+5. **`ReplayFetchExecutor soft-skipping`** для player rating-breakdown/heatmap — десятки случаев / час. Это сломанный fan-out, не parser.
+6. **Player parser nullify'ит `player.team_id`** когда parent team ещё не загружен. Player сохраняется без team_id, потом back-fill вручную не происходит.
 
-При этом для top-10 endpoints где парсер реально вызывается (lineups, incidents, statistics,
-comments, managers, odds, shotmap) **silent drop rate = 0%**: каждый успешный snapshot
-превращается в нормализованную строку. То есть **парсеры писать новый код смысла нет** —
-смысл починить upstream coverage и pipeline persistence.
+При этом для top-15 endpoints где парсер реально вызывается **silent drop rate = 0%** (кроме
+h2h): каждый успешный snapshot превращается в нормализованную строку. **Парсеры писать новый
+код смысла нет** — смысл расширить negative cache и добавить capability gating.
 
 ---
 
@@ -266,29 +267,93 @@ back-fill'ом не чинит. Со временем накапливается
 
 ## 6. Recommendations (по убывающему приоритету)
 
-### 6.1 (Hot) **Capability-aware gating** — устранить 70-90% 404'ов
+### 6.0 (Уже работает, но не до конца) — что **уже** сделано против 404'ов
 
-`event` root payload содержит boolean флаги:
-- `hasEventPlayerStatistics`
-- `hasGlobalHighlights`
-- `hasOfficialTweets` (если existing) или похожий
-- `homeManager.name IS NOT NULL` / `awayManager.name IS NOT NULL` → managers есть
+Бобур поднял правильный вопрос — у нас уже есть **два слоя защиты**:
 
-Сейчас match_center_policy whitelist'ит endpoint по `status × tier`, **игнорируя capability
-flags из root**. В результате:
-- `/managers` запрашиваем для всех live → 70% 404.
-- `/official-tweets` запрашиваем для всех live → 90% 404.
+#### Layer 1: Static deny-list (`event_endpoint_static_denylist.py`)
 
-**Что сделать:** в `_fetch_gated_event_endpoint` (pilot_orchestrator) — перед fetch проверить
-capability flag из последнего парсенного root payload (`event_root` parser уже извлекает).
-Если flag = false → skip без fetch.
+Hard ban на уровне `(sport, endpoint)`. 31 пара hardcoded — например
+`(tennis, /event/{eid}/comments)` никогда не fetched (Sofascore не возвращает comments для
+tennis). Football в этот список НЕ попадает по `/managers` etc., потому что эти endpoints
+для **части** football events реально работают.
 
-**Ожидаемый эффект:**
-- `/managers` → ~30% от текущего volume (только для events с managers).
-- `/official-tweets` → ~10%.
-- Освободится ~7-10 тыс. proxy-запросов / 24h.
+#### Layer 2: Per-event negative cache (`event_endpoint_negative_cache.py`)
 
-**Effort:** 2-3 часа.
+Per-event состояние: после 404 / empty payload event переходит в `c_probation`, и следующие
+fetches **suppressed** до конца cooldown. Cooldown зависит от status phase:
+
+| Phase | recheck интервалы |
+|---|---|
+| `notstarted` | 15min → 1h → 3h |
+| `inprogress` | **2min → 5min → 10min** ← короткие! |
+| `finished` | 15min → 1h → 6h |
+| `terminated` | 1h → 6h → 24h |
+
+**Эффективность за 24h** (из `event_endpoint_negative_cache_state`):
+
+| Endpoint | suppressed_total | probes_total | savings |
+|---|---:|---:|---:|
+| `/lineups` (c_probation) | **836 659** | 191 111 | **81% saved** |
+| `/statistics` (c_probation) | 821 369 | 204 562 | 80% saved |
+| `/official-tweets` (c_probation) | 174 093 | 64 450 | 73% saved |
+| `/incidents` (c_probation) | 126 936 | 60 926 | 68% saved |
+| `/graph` (c_probation) | 105 155 | 99 845 | 51% saved |
+| `/comments` (c_probation) | 77 332 | 70 700 | 52% saved |
+| `/managers` (c_probation) | 26 865 | 3 993 | **87% saved** |
+
+Без negative cache мы бы делали **~30 тысяч** запросов на `/managers` в день вместо текущих
+3.6 тыс. Это работает.
+
+### 6.1 (Hot) Что **не** работает: cooldown слишком короткий для permanent-404 events
+
+Проблема:
+- Live football match идёт ~2 часа.
+- Если event перманентно 404'ит `/managers` (Sofascore просто не имеет данных) — мы попадаем
+  в cooldown 2/5/10 минут.
+- После 3-го recheck остаёмся на 10 минут навсегда. За 2h матча = ~12 wasted probes per event.
+- Помножь на 100-500 concurrent live football matches → 1.2k-6k бесполезных fetches/h.
+
+**Improvement A** (1-2ч): добавить **5-й тир в `_PHASE_INTERVALS`** для `inprogress`:
+```python
+PHASE_INPROGRESS: (
+    timedelta(minutes=2),
+    timedelta(minutes=5),
+    timedelta(minutes=10),
+    timedelta(minutes=30),   # NEW — после 4-х подряд negative
+    timedelta(hours=2),       # NEW — для permanently-dead для этого матча
+),
+```
+
+После 5 неудачных probes — суппресим на 2 часа, что в случае live матча равносильно
+"больше не пробуем до конца матча". **Ожидаемое снижение** /managers fetches: 60-80% от
+текущих 3.6k → ~1.2k/24h.
+
+### 6.2 (Hot) **Capability-aware gating** — поверх negative cache, для root-payload hints
+
+`event` root payload Sofascore содержит boolean флаги:
+- `hasEventPlayerStatistics: bool`
+- `hasEventPlayerHeatMap: bool`
+- `hasGlobalHighlights: bool`
+- `hasXg: bool`
+- `homeTeam.manager IS NOT NULL` / `awayTeam.manager IS NOT NULL`
+
+EventRootParser **уже парсит** эти данные (в `event` table некоторые поля есть, проверить
+точно). `_fetch_gated_event_endpoint` сейчас **игнорирует** эти hints.
+
+**Что сделать:** если `event.has_managers = false` (или managers IS NULL в root payload)
+→ **никогда не пробовать `/managers`** для этого event, даже первый раз. Эта проверка
+ставится **до** негативного кеша, и убивает 100% wasted probes (а не 87%).
+
+**Что менять:**
+1. Убедиться что `event_root` parser сохраняет capability flags в `event` table или Redis.
+2. Добавить в `_fetch_gated_event_endpoint` шаг: SELECT capabilities из event по
+   `context_event_id` → if specific endpoint disabled → return (None, None) сразу.
+
+**Combined с Improvement A:** /managers fetches уйдут с 3.6k → 100-500 в день (только
+для events которые **реально** имеют managers).
+
+**Effort:** 3-5ч (зависит от того, как уже устроен event_root parser + где capability flags).
 
 ### 6.2 (Hot) **Deadlock investigation** — `pg_lock` snapshot во время deadlock
 
