@@ -210,6 +210,76 @@ class EventEndpointNegativeCachePolicyTests(unittest.TestCase):
         self.assertTrue(same_job_decision.should_fetch)
         self.assertFalse(different_job_decision.should_fetch)
 
+    def test_inprogress_recheck_extends_to_two_hours_after_fourth_negative(self) -> None:
+        """2026-05-16: PHASE_INPROGRESS gained two extra back-off tiers
+        (30 min and 2 h) on top of the legacy 2/5/10 min schedule.
+
+        The point is to stop hammering Sofascore every 10 minutes for
+        endpoints that 404 permanently on a live match. After four
+        consecutive negatives we want at least a 30-minute pause; after
+        five (and any further iteration) we want the full 2-hour steady
+        state so the rest of the match is effectively quiet.
+        """
+        from schema_inspector.event_endpoint_negative_cache import (
+            EventEndpointNegativeCacheState,
+            next_probe_after_for_state,
+        )
+
+        now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+
+        def _state_with(recheck_iteration: int) -> EventEndpointNegativeCacheState:
+            return EventEndpointNegativeCacheState(
+                event_id=99,
+                status_phase="inprogress",
+                endpoint_pattern="/api/v1/event/{event_id}/managers",
+                classification="c_probation",
+                first_negative_at=now - timedelta(hours=1),
+                last_negative_at=now,
+                first_success_at=None,
+                last_success_at=None,
+                suppressed_hits_total=0,
+                actual_probe_total=recheck_iteration,
+                recheck_iteration=recheck_iteration,
+                next_probe_after=None,
+                probe_lease_until=None,
+                probe_lease_owner=None,
+                last_http_status=404,
+                last_outcome_classification="not_found",
+                last_job_type="hydrate_event_edge",
+                last_trace_id="trace-1",
+                created_at=now - timedelta(hours=1),
+                updated_at=now,
+            )
+
+        def _delta(recheck_iteration: int) -> timedelta:
+            next_after = next_probe_after_for_state(
+                state=_state_with(recheck_iteration),
+                status_phase="inprogress",
+                observed_at=now,
+                event_id=99,
+                endpoint_pattern="/api/v1/event/{event_id}/managers",
+            )
+            return next_after - now
+
+        # Legacy first three tiers are preserved (subject to jitter ±20%
+        # so we accept a comfortable lower bound for each step).
+        self.assertGreaterEqual(_delta(0), timedelta(minutes=1, seconds=30))
+        self.assertLessEqual(_delta(0), timedelta(minutes=3))
+        self.assertGreaterEqual(_delta(1), timedelta(minutes=4))
+        self.assertLessEqual(_delta(1), timedelta(minutes=6, seconds=30))
+        self.assertGreaterEqual(_delta(2), timedelta(minutes=8))
+        self.assertLessEqual(_delta(2), timedelta(minutes=13))
+
+        # NEW: 4th consecutive negative → at least 25 minutes.
+        self.assertGreaterEqual(_delta(3), timedelta(minutes=25))
+        self.assertLessEqual(_delta(3), timedelta(minutes=40))
+
+        # NEW: 5th and beyond → steady-state ~2h, clamped to last tier.
+        self.assertGreaterEqual(_delta(4), timedelta(hours=1, minutes=40))
+        self.assertLessEqual(_delta(4), timedelta(hours=2, minutes=30))
+        self.assertGreaterEqual(_delta(10), timedelta(hours=1, minutes=40))
+        self.assertLessEqual(_delta(10), timedelta(hours=2, minutes=30))
+
     def run_async(self, awaitable):
         import asyncio
 

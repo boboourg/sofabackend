@@ -33,6 +33,26 @@ _KNOWN_PHASES = {
 
 _NEGATIVE_OUTCOME_CLASSIFICATIONS = {"not_found", "success_empty_json"}
 
+# Probe-suppression schedule per event status phase. Each tuple is
+# indexed by ``recheck_iteration`` (clamped to the last element when the
+# iteration runs past the end). On every negative outcome the iteration
+# increments by 1, so:
+#   - iter=0 (first 404)        -> tuple[0]
+#   - iter=1                    -> tuple[1]
+#   - ...
+#   - iter >= len(tuple) - 1    -> tuple[-1]   (permanent steady state)
+#
+# 2026-05-16: extended PHASE_INPROGRESS from 3 tiers (2/5/10 min) to 5
+# tiers, ending in a 2-hour steady-state. Background: prod telemetry
+# showed events that 404 permanently for an endpoint were re-probed
+# every 10 min until full-time, which on a 2h match meant ~12 wasted
+# fetches per (event, endpoint) pair. Adding a 30 min tier and then a
+# 2 h tier keeps the early-cycle recheck cadence unchanged (the first
+# three iters are still 2/5/10 min so a transient 404 is rechecked
+# fast), but after the 4th consecutive negative we back off to 30 min
+# and then settle at 2 h — effectively "stop trying for the rest of
+# the match" for permanently-dead endpoints. Other phases keep their
+# legacy 3-tier schedules.
 _PHASE_INTERVALS: dict[str, tuple[timedelta, ...]] = {
     PHASE_NOTSTARTED: (
         timedelta(minutes=15),
@@ -43,6 +63,8 @@ _PHASE_INTERVALS: dict[str, tuple[timedelta, ...]] = {
         timedelta(minutes=2),
         timedelta(minutes=5),
         timedelta(minutes=10),
+        timedelta(minutes=30),
+        timedelta(hours=2),
     ),
     PHASE_FINISHED: (
         timedelta(minutes=15),
