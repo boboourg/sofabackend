@@ -334,6 +334,12 @@ class HybridApp:
         self.final_sweep_gate = FinalSweepGate()
         self.capability_rollup: dict[str, str] = {}
         self._seeded_endpoint_registry_sports: set[str] = set()
+        # A3 Phase 0 (2026-05-16): lazily-loaded per-UT live-tier override
+        # registry. Stays ``None`` until ``ensure_tier_override_registry``
+        # is awaited (planner-daemon / worker entrypoints do this once on
+        # startup), which keeps unit tests and synchronous one-shot CLIs
+        # free of DB roundtrips when the override layer is unused.
+        self.tier_override_registry = None
         # Structural sync contour uses a separate non-residential proxy pool.
         # Both are lazily initialised (so unrelated CLI flows don't require
         # SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS to be set).
@@ -368,6 +374,34 @@ class HybridApp:
         async with self.database.transaction() as connection:
             await self.raw_repository.upsert_endpoint_registry_entries(connection, registry_entries)
         self._seeded_endpoint_registry_sports.add(normalized_sport_slug)
+
+    async def ensure_tier_override_registry(self):
+        """A3 Phase 0: lazily construct and load the per-UT live-tier
+        override registry. Called once per process from planner / worker
+        entrypoints. Subsequent calls return the cached registry without
+        re-querying. Failures during ``load()`` are swallowed inside the
+        registry itself (it preserves the previous snapshot — empty on
+        the very first load), so a transient DB hiccup at boot does NOT
+        block worker startup; live-tier dispatch falls through to the
+        existing detail_id / user_count heuristic in that case.
+        """
+
+        if self.tier_override_registry is not None:
+            return self.tier_override_registry
+        try:
+            from .live_tier_override import LiveTierOverrideRegistry
+        except ImportError:  # safety net for partial deploys
+            logger.warning("live_tier_override module unavailable; skipping registry load")
+            return None
+        async with self.database.connection() as connection:
+            registry = LiveTierOverrideRegistry(sql_executor=connection)
+            try:
+                loaded = await registry.load()
+                logger.info("tier_override_registry loaded: entries=%d", int(loaded or 0))
+            except Exception:  # never block startup on this best-effort load
+                logger.exception("tier_override_registry initial load failed; using empty registry")
+        self.tier_override_registry = registry
+        return registry
 
     async def run_event(
         self,
@@ -522,6 +556,7 @@ class HybridApp:
                 final_sweep_gate=self.final_sweep_gate,
                 freshness_store=self.freshness_store,
                 fanout_max_inflight=_live_fanout_max_inflight_from_env("live_delta"),
+                tier_override_registry=self.tier_override_registry,
             )
             result = await orchestrator.run_event_details(
                 event_id=event_id,
@@ -595,6 +630,7 @@ class HybridApp:
                 final_sweep_gate=self.final_sweep_gate,
                 freshness_store=self.freshness_store,
                 fanout_max_inflight=_live_fanout_max_inflight_from_env(hydration_mode),
+                tier_override_registry=self.tier_override_registry,
             )
             try:
                 await orchestrator.run_event(
@@ -736,6 +772,7 @@ class HybridApp:
                 event_endpoint_gate=prefetched_run.replay_event_endpoint_gate,
                 freshness_store=_ReplayFreshnessStore(prefetched_run.freshness_skip_keys),
                 fanout_max_inflight=1,
+                tier_override_registry=self.tier_override_registry,
             )
             result = await orchestrator.run_event(
                 event_id=prefetched_run.event_id,

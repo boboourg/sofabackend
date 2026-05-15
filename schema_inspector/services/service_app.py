@@ -312,6 +312,20 @@ class ServiceApp:
         for stream, group in OPERATIONAL_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
 
+    async def ensure_tier_override_registry_loaded(self):
+        """A3 Phase 0 (2026-05-16): forward to ``HybridApp.ensure_tier_override_registry``
+        so workers and planner daemons get a populated registry at boot.
+        Best-effort — never raises; on DB error the registry stays empty
+        and live-tier dispatch falls back to the legacy heuristic."""
+        ensure = getattr(self.app, "ensure_tier_override_registry", None)
+        if not callable(ensure):
+            return None
+        try:
+            return await ensure()
+        except Exception:  # noqa: BLE001 — never block worker startup
+            logger.exception("ensure_tier_override_registry failed; continuing with empty registry")
+            return None
+
     def ensure_historical_consumer_groups(self) -> None:
         for stream, group in HISTORICAL_CONSUMER_GROUPS:
             self.stream_queue.ensure_group(stream, group)
@@ -1130,6 +1144,7 @@ class ServiceApp:
                 ),
             ),
             job_audit_logger=self.job_audit_logger,
+            tier_override_registry=getattr(self.app, "tier_override_registry", None),
         )
 
     def build_historical_discovery_worker(
@@ -1166,6 +1181,7 @@ class ServiceApp:
             defer_on_backpressure=True,
             admission_delay_ms=30_000,
             job_audit_logger=self.job_audit_logger,
+            tier_override_registry=getattr(self.app, "tier_override_registry", None),
         )
 
     def build_live_discovery_worker(
@@ -1198,6 +1214,7 @@ class ServiceApp:
                 ),
             ),
             job_audit_logger=self.job_audit_logger,
+            tier_override_registry=getattr(self.app, "tier_override_registry", None),
         )
 
     def build_historical_tournament_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HistoricalTournamentWorker:
@@ -1338,6 +1355,7 @@ class ServiceApp:
         loop_interval_seconds: float = 5.0,
     ) -> None:
         self.ensure_consumer_groups()
+        await self.ensure_tier_override_registry_loaded()
         await self._recover_live_state()
         daemon = self.build_planner_daemon(
             sport_slugs=sport_slugs,
@@ -1353,6 +1371,7 @@ class ServiceApp:
         loop_interval_seconds: float = 5.0,
     ) -> None:
         self.ensure_consumer_groups()
+        await self.ensure_tier_override_registry_loaded()
         daemon = self.build_live_discovery_planner_daemon(
             sport_slugs=sport_slugs,
             loop_interval_seconds=loop_interval_seconds,
@@ -1400,6 +1419,7 @@ class ServiceApp:
         block_ms: int = 5_000,
         timeout_s: float = 20.0,
     ) -> None:
+        await self.ensure_tier_override_registry_loaded()
         worker = self.build_discovery_worker(
             consumer_name=consumer_name,
             block_ms=block_ms,
@@ -1414,6 +1434,7 @@ class ServiceApp:
         block_ms: int = 5_000,
         timeout_s: float = 20.0,
     ) -> None:
+        await self.ensure_tier_override_registry_loaded()
         worker = self.build_historical_discovery_worker(
             consumer_name=consumer_name,
             block_ms=block_ms,
@@ -1428,6 +1449,7 @@ class ServiceApp:
         block_ms: int = 5_000,
         timeout_s: float = 20.0,
     ) -> None:
+        await self.ensure_tier_override_registry_loaded()
         worker = self.build_live_discovery_worker(
             consumer_name=consumer_name,
             block_ms=block_ms,
@@ -1520,6 +1542,7 @@ class ServiceApp:
         await worker.run_forever()
 
     async def run_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        await self.ensure_tier_override_registry_loaded()
         worker = self.build_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
@@ -1528,6 +1551,7 @@ class ServiceApp:
         await worker.run_forever()
 
     async def run_live_worker(self, *, lane: str, consumer_name: str, block_ms: int = 5_000) -> None:
+        await self.ensure_tier_override_registry_loaded()
         worker = self.build_live_worker(lane=lane, consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 

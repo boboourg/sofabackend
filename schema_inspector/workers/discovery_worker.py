@@ -47,6 +47,7 @@ class DiscoveryWorker:
         admission_delay_ms: int = 30_000,
         now_ms_factory=None,
         job_audit_logger=None,
+        tier_override_registry=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.queue = queue
@@ -62,6 +63,12 @@ class DiscoveryWorker:
         self.defer_on_backpressure = bool(defer_on_backpressure)
         self.admission_delay_ms = int(admission_delay_ms)
         self.now_ms_factory = now_ms_factory or (lambda: int(datetime.now(timezone.utc).timestamp() * 1000))
+        # A3 Phase 0 (2026-05-16): optional registry for per-UT live-tier
+        # overrides. Read by resolve_live_dispatch_tier below via
+        # ``getattr(self, "tier_override_registry", None)`` — keeping the
+        # access pattern duck-typed lets older tests that monkey-patch the
+        # worker keep working unchanged.
+        self.tier_override_registry = tier_override_registry
         self.runtime = WorkerRuntime(
             name="discovery-worker",
             queue=queue,
