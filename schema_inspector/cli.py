@@ -1749,6 +1749,10 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "live-rescue-daemon":
+                service_app = ServiceApp(app)
+                await service_app.run_live_rescue_daemon()
+                return 0
         finally:
             await app.close()
     return 1
@@ -2123,6 +2127,20 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_historical_maintenance = subparsers.add_parser("worker-historical-maintenance", help="Run the archival maintenance/recovery consumer group loop.")
     worker_historical_maintenance.add_argument("--consumer-name", default="worker-historical-maintenance-1", help="Redis consumer name for the archival maintenance worker.")
     worker_historical_maintenance.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    live_rescue_daemon = subparsers.add_parser(
+        "live-rescue-daemon",
+        help=(
+            "A2 Phase 0: periodic force-hydrate for stuck live events. "
+            "Scans /events/live and re-publishes hydrate jobs for events "
+            "whose Redis live_state.last_ingested_at is stale "
+            "(SOFASCORE_LIVE_RESCUE_STALE_MINUTES, default 5). "
+            "Disabled by default — enable with SOFASCORE_LIVE_RESCUE_ENABLED=true."
+        ),
+    )
+    # No CLI arguments — config is fully env-driven (mirrors housekeeping)
+    # so operators can toggle behaviour via .env + systemctl restart without
+    # editing unit files.
 
     cache_warmer = subparsers.add_parser(
         "api-cache-warmer",

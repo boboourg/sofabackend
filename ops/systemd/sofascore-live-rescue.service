@@ -1,0 +1,30 @@
+[Unit]
+Description=Sofascore Live-Rescue Daemon (A2 Phase 0 — periodic force-hydrate for stuck live events)
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+Environment=PYTHONUNBUFFERED=1
+# Disabled by default. To enable on prod:
+#   1. Set SOFASCORE_LIVE_RESCUE_ENABLED=true in /opt/sofascore/.env
+#   2. sudo systemctl daemon-reload
+#   3. sudo systemctl enable --now sofascore-live-rescue.service
+#   4. journalctl -u sofascore-live-rescue -f
+# Tunables (all SOFASCORE_LIVE_RESCUE_* env vars):
+#   INTERVAL_S         — loop tick, default 60s
+#   STALE_MINUTES      — last_ingested_at age that triggers rescue, default 5
+#   COOLDOWN_SECONDS   — per-event cooldown after rescue, default 300
+#   MAX_PER_TICK       — cap on rescues per tick to protect hydrate lane, default 20
+#   SPORT_SLUGS        — comma-separated list, default "football"
+#   DRY_RUN            — log candidates without publishing, default false
+ExecStart=/opt/sofascore/deploy/run_service.sh live-rescue-daemon
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

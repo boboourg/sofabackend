@@ -1312,6 +1312,38 @@ class ServiceApp:
             redis_backend=self.app.redis_backend,
         )
 
+    def build_live_rescue_loop(self):
+        """A2 Phase 0 (2026-05-16): periodic force-hydrate for events
+        that upstream still reports as live but our pipeline has not
+        polled in `stale_minutes`. Returns ``None`` if Redis or the DB
+        connection is unavailable, so the daemon entrypoint can warn
+        and exit instead of crashing the systemd unit.
+        """
+        from .live_rescue import LiveRescueConfig, LiveRescueLoop
+
+        database = getattr(self.app, "database", None)
+        if database is None:
+            logger.warning("live-rescue loop disabled: app.database is None")
+            return None
+        connection_factory = getattr(database, "connection", None)
+        if not callable(connection_factory):
+            logger.warning("live-rescue loop disabled: app.database.connection is unavailable")
+            return None
+        if self.app.redis_backend is None:
+            logger.warning("live-rescue loop disabled: redis_backend is None")
+            return None
+        if self.live_state_store is None:
+            logger.warning("live-rescue loop disabled: live_state_store is None")
+            return None
+        return LiveRescueLoop(
+            config=LiveRescueConfig.from_env(),
+            connection_factory=connection_factory,
+            redis_backend=self.app.redis_backend,
+            live_state_store=self.live_state_store,
+            stream_queue=self.stream_queue,
+            tier_override_registry=getattr(self.app, "tier_override_registry", None),
+        )
+
     def build_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:
         self.ensure_consumer_groups()
         return MaintenanceWorker(
@@ -1563,6 +1595,20 @@ class ServiceApp:
     async def run_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_maintenance_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
+
+    async def run_live_rescue_daemon(self) -> None:
+        """A2 Phase 0: forever-run the live-rescue loop. Loads the
+        tier-override registry on boot (re-used by the resolver inside
+        the rescuer) and starts the periodic scan. If the loop is
+        disabled by config (``SOFASCORE_LIVE_RESCUE_ENABLED=false``),
+        ``run_forever`` logs and returns immediately."""
+        self.ensure_consumer_groups()
+        await self.ensure_tier_override_registry_loaded()
+        loop = self.build_live_rescue_loop()
+        if loop is None:
+            logger.warning("live-rescue daemon: build failed; exiting")
+            return
+        await loop.run_forever()
 
     async def run_historical_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_historical_maintenance_worker(consumer_name=consumer_name, block_ms=block_ms)
