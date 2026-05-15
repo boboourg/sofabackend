@@ -497,6 +497,8 @@ class LocalApiApplication:
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_job_runs_payload(limit))
         if path == "/ops/coverage/summary":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_coverage_summary_payload())
+        if path == "/ops/coverage/season-leaves":
+            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_season_leaf_coverage_payload())
         if path == "/ops/live-freshness":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_live_freshness_payload())
         return ApiResponse(
@@ -3231,6 +3233,128 @@ class LocalApiApplication:
                 }
                 for row in rows
             ],
+        }
+
+    async def _fetch_ops_season_leaf_coverage_payload(self) -> dict[str, Any]:
+        """Task 4 (2026-05-15): per-(ut_id, season_id) leaf coverage rollup.
+
+        Reads from mv_season_coverage (refreshed via the
+        ``coverage-refresh`` CLI subcommand or systemd timer). Returns
+        both the overall ratio and a per-sport breakdown so operators
+        can see which sports still have unfilled leaves.
+        """
+
+        connection = await self._connect()
+        try:
+            overall_row = await connection.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::bigint                                      AS total,
+                    COUNT(*) FILTER (WHERE has_info_snapshot)::bigint     AS has_info,
+                    COUNT(*) FILTER (WHERE has_rounds_snapshot)::bigint   AS has_rounds_snap,
+                    COUNT(*) FILTER (WHERE has_rounds_rows)::bigint       AS has_rounds_rows,
+                    COUNT(*) FILTER (WHERE has_standings_total_snapshot)::bigint AS has_standings_total,
+                    COUNT(*) FILTER (WHERE has_cuptrees_snapshot)::bigint AS has_cuptrees,
+                    COUNT(*) FILTER (WHERE has_top_players_snapshot)::bigint AS has_top_players,
+                    COUNT(*) FILTER (WHERE has_top_teams_snapshot)::bigint AS has_top_teams,
+                    COUNT(*) FILTER (WHERE has_season_stats_rows)::bigint AS has_season_stats,
+                    COUNT(*) FILTER (WHERE event_count_in_db > 0)::bigint AS with_events,
+                    MAX(refreshed_at)                                     AS refreshed_at
+                FROM mv_season_coverage
+                """
+            )
+            per_sport = await connection.fetch(
+                """
+                SELECT
+                    sport_slug,
+                    COUNT(*)::bigint                                       AS total,
+                    COUNT(*) FILTER (WHERE has_info_snapshot)::bigint      AS has_info,
+                    COUNT(*) FILTER (WHERE has_rounds_rows)::bigint        AS has_rounds_rows,
+                    COUNT(*) FILTER (WHERE has_standings_total_snapshot)::bigint AS has_standings_total,
+                    COUNT(*) FILTER (WHERE has_cuptrees_snapshot)::bigint  AS has_cuptrees,
+                    COUNT(*) FILTER (WHERE has_top_players_snapshot)::bigint AS has_top_players,
+                    COUNT(*) FILTER (WHERE has_season_stats_rows)::bigint  AS has_season_stats,
+                    COUNT(*) FILTER (WHERE event_count_in_db > 0)::bigint  AS with_events
+                FROM mv_season_coverage
+                GROUP BY sport_slug
+                ORDER BY total DESC
+                """
+            )
+        finally:
+            await connection.close()
+
+        total = int(overall_row["total"] or 0)
+
+        def _ratio(num: int) -> float:
+            if total == 0:
+                return 0.0
+            return round(num / total, 4)
+
+        overall = {
+            "total_season_scopes": total,
+            "leaves": {
+                "info": {
+                    "covered": int(overall_row["has_info"] or 0),
+                    "ratio": _ratio(int(overall_row["has_info"] or 0)),
+                },
+                "rounds_snapshot": {
+                    "covered": int(overall_row["has_rounds_snap"] or 0),
+                    "ratio": _ratio(int(overall_row["has_rounds_snap"] or 0)),
+                },
+                "rounds_rows": {
+                    "covered": int(overall_row["has_rounds_rows"] or 0),
+                    "ratio": _ratio(int(overall_row["has_rounds_rows"] or 0)),
+                },
+                "standings_total": {
+                    "covered": int(overall_row["has_standings_total"] or 0),
+                    "ratio": _ratio(int(overall_row["has_standings_total"] or 0)),
+                },
+                "cuptrees": {
+                    "covered": int(overall_row["has_cuptrees"] or 0),
+                    "ratio": _ratio(int(overall_row["has_cuptrees"] or 0)),
+                },
+                "top_players": {
+                    "covered": int(overall_row["has_top_players"] or 0),
+                    "ratio": _ratio(int(overall_row["has_top_players"] or 0)),
+                },
+                "top_teams": {
+                    "covered": int(overall_row["has_top_teams"] or 0),
+                    "ratio": _ratio(int(overall_row["has_top_teams"] or 0)),
+                },
+                "season_stats_rows": {
+                    "covered": int(overall_row["has_season_stats"] or 0),
+                    "ratio": _ratio(int(overall_row["has_season_stats"] or 0)),
+                },
+                "events_in_db": {
+                    "covered": int(overall_row["with_events"] or 0),
+                    "ratio": _ratio(int(overall_row["with_events"] or 0)),
+                },
+            },
+            "refreshed_at": _serialize_scalar(overall_row["refreshed_at"]),
+        }
+
+        per_sport_rollup = []
+        for row in per_sport:
+            sport_total = int(row["total"] or 0)
+            def _sport_ratio(num: int, tot: int = sport_total) -> float:
+                return round(num / tot, 4) if tot else 0.0
+            per_sport_rollup.append(
+                {
+                    "sport_slug": str(row["sport_slug"] or ""),
+                    "total_season_scopes": sport_total,
+                    "info_ratio": _sport_ratio(int(row["has_info"] or 0)),
+                    "rounds_rows_ratio": _sport_ratio(int(row["has_rounds_rows"] or 0)),
+                    "standings_total_ratio": _sport_ratio(int(row["has_standings_total"] or 0)),
+                    "cuptrees_ratio": _sport_ratio(int(row["has_cuptrees"] or 0)),
+                    "top_players_ratio": _sport_ratio(int(row["has_top_players"] or 0)),
+                    "season_stats_ratio": _sport_ratio(int(row["has_season_stats"] or 0)),
+                    "events_in_db_ratio": _sport_ratio(int(row["with_events"] or 0)),
+                }
+            )
+
+        return {
+            "overall": overall,
+            "per_sport": per_sport_rollup,
         }
 
     async def _fetch_ops_coverage_summary_payload(self) -> dict[str, Any]:

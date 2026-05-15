@@ -1437,6 +1437,17 @@ async def _dispatch(args) -> int:
                     f"cold={report.restored_cold} terminal={report.restored_terminal}"
                 )
                 return 0
+            if args.command == "coverage-refresh":
+                # Task 4 (2026-05-15): refresh mv_season_coverage. Should
+                # be run on a 15-30 min cadence via systemd timer (or
+                # manually after a big structure-sync sweep).
+                import time as _coverage_refresh_time
+                started = _coverage_refresh_time.perf_counter()
+                async with app.database.connection() as conn:
+                    await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_season_coverage")
+                elapsed_ms = int((_coverage_refresh_time.perf_counter() - started) * 1000)
+                print(f"coverage_refresh ok elapsed_ms={elapsed_ms}")
+                return 0
             if args.command == "rebuild-capability-rollup":
                 sport_slug = getattr(args, "sport_slug", None) or None
                 lookback_days = getattr(args, "lookback_days", None)
@@ -1760,6 +1771,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
     subparsers.add_parser("proxy-health-monitor", help="Continuously mark unhealthy proxy endpoints from api_request_log traffic.")
     subparsers.add_parser("recover-live-state", help="Rebuild Redis live-state indexes from PostgreSQL history.")
+    subparsers.add_parser("coverage-refresh", help="Refresh mv_season_coverage materialized view (Task 4 ledger).")
 
     rebuild_capability_rollup_parser = subparsers.add_parser(
         "rebuild-capability-rollup",
