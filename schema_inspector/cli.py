@@ -834,6 +834,17 @@ class HybridApp:
         normalized_allowed_ids = tuple(
             int(item) for item in allowed_unique_tournament_ids if int(item) > 0
         )
+        # A1 (2026-05-16): priority-aware backfill order. Previously the
+        # ORDER BY was just ``ut.id`` (effectively random by insertion
+        # time), so Macao Amateur Division and the Premier League got
+        # the same probability of being picked on any given tick. With
+        # this change Sofascore's own ``category.priority`` (Europe=19,
+        # England=10, Macao=0) drives the order, with ``user_count``
+        # (Premier League = 1.2M) as a tie-breaker between equal-priority
+        # categories. The ``ut.id`` ASC at the end is the cursor-stable
+        # tiebreaker — the cursor itself stays ``ut.id``-based so a full
+        # cycle still wraps correctly; what changes is which UTs land
+        # in each batch (top priority first per cycle).
         async with self.database.connection() as connection:
             rows = await connection.fetch(
                 """
@@ -847,7 +858,10 @@ class HybridApp:
                     cardinality($3::bigint[]) = 0
                     OR ut.id = ANY($3::bigint[])
                   )
-                ORDER BY ut.id
+                ORDER BY
+                  c.priority DESC NULLS LAST,
+                  ut.user_count DESC NULLS LAST,
+                  ut.id
                 LIMIT $4
                 """,
                 sport_slug,
