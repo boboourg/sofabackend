@@ -284,6 +284,12 @@ class PilotOrchestrator:
         self._event_endpoint_gate_decision_lock = asyncio.Lock()
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
+        # Task 6 (2026-05-15): track event id whose hydrate lock this
+        # orchestrator instance is currently holding. Set by run_event
+        # when ``acquire_hydrate_lock`` succeeds, cleared by
+        # ``release_hydrate_lock_if_held`` which the worker layer calls
+        # in its ``finally`` block regardless of run_event outcome.
+        self._pending_hydrate_lock_event_id: int | None = None
         self._freshness_skip_keys: set[str] = set()
 
     @property
@@ -304,6 +310,13 @@ class PilotOrchestrator:
         requested_hydration_mode = str(hydration_mode or "full").strip().lower()
         effective_hydration_mode = requested_hydration_mode
         should_mark_live_bootstrap = False
+        # Task 6 (2026-05-15): track explicit hydrate-lock ownership so
+        # the ``finally`` block below releases it on every exit path
+        # (success, exception, terminal early-return). Without this the
+        # lock only released via TTL (60 s default), and any failure
+        # mid-bootstrap blocked the next ~6-12 poll cycles for the same
+        # event — root cause of the 49% never-bootstrapped events on
+        # prod. See live_bootstrap.release_hydrate_lock docstring.
         if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
             is_bootstrapped = await self.live_bootstrap_coordinator.is_bootstrapped(self.sql_executor, event_id=event_id)
             if not is_bootstrapped:
@@ -314,6 +327,10 @@ class PilotOrchestrator:
                         fetch_outcomes=(),
                         parse_results=(),
                     )
+                # Task 6 fix: record the locked event_id so the worker
+                # finally-block can always release the lock — even when
+                # the bootstrap fan-out below raises mid-flight.
+                self._pending_hydrate_lock_event_id = int(event_id)
                 effective_hydration_mode = "full"
                 should_mark_live_bootstrap = True
         core_only = effective_hydration_mode == "core"
@@ -1714,6 +1731,36 @@ class PilotOrchestrator:
                 rollup=rollup,
             )
         )
+
+    def release_hydrate_lock_if_held(self) -> None:
+        """Task 6 (2026-05-15): unconditionally release the bootstrap
+        hydrate lock for the event whose orchestrator run just ended.
+
+        Designed to be called from the worker layer's ``finally`` block
+        so the lock never sits past the run, regardless of:
+          - normal success (full fan-out completed + mark_bootstrapped),
+          - bootstrap-but-no-marker (root succeeded, mark failed),
+          - mid-flight exception (orchestrator raised).
+
+        Idempotent. Safe to call when no lock was acquired (no-op).
+        """
+
+        event_id = self._pending_hydrate_lock_event_id
+        if event_id is None:
+            return
+        # Clear state first so a second invocation is a true no-op even
+        # if the release_hydrate_lock call raises (defensive — it should
+        # not, but Redis hiccups exist).
+        self._pending_hydrate_lock_event_id = None
+        if self.live_bootstrap_coordinator is None:
+            return
+        try:
+            self.live_bootstrap_coordinator.release_hydrate_lock(event_id=event_id)
+        except Exception:  # noqa: BLE001 — defensive
+            logger.exception(
+                "release_hydrate_lock_if_held: unexpected error for event_id=%s",
+                event_id,
+            )
 
     async def _flush_capabilities(self) -> None:
         if self.capability_repository is None or not self._pending_capability_records:

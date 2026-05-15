@@ -51,6 +51,61 @@ class LiveBootstrapCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await coordinator.is_bootstrapped(sql, event_id=42))
         self.assertFalse(coordinator.acquire_hydrate_lock(event_id=42))
 
+    def test_release_hydrate_lock_after_acquire_clears_redis(self) -> None:
+        """Task 6 (2026-05-15): explicit release must delete the
+        Redis key so the next attempt acquires immediately."""
+
+        redis = _FakeRedis()
+        coordinator = LiveBootstrapCoordinator(redis_backend=redis, worker_id="w1")
+
+        self.assertTrue(coordinator.acquire_hydrate_lock(event_id=42))
+        self.assertIn("live:hydrate_lock:42", redis.values)
+        self.assertTrue(coordinator.release_hydrate_lock(event_id=42))
+        self.assertNotIn("live:hydrate_lock:42", redis.values)
+
+    def test_release_hydrate_lock_after_release_enables_next_acquire(self) -> None:
+        """End-to-end: w1 acquire + release, w2 acquire — no contention."""
+
+        redis = _FakeRedis()
+        w1 = LiveBootstrapCoordinator(redis_backend=redis, worker_id="w1")
+        w2 = LiveBootstrapCoordinator(redis_backend=redis, worker_id="w2")
+
+        self.assertTrue(w1.acquire_hydrate_lock(event_id=42))
+        self.assertFalse(w2.acquire_hydrate_lock(event_id=42))
+        w1.release_hydrate_lock(event_id=42)
+        # After w1 released, w2 should now claim cleanly.
+        self.assertTrue(w2.acquire_hydrate_lock(event_id=42))
+
+    def test_release_hydrate_lock_owner_mismatch_keeps_lock(self) -> None:
+        """Defensive: never release a lock owned by a different worker
+        (avoids accidentally clearing a lock taken after our TTL expired
+        mid-fanout)."""
+
+        redis = _FakeRedis()
+        w1 = LiveBootstrapCoordinator(redis_backend=redis, worker_id="w1")
+        w2 = LiveBootstrapCoordinator(redis_backend=redis, worker_id="w2")
+
+        self.assertTrue(w1.acquire_hydrate_lock(event_id=42))
+        # w2 tries to release w1's lock — must be a no-op.
+        self.assertFalse(w2.release_hydrate_lock(event_id=42))
+        self.assertIn("live:hydrate_lock:42", redis.values)
+
+    def test_release_hydrate_lock_idempotent_after_expiry(self) -> None:
+        """Release when key absent (already expired) is a clean no-op."""
+
+        redis = _FakeRedis()
+        coordinator = LiveBootstrapCoordinator(redis_backend=redis, worker_id="w1")
+
+        self.assertFalse(coordinator.release_hydrate_lock(event_id=42))
+        # Should not raise on the second call either.
+        self.assertFalse(coordinator.release_hydrate_lock(event_id=42))
+
+    def test_release_hydrate_lock_no_redis_is_safe(self) -> None:
+        """No backend wired -> release silently returns False."""
+
+        coordinator = LiveBootstrapCoordinator(redis_backend=None, worker_id="w1")
+        self.assertFalse(coordinator.release_hydrate_lock(event_id=42))
+
 
 class _FakeSqlExecutor:
     def __init__(self, bootstrap: dict[int, bool]) -> None:

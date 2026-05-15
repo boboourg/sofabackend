@@ -323,6 +323,14 @@ class LiveWorkerService:
             # the short-TTL ``live:root_inflight`` lock now.
             if active_lock_store is not None and lock_owner is not None:
                 active_lock_store.release(event_id=event_id, owner=lock_owner)
+            # Task 6 (2026-05-15): release the live-bootstrap hydrate
+            # lock so a half-completed bootstrap does not freeze every
+            # subsequent poll cycle for this event behind a 60 s TTL.
+            # No-op when no lock was acquired (worker was running in
+            # delta mode, or the event was already bootstrapped).
+            orchestrator = getattr(self, "orchestrator", None)
+            if orchestrator is not None and hasattr(orchestrator, "release_hydrate_lock_if_held"):
+                orchestrator.release_hydrate_lock_if_held()
 
         # P0(b) root-only: enqueue a follow-up ``refresh_live_event``
         # (full hydration) onto ``stream:etl:live_warm`` so edges/details
