@@ -10,6 +10,7 @@ from typing import Any
 
 from ..jobs.types import JOB_REPLAY_FAILED_JOB
 from ..queue.delayed import DelayedJobScheduler
+from ..queue.backfill_governor import BackfillGovernor, CompositeBackpressure
 from ..queue.dedupe import DedupeStore
 from ..queue.event_circuit_breaker import EventCircuitBreaker
 from ..queue.live_details_throttle import LiveDetailsThrottle
@@ -559,19 +560,27 @@ class ServiceApp:
             target_loader=target_loader,
             dates_per_tick=dates_per_tick,
             loop_interval_s=loop_interval_seconds,
-            backpressure=QueueBackpressure(
-                queue=self.stream_queue,
-                limits=(
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_DISCOVERY,
-                        group=GROUP_HISTORICAL_DISCOVERY,
-                        max_lag=HISTORICAL_DISCOVERY_MAX_LAG,
+            # Task 5 (2026-05-15): pair existing queue-lag backpressure
+            # with a live-side governor — backfill pauses when live is
+            # in CRIT regardless of stream lag.
+            backpressure=CompositeBackpressure(
+                checks=(
+                    QueueBackpressure(
+                        queue=self.stream_queue,
+                        limits=(
+                            BackpressureLimit(
+                                stream=STREAM_HISTORICAL_DISCOVERY,
+                                group=GROUP_HISTORICAL_DISCOVERY,
+                                max_lag=HISTORICAL_DISCOVERY_MAX_LAG,
+                            ),
+                            BackpressureLimit(
+                                stream=STREAM_HISTORICAL_HYDRATE,
+                                group=GROUP_HISTORICAL_HYDRATE,
+                                max_lag=HISTORICAL_HYDRATE_MAX_LAG,
+                            ),
+                        ),
                     ),
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_HYDRATE,
-                        group=GROUP_HISTORICAL_HYDRATE,
-                        max_lag=HISTORICAL_HYDRATE_MAX_LAG,
-                    ),
+                    BackfillGovernor(redis_backend=self.redis_backend),
                 ),
             ),
         )
@@ -625,19 +634,26 @@ class ServiceApp:
             tournaments_per_tick=tournaments_per_tick,
             loop_interval_s=loop_interval_seconds,
             target_loader=target_loader,
-            backpressure=QueueBackpressure(
-                queue=self.stream_queue,
-                limits=(
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_TOURNAMENT,
-                        group=GROUP_HISTORICAL_TOURNAMENT,
-                        max_lag=HISTORICAL_TOURNAMENT_MAX_LAG,
+            # Task 5 (2026-05-15): live-side governor on top of stream
+            # backpressure — see build_historical_planner_daemon comment.
+            backpressure=CompositeBackpressure(
+                checks=(
+                    QueueBackpressure(
+                        queue=self.stream_queue,
+                        limits=(
+                            BackpressureLimit(
+                                stream=STREAM_HISTORICAL_TOURNAMENT,
+                                group=GROUP_HISTORICAL_TOURNAMENT,
+                                max_lag=HISTORICAL_TOURNAMENT_MAX_LAG,
+                            ),
+                            BackpressureLimit(
+                                stream=STREAM_HISTORICAL_ENRICHMENT,
+                                group=GROUP_HISTORICAL_ENRICHMENT,
+                                max_lag=HISTORICAL_ENRICHMENT_MAX_LAG,
+                            ),
+                        ),
                     ),
-                    BackpressureLimit(
-                        stream=STREAM_HISTORICAL_ENRICHMENT,
-                        group=GROUP_HISTORICAL_ENRICHMENT,
-                        max_lag=HISTORICAL_ENRICHMENT_MAX_LAG,
-                    ),
+                    BackfillGovernor(redis_backend=self.redis_backend),
                 ),
             ),
         )
@@ -699,14 +715,22 @@ class ServiceApp:
             targets=computed_targets,
             loop_interval_s=loop_interval_seconds,
             target_loader=target_loader,
-            backpressure=QueueBackpressure(
-                queue=self.stream_queue,
-                limits=(
-                    BackpressureLimit(
-                        stream=STREAM_STRUCTURE_SYNC,
-                        group=GROUP_STRUCTURE_SYNC,
-                        max_lag=STRUCTURE_SYNC_MAX_LAG,
+            # Task 5 (2026-05-15): live-side governor + the existing
+            # structure_sync lag guard. Same pattern as the historical
+            # planners — see build_historical_planner_daemon.
+            backpressure=CompositeBackpressure(
+                checks=(
+                    QueueBackpressure(
+                        queue=self.stream_queue,
+                        limits=(
+                            BackpressureLimit(
+                                stream=STREAM_STRUCTURE_SYNC,
+                                group=GROUP_STRUCTURE_SYNC,
+                                max_lag=STRUCTURE_SYNC_MAX_LAG,
+                            ),
+                        ),
                     ),
+                    BackfillGovernor(redis_backend=self.redis_backend),
                 ),
             ),
         )
