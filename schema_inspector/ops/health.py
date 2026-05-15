@@ -583,11 +583,16 @@ async def fetch_live_snapshot_repair_reasons(
                 ) AS sport_slug,
                 MAX(aps.fetched_at) AS latest_fetched_at
             FROM api_payload_snapshot AS aps
-            WHERE (
-                aps.endpoint_pattern = '/api/v1/sport/{{sport_slug}}/events/live'
-                OR aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
-                OR aps.source_url LIKE '%/api/v1/sport/%/events/live%'
-            )
+            -- 2026-05-15 hotfix: the previous OR-branch (`= '{{sport_slug}}'
+            -- literal` OR `source_url LIKE '%X%'`) forced a Parallel Seq Scan
+            -- on 4.8M rows and timed out via asyncpg, crashing
+            -- live_discovery_planner in a restart loop (counter=891). Prod
+            -- recon proved 100% of rows that match any of the three legacy
+            -- predicates ALSO match `endpoint_pattern LIKE '...'`, so the
+            -- other two predicates were redundant. With this simplification
+            -- + idx_aps_endpoint_live_aggregate partial index, Postgres
+            -- picks Index Only Scan (~110ms vs 4400ms).
+            WHERE aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
             GROUP BY 1
         ),
         latest_terminal_state AS (
