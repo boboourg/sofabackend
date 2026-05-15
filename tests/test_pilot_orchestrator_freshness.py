@@ -246,7 +246,10 @@ class PilotOrchestratorFreshnessTests(unittest.IsolatedAsyncioTestCase):
             task.freshness_key,
             "freshness:event-player:123:77:/api/v1/event/{event_id}/player/{player_id}/statistics",
         )
-        self.assertEqual(task.freshness_ttl_seconds, 300)
+        # B1 Phase 0 (2026-05-16): per-status TTL matrix wins over the
+        # legacy 300s default — for football LIVE the matrix says 60s
+        # (see endpoint_ttl_policy.py / docs/football-matrix.md §7).
+        self.assertEqual(task.freshness_ttl_seconds, 60)
 
     async def test_duplicate_player_still_uses_in_process_hydrated_entities_dedup(self) -> None:
         fetch_executor = _FakeFetchExecutor()

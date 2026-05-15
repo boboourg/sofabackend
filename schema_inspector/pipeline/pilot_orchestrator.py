@@ -39,6 +39,7 @@ from ..endpoints import (
     unique_tournament_top_teams_endpoint,
 )
 from ..detail_resource_policy import build_event_detail_request_specs
+from ..endpoint_ttl_policy import resolve_endpoint_ttl as _resolve_endpoint_ttl
 from ..event_endpoint_static_denylist import is_static_dead_event_endpoint
 from ..event_endpoint_negative_cache import normalize_event_status_phase
 from ..fetch_classifier import (
@@ -1274,7 +1275,12 @@ class PilotOrchestrator:
     ) -> tuple[FetchOutcomeEnvelope | None, object | None]:
         if is_static_dead_event_endpoint(sport_slug, endpoint.pattern):
             return None, None
-        freshness_key, freshness_ttl_seconds = _event_detail_freshness_fields(endpoint, path_params)
+        freshness_key, freshness_ttl_seconds = _event_detail_freshness_fields(
+            endpoint,
+            path_params,
+            sport_slug=sport_slug,
+            status_phase=status_phase,
+        )
         if freshness_key is not None and self._is_resource_fresh(freshness_key):
             self._freshness_skip_keys.add(freshness_key)
             logger.debug(
@@ -1989,32 +1995,84 @@ def _entity_profile_freshness_fields(
 def _event_detail_freshness_fields(
     endpoint: SofascoreEndpoint,
     path_params: dict[str, Any],
+    *,
+    sport_slug: str | None = None,
+    status_phase: str | None = None,
 ) -> tuple[str | None, int | None]:
+    """Resolve (freshness_key, ttl_seconds) for an event sub-endpoint.
+
+    B1 Phase 0 (2026-05-16) extension: when ``sport_slug`` and
+    ``status_phase`` are provided AND the
+    ``endpoint_ttl_policy.resolve_endpoint_ttl`` matrix has a per-status
+    entry for this endpoint, that TTL wins over the legacy global
+    defaults. The freshness *key* shape stays unchanged so old keys keep
+    working through the cutover — only the TTL gets a more granular
+    value.
+
+    Legacy callers that omit ``sport_slug`` / ``status_phase`` (older
+    tests, the prefetched-replay path) keep the previous behaviour
+    exactly: global 24h for static event details and 5min for player
+    event details.
+    """
+
     pattern = endpoint.pattern
+    # B1 — try the per-endpoint × per-status matrix first.
+    per_status_ttl: int | None = None
+    if sport_slug and status_phase:
+        try:
+            per_status_ttl = _resolve_endpoint_ttl(
+                sport_slug=sport_slug,
+                endpoint_pattern=pattern,
+                status_phase=status_phase,
+            )
+        except Exception:  # noqa: BLE001 — never block fetch on policy lookup
+            logger.exception(
+                "endpoint_ttl_policy.resolve_endpoint_ttl failed for pattern=%s sport=%s phase=%s",
+                pattern,
+                sport_slug,
+                status_phase,
+            )
+            per_status_ttl = None
+
     if pattern in _EVENT_PLAYER_DETAIL_FRESHNESS_PATTERNS:
         event_id = _as_int(path_params.get("event_id"))
         player_id = _as_int(path_params.get("player_id"))
         if event_id is None or player_id is None:
             return None, None
+        ttl = per_status_ttl if per_status_ttl is not None else EVENT_PLAYER_DETAIL_FRESHNESS_TTL_SECONDS
         return (
             f"freshness:event-player:{event_id}:{player_id}:{pattern}",
-            EVENT_PLAYER_DETAIL_FRESHNESS_TTL_SECONDS,
+            ttl,
         )
     if pattern in _EVENT_STATIC_DETAIL_FRESHNESS_PATTERNS:
         if pattern == EVENT_H2H_EVENTS_ENDPOINT.pattern:
             custom_id = str(path_params.get("custom_id") or "").strip()
             if not custom_id:
                 return None, None
+            ttl = per_status_ttl if per_status_ttl is not None else EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS
             return (
                 f"freshness:event-detail-custom:{custom_id}:{pattern}",
-                EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS,
+                ttl,
             )
+        event_id = _as_int(path_params.get("event_id"))
+        if event_id is None:
+            return None, None
+        ttl = per_status_ttl if per_status_ttl is not None else EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS
+        return (
+            f"freshness:event-detail:{event_id}:{pattern}",
+            ttl,
+        )
+    # B1 — endpoints not in the legacy whitelist sets but covered by the
+    # new per-status matrix (e.g. comments, lineups, statistics, incidents)
+    # now get a freshness gate too. Without this branch, the new TTL
+    # entries for those endpoints would be silently ignored.
+    if per_status_ttl is not None:
         event_id = _as_int(path_params.get("event_id"))
         if event_id is None:
             return None, None
         return (
             f"freshness:event-detail:{event_id}:{pattern}",
-            EVENT_STATIC_DETAIL_FRESHNESS_TTL_SECONDS,
+            per_status_ttl,
         )
     return None, None
 

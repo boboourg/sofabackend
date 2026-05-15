@@ -4,7 +4,11 @@
 
 This file должен читаться каждой сессией перед обсуждением refresh cadence для football. Read code → update this file → re-read.
 
-Last refreshed from code: **2026-05-15**.
+Last refreshed from code: **2026-05-16**.
+
+> **B1 (2026-05-16):** section 7 TTLs теперь runtime-enforced. Любое изменение
+> ниже надо синхронизировать с `schema_inspector/endpoint_ttl_policy.py`
+> (constant `_FOOTBALL_TTL_MATRIX`). Тесты: `tests/test_endpoint_ttl_policy.py`.
 
 ---
 
@@ -18,6 +22,7 @@ Last refreshed from code: **2026-05-15**.
 | Edges throttle window | `schema_inspector/queue/live_edges_throttle.py` | default 60s per event |
 | Details throttle window | `schema_inspector/queue/live_details_throttle.py` | default 30s per event |
 | Per-endpoint TTL (если есть) | `schema_inspector/endpoints.py` | `refresh_interval_seconds`, `freshness_ttl_seconds` |
+| **Per-endpoint × per-status TTL** (B1) | `schema_inspector/endpoint_ttl_policy.py` | matrix sport→pattern→{not_started, live, finished} |
 | Highlights delay | `schema_inspector/match_center_policy.py` | `FOOTBALL_HIGHLIGHTS_DELAY_SECONDS = 150 * 60` |
 | Bootstrap (первый full fetch) | `schema_inspector/live_bootstrap.py` | first-seen → full hydration; subsequent → delta |
 
@@ -59,7 +64,7 @@ Per-event lower bound (event level):
 
 Это **upper bound** — реальный refresh может быть реже из-за coalesce / negative cache / status_phase gates.
 
-**Сейчас всё одинаково — нет per-endpoint TTL.** Бобур-desired per-endpoint TTLs см. **раздел 7 ниже**.
+**~~Сейчас всё одинаково — нет per-endpoint TTL.~~ B1 (2026-05-16) deployed:** per-endpoint × per-status TTL gate enforced for football через `endpoint_ttl_policy.py`. Edges/details throttle (60s/30s) остаётся как нижний уровень защиты. Бобур-desired TTLs см. **раздел 7 ниже**.
 
 ---
 
@@ -123,9 +128,7 @@ Per-event lower bound (event level):
 
 ## 7. Bobur desired per-endpoint TTL (заполняется руками)
 
-**ЭТО ТА КАРТА ЧТО Я ЧИТАЮ КАЖДЫЙ РАЗ.** Здесь Бобур руками задаёт **желаемый** refresh cadence. Когда per-endpoint TTL будет implemented в коде, эти значения станут источником истины.
-
-Сейчас системно используется **60s edges / 30s details** на event — для **всех** endpoints одинаково.
+**ЭТО ТА КАРТА ЧТО Я ЧИТАЮ КАЖДЫЙ РАЗ.** Здесь Бобур руками задаёт **желаемый** refresh cadence. **B1 (2026-05-16):** эти значения теперь runtime-enforced через `endpoint_ttl_policy.py`. Менять в коде → менять здесь. Edges/details throttle (60s/30s) остаётся как нижний уровень защиты на producer side.
 
 ### Шаблон
 
@@ -173,13 +176,13 @@ Per-event lower bound (event level):
 
 ## 8. Что **не** реализовано в коде (Бобур может ACK Task для implement)
 
-| Feature | Effort | Priority |
-|---|---|---|
-| Per-endpoint TTL (sectiona 7 как config) | 3-5 ч | high — exact Бобур request |
-| Status-aware TTL (live vs finished) | 1-2 ч | medium |
-| Finished events refresh once per day | 1-2 ч | medium |
-| Cancel auto-refresh для finished events после N часов | 1 ч | low |
-| Tier-aware TTL multipliers (tier_3 = 10× slower) | 1 ч | low |
+| Feature | Effort | Priority | Status |
+|---|---|---|---|
+| Per-endpoint TTL (sectiona 7 как config) | 3-5 ч | high — exact Бобур request | ✅ B1 (2026-05-16) |
+| Status-aware TTL (live vs finished) | 1-2 ч | medium | ✅ B1 (2026-05-16) — same matrix |
+| Finished events refresh once per day | 1-2 ч | medium | ✅ B1 (24h TTL для finished по всей матрице) |
+| Cancel auto-refresh для finished events после N часов | 1 ч | low | (next) — A4 / housekeeping interaction |
+| Tier-aware TTL multipliers (tier_3 = 10× slower) | 1 ч | low | (next) |
 
 ---
 
@@ -213,6 +216,52 @@ Verified on prod:
 - Bottom: Chile amateur tournaments (priority=0)
 
 Commit: `fe62b26`.
+
+### B1 (2026-05-16) — per-endpoint × per-status TTL ✅
+
+`schema_inspector/endpoint_ttl_policy.py` содержит matrix sport →
+endpoint pattern → `EndpointTtlSpec(not_started, live, finished)`.
+Resolver `resolve_endpoint_ttl(sport_slug, endpoint_pattern, status_phase)`
+возвращает seconds или `None` (fall-through на legacy globals).
+
+Интеграция: `pilot_orchestrator._event_detail_freshness_fields` теперь
+принимает `sport_slug` + `status_phase` и сначала консультируется с
+matrix. Старая логика остаётся как fallback. `_fetch_gated_event_endpoint`
+передаёт оба контекста.
+
+Эффекты (football):
+- `/comments` live 60s + finished 24h
+- `/official-tweets` live 1200s (20×60s) + finished 24h
+- `/lineups` not_started 5min + live 60s + finished 24h
+- `/managers` not_started 1h + live 60s + finished 24h
+- `/highlights` only finished 24h
+- player-level (`/player/{pid}/statistics` etc.) live 60s + finished 24h
+  (было 300s legacy)
+
+Tests: 19 unit-tests в `tests/test_endpoint_ttl_policy.py`. 1 pin-test
+обновлён в `tests/test_pilot_orchestrator_freshness.py` (player TTL
+300→60 по matrix).
+
+### A3b (2026-05-16) — LiveTierOverrideRegistry wired ✅
+
+`HybridApp.ensure_tier_override_registry()` lazy-loads override snapshot
+из `live_tier_override` table. `ServiceApp.run_*_worker/_planner_daemon`
+зовут его на boot перед стартом loop'а. Registry прокинут до `LiveWorker`
+через PilotOrchestrator + до `DiscoveryWorker` через
+`build_*_discovery_worker`. Empty table → no behavioural change.
+
+Commit: `f08b1e6`.
+
+### A2 (2026-05-16) — Live Rescue Daemon (disabled by default) ✅
+
+`schema_inspector/services/live_rescue.py` — отдельный loop, каждые 60s:
+SELECT `/events/live` snapshot → cross-check Redis live_state → если
+event есть в surface но `last_ingested_at` стар (>5min) или `live_state`
+вообще нет → publish force_rehydrate job. Per-event Redis cooldown
+300s. Disabled by default — flag `SOFASCORE_LIVE_RESCUE_ENABLED=true`.
+Systemd unit `sofascore-live-rescue.service`.
+
+Commit: `72a9759`.
 
 ### A3 (2026-05-16) — per-UT live tier override (backend готов, wiring pending) 🟡
 
@@ -250,4 +299,5 @@ Commit: `ec2b9b1`.
 |---|---|---|
 | 2026-05-15 | Создан после Task 6 (bootstrap fix) | Claude (Bobur ACK) |
 | 2026-05-16 | Phase 0 A1 deployed (priority backfill), A3 backend ready (wiring pending) | Claude (Bobur ACK) |
+| 2026-05-16 | Phase 0 A3b deployed (registry wired), A2 added (live-rescue daemon, disabled by default), B1 deployed (per-endpoint × per-status TTL) | Claude (Bobur ACK) |
 | (пиши сюда manual entries) | | |
