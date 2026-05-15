@@ -27,6 +27,7 @@ from .signals import (
     SIGNAL_REFRESH_SUCCESS,
     SIGNAL_RETRY_RATE_15MIN,
     SIGNAL_TIER_1_BLOCKED,
+    SIGNAL_TIER_1_QUARANTINED,
     SignalDefinition,
     SignalSnapshot,
     make_snapshot,
@@ -119,6 +120,19 @@ async def fetch_slo_signals_from_api(
             threshold_warn=ov.get("warn"),
             threshold_crit=ov.get("crit"),
             note=_pick_slo_note(payload, SIGNAL_REFRESH_SUCCESS.name),
+        )
+    )
+
+    tier_1_quarantined = _coerce_int(payload.get("tier_1_quarantined_events"))
+    ov = overrides.get(SIGNAL_TIER_1_QUARANTINED.name, {})
+    snapshots.append(
+        make_snapshot(
+            definition=SIGNAL_TIER_1_QUARANTINED,
+            value=tier_1_quarantined,
+            timestamp=timestamp,
+            threshold_warn=ov.get("warn"),
+            threshold_crit=ov.get("crit"),
+            note=_pick_slo_note(payload, SIGNAL_TIER_1_QUARANTINED.name),
         )
     )
 

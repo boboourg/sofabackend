@@ -69,6 +69,10 @@ class MonitoringConfig:
     tier_1_blocked_crit_rate: float = 0.50
     refresh_success_warn_rate: float = 0.95
     refresh_success_crit_rate: float = 0.85
+    # Task 2 (2026-05-15): tier_1 P5b quarantine signal thresholds.
+    # Baseline on prod 0-3 events; >5 worth a WARN, >10 worth CRIT.
+    tier_1_quarantined_warn: int = 5
+    tier_1_quarantined_crit: int = 10
     # Phase 2 (queue signals) thresholds — read by Phase 2 code but kept
     # here so config stays one file.
     hydrate_xlen_warn: int = 1000
@@ -142,6 +146,12 @@ class MonitoringConfig:
             ),
             refresh_success_crit_rate=_env_float(
                 resolved, "SOFASCORE_MONITORING_REFRESH_SUCCESS_CRIT_RATE", 0.85
+            ),
+            tier_1_quarantined_warn=_env_int(
+                resolved, "SOFASCORE_MONITORING_TIER_1_QUARANTINED_WARN", 5
+            ),
+            tier_1_quarantined_crit=_env_int(
+                resolved, "SOFASCORE_MONITORING_TIER_1_QUARANTINED_CRIT", 10
             ),
             hydrate_xlen_warn=_env_int(
                 resolved, "SOFASCORE_MONITORING_HYDRATE_XLEN_WARN", 1000

@@ -19,6 +19,7 @@ from schema_inspector.monitoring.signals import (
     SIGNAL_OLDEST_HOT_AGE,
     SIGNAL_REFRESH_SUCCESS,
     SIGNAL_TIER_1_BLOCKED,
+    SIGNAL_TIER_1_QUARANTINED,
 )
 
 
@@ -47,12 +48,13 @@ class _StubHttpClient:
 
 
 class FetchSloSignalsTests(unittest.IsolatedAsyncioTestCase):
-    async def test_returns_three_snapshots_on_success(self) -> None:
+    async def test_returns_four_snapshots_on_success(self) -> None:
         payload = {
             "oldest_hot_score_age_seconds": 96,
             "tier_1_blocked_rate_cumulative": 0.81,
             "tier_1_active_events": 5,
             "refresh_live_event_success_rate_5min": None,
+            "tier_1_quarantined_events": 2,
             "slos": [],
         }
         client = _StubHttpClient(response=_StubResponse(200, payload))
@@ -68,6 +70,7 @@ class FetchSloSignalsTests(unittest.IsolatedAsyncioTestCase):
                 SIGNAL_OLDEST_HOT_AGE.name,
                 SIGNAL_TIER_1_BLOCKED.name,
                 SIGNAL_REFRESH_SUCCESS.name,
+                SIGNAL_TIER_1_QUARANTINED.name,
             },
         )
         self.assertEqual(client.last_url, "http://example/api/ops/live-freshness")

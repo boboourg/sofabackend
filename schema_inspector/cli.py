@@ -2328,6 +2328,11 @@ async def _run_monitoring_daemon(args) -> int:
             "warn": config.refresh_success_warn_rate,
             "crit": config.refresh_success_crit_rate,
         },
+        # Task 2 (2026-05-15) — tier_1 P5b quarantine threshold.
+        "tier_1_quarantined_events": {
+            "warn": config.tier_1_quarantined_warn,
+            "crit": config.tier_1_quarantined_crit,
+        },
         # Phase 2 — queue XLEN thresholds.
         "hydrate_xlen": {
             "warn": config.hydrate_xlen_warn,

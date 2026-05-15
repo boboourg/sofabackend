@@ -133,6 +133,23 @@ SIGNAL_REFRESH_SUCCESS = SignalDefinition(
     ),
 )
 
+# Task 2 (2026-05-15): tier_1 P5b quarantine signal. Correlates with
+# upstream selective throttling (Real Madrid-class incidents). Default
+# WARN 5 / CRIT 10 — baseline on prod is 0-3 events.
+SIGNAL_TIER_1_QUARANTINED = SignalDefinition(
+    name="tier_1_quarantined_events",
+    direction="max",
+    threshold_warn=5,
+    threshold_crit=10,
+    unit="",
+    help=(
+        "Number of tier_1 events currently in P5b quarantine. Bigger = "
+        "Sofascore is selectively throttling top-tier matches (Real "
+        "Madrid-class). Each quarantined event burns proxy budget on "
+        "guaranteed-timeout root fetches."
+    ),
+)
+
 # Phase 2 — queue length signals. Per-stream XLEN. Direction "max":
 # larger queues = workers falling behind. Defaults match
 # docs/N1_MONITORING_PLAN.md and are env-overridable via MonitoringConfig.
@@ -223,6 +240,7 @@ SIGNAL_DEFINITIONS = {
     SIGNAL_OLDEST_HOT_AGE.name: SIGNAL_OLDEST_HOT_AGE,
     SIGNAL_TIER_1_BLOCKED.name: SIGNAL_TIER_1_BLOCKED,
     SIGNAL_REFRESH_SUCCESS.name: SIGNAL_REFRESH_SUCCESS,
+    SIGNAL_TIER_1_QUARANTINED.name: SIGNAL_TIER_1_QUARANTINED,
     SIGNAL_HYDRATE_XLEN.name: SIGNAL_HYDRATE_XLEN,
     SIGNAL_LIVE_HOT_XLEN.name: SIGNAL_LIVE_HOT_XLEN,
     SIGNAL_LIVE_WARM_XLEN.name: SIGNAL_LIVE_WARM_XLEN,

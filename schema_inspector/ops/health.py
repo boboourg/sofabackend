@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ..queue.streams import (
     STREAM_HISTORICAL_ENRICHMENT,
@@ -143,6 +146,9 @@ class LiveFreshnessSummary:
     refresh_live_event_succeeded_5min: int = 0
     refresh_live_event_retry_5min: int = 0
     refresh_live_event_failed_5min: int = 0
+    # Task 2 (2026-05-15): tier_1 P5b quarantined events. Correlates with
+    # upstream selective throttling (Real Madrid-class incidents).
+    tier_1_quarantined_events: int | None = None
 
 
 @dataclass(frozen=True)
@@ -263,15 +269,7 @@ async def _build_live_freshness_summary(
     queue_summary: QueueSummary,
     now: datetime,
 ) -> LiveFreshnessSummary:
-    """Compose the live freshness summary (P0.C 2026-05-14).
-
-    All signals are sourced from Redis or the already-collected
-    ``queue_summary`` so this helper adds **zero** new Postgres round-trips
-    to ``/ops/health``. Adding a 5-minute job-count query was attempted
-    first but caused a 30s full scan on ``etl_job_run`` (no usable index
-    on ``started_at``) which blocked the shared health-report connection.
-    ``refresh_live_event_success_rate_5min`` is therefore reported as
-    ``None`` until the index lands; the SLO simply does not breach.
+    """Compose the live freshness summary (P0.C 2026-05-14, expanded 2026-05-15).
 
     Best-effort: any underlying probe failure returns ``None`` for that
     metric. Health endpoint must never fail because one sub-probe could
@@ -280,19 +278,26 @@ async def _build_live_freshness_summary(
     Sources:
       * oldest score age in ``zset:live:hot`` (Redis ZRANGE, fast)
       * tier_1 blocked rate (from QueueSummary.live_dispatch_metrics)
-      * refresh_live_event success rate — NOT FETCHED here (placeholder).
-        See module-level docstring for the index-once-then-restore plan.
-    """
+      * refresh_live_event 5-min success rate (etl_job_run via BRIN
+        index ``idx_etl_job_run_started_at_brin``, landed
+        2026-05-14 commit fd59951)
+      * tier_1 quarantined events (Redis SCAN on
+        ``live:tier1_quarantine:*``)
 
-    # ``sql_executor`` is intentionally unused for now — kept in the
-    # signature so callers do not need to rewire and the future restore
-    # of the success-rate query is a one-line change.
-    del sql_executor
+    Historical note: the 5-minute count query was disabled briefly in
+    P0.C because the original implementation triggered a 30s full scan
+    on ``etl_job_run`` (no usable index on ``started_at``). With the
+    BRIN index in place this query reliably runs in low-double-digit
+    milliseconds on prod (~5M rows), so it has been restored.
+    """
 
     oldest_age_seconds = await _fetch_oldest_hot_score_age_seconds(
         redis_backend, now
     )
-    counts_5min = dict(_EMPTY_REFRESH_COUNTS)
+    counts_5min = await _fetch_refresh_live_event_5min_counts(
+        sql_executor=sql_executor, now=now
+    )
+    tier_1_quarantined = await _fetch_tier_1_quarantined_count(redis_backend)
 
     tier_1_blocked = _tier_1_blocked_rate(queue_summary)
     tier_1_active = int((queue_summary.live_tier_counts or {}).get("tier_1", 0))
@@ -353,6 +358,25 @@ async def _build_live_freshness_summary(
                 else None
             ),
         ),
+        LiveFreshnessSlo(
+            name="tier_1_quarantined_events",
+            actual=tier_1_quarantined,
+            threshold=_LIVE_FRESHNESS_TIER_1_QUARANTINED_MAX,
+            breached=(
+                tier_1_quarantined is not None
+                and tier_1_quarantined > _LIVE_FRESHNESS_TIER_1_QUARANTINED_MAX
+            ),
+            note=(
+                "many tier_1 events in P5b quarantine — likely selective "
+                "upstream throttling (Real Madrid-class). Check live-tier-1 "
+                "worker logs for ErrCode 28 timeouts."
+                if (
+                    tier_1_quarantined is not None
+                    and tier_1_quarantined > _LIVE_FRESHNESS_TIER_1_QUARANTINED_MAX
+                )
+                else None
+            ),
+        ),
     ]
 
     if any(slo.breached for slo in slos):
@@ -373,6 +397,7 @@ async def _build_live_freshness_summary(
         refresh_live_event_success_rate_5min=success_rate,
         tier_1_blocked_rate_cumulative=tier_1_blocked,
         tier_1_active_events=tier_1_active,
+        tier_1_quarantined_events=tier_1_quarantined,
         refresh_live_event_succeeded_5min=counts_5min["succeeded"],
         refresh_live_event_retry_5min=counts_5min["retry_scheduled"],
         refresh_live_event_failed_5min=counts_5min["failed"],
@@ -412,14 +437,83 @@ async def _fetch_oldest_hot_score_age_seconds(
     return age_ms // 1000
 
 
-# refresh_live_event_count_5min query path was removed 2026-05-14: prod
-# probe showed a 30s full scan on etl_job_run (no usable started_at
-# index), which blocked the shared /ops/health connection. The Redis-
-# sourced metrics below are enough for the current SLO contract.
-# When etl_job_run(started_at) or etl_job_run(started_at, job_type) is
-# indexed in a future migration, restore the count query via a separate
-# pool acquire so it cannot starve the main health connection.
+# refresh_live_event 5-min count query: restored 2026-05-15 after BRIN
+# index ``idx_etl_job_run_started_at_brin`` (migration 2026-05-14) makes
+# the originally-30s full scan a ~10ms operation on prod (4.9M rows).
+# Best-effort: any failure returns _EMPTY_REFRESH_COUNTS so the SLO
+# simply does not breach (no false alarm on transient DB hiccup).
 _EMPTY_REFRESH_COUNTS = {"succeeded": 0, "retry_scheduled": 0, "failed": 0}
+
+# Task 2 (2026-05-15): default tier_1 quarantine SLO. P0(c) rollout on
+# prod typically sees 0-3 events in quarantine; >10 indicates broad
+# Sofascore upstream throttling (Real Madrid-class incident) and is
+# worth a Telegram alert. Env-overridable in service_app via the
+# monitoring config (config.py / SOFASCORE_MONITORING_TIER_1_QUARANTINED_*).
+_LIVE_FRESHNESS_TIER_1_QUARANTINED_MAX = 10
+
+
+async def _fetch_refresh_live_event_5min_counts(
+    *,
+    sql_executor: Any,
+    now: datetime,
+) -> dict[str, int]:
+    """Count refresh_live_event jobs by status in the last 5 minutes.
+
+    Uses the BRIN index on ``etl_job_run(started_at)`` so the scan is
+    bounded to the recent BRIN block range even on a 4.9M-row table.
+    """
+
+    counts = dict(_EMPTY_REFRESH_COUNTS)
+    try:
+        rows = await sql_executor.fetch(
+            """
+            SELECT status, COUNT(*) AS c
+            FROM etl_job_run
+            WHERE started_at > $1
+              AND job_type = 'refresh_live_event'
+            GROUP BY status
+            """,
+            now - timedelta(minutes=5),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, never crash health
+        logger.warning("refresh_live_event_5min counts probe failed: %r", exc)
+        return counts
+    for row in rows:
+        try:
+            status = str(row["status"])
+            count_val = int(row["c"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if status in counts:
+            counts[status] = count_val
+    return counts
+
+
+async def _fetch_tier_1_quarantined_count(redis_backend: Any) -> int | None:
+    """Count active tier_1 P5b quarantine markers via Redis SCAN.
+
+    Pattern ``live:tier1_quarantine:{event_id}``. Returns None if SCAN
+    is unavailable (Redis backend mismatch) so the SLO can distinguish
+    "could not measure" from "0".
+    """
+
+    pattern = "live:tier1_quarantine:*"
+    scan_iter = getattr(redis_backend, "scan_iter", None)
+    if callable(scan_iter):
+        try:
+            return sum(1 for _ in scan_iter(match=pattern, count=200))
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning("tier_1_quarantine SCAN failed: %r", exc)
+            return None
+    keys = getattr(redis_backend, "keys", None)
+    if callable(keys):
+        try:
+            result = keys(pattern)
+            return len(list(result)) if result is not None else 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tier_1_quarantine KEYS fallback failed: %r", exc)
+            return None
+    return None
 
 
 def _tier_1_blocked_rate(queue_summary: QueueSummary) -> float | None:

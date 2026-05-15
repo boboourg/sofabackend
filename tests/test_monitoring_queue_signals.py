@@ -216,9 +216,10 @@ class FetchAllSignalsTests(unittest.IsolatedAsyncioTestCase):
             timeout_seconds=2.0,
         )
         names = {s.name for s in snapshots}
-        # 3 SLO + 5 queue = 8 snapshots.
-        self.assertEqual(len(snapshots), 8)
+        # 4 SLO (incl. tier_1_quarantined_events) + 5 queue = 9 snapshots.
+        self.assertEqual(len(snapshots), 9)
         self.assertIn("oldest_hot_score_age_seconds", names)
+        self.assertIn("tier_1_quarantined_events", names)
         self.assertIn("hydrate_xlen", names)
 
     async def test_slo_fail_yields_queue_only(self) -> None:
