@@ -172,21 +172,38 @@ heavy events (Premier League full root с 5MB payload), curl_cffi TLS handshake 
 
 ## 4. Silent drops: snapshot есть, normalized rows нет
 
-Probe: для каждого endpoint, distinct events с успешным snapshot за последний 1-2 часа
+Probe: для каждого endpoint, distinct events с успешным snapshot за последние 2 часа
 vs distinct events в соответствующей normalized table.
 
 | Endpoint | snap events | in target table | silent drop |
 |---|---:|---:|---|
-| `/event/{eid}/lineups` | 590 | 589 | **0.17%** (1 event) |
-| `/event/{eid}/comments` | 157 | 157 | **0%** ✅ |
-| `/event/{eid}/managers` | 6 | 6 | **0%** ✅ |
-| `/event/{eid}/statistics` | 111 | 111 | **0%** ✅ |
+| `/event/{eid}/lineups` | 587 | 587 | **0%** ✅ |
+| `/event/{eid}/best-players/summary` | 586 | 586 | **0%** ✅ |
 | `/event/{eid}/incidents` | 439 | 439 | **0%** ✅ |
+| `/event/{eid}/comments` | 157 | 157 | **0%** ✅ |
+| **`/event/{eid}/h2h`** | **113** | **100** | **🚨 11.5%** (13 events) |
+| `/event/{eid}/statistics` | 111 | 111 | **0%** ✅ |
+| `/event/{eid}/votes` | 75 | 75 | **0%** ✅ |
+| `/event/{eid}/odds/{provider_id}/all` | 65 | 65 | **0%** ✅ |
+| `/event/{eid}/player/{pid}/statistics` | 58 | 58 | **0%** ✅ |
+| `/event/{eid}/heatmap/{team_id}` | 40 | 40 | **0%** ✅ |
+| `/event/{eid}/player/{pid}/rating-breakdown` | 37 | 37 | **0%** ✅ |
+| `/event/{eid}/provider/{pid}/winning-odds` | 29 | 29 | **0%** ✅ |
 | `/event/{eid}/shotmap` | 18 | 18 | **0%** ✅ |
-| `/event/{eid}/odds/*/all+featured` | 32 | 32 | **0%** ✅ |
+| `/event/{eid}/graph` | 7 | 7 | **0%** ✅ |
+| `/event/{eid}/managers` | 6 | 6 | **0%** ✅ |
+| `/event/{eid}/pregame-form` | 4 | 4 | **0%** ✅ |
 
-**Вывод:** парсеры **сами по себе** работают надёжно — нет silent drops на ярких endpoints.
-Все ошибки приходят сверху (upstream 404) или снизу (DeadlockDetectedError при персисте).
+**Вывод:** для 15 из 16 проверенных endpoints silent drop = 0% — парсеры работают надёжно.
+
+**Исключение: `/event/{eid}/h2h` — 11.5% silent drop.** Это **реальный parser issue**, требует
+расследования. Возможные причины (без открытия snapshot'ов):
+- payload отдаёт пустые `teamDuel` / `managerDuel` для некоторых матчей (Sofascore не
+  считал H2H ещё) — parser отрабатывает корректно (ParseResult.empty), но row не пишется.
+- payload содержит данные, но parser имеет bug на конкретной структуре.
+
+Если хочется починить — нужно достать `snapshot_id` для одного из 13 silent-drop events
+из последних 2h и руками прогнать через `EventH2HParser`. **Effort: 1-2 часа.**
 
 ---
 
