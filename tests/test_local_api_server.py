@@ -127,9 +127,9 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
             calls.append(("health", None))
             return {"database_ok": True}
 
-        async def fake_snapshots() -> dict[str, object]:
-            calls.append(("snapshots", None))
-            return {"raw_snapshots": 12}
+        async def fake_snapshots(*, detail: bool = False) -> dict[str, object]:
+            calls.append(("snapshots", "detail" if detail else None))
+            return {"raw_snapshots": 12, "detail": detail}
 
         async def fake_queues() -> dict[str, object]:
             calls.append(("queues", None))
@@ -156,7 +156,10 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         coverage = await application.handle_ops_get("/ops/coverage/summary", "")
 
         self.assertEqual(health, ApiResponse(status_code=200, payload={"database_ok": True}))
-        self.assertEqual(snapshots, ApiResponse(status_code=200, payload={"raw_snapshots": 12}))
+        self.assertEqual(
+            snapshots,
+            ApiResponse(status_code=200, payload={"raw_snapshots": 12, "detail": False}),
+        )
         self.assertEqual(queues, ApiResponse(status_code=200, payload={"pending_total": 4}))
         self.assertEqual(jobs, ApiResponse(status_code=200, payload={"jobRuns": []}))
         self.assertEqual(coverage, ApiResponse(status_code=200, payload={"coverage": []}))

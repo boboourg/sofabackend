@@ -489,7 +489,13 @@ class LocalApiApplication:
         if path == "/ops/health":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_health_payload())
         if path == "/ops/snapshots/summary":
-            return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_snapshots_summary_payload())
+            # Default is the fast reltuples + BRIN path (~10-50 ms). Pass
+            # ``?detail=true`` only when exact distinct counts are needed.
+            detail_flag = _query_str(raw_query, "detail", default="false").lower() in {"1", "true", "yes"}
+            return ApiResponse(
+                status_code=HTTPStatus.OK,
+                payload=await self._fetch_ops_snapshots_summary_payload(detail=detail_flag),
+            )
         if path == "/ops/queues/summary":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_queue_summary_payload())
         if path == "/ops/jobs/runs":
@@ -3147,36 +3153,83 @@ class LocalApiApplication:
         payload["service"] = "local-multisport-api"
         return payload
 
-    async def _fetch_ops_snapshots_summary_payload(self) -> dict[str, Any]:
+    async def _fetch_ops_snapshots_summary_payload(
+        self, *, detail: bool = False
+    ) -> dict[str, Any]:
+        """Snapshot ingestion counters.
+
+        Fast path (default, ``detail=False``): reads ``COUNT(*)`` estimates
+        from ``pg_class.reltuples`` (autovacuum-maintained, ±5% drift) and
+        only does ``MAX(fetched_at)`` against the BRIN index
+        ``idx_aps_fetched_at_brin``. End-to-end this is ~10-50 ms on prod
+        instead of the 30+ s seqscan the old query needed against the 99 GB
+        ``api_payload_snapshot``. The trace / endpoint / event distinct
+        counts and the http_status break-down are omitted in the fast path
+        because every single one of them required a full table scan.
+
+        Detail path (``?detail=true``): runs the original aggregate query
+        for operators who really need exact numbers. Expect 30+ s on the
+        current dataset; only invoke from off-peak diagnostic sessions.
+        """
         connection = await self._connect()
         try:
-            snapshot_row = await connection.fetchrow(
+            if detail:
+                snapshot_row = await connection.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*)::bigint AS raw_snapshots,
+                        COUNT(DISTINCT trace_id)::bigint AS trace_count,
+                        COUNT(DISTINCT endpoint_pattern)::bigint AS endpoint_pattern_count,
+                        COUNT(DISTINCT context_event_id)::bigint AS event_context_count,
+                        COUNT(*) FILTER (WHERE http_status = 200)::bigint AS http_200_count,
+                        COUNT(*) FILTER (WHERE http_status = 404)::bigint AS http_404_count,
+                        COUNT(*) FILTER (WHERE http_status >= 500)::bigint AS http_5xx_count,
+                        MAX(fetched_at) AS latest_fetched_at
+                    FROM api_payload_snapshot
+                    """
+                )
+                request_count = await connection.fetchval(
+                    "SELECT COUNT(*) FROM api_request_log"
+                )
+                return {
+                    "raw_requests": int(request_count or 0),
+                    "raw_snapshots": int(snapshot_row["raw_snapshots"] or 0),
+                    "trace_count": int(snapshot_row["trace_count"] or 0),
+                    "endpoint_pattern_count": int(snapshot_row["endpoint_pattern_count"] or 0),
+                    "event_context_count": int(snapshot_row["event_context_count"] or 0),
+                    "http_200_count": int(snapshot_row["http_200_count"] or 0),
+                    "http_404_count": int(snapshot_row["http_404_count"] or 0),
+                    "http_5xx_count": int(snapshot_row["http_5xx_count"] or 0),
+                    "latest_fetched_at": _serialize_scalar(snapshot_row["latest_fetched_at"]),
+                    "source": "exact",
+                }
+
+            # Fast path — reltuples + BRIN MAX.
+            row = await connection.fetchrow(
                 """
                 SELECT
-                    COUNT(*)::bigint AS raw_snapshots,
-                    COUNT(DISTINCT trace_id)::bigint AS trace_count,
-                    COUNT(DISTINCT endpoint_pattern)::bigint AS endpoint_pattern_count,
-                    COUNT(DISTINCT context_event_id)::bigint AS event_context_count,
-                    COUNT(*) FILTER (WHERE http_status = 200)::bigint AS http_200_count,
-                    COUNT(*) FILTER (WHERE http_status = 404)::bigint AS http_404_count,
-                    COUNT(*) FILTER (WHERE http_status >= 500)::bigint AS http_5xx_count,
-                    MAX(fetched_at) AS latest_fetched_at
-                FROM api_payload_snapshot
+                    (SELECT COALESCE(reltuples, 0)::bigint
+                       FROM pg_class WHERE relname = 'api_payload_snapshot')
+                       AS raw_snapshots,
+                    (SELECT COALESCE(reltuples, 0)::bigint
+                       FROM pg_class WHERE relname = 'api_request_log')
+                       AS raw_requests,
+                    (SELECT MAX(fetched_at) FROM api_payload_snapshot)
+                       AS latest_fetched_at
                 """
             )
-            request_count = await connection.fetchval("SELECT COUNT(*) FROM api_request_log")
         finally:
             await connection.close()
         return {
-            "raw_requests": int(request_count or 0),
-            "raw_snapshots": int(snapshot_row["raw_snapshots"] or 0),
-            "trace_count": int(snapshot_row["trace_count"] or 0),
-            "endpoint_pattern_count": int(snapshot_row["endpoint_pattern_count"] or 0),
-            "event_context_count": int(snapshot_row["event_context_count"] or 0),
-            "http_200_count": int(snapshot_row["http_200_count"] or 0),
-            "http_404_count": int(snapshot_row["http_404_count"] or 0),
-            "http_5xx_count": int(snapshot_row["http_5xx_count"] or 0),
-            "latest_fetched_at": _serialize_scalar(snapshot_row["latest_fetched_at"]),
+            "raw_requests": int((row["raw_requests"] if row else None) or 0),
+            "raw_snapshots": int((row["raw_snapshots"] if row else None) or 0),
+            "latest_fetched_at": _serialize_scalar(
+                row["latest_fetched_at"] if row else None
+            ),
+            # The default fast path uses pg_class.reltuples estimates. Exact
+            # values (incl. distinct counts and http_status splits) are
+            # available via ``?detail=true``.
+            "source": "estimate",
         }
 
     async def _fetch_ops_queue_summary_payload(self) -> dict[str, Any]:
