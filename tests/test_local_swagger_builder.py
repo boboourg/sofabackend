@@ -146,6 +146,11 @@ class LocalSwaggerBuilderTests(unittest.TestCase):
                 "/ops/queues/summary",
                 "/ops/jobs/runs",
                 "/ops/coverage/summary",
+                # 2026-05-16: added in this session
+                "/ops/coverage/season-leaves",
+                "/ops/live-freshness",
+                "/ops/backfill-progress",
+                "/ops/backfill-cursor",
             }
         )
         self.assertEqual(set(document["paths"]), expected_paths)

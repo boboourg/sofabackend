@@ -762,6 +762,95 @@ def _build_operations_paths(summary: SwaggerDataSummary) -> dict[str, Any]:
                 },
             }
         },
+        "/ops/coverage/season-leaves": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getCoverageSeasonLeaves",
+                "summary": "Season-leaf coverage breakdown",
+                "description": (
+                    "Per-(season, leaf) coverage rows derived from coverage_ledger plus season metadata. "
+                    "Useful for spotting individual seasons that have missing widget or standings data."
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Season-leaf coverage breakdown",
+                        "content": {"application/json": {"schema": _ref("CoverageSeasonLeaves")}},
+                    }
+                },
+            }
+        },
+        "/ops/live-freshness": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getLiveFreshness",
+                "summary": "Live freshness SLO snapshot",
+                "description": (
+                    "Bundles the four live-freshness SLO signals used by the Telegram alerting daemon: "
+                    "oldest hot-zset entry age, oldest warm-zset entry age, refresh_live_event 5-minute "
+                    "success/retry counts, and tier_1 quarantine size. Each signal carries a severity "
+                    "classification (healthy / warn / crit) so dashboards can colour-code without "
+                    "duplicating the thresholds."
+                ),
+                "responses": {
+                    "200": {
+                        "description": "Live freshness SLO snapshot",
+                        "content": {"application/json": {"schema": _ref("LiveFreshnessSummary")}},
+                    }
+                },
+            }
+        },
+        "/ops/backfill-progress": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getBackfillProgress",
+                "summary": "Per-(UT, season) backfill progress",
+                "description": (
+                    "Reads v_backfill_progress for the requested sport and returns one block per "
+                    "unique-tournament with the list of its seasons, captured event counts, expected "
+                    "baseline (median over the UT's recent 5 substantial seasons), and pct = "
+                    "events/expected. Cap UT count via the ``limit`` param; cap on priority_rank via "
+                    "``priority_max`` (default 10 = all UTs in the registry)."
+                ),
+                "parameters": [
+                    _query_param("sport", "string", "Sport slug filter; default ``football``."),
+                    _query_param(
+                        "priority_max",
+                        "integer",
+                        "Maximum tournament_registry.priority_rank to include (1=top tier).",
+                    ),
+                    _query_param("limit", "integer", "Maximum number of UTs to return."),
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Per-(UT, season) backfill progress",
+                        "content": {"application/json": {"schema": _ref("BackfillProgress")}},
+                    }
+                },
+            }
+        },
+        "/ops/backfill-cursor": {
+            "get": {
+                "tags": ["Operations"],
+                "operationId": "getBackfillCursor",
+                "summary": "Per-UT historical backfill cursor",
+                "description": (
+                    "Returns the next-season cursor for each unique-tournament in tournament_registry. "
+                    "Use this to see what the historical-tournament planner will pick up next for the "
+                    "given sport, and to spot UTs that are stuck (state=exhausted), uninitialised, or "
+                    "whose cursor has not advanced in a while (compare ``backfill_last_advance_at``)."
+                ),
+                "parameters": [
+                    _query_param("sport", "string", "Sport slug filter; default ``football``."),
+                    _query_param("limit", "integer", "Maximum number of UTs to return."),
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Per-UT backfill cursor snapshot",
+                        "content": {"application/json": {"schema": _ref("BackfillCursor")}},
+                    }
+                },
+            }
+        },
     }
 
 
@@ -2743,6 +2832,98 @@ def _build_schemas() -> dict[str, Any]:
             "CoverageSummary": _obj(
                 {
                     "coverage": _array(_ref("CoverageSummaryEntry")),
+                }
+            ),
+            "CoverageSeasonLeaves": _obj(
+                {
+                    "season_leaves": _array(
+                        _obj(
+                            {
+                                "source_slug": {"type": "string"},
+                                "sport_slug": {"type": "string"},
+                                "unique_tournament_id": _int64(),
+                                "season_id": _int64(),
+                                "scope_type": {"type": "string"},
+                                "leaf_name": {"type": "string"},
+                                "freshness_status": {"type": "string"},
+                                "completeness_ratio": {"type": "number", "format": "float"},
+                                "last_success_at": {"type": "string", "format": "date-time", "nullable": True},
+                            }
+                        )
+                    ),
+                }
+            ),
+            "LiveFreshnessSloEntry": _obj(
+                {
+                    "name": {"type": "string"},
+                    "value": _int64(),
+                    "warn_threshold": {"type": "integer", "nullable": True},
+                    "crit_threshold": {"type": "integer", "nullable": True},
+                    "severity": {"type": "string", "enum": ["healthy", "warn", "crit"]},
+                }
+            ),
+            "LiveFreshnessSummary": _obj(
+                {
+                    "generated_at": {"type": "string", "format": "date-time"},
+                    "status": {"type": "string", "enum": ["healthy", "warn", "crit"]},
+                    "slos": _array(_ref("LiveFreshnessSloEntry")),
+                }
+            ),
+            "BackfillProgressSeason": _obj(
+                {
+                    "season_id": _int64(),
+                    "year": {"type": "string", "nullable": True},
+                    "season_name": {"type": "string", "nullable": True},
+                    "events": _int32(),
+                    "finished": _int32(),
+                    "expected": {"type": "integer", "nullable": True},
+                    "pct": {"type": "integer", "nullable": True},
+                }
+            ),
+            "BackfillProgressUnique": _obj(
+                {
+                    "ut_id": _int64(),
+                    "ut_name": {"type": "string"},
+                    "priority_rank": _int32(),
+                    "seasons": _array(_ref("BackfillProgressSeason")),
+                }
+            ),
+            "BackfillProgress": _obj(
+                {
+                    "sport_slug": {"type": "string"},
+                    "priority_max": _int32(),
+                    "ut_count": _int32(),
+                    "unique_tournaments": _array(_ref("BackfillProgressUnique")),
+                }
+            ),
+            "BackfillCursorEntry": _obj(
+                {
+                    "ut_id": _int64(),
+                    "ut_name": {"type": "string", "nullable": True},
+                    "priority_rank": _int32(),
+                    "next_season_id": {"type": "integer", "nullable": True},
+                    "next_season_year": {"type": "string", "nullable": True},
+                    "next_season_name": {"type": "string", "nullable": True},
+                    "state": {
+                        "type": "string",
+                        "enum": ["pending", "exhausted", "uninitialised"],
+                    },
+                    "backfill_started_at": {
+                        "type": "string", "format": "date-time", "nullable": True,
+                    },
+                    "backfill_last_advance_at": {
+                        "type": "string", "format": "date-time", "nullable": True,
+                    },
+                    "backfill_completed_at": {
+                        "type": "string", "format": "date-time", "nullable": True,
+                    },
+                }
+            ),
+            "BackfillCursor": _obj(
+                {
+                    "sport_slug": {"type": "string"},
+                    "ut_count": _int32(),
+                    "uniques": _array(_ref("BackfillCursorEntry")),
                 }
             ),
         }
