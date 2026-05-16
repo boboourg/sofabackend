@@ -238,12 +238,25 @@ class TournamentRegistryRepository:
         only_uninitialised: bool = True,
     ) -> int:
         """One-shot bootstrap: for every active UT in registry, set
-        ``next_season_backfill_id`` to that UT's most recent season id
-        (= ``MAX(season_id)`` from ``unique_tournament_season``).
+        ``next_season_backfill_id`` to the UT's most-recently-played
+        season — defined as the season with the latest
+        ``MAX(event.start_timestamp)``.
+
+        We deliberately do NOT use ``MAX(season_id)``: Sofascore re-uses
+        old season ids and sometimes assigns a brand-new high id to a
+        historical season (observed 2026-05-16 with LaLiga 1969/70
+        receiving season_id 91246, higher than current 25/26 = 77559).
+        Sorting by latest event start_timestamp is the only reliable
+        "newest season" signal available cheaply in our schema.
 
         ``only_uninitialised=True`` (default) updates ONLY rows where
         the cursor is currently NULL — safe to re-run without clobbering
         in-progress backfills.
+
+        UTs with **zero** ingested events get no seed (no event window
+        to anchor on). Those become candidates for a future event-list
+        bootstrap pass; the cursor stays NULL so the planner skips
+        them via the pending-cursor filter.
 
         Returns the number of rows that received a new cursor value.
         """
@@ -251,16 +264,27 @@ class TournamentRegistryRepository:
         condition = "AND tr.next_season_backfill_id IS NULL" if only_uninitialised else ""
         query = f"""
             WITH latest_season AS (
-                SELECT unique_tournament_id, MAX(season_id) AS season_id
-                FROM unique_tournament_season
-                GROUP BY unique_tournament_id
+                SELECT
+                    e.unique_tournament_id,
+                    e.season_id,
+                    MAX(e.start_timestamp) AS max_start_ts,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.unique_tournament_id
+                        ORDER BY MAX(e.start_timestamp) DESC NULLS LAST, e.season_id DESC
+                    ) AS rn
+                FROM event e
+                WHERE e.unique_tournament_id IS NOT NULL
+                  AND e.season_id IS NOT NULL
+                  AND e.start_timestamp IS NOT NULL
+                GROUP BY e.unique_tournament_id, e.season_id
             )
             UPDATE tournament_registry tr
             SET next_season_backfill_id = ls.season_id,
                 backfill_started_at = COALESCE(tr.backfill_started_at, now()),
                 updated_at = now()
             FROM latest_season ls
-            WHERE tr.unique_tournament_id = ls.unique_tournament_id
+            WHERE ls.rn = 1
+              AND tr.unique_tournament_id = ls.unique_tournament_id
               AND tr.is_active = TRUE
               AND tr.historical_enabled = TRUE
               AND ($1::text IS NULL OR tr.sport_slug = $1::text)
@@ -303,27 +327,46 @@ class TournamentRegistryRepository:
     ) -> int | None:
         """Move the cursor past ``completed_season_id``.
 
-        Strategy: pick the largest ``season_id < completed_season_id`` from
-        ``unique_tournament_season`` for this UT. If none exists, set the
-        cursor to 0 and stamp ``backfill_completed_at``. Returns the new
-        cursor value (or ``None`` if the row is missing).
+        Walks to the next-most-recent season by ``MAX(event.start_timestamp)``
+        — same rationale as ``seed_backfill_cursors`` (see its docstring on
+        why ``season_id`` ordering is unreliable). If no older season has
+        events yet, set the cursor to 0 and stamp ``backfill_completed_at``.
+
+        Returns the new cursor value (or ``None`` if the row is missing).
         """
         query = """
-            WITH next_season AS (
-                SELECT MAX(season_id) AS season_id
-                FROM unique_tournament_season
+            WITH completed_anchor AS (
+                SELECT MAX(start_timestamp) AS ts
+                FROM event
                 WHERE unique_tournament_id = $2
-                  AND season_id < $3
+                  AND season_id = $3
+            ),
+            next_season AS (
+                SELECT
+                    e.season_id,
+                    MAX(e.start_timestamp) AS max_ts
+                FROM event e, completed_anchor ca
+                WHERE e.unique_tournament_id = $2
+                  AND e.season_id IS NOT NULL
+                  AND e.season_id <> $3
+                  AND e.start_timestamp IS NOT NULL
+                  AND (ca.ts IS NULL OR e.start_timestamp < ca.ts)
+                GROUP BY e.season_id
+                ORDER BY MAX(e.start_timestamp) DESC, e.season_id DESC
+                LIMIT 1
             )
             UPDATE tournament_registry tr
-            SET next_season_backfill_id = COALESCE(ns.season_id, 0),
+            SET next_season_backfill_id = COALESCE(
+                    (SELECT season_id FROM next_season),
+                    0
+                ),
                 backfill_last_advance_at = now(),
                 backfill_completed_at = CASE
-                    WHEN ns.season_id IS NULL THEN now()
+                    WHEN (SELECT season_id FROM next_season) IS NULL
+                        THEN now()
                     ELSE tr.backfill_completed_at
                 END,
                 updated_at = now()
-            FROM next_season ns
             WHERE tr.sport_slug = $1
               AND tr.unique_tournament_id = $2
             RETURNING tr.next_season_backfill_id
