@@ -21,6 +21,18 @@ from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job, encode_stream_job
 
 
+def _coerce_optional_int(value: object) -> int | None:
+    """Read int from job.params dict cleanly. Job params come from a JSON
+    blob — values may already be int, or could be string like ``"52186"``,
+    or absent entirely. Returns None for any unparseable input."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class HistoricalTournamentWorker:
     def __init__(
         self,
@@ -68,11 +80,44 @@ class HistoricalTournamentWorker:
         if job.entity_id is None:
             raise RuntimeError("Historical tournament worker requires unique_tournament entity_id.")
         sport_slug = str(job.sport_slug or "").strip().lower()
+        ut_id = int(job.entity_id)
+        # Phase 1 cursor mode (2026-05-16): when the planner publishes
+        # a per-(UT, season) job it includes the target season in params.
+        # Legacy "process every season" jobs leave the param absent and
+        # we fall back to the historical multi-season walk.
+        target_season_id = _coerce_optional_int(job.params.get("target_season_id"))
         result = await self.orchestrator.run_historical_tournament_archive(
-            unique_tournament_id=int(job.entity_id),
+            unique_tournament_id=ut_id,
             sport_slug=sport_slug,
+            target_season_id=target_season_id,
         )
         season_ids = tuple(int(item) for item in result.get("season_ids", ()) or ())
+
+        # Advance the registry cursor only on a fully-successful targeted
+        # run. Failed/partial outcomes leave the cursor alone so the next
+        # planner tick re-attempts the same season via the delayed retry
+        # machinery.
+        if (
+            target_season_id is not None
+            and result.get("stage_failures", 0) == 0
+            and season_ids
+        ):
+            advance = getattr(self.orchestrator, "advance_backfill_cursor", None)
+            if callable(advance):
+                try:
+                    await advance(
+                        sport_slug=sport_slug,
+                        unique_tournament_id=ut_id,
+                        completed_season_id=int(target_season_id),
+                    )
+                except Exception:  # noqa: BLE001 — never fail the job on cursor accounting
+                    import logging
+                    logging.getLogger(__name__).exception(
+                        "advance_backfill_cursor failed: ut=%s season=%s",
+                        ut_id,
+                        target_season_id,
+                    )
+
         for child_job_type in (
             JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
             JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
@@ -80,7 +125,7 @@ class HistoricalTournamentWorker:
             enrich_job = job.spawn_child(
                 job_type=child_job_type,
                 entity_type="unique_tournament",
-                entity_id=int(job.entity_id),
+                entity_id=ut_id,
                 scope="historical",
                 params={"season_ids": list(season_ids)},
                 priority=job.priority,

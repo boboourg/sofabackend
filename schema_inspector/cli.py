@@ -908,12 +908,44 @@ class HybridApp:
             )
         return tuple(int(row["id"]) for row in rows if row["id"] is not None)
 
-    async def run_historical_tournament_archive(self, *, unique_tournament_id: int, sport_slug: str):
+    async def run_historical_tournament_archive(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        target_season_id: int | None = None,
+    ):
         return await run_historical_tournament_archive_service(
             self,
             unique_tournament_id=unique_tournament_id,
             sport_slug=sport_slug,
+            target_season_id=target_season_id,
         )
+
+    async def advance_backfill_cursor(
+        self,
+        *,
+        sport_slug: str,
+        unique_tournament_id: int,
+        completed_season_id: int,
+    ) -> int | None:
+        """Phase 1 (2026-05-16): called by HistoricalTournamentWorker after
+        a successful per-season run. Walks tournament_registry cursor
+        from ``completed_season_id`` down to the next-older season for
+        this UT (or to 0 when nothing older exists). Best-effort — the
+        worker swallows exceptions from this call so a transient DB
+        error never fails the underlying job.
+        """
+        from .storage.tournament_registry_repository import TournamentRegistryRepository
+
+        repo = TournamentRegistryRepository()
+        async with self.database.connection() as connection:
+            return await repo.advance_backfill_cursor(
+                connection,
+                sport_slug=sport_slug,
+                unique_tournament_id=unique_tournament_id,
+                completed_season_id=completed_season_id,
+            )
 
     async def run_historical_tournament_enrichment(
         self,
@@ -1753,6 +1785,24 @@ async def _dispatch(args) -> int:
                 service_app = ServiceApp(app)
                 await service_app.run_live_rescue_daemon()
                 return 0
+            if args.command == "backfill-cursor-bootstrap":
+                from .storage.tournament_registry_repository import TournamentRegistryRepository
+
+                repo = TournamentRegistryRepository()
+                async with app.database.connection() as connection:
+                    seeded = await repo.seed_backfill_cursors(
+                        connection,
+                        sport_slug=args.sport_slug,
+                        only_uninitialised=not args.reseed,
+                    )
+                logger.info(
+                    "backfill-cursor-bootstrap: seeded=%d sport=%s reseed=%s",
+                    seeded,
+                    args.sport_slug or "<all>",
+                    args.reseed,
+                )
+                print(f"seeded={seeded} sport={args.sport_slug or '<all>'} reseed={args.reseed}")
+                return 0
         finally:
             await app.close()
     return 1
@@ -2141,6 +2191,26 @@ def _build_parser() -> argparse.ArgumentParser:
     # No CLI arguments — config is fully env-driven (mirrors housekeeping)
     # so operators can toggle behaviour via .env + systemctl restart without
     # editing unit files.
+
+    backfill_cursor_bootstrap = subparsers.add_parser(
+        "backfill-cursor-bootstrap",
+        help=(
+            "Phase 1 (2026-05-16): seed tournament_registry.next_season_backfill_id "
+            "to each active UT's most recent season. One-shot; the historical "
+            "tournament planner walks from there to older seasons one job at a time. "
+            "Re-run safely: only NULL cursors get seeded unless --reseed is given."
+        ),
+    )
+    backfill_cursor_bootstrap.add_argument(
+        "--sport-slug",
+        default=None,
+        help="Limit seeding to one sport (default: all sports with historical_enabled).",
+    )
+    backfill_cursor_bootstrap.add_argument(
+        "--reseed",
+        action="store_true",
+        help="Also overwrite existing non-NULL cursors. Use with caution.",
+    )
 
     cache_warmer = subparsers.add_parser(
         "api-cache-warmer",

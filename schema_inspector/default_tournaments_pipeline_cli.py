@@ -358,6 +358,7 @@ async def _run_tournament_worker(
     skip_standings: bool,
     skip_leaderboards: bool,
     timeout: float,
+    target_season_id: int | None = None,
 ) -> _WorkerResult:
     logger = logging.getLogger(__name__)
     stage_failures = 0
@@ -386,7 +387,16 @@ async def _run_tournament_worker(
             error=str(exc),
         )
 
-    season_ids = _select_season_ids(competition_result, seasons_per_tournament=seasons_per_tournament)
+    if target_season_id is not None:
+        # Phase 1 cursor mode (2026-05-16): the orchestrator picks ONE
+        # season for this run and lets the upstream cursor walk
+        # advance after success. Skip the full discovery walk so a
+        # 30-season UT does not refresh every season on every job.
+        season_ids = (int(target_season_id),)
+    else:
+        season_ids = _select_season_ids(
+            competition_result, seasons_per_tournament=seasons_per_tournament
+        )
     if not season_ids:
         return _WorkerResult(
             unique_tournament_id=unique_tournament_id,

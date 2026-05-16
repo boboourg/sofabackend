@@ -58,6 +58,120 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(str(payloads[1]["params_json"])), {"season_ids": [701, 702]})
 
 
+    async def test_tournament_worker_honours_target_season_and_advances_cursor(self) -> None:
+        """Phase 1 (2026-05-16): when ``params.target_season_id`` is set,
+        the worker passes it through to the orchestrator AND calls
+        ``advance_backfill_cursor`` after the successful archive."""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="1-2",
+                values={
+                    "job_id": "job-2",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "key-2",
+                },
+            )
+        )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(orchestrator.archive_calls, [(17, "football")])
+        self.assertEqual(orchestrator.archive_target_seasons, [76986])
+        self.assertEqual(
+            orchestrator.advance_cursor_calls,
+            [("football", 17, 76986)],
+        )
+
+    async def test_tournament_worker_skips_cursor_advance_on_stage_failures(self) -> None:
+        """When the archive returns stage_failures > 0, the cursor is
+        left in place so the next planner tick retries the same season."""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        orchestrator.archive_stage_failures = 1  # simulate partial failure
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        result = await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="1-3",
+                values={
+                    "job_id": "job-3",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "key-3",
+                },
+            )
+        )
+
+        self.assertEqual(result, "completed")
+        # The targeted run happened …
+        self.assertEqual(orchestrator.archive_target_seasons, [76986])
+        # … but advance was skipped because stage_failures > 0.
+        self.assertEqual(orchestrator.advance_cursor_calls, [])
+
+    async def test_legacy_job_without_target_season_does_not_advance_cursor(self) -> None:
+        """A legacy ``params={}`` job — what the daemon publishes before
+        cursors are bootstrapped — must not touch advance_backfill_cursor.
+        """
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="1-4",
+                values={
+                    "job_id": "job-4",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": "{}",
+                    "attempt": "1",
+                    "idempotency_key": "key-4",
+                },
+            )
+        )
+
+        self.assertEqual(orchestrator.archive_target_seasons, [None])
+        self.assertEqual(orchestrator.advance_cursor_calls, [])
+
+
 class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_enrichment_worker_requeues_legacy_job_type_as_split_child_jobs(self) -> None:
         from schema_inspector.workers.historical_archive_worker import HistoricalEnrichmentWorker
@@ -504,13 +618,40 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
 class _FakeArchiveOrchestrator:
     def __init__(self) -> None:
         self.archive_calls: list[tuple[int, str]] = []
+        self.archive_target_seasons: list[int | None] = []
+        self.advance_cursor_calls: list[tuple[str, int, int]] = []
+        self.archive_stage_failures = 0
         self.enrichment_calls: list[tuple[int, str, tuple[int, ...]]] = []
         self.event_detail_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
         self.entities_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
 
-    async def run_historical_tournament_archive(self, *, unique_tournament_id: int, sport_slug: str):
+    async def run_historical_tournament_archive(
+        self,
+        *,
+        unique_tournament_id: int,
+        sport_slug: str,
+        target_season_id: int | None = None,
+    ):
         self.archive_calls.append((unique_tournament_id, sport_slug))
-        return {"season_ids": (701, 702)}
+        self.archive_target_seasons.append(target_season_id)
+        if target_season_id is not None:
+            return {
+                "season_ids": (int(target_season_id),),
+                "stage_failures": self.archive_stage_failures,
+            }
+        return {"season_ids": (701, 702), "stage_failures": self.archive_stage_failures}
+
+    async def advance_backfill_cursor(
+        self,
+        *,
+        sport_slug: str,
+        unique_tournament_id: int,
+        completed_season_id: int,
+    ) -> int | None:
+        self.advance_cursor_calls.append(
+            (sport_slug, unique_tournament_id, completed_season_id)
+        )
+        return None
 
     async def run_historical_tournament_enrichment(
         self,

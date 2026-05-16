@@ -60,6 +60,7 @@ class HistoricalTournamentPlannerDaemon:
         loop_interval_s: float = 10.0,
         backpressure=None,
         target_loader=None,
+        backfill_cursor_selector: Callable[..., Awaitable[list[dict]]] | None = None,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -71,6 +72,12 @@ class HistoricalTournamentPlannerDaemon:
         self.loop_interval_s = float(loop_interval_s)
         self.backpressure = backpressure
         self._target_loader = target_loader
+        # Phase 1 (2026-05-16): when provided, the planner pulls pending
+        # (UT, season) pairs from the cursor selector first and publishes
+        # per-season jobs. When the cursor selector returns nothing it
+        # falls back to the legacy UT-only selector path so the daemon
+        # keeps working before bootstrap and during gradual rollouts.
+        self.backfill_cursor_selector = backfill_cursor_selector
         self.shutdown_requested = False
 
     def request_shutdown(self) -> None:
@@ -92,6 +99,37 @@ class HistoricalTournamentPlannerDaemon:
         targets = await _await_maybe(self._target_loader()) if self._target_loader else self._static_targets
         published = 0
         for target in targets:
+            # Phase 1 (2026-05-16): cursor-aware path first. The selector
+            # returns rows like {unique_tournament_id, next_season_backfill_id,
+            # priority_rank} ordered by priority. When it yields anything we
+            # publish per-(UT, season) jobs and skip the legacy walk for
+            # this target.
+            if self.backfill_cursor_selector is not None:
+                cursor_rows = await _await_maybe(
+                    self.backfill_cursor_selector(
+                        sport_slug=target.sport_slug,
+                        limit=self.tournaments_per_tick,
+                    )
+                )
+                if cursor_rows:
+                    for row in cursor_rows:
+                        ut_id = int(row["unique_tournament_id"])
+                        season_id = int(row["next_season_backfill_id"])
+                        job = JobEnvelope.create(
+                            job_type=JOB_SYNC_TOURNAMENT_ARCHIVE,
+                            sport_slug=target.sport_slug,
+                            entity_type="unique_tournament",
+                            entity_id=ut_id,
+                            scope="historical",
+                            params={"target_season_id": season_id},
+                            priority=target.priority,
+                            trace_id=None,
+                        )
+                        self.queue.publish(self.stream, encode_stream_job(job))
+                        published += 1
+                    continue
+
+            # Legacy path — no cursor data yet, fall back to UT-only walk.
             after_unique_tournament_id = self.cursor_store.load_last_unique_tournament_id(target.sport_slug)
             selector_kwargs = {
                 "sport_slug": target.sport_slug,

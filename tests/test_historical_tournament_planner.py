@@ -52,6 +52,93 @@ class HistoricalTournamentPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cursor_store.load_last_unique_tournament_id("football"), 23)
         self.assertEqual(json.loads(str(queue.published[0][1]["params_json"])), {})
 
+    async def test_cursor_aware_path_publishes_per_season_jobs(self) -> None:
+        """Phase 1 (2026-05-16): when backfill_cursor_selector is wired and
+        returns rows, the planner emits one job per (UT, season) with
+        ``params.target_season_id`` set and skips the legacy walk."""
+        from schema_inspector.services.historical_tournament_planner import (
+            HistoricalTournamentCursorStore,
+            HistoricalTournamentPlannerDaemon,
+            HistoricalTournamentPlanningTarget,
+        )
+
+        backend = _FakeRedisBackend()
+        queue = _FakeQueue()
+
+        legacy_selector_calls: list[dict] = []
+
+        async def legacy_selector(**kwargs) -> tuple[int, ...]:
+            legacy_selector_calls.append(kwargs)
+            return ()
+
+        cursor_rows = [
+            {"unique_tournament_id": 17, "next_season_backfill_id": 76986, "priority_rank": 1},
+            {"unique_tournament_id": 8, "next_season_backfill_id": 77559, "priority_rank": 1},
+        ]
+
+        async def cursor_selector(*, sport_slug: str, limit: int):
+            self.assertEqual(sport_slug, "football")
+            self.assertEqual(limit, 5)
+            return cursor_rows
+
+        daemon = HistoricalTournamentPlannerDaemon(
+            queue=queue,
+            cursor_store=HistoricalTournamentCursorStore(backend),
+            selector=legacy_selector,
+            targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
+            tournaments_per_tick=5,
+            backfill_cursor_selector=cursor_selector,
+        )
+
+        published = await daemon.tick()
+
+        self.assertEqual(published, 2)
+        # Legacy walker must not run when cursor selector returned rows.
+        self.assertEqual(legacy_selector_calls, [])
+        # Both jobs carry the target_season_id param.
+        params = [json.loads(str(p["params_json"])) for _, p in queue.published]
+        self.assertEqual(params[0]["target_season_id"], 76986)
+        self.assertEqual(params[1]["target_season_id"], 77559)
+        # entity_id should match UT ids.
+        self.assertEqual([int(p["entity_id"]) for _, p in queue.published], [17, 8])
+
+    async def test_cursor_selector_empty_falls_back_to_legacy_path(self) -> None:
+        """When the cursor selector returns no rows yet (cursors not
+        bootstrapped), the planner must still publish jobs via the
+        legacy UT-only selector so the rollout is non-breaking."""
+        from schema_inspector.services.historical_tournament_planner import (
+            HistoricalTournamentCursorStore,
+            HistoricalTournamentPlannerDaemon,
+            HistoricalTournamentPlanningTarget,
+        )
+
+        backend = _FakeRedisBackend()
+        queue = _FakeQueue()
+
+        async def cursor_selector(*, sport_slug: str, limit: int):
+            del sport_slug, limit
+            return []  # nothing in cursor table yet
+
+        async def legacy_selector(*, sport_slug: str, after_unique_tournament_id: int, limit: int):
+            del sport_slug, after_unique_tournament_id, limit
+            return (11, 23)
+
+        daemon = HistoricalTournamentPlannerDaemon(
+            queue=queue,
+            cursor_store=HistoricalTournamentCursorStore(backend),
+            selector=legacy_selector,
+            targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
+            tournaments_per_tick=5,
+            backfill_cursor_selector=cursor_selector,
+        )
+
+        published = await daemon.tick()
+
+        self.assertEqual(published, 2)
+        params = [json.loads(str(p["params_json"])) for _, p in queue.published]
+        # Legacy path emits empty params dict (no target_season_id).
+        self.assertEqual(params, [{}, {}])
+
     async def test_tournament_planner_pauses_when_backpressure_is_above_threshold(self) -> None:
         from schema_inspector.services.backpressure import BackpressureLimit, QueueBackpressure
         from schema_inspector.services.historical_tournament_planner import (

@@ -513,6 +513,16 @@ class LocalApiApplication:
                     limit_uts=limit_uts,
                 ),
             )
+        if path == "/ops/backfill-cursor":
+            sport = _query_str(raw_query, "sport", default="football")
+            limit_uts = _query_int(raw_query, "limit", default=50, minimum=1, maximum=500)
+            return ApiResponse(
+                status_code=HTTPStatus.OK,
+                payload=await self._fetch_ops_backfill_cursor_payload(
+                    sport_slug=sport,
+                    limit_uts=limit_uts,
+                ),
+            )
         return ApiResponse(
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
@@ -3478,6 +3488,93 @@ class LocalApiApplication:
                 }
                 for row in rows
             ]
+        }
+
+    async def _fetch_ops_backfill_cursor_payload(
+        self,
+        *,
+        sport_slug: str,
+        limit_uts: int,
+    ) -> dict[str, Any]:
+        """Phase 1 (2026-05-16): show next-season cursor per UT so operators
+        can see what the historical-tournament planner will pick next.
+        Joins tournament_registry against season for the year/name."""
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    tr.sport_slug,
+                    tr.unique_tournament_id,
+                    ut.name AS ut_name,
+                    tr.priority_rank,
+                    tr.next_season_backfill_id,
+                    s.year AS next_season_year,
+                    s.name AS next_season_name,
+                    tr.backfill_started_at,
+                    tr.backfill_last_advance_at,
+                    tr.backfill_completed_at
+                FROM tournament_registry tr
+                LEFT JOIN unique_tournament ut ON ut.id = tr.unique_tournament_id
+                LEFT JOIN season s ON s.id = tr.next_season_backfill_id
+                WHERE tr.is_active = TRUE
+                  AND tr.historical_enabled = TRUE
+                  AND tr.sport_slug = $1
+                ORDER BY
+                    -- exhausted (=0) and uninitialised (NULL) drop to the bottom
+                    CASE
+                        WHEN tr.next_season_backfill_id IS NULL THEN 2
+                        WHEN tr.next_season_backfill_id = 0 THEN 3
+                        ELSE 1
+                    END,
+                    tr.priority_rank,
+                    tr.unique_tournament_id
+                LIMIT $2
+                """,
+                sport_slug,
+                limit_uts,
+            )
+        finally:
+            await connection.close()
+        return {
+            "sport_slug": sport_slug,
+            "ut_count": len(rows),
+            "uniques": [
+                {
+                    "ut_id": int(r["unique_tournament_id"]),
+                    "ut_name": (str(r["ut_name"]) if r["ut_name"] is not None else None),
+                    "priority_rank": int(r["priority_rank"] or 0),
+                    "next_season_id": (
+                        int(r["next_season_backfill_id"])
+                        if r["next_season_backfill_id"] is not None
+                        else None
+                    ),
+                    "next_season_year": (
+                        str(r["next_season_year"]) if r["next_season_year"] is not None else None
+                    ),
+                    "next_season_name": (
+                        str(r["next_season_name"]) if r["next_season_name"] is not None else None
+                    ),
+                    "state": (
+                        "uninitialised" if r["next_season_backfill_id"] is None
+                        else "exhausted" if r["next_season_backfill_id"] == 0
+                        else "pending"
+                    ),
+                    "backfill_started_at": (
+                        r["backfill_started_at"].isoformat()
+                        if r["backfill_started_at"] is not None else None
+                    ),
+                    "backfill_last_advance_at": (
+                        r["backfill_last_advance_at"].isoformat()
+                        if r["backfill_last_advance_at"] is not None else None
+                    ),
+                    "backfill_completed_at": (
+                        r["backfill_completed_at"].isoformat()
+                        if r["backfill_completed_at"] is not None else None
+                    ),
+                }
+                for r in rows
+            ],
         }
 
     async def _fetch_ops_backfill_progress_payload(

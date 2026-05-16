@@ -25,6 +25,7 @@ async def run_historical_tournament_archive(
     seasons_per_tournament: int = 0,
     event_concurrency: int = 4,
     timeout: float = 20.0,
+    target_season_id: int | None = None,
 ) -> dict[str, object]:
     adapter = build_source_adapter(
         app.runtime_config.source_slug,
@@ -72,6 +73,7 @@ async def run_historical_tournament_archive(
         skip_standings=False,
         skip_leaderboards=False,
         timeout=timeout,
+        target_season_id=target_season_id,
     )
     return {
         "season_ids": tuple(int(item) for item in result.season_ids),

@@ -21,6 +21,22 @@ class SqlFetchExecutor(SqlExecutor, Protocol):
     async def fetch(self, query: str, *args: object) -> list[object]: ...
 
 
+def _rows_affected(execute_result: Any) -> int:
+    """asyncpg.execute() returns a CommandTag string like ``UPDATE 12``.
+    Parse the trailing integer when possible — used by the bootstrap CLI
+    to report how many cursors were seeded. Returns 0 when the executor
+    returns something else (older fakes / mocks)."""
+    if not isinstance(execute_result, str):
+        return 0
+    parts = execute_result.strip().split()
+    if not parts:
+        return 0
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return 0
+
+
 @dataclass(frozen=True)
 class TournamentRegistryRecord:
     source_slug: str
@@ -202,6 +218,175 @@ class TournamentRegistryRepository:
             str(sport_slug).strip().lower(),
         )
         return bool(rows)
+
+    # ------------------------------------------------------------------
+    # Phase 1 backfill cursor (2026-05-16). See:
+    #   migrations/2026-05-16_backfill_cursor.sql
+    #   docs/backfill-ordering-roadmap.md
+    #
+    # Semantics: next_season_backfill_id is the season the worker should
+    # process **next**. Worker reads it, fetches that season, then calls
+    # ``advance_backfill_cursor`` which moves the cursor to the next-older
+    # season (or sets it to 0 when there is no older season left).
+    # ------------------------------------------------------------------
+
+    async def seed_backfill_cursors(
+        self,
+        executor: SqlExecutor,
+        *,
+        sport_slug: str | None = None,
+        only_uninitialised: bool = True,
+    ) -> int:
+        """One-shot bootstrap: for every active UT in registry, set
+        ``next_season_backfill_id`` to that UT's most recent season id
+        (= ``MAX(season_id)`` from ``unique_tournament_season``).
+
+        ``only_uninitialised=True`` (default) updates ONLY rows where
+        the cursor is currently NULL — safe to re-run without clobbering
+        in-progress backfills.
+
+        Returns the number of rows that received a new cursor value.
+        """
+        normalized_sport = (sport_slug or "").strip().lower() or None
+        condition = "AND tr.next_season_backfill_id IS NULL" if only_uninitialised else ""
+        query = f"""
+            WITH latest_season AS (
+                SELECT unique_tournament_id, MAX(season_id) AS season_id
+                FROM unique_tournament_season
+                GROUP BY unique_tournament_id
+            )
+            UPDATE tournament_registry tr
+            SET next_season_backfill_id = ls.season_id,
+                backfill_started_at = COALESCE(tr.backfill_started_at, now()),
+                updated_at = now()
+            FROM latest_season ls
+            WHERE tr.unique_tournament_id = ls.unique_tournament_id
+              AND tr.is_active = TRUE
+              AND tr.historical_enabled = TRUE
+              AND ($1::text IS NULL OR tr.sport_slug = $1::text)
+              {condition}
+        """
+        result = await executor.execute(query, normalized_sport)
+        return _rows_affected(result)
+
+    async def fetch_backfill_cursor(
+        self,
+        executor: SqlFetchExecutor,
+        *,
+        sport_slug: str,
+        unique_tournament_id: int,
+    ) -> int | None:
+        """Read the cursor for a (sport, UT). Returns the next season_id
+        to fetch, ``0`` when exhausted, ``None`` when uninitialised."""
+        rows = await executor.fetch(
+            """
+            SELECT next_season_backfill_id
+            FROM tournament_registry
+            WHERE sport_slug = $1 AND unique_tournament_id = $2
+            LIMIT 1
+            """,
+            str(sport_slug).strip().lower(),
+            int(unique_tournament_id),
+        )
+        if not rows:
+            return None
+        value = rows[0]["next_season_backfill_id"]
+        return None if value is None else int(value)
+
+    async def advance_backfill_cursor(
+        self,
+        executor: SqlExecutor,
+        *,
+        sport_slug: str,
+        unique_tournament_id: int,
+        completed_season_id: int,
+    ) -> int | None:
+        """Move the cursor past ``completed_season_id``.
+
+        Strategy: pick the largest ``season_id < completed_season_id`` from
+        ``unique_tournament_season`` for this UT. If none exists, set the
+        cursor to 0 and stamp ``backfill_completed_at``. Returns the new
+        cursor value (or ``None`` if the row is missing).
+        """
+        query = """
+            WITH next_season AS (
+                SELECT MAX(season_id) AS season_id
+                FROM unique_tournament_season
+                WHERE unique_tournament_id = $2
+                  AND season_id < $3
+            )
+            UPDATE tournament_registry tr
+            SET next_season_backfill_id = COALESCE(ns.season_id, 0),
+                backfill_last_advance_at = now(),
+                backfill_completed_at = CASE
+                    WHEN ns.season_id IS NULL THEN now()
+                    ELSE tr.backfill_completed_at
+                END,
+                updated_at = now()
+            FROM next_season ns
+            WHERE tr.sport_slug = $1
+              AND tr.unique_tournament_id = $2
+            RETURNING tr.next_season_backfill_id
+        """
+        # asyncpg returns rows via fetch only; some executors expose execute
+        # with a RETURNING-aware return value (string CommandTag). To keep
+        # the contract simple we go through fetch when available.
+        fetch = getattr(executor, "fetch", None)
+        if callable(fetch):
+            rows = await fetch(
+                query,
+                str(sport_slug).strip().lower(),
+                int(unique_tournament_id),
+                int(completed_season_id),
+            )
+            if not rows:
+                return None
+            value = rows[0]["next_season_backfill_id"]
+            return None if value is None else int(value)
+        # Fallback for executors without fetch (older test fakes).
+        await executor.execute(
+            query,
+            str(sport_slug).strip().lower(),
+            int(unique_tournament_id),
+            int(completed_season_id),
+        )
+        return None
+
+    async def list_pending_backfill_cursors(
+        self,
+        executor: SqlFetchExecutor,
+        *,
+        sport_slug: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return UTs whose cursor points at a real next season (>0), sorted
+        by priority_rank then UT id. Useful for /ops/backfill-cursor.
+        """
+        normalized_sport = (sport_slug or "").strip().lower() or None
+        rows = await executor.fetch(
+            """
+            SELECT
+                tr.source_slug,
+                tr.sport_slug,
+                tr.unique_tournament_id,
+                tr.priority_rank,
+                tr.next_season_backfill_id,
+                tr.backfill_started_at,
+                tr.backfill_last_advance_at,
+                tr.backfill_completed_at
+            FROM tournament_registry tr
+            WHERE tr.is_active = TRUE
+              AND tr.historical_enabled = TRUE
+              AND tr.next_season_backfill_id IS NOT NULL
+              AND tr.next_season_backfill_id > 0
+              AND ($1::text IS NULL OR tr.sport_slug = $1::text)
+            ORDER BY tr.priority_rank, tr.unique_tournament_id
+            LIMIT $2
+            """,
+            normalized_sport,
+            int(limit),
+        )
+        return [dict(row) for row in rows]
 
     async def list_historical_planning_policies(
         self,
