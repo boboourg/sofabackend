@@ -2,6 +2,11 @@
 
 Last refreshed from code: **2026-05-16**.
 
+> **Related documents:**
+> - `docs/endpoint-ttl-matrix.md` — single source of truth по TTL для каждого endpoint × состояние
+> - `docs/football-matrix.md` — Bobur-desired refresh cadence для football events
+> - `docs/parser-reliability-audit-2026-05-16.md` — последний аудит надёжности парсеров
+
 Этот документ объясняет **всё дерево парсинга** от корня (список спортов) до листьев
 (статистика игрока в матче). Для каждого узла указано:
 * **что** парсится (endpoint URL)
@@ -345,7 +350,7 @@ Workers: sofascore-live-tier-{1,2,3}@N.service, sofascore-live-warm@N.service
 2. Event удаляется из `zset:live:hot / warm / cold`.
 3. Один последний refresh (через `final_sweep_gate`) — добор того что упустили (incidents
    до 90+стопп. минуты, итоговая статистика).
-4. После 2.5h после `finished_at` — фетч `/highlights` (если `hasGlobalHighlights=true`).
+4. После 2.5h после `finished_at` — фетч `/highlights` (видео-обзор матча). Флаг `hasGlobalHighlights` в payload означает "видео доступно по всему миру" (нет geo-restriction); это **не** влияет на наличие данных, только на доступность видео в раздаче. Парсера нет — только raw snapshot, ссылка на видео внутри.
 5. В дальнейшем — обновление через `resource_planner` (см. RUT 5) если что-то нужно
    догнать.
 
