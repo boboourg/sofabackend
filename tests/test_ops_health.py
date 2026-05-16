@@ -308,7 +308,10 @@ class _FakeSqlExecutor:
             return list(self.rows_by_query.get("health_drift", ()))
         if "FROM coverage_ledger" in normalized:
             return list(self.rows_by_query.get("health_coverage", ()))
-        if "MAX(fetched_at) AS latest_fetched_at" in normalized:
+        if (
+            "MAX(latest_fetched_at) AS latest_fetched_at" in normalized
+            or "MAX(fetched_at) AS latest_fetched_at" in normalized
+        ):
             return list(self.rows_by_query.get("health_snapshot_freshness", ()))
         if "retry_scheduled_runs" in normalized:
             return list(self.rows_by_query.get("health_retry_pressure", ()))

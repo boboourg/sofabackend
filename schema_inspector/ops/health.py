@@ -821,10 +821,17 @@ def _build_reconcile_policy_summary() -> ReconcilePolicySummary:
 
 
 async def _fetch_latest_snapshot_fetched_at(sql_executor) -> datetime | None:
+    # 2026-05-16: api_payload_snapshot is ~99 GB and a plain ``MAX(fetched_at)``
+    # over the full table is a 100-150 s parallel seq scan that asyncpg
+    # kills via command_timeout, returning HTTP 500 from /ops/health.
+    # ``api_snapshot_head`` keeps a row per (scope_key, endpoint_pattern)
+    # already containing the latest fetched_at — orders of magnitude smaller
+    # (10k-100k rows) so the same MAX is sub-millisecond there. Falls back
+    # to None when the table is empty (fresh deploy / replica).
     rows = await sql_executor.fetch(
         """
-        SELECT MAX(fetched_at) AS latest_fetched_at
-        FROM api_payload_snapshot
+        SELECT MAX(latest_fetched_at) AS latest_fetched_at
+        FROM api_snapshot_head
         """
     )
     if not rows:

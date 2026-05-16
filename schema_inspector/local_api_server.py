@@ -3204,7 +3204,12 @@ class LocalApiApplication:
                     "source": "exact",
                 }
 
-            # Fast path — reltuples + BRIN MAX.
+            # Fast path — reltuples for the two row counts and a
+            # MAX(latest_fetched_at) read off api_snapshot_head (the
+            # maintained aggregate; ~10k-100k rows). A plain
+            # ``MAX(fetched_at) FROM api_payload_snapshot`` is a 100+ s
+            # parallel seq scan on this 99 GB table even with a BRIN
+            # index, so we never run it from the default path.
             row = await connection.fetchrow(
                 """
                 SELECT
@@ -3214,7 +3219,7 @@ class LocalApiApplication:
                     (SELECT COALESCE(reltuples, 0)::bigint
                        FROM pg_class WHERE relname = 'api_request_log')
                        AS raw_requests,
-                    (SELECT MAX(fetched_at) FROM api_payload_snapshot)
+                    (SELECT MAX(latest_fetched_at) FROM api_snapshot_head)
                        AS latest_fetched_at
                 """
             )
