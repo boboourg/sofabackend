@@ -86,14 +86,19 @@ DEFAULT_EVENT_COVERAGE_SURFACES = ("event_core", "statistics", "incidents", "lin
 
 
 def _live_fanout_max_inflight_from_env(hydration_mode: str) -> int:
-    if str(hydration_mode or "").strip().lower() != "live_delta":
-        return 1
-    raw_value = os.getenv("SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT", "1")
+    # live_delta uses SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT (existing knob,
+    # default 1). Historical/regular hydration uses
+    # SOFASCORE_HYDRATE_FANOUT_MAX_INFLIGHT (also default 1 — sequential
+    # — to preserve existing behaviour unless explicitly enabled).
+    mode = str(hydration_mode or "").strip().lower()
+    env_name = "SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT" if mode == "live_delta" else "SOFASCORE_HYDRATE_FANOUT_MAX_INFLIGHT"
+    raw_value = os.getenv(env_name, "1")
     try:
         value = int(raw_value)
     except (TypeError, ValueError):
         logger.warning(
-            "Invalid SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT=%r; falling back to sequential fan-out",
+            "Invalid %s=%r; falling back to sequential fan-out",
+            env_name,
             raw_value,
         )
         return 1
