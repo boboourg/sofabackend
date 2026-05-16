@@ -501,6 +501,18 @@ class LocalApiApplication:
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_season_leaf_coverage_payload())
         if path == "/ops/live-freshness":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_live_freshness_payload())
+        if path == "/ops/backfill-progress":
+            sport = _query_str(raw_query, "sport", default="football")
+            limit_uts = _query_int(raw_query, "limit", default=20, minimum=1, maximum=200)
+            priority_max = _query_int(raw_query, "priority_max", default=10, minimum=1, maximum=99)
+            return ApiResponse(
+                status_code=HTTPStatus.OK,
+                payload=await self._fetch_ops_backfill_progress_payload(
+                    sport_slug=sport,
+                    priority_max=priority_max,
+                    limit_uts=limit_uts,
+                ),
+            )
         return ApiResponse(
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
@@ -3468,6 +3480,95 @@ class LocalApiApplication:
             ]
         }
 
+    async def _fetch_ops_backfill_progress_payload(
+        self,
+        *,
+        sport_slug: str,
+        priority_max: int,
+        limit_uts: int,
+    ) -> dict[str, Any]:
+        """Per-(UT, season) backfill progress via the v_backfill_progress
+        view. The view does the heavy join + median work in PG; this
+        handler picks the top-N UTs by priority_rank and emits a
+        compact JSON shape that ops dashboards can read.
+
+        Query params (handled in handle_ops_get):
+          - sport=football                 (default football)
+          - priority_max=10                (cap on priority_rank)
+          - limit=20                       (how many UTs to return)
+        """
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                WITH selected_uts AS (
+                    SELECT DISTINCT ut_id, ut_name, priority_rank
+                    FROM v_backfill_progress
+                    WHERE sport_slug = $1
+                      AND priority_rank <= $2
+                    ORDER BY priority_rank, ut_id
+                    LIMIT $3
+                )
+                SELECT
+                    v.ut_id,
+                    v.ut_name,
+                    v.priority_rank,
+                    v.season_id,
+                    v.year,
+                    v.season_name,
+                    v.events,
+                    v.finished,
+                    v.expected,
+                    v.pct
+                FROM v_backfill_progress v
+                JOIN selected_uts s ON s.ut_id = v.ut_id
+                WHERE v.sport_slug = $1
+                ORDER BY v.priority_rank, v.ut_id, v.season_id DESC
+                """,
+                sport_slug,
+                priority_max,
+                limit_uts,
+            )
+        finally:
+            await connection.close()
+
+        # Pivot rows into {ut_id, ut_name, priority, seasons:[...]} shape so
+        # consumers do not need to do the GROUP BY themselves.
+        by_ut: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            ut_id = int(row["ut_id"])
+            bucket = by_ut.setdefault(
+                ut_id,
+                {
+                    "ut_id": ut_id,
+                    "ut_name": str(row["ut_name"]),
+                    "priority_rank": int(row["priority_rank"]),
+                    "seasons": [],
+                },
+            )
+            bucket["seasons"].append(
+                {
+                    "season_id": int(row["season_id"]),
+                    "year": (str(row["year"]) if row["year"] is not None else None),
+                    "season_name": (
+                        str(row["season_name"]) if row["season_name"] is not None else None
+                    ),
+                    "events": int(row["events"] or 0),
+                    "finished": int(row["finished"] or 0),
+                    "expected": (
+                        int(row["expected"]) if row["expected"] is not None else None
+                    ),
+                    "pct": (int(row["pct"]) if row["pct"] is not None else None),
+                }
+            )
+
+        return {
+            "sport_slug": sport_slug,
+            "priority_max": priority_max,
+            "ut_count": len(by_ut),
+            "unique_tournaments": list(by_ut.values()),
+        }
+
     async def _connect(self):
         if self._db_pool is None:
             await self.startup()
@@ -3976,6 +4077,17 @@ def _query_int(raw_query: str, name: str, *, default: int, minimum: int, maximum
     except ValueError:
         return default
     return max(minimum, min(maximum, value))
+
+
+def _query_str(raw_query: str, name: str, *, default: str) -> str:
+    """Pull a single string param from a URL query — no validation
+    beyond strip(). Returns ``default`` when absent or empty."""
+    parsed = parse_qs(raw_query or "", keep_blank_values=True)
+    raw_value = next(iter(parsed.get(name, [])), None)
+    if raw_value is None:
+        return default
+    cleaned = str(raw_value).strip()
+    return cleaned if cleaned else default
 
 
 def _serialize_scalar(value: Any) -> Any:
