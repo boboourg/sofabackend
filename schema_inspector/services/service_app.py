@@ -647,6 +647,35 @@ class ServiceApp:
         else:
             computed_targets = fallback_targets
             target_loader = None
+        # Phase 1 (2026-05-16): per-(UT, season) cursor selector. When
+        # tournament_registry has cursors seeded (see
+        # ``backfill-cursor-bootstrap`` CLI), the planner picks pending
+        # rows in priority + UT-id order and publishes per-season jobs.
+        # When the table is empty (fresh deploy, or only-non-football
+        # sport not yet bootstrapped) it returns [] and the daemon falls
+        # back to the legacy UT-only walk via ``selector`` above. So this
+        # wiring is safe to ship even before every sport is seeded.
+        if callable(connection_factory):
+            cursor_repository = TournamentRegistryRepository()
+
+            async def _backfill_cursor_selector(*, sport_slug: str, limit: int):
+                try:
+                    async with connection_factory() as connection:
+                        return await cursor_repository.list_pending_backfill_cursors(
+                            connection, sport_slug=sport_slug, limit=limit
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "historical tournament planner: cursor selector failed, "
+                        "falling back to legacy walk: %s",
+                        exc,
+                    )
+                    return []
+
+            backfill_cursor_selector = _backfill_cursor_selector
+        else:
+            backfill_cursor_selector = None
+
         return HistoricalTournamentPlannerDaemon(
             queue=self.stream_queue,
             cursor_store=self.historical_tournament_cursor_store,
@@ -655,6 +684,7 @@ class ServiceApp:
             tournaments_per_tick=tournaments_per_tick,
             loop_interval_s=loop_interval_seconds,
             target_loader=target_loader,
+            backfill_cursor_selector=backfill_cursor_selector,
             # Task 5 (2026-05-15): live-side governor on top of stream
             # backpressure — see build_historical_planner_daemon comment.
             backpressure=CompositeBackpressure(
