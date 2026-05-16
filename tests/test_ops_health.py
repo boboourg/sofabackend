@@ -179,7 +179,12 @@ class OpsHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("coverage_stale_scopes_present", reasons)
         self.assertIn("housekeeping_dry_run_enabled", reasons)
 
-    async def test_live_drift_query_covers_legacy_and_concrete_live_snapshot_patterns(self) -> None:
+    async def test_live_drift_query_uses_partial_index_predicate(self) -> None:
+        """2026-05-16: dropped the legacy 3-branch OR predicate. The
+        single LIKE branch is enough — 100% of historical rows match it
+        and using it alone lets the planner pick the partial index
+        ``idx_aps_endpoint_live_aggregate`` instead of a 189 s parallel
+        seq scan over the 99 GB table."""
         from schema_inspector.ops.health import _fetch_drift_summary
 
         executor = _CapturingSqlExecutor()
@@ -187,9 +192,11 @@ class OpsHealthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(executor.last_query)
         normalized = " ".join(str(executor.last_query).split())
-        self.assertIn("aps.endpoint_pattern = '/api/v1/sport/{sport_slug}/events/live'", normalized)
         self.assertIn("aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'", normalized)
-        self.assertIn("aps.source_url LIKE '%/api/v1/sport/%/events/live%'", normalized)
+        # The two removed legs must NOT be there — keeping them disables
+        # the partial index and times out /ops/health.
+        self.assertNotIn("aps.endpoint_pattern = '/api/v1/sport/{sport_slug}/events/live'", normalized)
+        self.assertNotIn("aps.source_url LIKE '%/api/v1/sport/%/events/live%'", normalized)
 
     async def test_live_drift_summary_ignores_short_lag_within_discovery_window(self) -> None:
         from schema_inspector.ops.health import _fetch_drift_summary

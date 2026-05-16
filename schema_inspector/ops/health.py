@@ -607,18 +607,22 @@ async def _fetch_drift_summary(sql_executor) -> DriftSummary:
                     CASE
                         WHEN aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
                             THEN split_part(aps.endpoint_pattern, '/', 5)
-                        WHEN aps.source_url LIKE '%/api/v1/sport/%/events/live%'
-                            THEN split_part(split_part(aps.source_url, '/api/v1/sport/', 2), '/', 1)
                         ELSE NULL
                     END
                 ) AS sport_slug,
                 MAX(aps.fetched_at) AS latest_fetched_at
             FROM api_payload_snapshot AS aps
-            WHERE (
-                aps.endpoint_pattern = '/api/v1/sport/{sport_slug}/events/live'
-                OR aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
-                OR aps.source_url LIKE '%/api/v1/sport/%/events/live%'
-            )
+            -- 2026-05-16: dropped the previous 3-branch OR predicate (literal
+            -- ``'{sport_slug}'`` AND endpoint_pattern LIKE AND source_url LIKE)
+            -- because the source_url leg disqualified the partial index
+            -- ``idx_aps_endpoint_live_aggregate`` and forced a Parallel Seq
+            -- Scan over the 99 GB api_payload_snapshot (~189s on prod →
+            -- HTTP 500 on /ops/health). The same fix already landed for
+            -- fetch_live_snapshot_repair_reasons on 2026-05-15: 100% of rows
+            -- matching the legacy ORs also match this single LIKE, so the
+            -- other two predicates were redundant. With this single predicate
+            -- the planner picks the partial index, ~318 ms on prod.
+            WHERE aps.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
             GROUP BY 1
         ),
         latest_terminal_state AS (
