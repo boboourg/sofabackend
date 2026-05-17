@@ -1088,11 +1088,44 @@ class LocalApiApplication:
                 page=max(int(path_params["page"]), 0),
                 direction="last" if template.endswith("/events/last/{page}") else "next",
             )
+        if template == "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/events/round/{round_number}":
+            return await self._fetch_round_events_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+                season_id=int(path_params["season_id"]),
+                round_number=int(path_params["round_number"]),
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
             return await self._fetch_top_team_payload(route, path_params)
         return None
+
+    async def _fetch_round_events_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int,
+        round_number: int,
+    ) -> dict[str, Any]:
+        """Synthesize /unique-tournament/{ut}/season/{sid}/events/round/{N}."""
+        from .scheduled_events_synthesizer import build_payload, fetch_round_events_rows
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"events": []}
+        try:
+            rows = await fetch_round_events_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                round_number=round_number,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"events": []}
+        await connection.close()
+        return build_payload(rows)
 
     async def _fetch_team_events_payload(
         self,

@@ -636,6 +636,36 @@ class FetchSeasonEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notstarted", query)
 
 
+class FetchRoundEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_round_events_rows powers
+    /unique-tournament/{ut_id}/season/{sid}/events/round/{round_number}.
+    Filter: UT + season + event_round_info.round_number = $3."""
+
+    async def test_filter_passes_ut_season_and_round(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_round_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        await fetch_round_events_rows(
+            _StubConn(),
+            unique_tournament_id=17,
+            season_id=76986,
+            round_number=10,
+        )
+        self.assertEqual(captured["args"], (17, 76986, 10))
+        query = str(captured["query"])
+        self.assertIn("unique_tournament_id = $1", query)
+        self.assertIn("season_id = $2", query)
+        # round_number is on event_round_info table, joined via eri alias.
+        self.assertIn("round_number = $3", query)
+
+
 class FetchUtScheduledEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_ut_scheduled_events_rows powers
     /unique-tournament/{ut_id}/scheduled-events/{date} — date-bounded

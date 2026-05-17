@@ -265,6 +265,21 @@ LIMIT $4
 """
 )
 
+# Round events — events in a specific round of a unique tournament season.
+# Round number lives on event_round_info (eri alias is in the shared JOIN
+# block), so we filter on eri.round_number = $3.
+_FETCH_QUERY_ROUND_EVENTS = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.unique_tournament_id = $1
+  AND e.season_id = $2
+  AND eri.round_number = $3
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp, e.id
+"""
+)
+
+
 # Unique-tournament scheduled events — same as sport-wide scheduled, but
 # filtered to a single unique_tournament_id (Sofascore's
 # /unique-tournament/{ut_id}/scheduled-events/{date} surface).
@@ -425,6 +440,22 @@ async def fetch_season_events_rows(
     limit = int(page_size) + 1
     records = await connection.fetch(
         query, unique_tournament_id, season_id, offset, limit
+    )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_round_events_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+    round_number: int,
+) -> list[dict[str, Any]]:
+    """Powers /unique-tournament/{ut_id}/season/{sid}/events/round/{round_number}.
+    Filter: UT + season + event_round_info.round_number.
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_ROUND_EVENTS, unique_tournament_id, season_id, round_number
     )
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
