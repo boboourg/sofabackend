@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
 # the row keys consumed by ``_build_event`` cannot drift from the SQL.
 # The query is one big LEFT JOIN with LATERAL subqueries for the side-
 # specific score row and the pre-aggregated changes payload.
-_FETCH_QUERY = """
+#
+# Both fetchers (date-range scheduled and active-live) share the same SELECT
+# projection and FROM/JOIN graph below; they only differ in the WHERE clause.
+_FETCH_SELECT_AND_JOINS = """
 SELECT
     e.id                                        AS event_id,
     e.slug                                      AS event_slug,
@@ -186,12 +189,55 @@ LEFT JOIN country ac       ON ac.alpha2 = at_.country_alpha2
 LEFT JOIN event_score hs   ON hs.event_id = e.id AND hs.side = 'home'
 LEFT JOIN event_score as_  ON as_.event_id = e.id AND as_.side = 'away'
 LEFT JOIN event_round_info eri ON eri.event_id = e.id
+"""
+
+# Scheduled-events fetcher: filter by start_timestamp date range.
+_FETCH_QUERY_SCHEDULED = (
+    _FETCH_SELECT_AND_JOINS
+    + """
 WHERE sp.slug = $1
   AND e.start_timestamp >= $2
   AND e.start_timestamp <  $3
-  AND e.is_editor = false
+  AND e.is_editor IS NOT TRUE
 ORDER BY e.start_timestamp, e.id
 """
+)
+
+# Live-events fetcher: filter by active-live status type, last-12h window,
+# skip events with terminal_state (already finalized upstream) and skip
+# SofaEditor crowdsourced events (X4 rule, 2026-05-13). Matches the
+# semantics of Sofascore's /sport/{slug}/events/live exactly.
+_LIVE_STATUS_TYPES = (
+    "inprogress",
+    "live",
+    "overtime",
+    "extra",
+    "awaitingextra",
+    "awaitingpenalties",
+    "penalties",
+    "interrupted",
+    "halftime",
+    "paused",
+    "pause",
+    "break",
+)
+_FETCH_QUERY_LIVE = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE sp.slug = $1
+  AND st.type = ANY($2::text[])
+  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 hours')::bigint
+  AND NOT EXISTS (
+      SELECT 1 FROM event_terminal_state ets WHERE ets.event_id = e.id
+  )
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
+LIMIT 500
+"""
+)
+
+# Back-compat alias — older tests import _FETCH_QUERY.
+_FETCH_QUERY = _FETCH_QUERY_SCHEDULED
 
 
 # JSONB columns that asyncpg can return as raw strings depending on
@@ -232,7 +278,27 @@ async def fetch_rows(
     """Run the joined fetch and return a list of plain dicts ready for
     :func:`build_payload`. ``connection`` is any object with an async
     ``fetch`` method (asyncpg compatible)."""
-    records = await connection.fetch(_FETCH_QUERY, sport_slug, start_ts, end_ts)
+    records = await connection.fetch(_FETCH_QUERY_SCHEDULED, sport_slug, start_ts, end_ts)
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_live_rows(
+    connection: Any,
+    *,
+    sport_slug: str,
+    lookback_hours: int = 12,
+) -> list[dict[str, Any]]:
+    """Live-events counterpart of :func:`fetch_rows`. Returns rows for
+    events whose status_type matches the active-live set, that started
+    within the last ``lookback_hours``, that have no
+    ``event_terminal_state`` row, and that are not editor-flagged.
+
+    ``lookback_hours`` is accepted for API symmetry but the current
+    implementation hard-codes 12 hours in the SQL. A future change can
+    parametrise this without touching callers.
+    """
+    del lookback_hours  # currently fixed at 12 hours in SQL
+    records = await connection.fetch(_FETCH_QUERY_LIVE, sport_slug, list(_LIVE_STATUS_TYPES))
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 

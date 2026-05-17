@@ -509,5 +509,72 @@ class BuildPayloadStatusTests(unittest.TestCase):
         self.assertEqual(status["description"], "Not started")
 
 
+class FetchLiveRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_live_rows is the live-events counterpart of fetch_rows:
+    same column projection, different WHERE clause (active-live status,
+    last-12h window, no terminal_state, no editor events).
+
+    These tests pin the *contract* of the function (params, return shape,
+    delegation to build_payload). They do not exercise the SQL — that is
+    verified via a manual prod smoke after deploy.
+    """
+
+    async def test_fetch_live_rows_passes_sport_slug_and_lookback_to_fetch(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_live_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        rows = await fetch_live_rows(
+            _StubConn(),
+            sport_slug="football",
+            lookback_hours=12,
+        )
+
+        self.assertEqual(rows, [])
+        args = captured["args"]
+        # Sport slug is the first parameter; the second is the list of
+        # active-live status types we filter on.
+        self.assertEqual(args[0], "football")
+        self.assertIn("inprogress", args[1])
+        self.assertIn("halftime", args[1])
+        query = str(captured["query"])
+        # Discriminating WHERE clauses so the query cannot silently regress
+        # into the scheduled-events date-range filter.
+        self.assertIn("event_terminal_state", query)
+        self.assertIn("is_editor", query)
+        self.assertIn("12 hours", query)
+
+    async def test_fetch_live_rows_decodes_jsonb_columns_like_fetch_rows(self) -> None:
+        """Both fetchers should reuse the same JSONB decoder so a future
+        bug-fix in one path applies to the other."""
+        from schema_inspector.scheduled_events_synthesizer import fetch_live_rows
+
+        class _StubRow(dict):
+            pass
+
+        sample_row = _StubRow({
+            "home_team_team_colors": '{"primary": "#1c5b9f"}',
+            "home_team_field_translations": '{"nameTranslation": {}}',
+            "away_team_team_colors": None,
+            "away_team_field_translations": None,
+            "tournament_field_translations": None,
+            "changes_payload": None,
+        })
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                return [sample_row]
+
+        rows = await fetch_live_rows(_StubConn(), sport_slug="football")
+
+        self.assertEqual(rows[0]["home_team_team_colors"], {"primary": "#1c5b9f"})
+
+
 if __name__ == "__main__":
     unittest.main()

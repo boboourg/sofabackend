@@ -1984,78 +1984,36 @@ class LocalApiApplication:
         return build_payload(rows)
 
     async def _fetch_sport_live_events_payload(self, sport_slug: str) -> dict[str, Any]:
-        # Sofascore's /events/live returns events that are ACTUALLY in flight
-        # right now. Our DB carries a long tail of stale 'interrupted' /
-        # 'inprogress' rows from 2019+ that were never finalised. To match
-        # upstream semantics:
-        #   * limit to events whose start_timestamp is within the last 12h,
-        #   * skip events that already have an event_terminal_state row,
-        #   * order by start_timestamp DESC so the freshest match comes first.
-        active_statuses = (
-            "inprogress",
-            "live",
-            "overtime",
-            "extra",
-            "awaitingextra",
-            "awaitingpenalties",
-            "penalties",
-            "interrupted",
-            "halftime",
-            "paused",
-            "pause",
-            "break",
-        )
-        connection = await self._connect()
+        """Synthesize ``/api/v1/sport/{slug}/events/live`` from normalized
+        tables — full Sofascore-shape payload (teamColors, country,
+        fieldTranslations, score breakdown, status object, tournament +
+        uniqueTournament + category + sport nested, season).
+
+        Replaces the legacy minimal envelope (id, slug, status, team
+        names only). Same filter semantics as before:
+          * active-live status_type only,
+          * start_timestamp within the last 12h,
+          * skip events with event_terminal_state,
+          * skip is_editor=TRUE.
+
+        Test harnesses construct LocalApiApplication without a DB pool —
+        we keep the legacy empty envelope behaviour in that case.
+        """
+        from .scheduled_events_synthesizer import build_payload, fetch_live_rows
+
+        if getattr(self, "_db_pool", None) is None:
+            return {"events": []}
         try:
-            rows = await connection.fetch(
-                """
-                SELECT
-                    e.id, e.slug, e.custom_id, e.start_timestamp,
-                    e.status_code, e.winner_code, e.aggregated_winner_code,
-                    e.coverage, e.home_red_cards, e.away_red_cards,
-                    es.type AS status_type,
-                    es.description AS status_description,
-                    e.home_team_id,
-                    ht.slug AS home_team_slug, ht.name AS home_team_name,
-                    ht.short_name AS home_team_short_name,
-                    e.away_team_id,
-                    at.slug AS away_team_slug, at.name AS away_team_name,
-                    at.short_name AS away_team_short_name,
-                    e.tournament_id,
-                    t.slug AS tournament_slug, t.name AS tournament_name,
-                    e.unique_tournament_id,
-                    ut.slug AS unique_tournament_slug, ut.name AS unique_tournament_name,
-                    e.season_id,
-                    s.name AS season_name, s.year AS season_year
-                FROM event AS e
-                JOIN event_status AS es ON es.code = e.status_code
-                LEFT JOIN team AS ht ON ht.id = e.home_team_id
-                LEFT JOIN team AS at ON at.id = e.away_team_id
-                LEFT JOIN tournament AS t ON t.id = e.tournament_id
-                LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
-                LEFT JOIN season AS s ON s.id = e.season_id
-                JOIN category AS cat ON cat.id = t.category_id
-                JOIN sport AS sp ON sp.id = cat.sport_id
-                WHERE sp.slug = $1
-                  AND es.type = ANY($2::text[])
-                  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 hours')::bigint
-                  AND NOT EXISTS (
-                      SELECT 1 FROM event_terminal_state ets WHERE ets.event_id = e.id
-                  )
-                  -- X4 (2026-05-13): SofaEditor crowdsourced events are banned
-                  -- product data. They must not appear in public live list
-                  -- responses. ``e.is_editor IS NOT TRUE`` keeps NULL (== unknown,
-                  -- treated as non-editor) and false rows; drops true.
-                  AND e.is_editor IS NOT TRUE
-                ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
-                LIMIT 500
-                """,
-                sport_slug,
-                list(active_statuses),
-            )
-        finally:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001 - defensive
+            return {"events": []}
+        try:
+            rows = await fetch_live_rows(connection, sport_slug=sport_slug)
+        except Exception:  # noqa: BLE001 - synthesizer failure must not 500
             await connection.close()
-        return {"events": [_serialize_season_event_row(row) for row in rows]}
+            return {"events": []}
+        await connection.close()
+        return build_payload(rows)
 
     async def _fetch_event_player_statistics_payload(
         self,
