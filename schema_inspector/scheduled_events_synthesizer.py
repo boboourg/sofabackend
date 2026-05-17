@@ -217,6 +217,14 @@ ORDER BY e.start_timestamp, e.id
 """
 )
 
+# Single-event fetcher: pin by event.id. Returns one row or None.
+_FETCH_QUERY_SINGLE = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.id = $1
+"""
+)
+
 # Live-events fetcher: filter by active-live status type, last-12h window,
 # skip events with terminal_state (already finalized upstream) and skip
 # SofaEditor crowdsourced events (X4 rule, 2026-05-13). Matches the
@@ -296,6 +304,20 @@ async def fetch_rows(
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 
+async def fetch_single_event_row(
+    connection: Any,
+    *,
+    event_id: int,
+) -> dict[str, Any] | None:
+    """Fetch one event by id with the same column projection as the
+    list fetchers. Returns None if no event matches.
+    """
+    record = await connection.fetchrow(_FETCH_QUERY_SINGLE, event_id)
+    if record is None:
+        return None
+    return _decode_jsonb_fields(dict(record))
+
+
 async def fetch_live_rows(
     connection: Any,
     *,
@@ -319,6 +341,13 @@ async def fetch_live_rows(
 def build_payload(rows: Sequence[Any]) -> dict[str, Any]:
     """Assemble the ``{"events": [...]}`` envelope from joined event rows."""
     return {"events": [_build_event(row) for row in rows]}
+
+
+def build_single_event_payload(row: Any) -> dict[str, Any]:
+    """Single-event envelope for ``/api/v1/event/{event_id}`` —
+    Sofascore wraps the event in ``{"event": ...}`` not ``{"events": [...]}``.
+    """
+    return {"event": _build_event(row)}
 
 
 def _build_event(row: Any) -> dict[str, Any]:

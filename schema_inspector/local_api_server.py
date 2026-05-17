@@ -2993,6 +2993,37 @@ class LocalApiApplication:
                     rewrapped = _wrap_stripped_entity_payload(decoded, "event")
                     return _apply_terminal_status_to_event_payload(rewrapped, terminal_status_raw)
 
+            # Full Sofascore-shape synthesizer over normalized tables —
+            # joins team / tournament / category / sport / season / score /
+            # round_info / change_item and assembles the same envelope shape
+            # we already use for /scheduled-events and /events/live. This
+            # is the synthesizer pattern's last waterfall step: when no
+            # raw snapshot is captured, we still answer with a complete
+            # payload built from our normalized data.
+            from .scheduled_events_synthesizer import (
+                build_single_event_payload,
+                fetch_single_event_row,
+            )
+
+            synth_row = await fetch_single_event_row(connection, event_id=event_id)
+            # Defensive: the synthesizer expects fully-joined keys
+            # (event_id, event_slug, ...). If the connection returned a
+            # legacy-shape row (e.g. from a test fake that matched a
+            # broader "FROM event" pattern), fall through to the
+            # minimal-envelope path rather than 500.
+            if synth_row is not None and "event_id" in synth_row:
+                try:
+                    return _apply_terminal_status_to_event_payload(
+                        build_single_event_payload(synth_row),
+                        terminal_status_raw,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    # Row was joined but missing optional sub-objects —
+                    # do not crash the request, fall back to minimal.
+                    pass
+
+            # Fallback to the legacy minimal envelope if the JOIN missed
+            # rows (e.g. team / tournament FK gaps for very old events).
             normalized_row = await connection.fetchrow(
                 """
                 SELECT id, slug, tournament_id, unique_tournament_id, season_id,

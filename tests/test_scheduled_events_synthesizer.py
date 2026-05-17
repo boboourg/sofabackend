@@ -509,6 +509,72 @@ class BuildPayloadStatusTests(unittest.TestCase):
         self.assertEqual(status["description"], "Not started")
 
 
+class BuildSingleEventPayloadTests(unittest.TestCase):
+    """build_single_event_payload wraps one event in {"event": {...}}
+    envelope — the Sofascore shape for /api/v1/event/{event_id}."""
+
+    def test_single_event_envelope_uses_event_key_not_events(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import build_single_event_payload
+
+        result = build_single_event_payload(_minimal_row())
+
+        self.assertIn("event", result)
+        self.assertNotIn("events", result)
+        self.assertEqual(result["event"]["id"], 13981512)
+
+    def test_single_event_includes_full_team_and_tournament_shape(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import build_single_event_payload
+
+        result = build_single_event_payload(_minimal_row())
+
+        event = result["event"]
+        # All the nested objects we tested for the list endpoint should
+        # also appear in the single-event envelope — same _build_event.
+        self.assertEqual(event["homeTeam"]["country"]["alpha2"], "IT")
+        self.assertEqual(event["tournament"]["uniqueTournament"]["id"], 23)
+        self.assertEqual(event["status"]["type"], "finished")
+
+
+class FetchSingleEventRowContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_single_event_row pins one event by id and returns the same
+    column shape as the list fetchers (so build_event works unchanged)."""
+
+    async def test_fetch_single_event_row_passes_event_id_as_first_param(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_single_event_row
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetchrow(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return None
+
+        result = await fetch_single_event_row(_StubConn(), event_id=14023956)
+
+        self.assertIsNone(result)
+        self.assertEqual(captured["args"], (14023956,))
+        self.assertIn("WHERE e.id = $1", str(captured["query"]))
+
+    async def test_fetch_single_event_row_decodes_jsonb(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_single_event_row
+
+        class _StubConn:
+            async def fetchrow(self, query: str, *args: object):
+                return {
+                    "home_team_team_colors": '{"primary": "#1c5b9f"}',
+                    "home_team_field_translations": None,
+                    "away_team_team_colors": None,
+                    "away_team_field_translations": None,
+                    "tournament_field_translations": None,
+                    "changes_payload": None,
+                }
+
+        result = await fetch_single_event_row(_StubConn(), event_id=1)
+
+        self.assertEqual(result["home_team_team_colors"], {"primary": "#1c5b9f"})
+
+
 class FetchLiveRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_live_rows is the live-events counterpart of fetch_rows:
     same column projection, different WHERE clause (active-live status,
