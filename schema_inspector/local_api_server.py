@@ -408,6 +408,8 @@ class LocalApiApplication:
         if payload is None:
             payload = await self._fetch_normalized_payload(route, path, raw_query, path_params)
         if payload is None:
+            payload = await self._fetch_synthesized_scheduled_events_payload(route, path_params)
+        if payload is None:
             empty_payload = _empty_payload_for_missing_route(route)
             if empty_payload is not None:
                 return ApiResponse(status_code=HTTPStatus.OK, payload=empty_payload)
@@ -1918,6 +1920,68 @@ class LocalApiApplication:
             elif side == "away":
                 payload["awayTeam"] = side_payload
         return payload or None
+
+    async def _fetch_synthesized_scheduled_events_payload(
+        self, route: RouteSpec, path_params: dict[str, str]
+    ) -> dict[str, Any] | None:
+        """Synthesize ``/api/v1/sport/{slug}/scheduled-events/{date}`` from
+        normalized tables when no raw snapshot is available for that
+        date — covers future fixtures already ingested via the historical
+        tournament backfill (which fetches the whole season fixture list).
+
+        Returns ``None`` when the route is not a scheduled-events path so
+        the caller falls through to the normal NOT_FOUND / empty handling.
+        """
+        path_template = route.endpoint.path_template
+        if not (
+            route.endpoint.envelope_key == "events"
+            and path_template.endswith("/scheduled-events/{date}")
+        ):
+            return None
+        date_str = path_params.get("date")
+        if not date_str:
+            return None
+        # Extract sport from the path_template — Sofascore endpoints encode
+        # the sport slug into the path itself (e.g. /sport/football/scheduled-...).
+        sport_slug = _extract_sport_slug_from_path_template(path_template)
+        if not sport_slug:
+            return None
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+        start_ts = int(day_start.timestamp())
+        end_ts = int((day_start + timedelta(days=1)).timestamp())
+
+        from .scheduled_events_synthesizer import build_payload, fetch_rows
+
+        # Test harnesses construct LocalApiApplication without a DB pool —
+        # silently fall through so the empty-envelope fallback fires the
+        # same way it used to.
+        if getattr(self, "_db_pool", None) is None:
+            return None
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001 — defensive, never crash request
+            return None
+        try:
+            rows = await fetch_rows(
+                connection,
+                sport_slug=sport_slug,
+                start_ts=start_ts,
+                end_ts=end_ts,
+            )
+        except Exception:  # noqa: BLE001 — synthesizer failure must not 500
+            await connection.close()
+            return None
+        await connection.close()
+        if not rows:
+            # No events for this date — return None so the normal empty-
+            # envelope fallback kicks in and the caller sees {"events": []}.
+            return None
+        return build_payload(rows)
 
     async def _fetch_sport_live_events_payload(self, sport_slug: str) -> dict[str, Any]:
         # Sofascore's /events/live returns events that are ACTUALLY in flight
@@ -4166,6 +4230,17 @@ def _response_ttl_seconds(route: RouteSpec | None, payload: Any) -> float:
     if path_template.startswith("/api/v1/event/"):
         return 2.0
     return 30.0
+
+
+_SPORT_PATH_TEMPLATE_PATTERN = re.compile(r"^/api/v1/sport/([^/]+)/")
+
+
+def _extract_sport_slug_from_path_template(path_template: str) -> str | None:
+    """Extract the sport slug from a path template like
+    ``/api/v1/sport/football/scheduled-events/{date}``. Returns None when
+    the template does not start with the expected sport prefix."""
+    match = _SPORT_PATH_TEMPLATE_PATTERN.match(path_template)
+    return match.group(1) if match else None
 
 
 def _empty_payload_for_missing_route(route: RouteSpec) -> dict[str, Any] | None:
