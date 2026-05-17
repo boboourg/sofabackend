@@ -62,6 +62,7 @@ LIVE_HOT_ZSET_KEY = "zset:live:hot"
 TIER_1_QUARANTINE_KEY_PATTERN = "live:tier1_quarantine:*"
 
 _ENV_OLDEST_HOT_AGE_MAX = "SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS"
+_ENV_OLDEST_HOT_AGE_WARN = "SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_WARN_SECONDS"
 _ENV_TIER_1_QUARANTINED_MAX = "SOFASCORE_BACKFILL_GOVERNOR_TIER_1_QUARANTINED_MAX"
 
 
@@ -71,12 +72,34 @@ class BackfillGovernorThresholds:
 
     Defaults mirror the live-freshness SLO CRIT thresholds in
     docs/N1_MONITORING_PLAN.md so a single bad signal blocks
-    backfill without any additional tuning. Both fields are
+    backfill without any additional tuning. All fields are
     env-overridable through :meth:`from_env`.
+
+    ``oldest_hot_score_age_warn_seconds`` defines the start of the
+    gradient throttle zone — between warn and max we deterministically
+    skip a fraction of planner ticks proportional to how deep into the
+    zone we are. Above max we full-pause (binary CRIT behaviour, kept
+    for backward compatibility). When left unset (the sentinel ``-1``),
+    warn defaults to half of max.
     """
 
     oldest_hot_score_age_max_seconds: int = 1800
     tier_1_quarantined_max_events: int = 10
+    oldest_hot_score_age_warn_seconds: int = -1  # sentinel: derive from max
+
+    def __post_init__(self) -> None:
+        if self.oldest_hot_score_age_warn_seconds < 0:
+            derived = max(1, self.oldest_hot_score_age_max_seconds // 2)
+            object.__setattr__(self, "oldest_hot_score_age_warn_seconds", derived)
+        # Clamp warn to (0, max) range so the math in BackfillGovernor.
+        # _compute_blocking_reason never divides by zero or produces a
+        # negative throttle fraction.
+        if self.oldest_hot_score_age_warn_seconds >= self.oldest_hot_score_age_max_seconds:
+            object.__setattr__(
+                self,
+                "oldest_hot_score_age_warn_seconds",
+                max(1, self.oldest_hot_score_age_max_seconds - 1),
+            )
 
     @classmethod
     def from_env(
@@ -118,6 +141,19 @@ class BackfillGovernorThresholds:
                 return int(default)
             return value
 
+        # Warn threshold: -1 sentinel triggers __post_init__ to derive
+        # warn = max // 2. Explicit env override wins.
+        warn_raw = resolved.get(_ENV_OLDEST_HOT_AGE_WARN)
+        if warn_raw is None or warn_raw == "":
+            warn_value = -1
+        else:
+            try:
+                warn_value = int(warn_raw)
+                if warn_value <= 0:
+                    warn_value = -1
+            except (TypeError, ValueError):
+                warn_value = -1
+
         return cls(
             oldest_hot_score_age_max_seconds=_parse_positive_int(
                 _ENV_OLDEST_HOT_AGE_MAX, default_age
@@ -125,6 +161,7 @@ class BackfillGovernorThresholds:
             tier_1_quarantined_max_events=_parse_positive_int(
                 _ENV_TIER_1_QUARANTINED_MAX, default_quarantine
             ),
+            oldest_hot_score_age_warn_seconds=warn_value,
         )
 
 
@@ -153,6 +190,13 @@ class BackfillGovernor:
         # not hammer Redis once per second. Refresh every ~5 seconds.
         self._cached_reason: str | None = None
         self._cached_at: float = -1.0
+        # Gradient-throttle accumulator: every call in the WARN zone
+        # adds the current throttle fraction; when the accumulator
+        # crosses 1.0 we deliberately skip one tick and subtract 1.0.
+        # This converts a fractional throttle (e.g. 0.3 = 30%) into a
+        # deterministic skip pattern (~every third call returns a
+        # "throttled" reason).
+        self._throttle_accumulator: float = 0.0
 
     def blocking_reason(self) -> str | None:
         """Return a human-readable block reason or None when OK."""
@@ -168,15 +212,61 @@ class BackfillGovernor:
     def _compute_blocking_reason(self) -> str | None:
         age = self._fetch_oldest_hot_score_age_seconds()
         if age is not None and age > self.thresholds.oldest_hot_score_age_max_seconds:
+            # CRIT — full pause. Reset throttle accumulator so we don't
+            # carry partial-throttle state into the recovery window once
+            # the age drops back below max.
+            self._throttle_accumulator = 0.0
             return (
                 f"oldest_hot_score_age={age}s>"
                 f"{self.thresholds.oldest_hot_score_age_max_seconds}s"
             )
+        # WARN zone: deterministic fractional throttle proportional to
+        # how deep the age is between warn and max thresholds.
+        if age is not None:
+            throttle_reason = self._maybe_throttle(age)
+            if throttle_reason is not None:
+                return throttle_reason
         quarantined = self._fetch_tier_1_quarantined_count()
         if quarantined is not None and quarantined > self.thresholds.tier_1_quarantined_max_events:
             return (
                 f"tier_1_quarantined_events={quarantined}>"
                 f"{self.thresholds.tier_1_quarantined_max_events}"
+            )
+        return None
+
+    def _maybe_throttle(self, age: int) -> str | None:
+        """Compute fractional throttle for a WARN-zone age.
+
+        Returns a "throttled" reason string when this call should skip
+        the planner tick, or None to let the tick proceed.
+
+        Math: fraction = (age - warn) / (max - warn), bounded to [0, 1).
+        We accumulate the fraction per call; on overflow (>=1.0) we
+        emit one skip and reduce the accumulator by 1.0. This converts
+        a continuous fraction into a deterministic skip rate.
+        """
+
+        warn = self.thresholds.oldest_hot_score_age_warn_seconds
+        crit = self.thresholds.oldest_hot_score_age_max_seconds
+        if age <= warn:
+            # Healthy — keep the accumulator decaying so a sudden bump
+            # into the WARN zone starts fresh rather than firing
+            # immediately.
+            self._throttle_accumulator = 0.0
+            return None
+        zone_width = max(1, crit - warn)
+        fraction = (age - warn) / zone_width
+        # Clamp to (0, 1) — CRIT path already handled age > crit.
+        if fraction <= 0.0:
+            return None
+        if fraction >= 1.0:
+            fraction = 0.999
+        self._throttle_accumulator += fraction
+        if self._throttle_accumulator >= 1.0:
+            self._throttle_accumulator -= 1.0
+            return (
+                f"throttled (oldest_hot_score_age={age}s, "
+                f"fraction={fraction:.2f}, warn={warn}s, max={crit}s)"
             )
         return None
 

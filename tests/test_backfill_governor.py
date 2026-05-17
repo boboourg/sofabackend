@@ -182,6 +182,149 @@ class BackfillGovernorTests(unittest.TestCase):
         self.assertIsNotNone(third)
 
 
+class BackfillGovernorGradientTests(unittest.TestCase):
+    """Gradient (soft) throttle in the WARN zone between half-threshold and
+    the CRIT threshold.
+
+    Current binary behaviour (block above 1800s, no-op below) creates a
+    cliff: one slightly-old event flips the planner from full speed to
+    full pause and historical lag never drains. With gradient, the
+    planner gets a smooth ramp:
+
+      age <= warn       (default warn = max/2 = 900s)  : full speed
+      warn < age <= max (900s..1800s)                  : skip a deterministic
+                                                          fraction of ticks
+                                                          proportional to
+                                                          (age - warn) / (max - warn)
+      age > max         (>1800s)                       : full pause (existing)
+
+    Throttle is communicated via the same ``blocking_reason()`` channel —
+    planners that already pause on any non-None reason will Just Work:
+    they skip the throttled tick exactly the same way they skip a CRIT
+    tick. The only difference is that the next call after a soft-skip
+    has the chance to come back as None and let the tick proceed.
+    """
+
+    def setUp(self) -> None:
+        self.now_ms = 1_700_000_000_000
+        self._real_time = time.time
+        time.time = lambda: self.now_ms / 1000.0  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        time.time = self._real_time  # type: ignore[assignment]
+
+    def _governor(
+        self,
+        backend,
+        *,
+        hot_age_max=1800,
+        hot_age_warn=None,
+        quarantined_max=10,
+    ):
+        kwargs = {
+            "oldest_hot_score_age_max_seconds": hot_age_max,
+            "tier_1_quarantined_max_events": quarantined_max,
+        }
+        if hot_age_warn is not None:
+            kwargs["oldest_hot_score_age_warn_seconds"] = hot_age_warn
+        return BackfillGovernor(
+            redis_backend=backend,
+            thresholds=BackfillGovernorThresholds(**kwargs),
+            cache_ttl_seconds=0.0,
+        )
+
+    def test_no_throttle_when_age_below_warn(self) -> None:
+        backend = _StubBackend()
+        # age = 500s, max=1800, warn defaults to 900 → below warn → no-op
+        backend.hot_zset = [("event-1", float(self.now_ms - 500_000))]
+        governor = self._governor(backend)
+        for _ in range(10):
+            self.assertIsNone(governor.blocking_reason())
+
+    def test_full_pause_above_max_unchanged_behaviour(self) -> None:
+        backend = _StubBackend()
+        backend.hot_zset = [("event-1", float(self.now_ms - 2_000_000))]
+        governor = self._governor(backend)
+        for _ in range(5):
+            reason = governor.blocking_reason()
+            self.assertIsNotNone(reason)
+            self.assertIn("oldest_hot_score_age=", reason or "")
+            self.assertIn(">1800s", reason or "")
+
+    def test_default_warn_is_half_of_max(self) -> None:
+        thresholds = BackfillGovernorThresholds(oldest_hot_score_age_max_seconds=1800)
+        self.assertEqual(thresholds.oldest_hot_score_age_warn_seconds, 900)
+
+    def test_partial_throttle_in_warn_zone_skips_half_at_midpoint(self) -> None:
+        backend = _StubBackend()
+        # Midpoint between warn(900) and max(1800) → 1350s.
+        # Fraction = (1350 - 900) / (1800 - 900) = 0.5 → ~50% ticks skipped.
+        backend.hot_zset = [("event-1", float(self.now_ms - 1_350_000))]
+        governor = self._governor(backend)
+        skipped = 0
+        total = 100
+        for _ in range(total):
+            if governor.blocking_reason() is not None:
+                skipped += 1
+        # Allow some leeway for the deterministic counter — anywhere
+        # close to 50% means the throttle is at the right magnitude.
+        self.assertGreaterEqual(skipped, 40)
+        self.assertLessEqual(skipped, 60)
+
+    def test_partial_throttle_skips_few_near_warn(self) -> None:
+        backend = _StubBackend()
+        # age=1000s → fraction = (1000 - 900) / 900 = ~0.11 → ~11% skips
+        backend.hot_zset = [("event-1", float(self.now_ms - 1_000_000))]
+        governor = self._governor(backend)
+        skipped = 0
+        total = 100
+        for _ in range(total):
+            if governor.blocking_reason() is not None:
+                skipped += 1
+        self.assertGreaterEqual(skipped, 5)
+        self.assertLessEqual(skipped, 20)
+
+    def test_partial_throttle_skips_most_near_max(self) -> None:
+        backend = _StubBackend()
+        # age=1750s → fraction = (1750 - 900) / 900 = ~0.944 → ~94% skips
+        backend.hot_zset = [("event-1", float(self.now_ms - 1_750_000))]
+        governor = self._governor(backend)
+        skipped = 0
+        total = 100
+        for _ in range(total):
+            if governor.blocking_reason() is not None:
+                skipped += 1
+        self.assertGreaterEqual(skipped, 88)
+
+    def test_throttle_reason_label(self) -> None:
+        """Throttled-tick reason should clearly identify itself."""
+        backend = _StubBackend()
+        backend.hot_zset = [("event-1", float(self.now_ms - 1_350_000))]
+        governor = self._governor(backend)
+        # Run until we get a throttled reason (within 5 tries at midpoint).
+        reasons: list[str] = []
+        for _ in range(10):
+            r = governor.blocking_reason()
+            if r is not None:
+                reasons.append(r)
+        self.assertTrue(reasons, "expected at least one throttled tick at midpoint")
+        first = reasons[0]
+        self.assertIn("throttle", first.lower())
+        # Reason should NOT use the binary > comparator (that is the
+        # CRIT/full-pause format).
+        self.assertNotIn(">1800s", first)
+
+    def test_env_overrides_warn_threshold(self) -> None:
+        thresholds = BackfillGovernorThresholds.from_env(
+            env={
+                "SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_MAX_SECONDS": "1800",
+                "SOFASCORE_BACKFILL_GOVERNOR_OLDEST_HOT_AGE_WARN_SECONDS": "600",
+            }
+        )
+        self.assertEqual(thresholds.oldest_hot_score_age_max_seconds, 1800)
+        self.assertEqual(thresholds.oldest_hot_score_age_warn_seconds, 600)
+
+
 class CompositeBackpressureTests(unittest.TestCase):
     def test_returns_none_when_all_checks_clear(self) -> None:
         class _A:
