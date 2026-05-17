@@ -162,13 +162,21 @@ SELECT
     eri.slug               AS round_slug,
     eri.name               AS round_name,
     eri.cup_round_type     AS round_cup_round_type,
-    -- time: event_status_time is structured by period prefix and does not
-    -- carry the Sofascore raw payload's injuryTime/currentPeriodStartTimestamp
-    -- fields. Return NULL placeholders so the synthesizer omits the block.
-    -- A future enhancement could pull these from the latest hydrate snapshot.
-    NULL::int              AS time_injury_time_1,
-    NULL::int              AS time_injury_time_2,
-    NULL::bigint           AS time_current_period_start_timestamp,
+    -- time: pulled from event_time which the bulk live-snapshot parser
+    -- normalizes from the upstream payload's ``time`` object. Carries
+    -- injuryTime1/2, currentPeriodStartTimestamp, initial/max/extra plus
+    -- overtime/period length metadata.
+    et.injury_time1                    AS time_injury_time_1,
+    et.injury_time2                    AS time_injury_time_2,
+    et.current_period_start_timestamp  AS time_current_period_start_timestamp,
+    et.initial                         AS time_initial,
+    et.max                             AS time_max,
+    et.extra                           AS time_extra,
+    et.overtime_length                 AS time_overtime_length,
+    et.period_length                   AS time_period_length,
+    et.total_period_count              AS time_total_period_count,
+    et.injury_time3                    AS time_injury_time_3,
+    et.injury_time4                    AS time_injury_time_4,
     -- changes: aggregate the LATEST changeTimestamp's items from
     -- event_change_item into the Sofascore-shape {changes:[...],
     -- changeTimestamp: N}. Pkey (event_id, ordinal) keeps the seek
@@ -190,6 +198,7 @@ LEFT JOIN country ac       ON ac.alpha2 = at_.country_alpha2
 LEFT JOIN event_score hs   ON hs.event_id = e.id AND hs.side = 'home'
 LEFT JOIN event_score as_  ON as_.event_id = e.id AND as_.side = 'away'
 LEFT JOIN event_round_info eri ON eri.event_id = e.id
+LEFT JOIN event_time et ON et.event_id = e.id
 LEFT JOIN LATERAL (
     SELECT jsonb_build_object(
         'changes', array_agg(change_value ORDER BY ordinal),
@@ -425,11 +434,26 @@ def _build_round_info(row: Any) -> dict[str, Any] | None:
 
 
 def _build_time(row: Any) -> dict[str, Any] | None:
-    """Return time block (injuryTime, currentPeriodStartTimestamp) or None."""
+    """Return time block matching the Sofascore ``time`` envelope.
+
+    Maps event_time columns (normalized by the bulk live-snapshot parser
+    from upstream's ``time`` object) onto the Sofascore camelCase shape.
+    Returns None if every field is NULL so the synthesizer can omit the
+    block entirely (Sofascore convention for not-started / no-time
+    events).
+    """
     fields = [
-        ("injuryTime1", row["time_injury_time_1"]),
-        ("injuryTime2", row["time_injury_time_2"]),
-        ("currentPeriodStartTimestamp", row["time_current_period_start_timestamp"]),
+        ("injuryTime1", row.get("time_injury_time_1")),
+        ("injuryTime2", row.get("time_injury_time_2")),
+        ("injuryTime3", row.get("time_injury_time_3")),
+        ("injuryTime4", row.get("time_injury_time_4")),
+        ("currentPeriodStartTimestamp", row.get("time_current_period_start_timestamp")),
+        ("initial", row.get("time_initial")),
+        ("max", row.get("time_max")),
+        ("extra", row.get("time_extra")),
+        ("overtimeLength", row.get("time_overtime_length")),
+        ("periodLength", row.get("time_period_length")),
+        ("totalPeriodCount", row.get("time_total_period_count")),
     ]
     populated = {key: value for key, value in fields if value is not None}
     return populated or None
