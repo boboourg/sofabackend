@@ -1094,11 +1094,46 @@ class LocalApiApplication:
                 season_id=int(path_params["season_id"]),
                 round_number=int(path_params["round_number"]),
             )
+        if template == "/api/v1/unique-tournament/{unique_tournament_id}/featured-events":
+            return await self._fetch_featured_events_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
             return await self._fetch_top_team_payload(route, path_params)
         return None
+
+    async def _fetch_featured_events_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+    ) -> dict[str, Any]:
+        """Synthesize /unique-tournament/{ut_id}/featured-events.
+
+        Sofascore curates this editorially; we approximate by returning
+        events in a ±7 day window around now, capped at 12 — the
+        envelope key here is ``featuredEvents`` (not ``events``).
+        """
+        from .scheduled_events_synthesizer import build_payload, fetch_featured_events_rows
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"featuredEvents": []}
+        try:
+            rows = await fetch_featured_events_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"featuredEvents": []}
+        await connection.close()
+        # build_payload returns {"events": [...]} — for the featured
+        # endpoint Sofascore uses the key "featuredEvents", so rewrap.
+        inner = build_payload(rows)
+        return {"featuredEvents": inner.get("events", [])}
 
     async def _fetch_round_events_payload(
         self,

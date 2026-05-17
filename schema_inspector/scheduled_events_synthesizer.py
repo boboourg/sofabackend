@@ -265,6 +265,26 @@ LIMIT $4
 """
 )
 
+# Featured events — approximation of Sofascore's editorial top-match
+# list. We do not have the "featured" flag normalized; instead we
+# return events for the unique tournament in a +/- 7 day window
+# around now, ordered by closest fixture first, capped at a small
+# limit (12 — matches what Sofascore typically returns).
+_FETCH_QUERY_FEATURED_EVENTS = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.unique_tournament_id = $1
+  AND e.start_timestamp BETWEEN
+      EXTRACT(EPOCH FROM NOW() - interval '7 days')::bigint
+      AND
+      EXTRACT(EPOCH FROM NOW() + interval '7 days')::bigint
+  AND e.is_editor IS NOT TRUE
+ORDER BY abs(e.start_timestamp - EXTRACT(EPOCH FROM NOW())::bigint), e.id
+LIMIT 12
+"""
+)
+
+
 # Player events last — events the player participated in (via lineup).
 # Joins event_lineup_player → event, filters by player_id, returns most
 # recent first. The composite index
@@ -460,6 +480,21 @@ async def fetch_season_events_rows(
     records = await connection.fetch(
         query, unique_tournament_id, season_id, offset, limit
     )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_featured_events_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+) -> list[dict[str, Any]]:
+    """Powers /unique-tournament/{ut_id}/featured-events.
+
+    Approximation of the editorial "featured" list: events of the UT
+    that fall in a ±7 day window around now, ordered by closest
+    fixture, capped at 12 events (Sofascore's typical featured size).
+    """
+    records = await connection.fetch(_FETCH_QUERY_FEATURED_EVENTS, unique_tournament_id)
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 

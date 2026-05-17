@@ -636,6 +636,36 @@ class FetchSeasonEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notstarted", query)
 
 
+class FetchFeaturedEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_featured_events_rows powers
+    /unique-tournament/{ut_id}/featured-events.
+
+    Sofascore's ``featuredEvents`` envelope is curated editorially.
+    We approximate: events for that unique tournament in a ±7d window
+    around now, ordered by closest fixture first.
+    """
+
+    async def test_filter_passes_ut_id_with_default_window(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_featured_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        await fetch_featured_events_rows(_StubConn(), unique_tournament_id=17)
+
+        self.assertEqual(captured["args"][0], 17)
+        query = str(captured["query"])
+        self.assertIn("unique_tournament_id = $1", query)
+        # ±7d window expressed in the query so the caller does not have
+        # to pass start/end timestamps.
+        self.assertIn("interval", query.lower())
+
+
 class FetchPlayerEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_player_events_rows powers /player/{player_id}/events/last/{page}.
 
