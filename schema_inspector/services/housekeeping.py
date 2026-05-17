@@ -79,8 +79,17 @@ _ENV_STALE_UPDATED_MIN = _ENV_PREFIX + "HOUSEKEEPING_LIVE_UPDATED_STALE_MINUTES"
 _ENV_STALE_BOOTSTRAP_GRACE_MIN = _ENV_PREFIX + "HOUSEKEEPING_BOOTSTRAP_GRACE_MINUTES"
 _ENV_STALE_SURFACE_SUCCESS_LOOKBACK_MIN = _ENV_PREFIX + "HOUSEKEEPING_SURFACE_SUCCESS_LOOKBACK_MINUTES"
 _ENV_STALE_MAX_RETIREMENTS = _ENV_PREFIX + "HOUSEKEEPING_MAX_STALE_RETIREMENTS_PER_TICK"
+_ENV_FORCE_CLOSE_MAX_AGE_HOURS = _ENV_PREFIX + "HOUSEKEEPING_FORCE_CLOSE_MAX_AGE_HOURS"
 
 LIVE_STATUS_CODES: tuple[int, ...] = (6, 7, 8, 9, 30, 31, 32)
+
+# Status codes that mean the upstream event is no longer live-in-progress
+# (postponed, canceled, not-played, abandoned, finished, special abandonment
+# states 1001/1002/1003). If we still hold such an event in a hot/warm zset
+# without an event_terminal_state row, the discovery → finalize path missed
+# it — typically because the matching status_code path doesn't exist for
+# that sport/state. The terminal-zset sweep retires these events.
+TERMINAL_STATUS_CODES: tuple[int, ...] = (60, 70, 80, 90, 100, 1001, 1002, 1003)
 
 
 @dataclass(frozen=True)
@@ -110,6 +119,10 @@ class HousekeepingConfig:
     bootstrap_grace_minutes: int = 15
     surface_success_lookback_minutes: int = 15
     max_stale_retirements_per_tick: int = 100
+    # Force-close any zset:live:* member whose event.start_timestamp is older
+    # than this many hours and which has no event_terminal_state row — a hard
+    # safety net for events that linger after upstream stopped emitting them.
+    force_close_max_age_hours: int = 24
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "HousekeepingConfig":
@@ -143,6 +156,7 @@ class HousekeepingConfig:
             bootstrap_grace_minutes=_env_int(env, _ENV_STALE_BOOTSTRAP_GRACE_MIN, 15, minimum=1),
             surface_success_lookback_minutes=_env_int(env, _ENV_STALE_SURFACE_SUCCESS_LOOKBACK_MIN, 15, minimum=1),
             max_stale_retirements_per_tick=_env_int(env, _ENV_STALE_MAX_RETIREMENTS, 100, minimum=1),
+            force_close_max_age_hours=_env_int(env, _ENV_FORCE_CLOSE_MAX_AGE_HOURS, 24, minimum=1),
         )
 
 
@@ -159,6 +173,10 @@ class HousekeepingTickReport:
     zombies_cleared: int = 0
     stale_live_found: int = 0
     stale_live_cleared: int = 0
+    # Senior-pattern terminal-zset sweep (status_code in TERMINAL_STATUS_CODES
+    # OR start_timestamp older than force_close_max_age_hours).
+    terminal_zset_found: int = 0
+    terminal_zset_cleared: int = 0
     dry_run: bool = False
     # Populated only in dry-run mode — counts of rows that would be deleted.
     would_delete: dict[str, int] = field(default_factory=dict)
@@ -381,42 +399,124 @@ class HousekeepingLoop:
             return
         lane_candidates = self._collect_zombie_candidates() if self.live_state_store is not None else []
         stale_live_candidates = await self._collect_stale_live_candidates()
+        terminal_zset_candidates = await self._collect_terminal_zset_candidates()
         report.zombies_found = len(lane_candidates)
         report.stale_live_found = len(stale_live_candidates)
-        candidates = self._merge_candidates(lane_candidates, stale_live_candidates)
+        report.terminal_zset_found = len(terminal_zset_candidates)
+        candidates = self._merge_candidates(
+            lane_candidates,
+            stale_live_candidates,
+            terminal_zset_candidates,
+        )
         if not candidates:
             return
         if self.config.dry_run:
             logger.info(
-                "zombie sweep dry-run candidates=%d lane=%d stale_live=%d (first 10: %s)",
+                "zombie sweep dry-run candidates=%d lane=%d stale_live=%d terminal_zset=%d (first 10: %s)",
                 len(candidates),
                 len(lane_candidates),
                 len(stale_live_candidates),
+                len(terminal_zset_candidates),
                 [c.event_id for c in candidates[:10]],
             )
             return
         now_iso = self._clock().isoformat()
         zombie_cleared = 0
         stale_live_cleared = 0
+        terminal_zset_cleared = 0
+        terminal_zset_reasons = {"terminal_status_not_finalized", "force_close_24h"}
         for candidate in candidates:
             try:
                 await self._retire_zombie(candidate, finalized_at_iso=now_iso)
                 if candidate.reason == "surface_missing":
                     stale_live_cleared += 1
+                elif candidate.reason in terminal_zset_reasons:
+                    terminal_zset_cleared += 1
                 else:
                     zombie_cleared += 1
             except Exception:  # pragma: no cover - best effort, continue sweep
                 logger.exception("zombie sweep failed for event_id=%s", candidate.event_id)
         report.zombies_cleared = zombie_cleared
         report.stale_live_cleared = stale_live_cleared
+        report.terminal_zset_cleared = terminal_zset_cleared
         logger.info(
-            "zombie sweep cleared=%d/%d stale_live=%d/%d found=%d",
+            "zombie sweep cleared=%d/%d stale_live=%d/%d terminal_zset=%d/%d found=%d",
             zombie_cleared,
             len(lane_candidates),
             stale_live_cleared,
             len(stale_live_candidates),
+            terminal_zset_cleared,
+            len(terminal_zset_candidates),
             len(candidates),
         )
+
+    async def _collect_terminal_zset_candidates(self) -> list[ZombieCandidate]:
+        """Find zset:live:hot/warm members whose upstream status is already
+        terminal (finished/postponed/canceled/etc) OR whose start_timestamp
+        is older than ``force_close_max_age_hours``, AND which have no
+        ``event_terminal_state`` row.
+
+        This is the senior-pattern query-based zombie cleanup: instead of
+        relying on Redis ``live_state.last_ingested_at`` (which can be
+        recent even for a zombie if the worker keeps probing it), join
+        directly against the upstream-truth ``event.status_code`` plus a
+        hard 24h floor.
+        """
+        if self.redis_backend is None:
+            return []
+        zset_event_ids: set[int] = set()
+        for lane_key in (LIVE_HOT_ZSET, LIVE_WARM_ZSET):
+            for raw in self._zrange_all(lane_key):
+                try:
+                    zset_event_ids.add(int(raw))
+                except (TypeError, ValueError):
+                    continue
+        if not zset_event_ids:
+            return []
+        force_close_cutoff_ts = int(
+            (self._clock() - timedelta(hours=self.config.force_close_max_age_hours)).timestamp()
+        )
+        async with self._connection_factory() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT e.id AS event_id,
+                       e.status_code,
+                       e.start_timestamp,
+                       CASE
+                           WHEN e.status_code = ANY($2::int[])
+                               THEN 'terminal_status_not_finalized'
+                           WHEN e.start_timestamp < $3
+                               THEN 'force_close_24h'
+                       END AS reason
+                FROM event e
+                LEFT JOIN event_terminal_state ets ON ets.event_id = e.id
+                WHERE e.id = ANY($1::bigint[])
+                  AND ets.event_id IS NULL
+                  AND (
+                      e.status_code = ANY($2::int[])
+                      OR e.start_timestamp < $3
+                  )
+                """,
+                list(zset_event_ids),
+                list(TERMINAL_STATUS_CODES),
+                force_close_cutoff_ts,
+            )
+        candidates: list[ZombieCandidate] = []
+        for row in rows:
+            try:
+                event_id = int(row["event_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            reason = str(row["reason"]) if "reason" in row and row["reason"] is not None else "terminal_status_not_finalized"
+            candidates.append(
+                ZombieCandidate(
+                    event_id=event_id,
+                    lane="terminal_zset",
+                    last_ingested_at=None,
+                    reason=reason,
+                )
+            )
+        return candidates
 
     def _collect_zombie_candidates(self) -> list[ZombieCandidate]:
         assert self.live_state_store is not None
@@ -601,10 +701,20 @@ class HousekeepingLoop:
         self,
         lane_candidates: list[ZombieCandidate],
         stale_live_candidates: list[ZombieCandidate],
+        terminal_zset_candidates: list[ZombieCandidate] | None = None,
     ) -> list[ZombieCandidate]:
         merged: list[ZombieCandidate] = []
         seen: set[int] = set()
-        for candidate in (*lane_candidates, *stale_live_candidates):
+        # Order matters: terminal_zset_candidates come from joining against
+        # the upstream-truth event.status_code / start_timestamp. When the
+        # same event_id is also flagged as a Redis-state orphan, the
+        # DB-derived category is the more actionable diagnosis, so we keep
+        # it and let the orphan dedupe out.
+        for candidate in (
+            *(terminal_zset_candidates or ()),
+            *lane_candidates,
+            *stale_live_candidates,
+        ):
             if candidate.event_id in seen:
                 continue
             seen.add(candidate.event_id)

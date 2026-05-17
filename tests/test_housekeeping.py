@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unittest
 
 from schema_inspector.queue.live_state import (
@@ -256,6 +256,195 @@ class HousekeepingLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_state_repository.marked_event_ids, [])
 
 
+class HousekeepingTerminalZsetSweepTests(unittest.IsolatedAsyncioTestCase):
+    """Shape A from senior-backend pattern: query-based zombie cleanup.
+
+    Senior crawler runs three queries on every live tick to self-heal:
+    finished-but-no-score, live-but-stale, completed-but-no-stats. We
+    adapt the same idea to our zset:live:hot/warm world — events whose
+    DB status_code is already terminal (postponed/canceled/finished/
+    abandoned/walkover/etc) but which still occupy a live lane because
+    nothing finalized them. The query joins event with event_terminal_state
+    and returns rows that are still in our hot/warm lanes but already
+    terminal upstream.
+    """
+
+    async def test_finds_event_with_terminal_status_in_hot_zset_and_retires_it(self) -> None:
+        from schema_inspector.services.housekeeping import (
+            HousekeepingConfig,
+            HousekeepingLoop,
+            ZOMBIE_TERMINAL_STATUS,
+        )
+
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+
+        # event 16191130 — status 100 (finished), in hot zset, no terminal_state
+        connection = _FakeTerminalCandidateConnection(
+            candidate_rows=[
+                {
+                    "event_id": 16191130,
+                    "status_code": 100,
+                    "start_timestamp": int(now.timestamp()) - 3600,
+                    "reason": "terminal_status_not_finalized",
+                },
+            ],
+        )
+        redis_backend = _FakeRedisBackend(
+            zsets={LIVE_HOT_ZSET: ("16191130",)},
+        )
+        live_state_repository = _FakeLiveStateRepository()
+
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                stale_live_enabled=False,  # disable old DB-only sweep to isolate new path
+            ),
+            connection_factory=lambda: connection,
+            retention_repository=_FakeRetentionRepository(),
+            live_state_store=_FakeLiveStateStore({}),
+            live_state_repository=live_state_repository,
+            redis_backend=redis_backend,
+            now_ms_factory=lambda: now_ms,
+            clock=lambda: now,
+        )
+
+        report = await loop.run_once()
+
+        self.assertEqual(report.terminal_zset_found, 1)
+        self.assertEqual(report.terminal_zset_cleared, 1)
+        self.assertNotIn("16191130", redis_backend.zsets.get(LIVE_HOT_ZSET, ()))
+        inserted_ids = [r.event_id for r in live_state_repository.records]
+        self.assertIn(16191130, inserted_ids)
+        # Terminal status uses zombie_stale sentinel (per CLAUDE.md contract).
+        record = next(r for r in live_state_repository.records if r.event_id == 16191130)
+        self.assertEqual(record.terminal_status, ZOMBIE_TERMINAL_STATUS)
+
+    async def test_query_passes_only_zset_member_ids_and_terminal_codes_to_db(self) -> None:
+        from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop
+
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+
+        connection = _FakeTerminalCandidateConnection(candidate_rows=[])
+        redis_backend = _FakeRedisBackend(
+            zsets={
+                LIVE_HOT_ZSET: ("11", "22"),
+                LIVE_WARM_ZSET: ("33",),
+            },
+        )
+
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                stale_live_enabled=False,
+            ),
+            connection_factory=lambda: connection,
+            retention_repository=_FakeRetentionRepository(),
+            live_state_store=_FakeLiveStateStore({}),
+            live_state_repository=_FakeLiveStateRepository(),
+            redis_backend=redis_backend,
+            now_ms_factory=lambda: now_ms,
+            clock=lambda: now,
+        )
+
+        await loop.run_once()
+
+        self.assertIsNotNone(connection.last_event_ids_param)
+        self.assertEqual(set(connection.last_event_ids_param or []), {11, 22, 33})
+        # All non-live terminal codes: postponed/canceled/notplayed/abandoned/finished/walkover variants.
+        self.assertEqual(
+            set(connection.last_terminal_codes_param or []),
+            {60, 70, 80, 90, 100, 1001, 1002, 1003},
+        )
+
+    async def test_force_close_event_with_start_timestamp_older_than_24h(self) -> None:
+        from schema_inspector.services.housekeeping import (
+            HousekeepingConfig,
+            HousekeepingLoop,
+            ZOMBIE_TERMINAL_STATUS,
+        )
+
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+
+        # event 15388348 — status 80 but also start_timestamp > 24h ago → force_close
+        connection = _FakeTerminalCandidateConnection(
+            candidate_rows=[
+                {
+                    "event_id": 15388348,
+                    "status_code": 6,  # live in-progress (not terminal)
+                    "start_timestamp": int(now.timestamp()) - 30 * 3600,  # 30h ago
+                    "reason": "force_close_24h",
+                },
+            ],
+        )
+        redis_backend = _FakeRedisBackend(zsets={LIVE_HOT_ZSET: ("15388348",)})
+        live_state_repository = _FakeLiveStateRepository()
+
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                stale_live_enabled=False,
+                force_close_max_age_hours=24,
+            ),
+            connection_factory=lambda: connection,
+            retention_repository=_FakeRetentionRepository(),
+            live_state_store=_FakeLiveStateStore({}),
+            live_state_repository=live_state_repository,
+            redis_backend=redis_backend,
+            now_ms_factory=lambda: now_ms,
+            clock=lambda: now,
+        )
+
+        report = await loop.run_once()
+
+        self.assertEqual(report.terminal_zset_found, 1)
+        self.assertEqual(report.terminal_zset_cleared, 1)
+        self.assertNotIn("15388348", redis_backend.zsets.get(LIVE_HOT_ZSET, ()))
+        # Force-close cutoff in query should be ~now - 24h as unix timestamp
+        expected_cutoff = int((now - timedelta(hours=24)).timestamp())
+        self.assertEqual(connection.last_force_close_cutoff_param, expected_cutoff)
+        inserted_ids = [r.event_id for r in live_state_repository.records]
+        self.assertIn(15388348, inserted_ids)
+        record = next(r for r in live_state_repository.records if r.event_id == 15388348)
+        self.assertEqual(record.terminal_status, ZOMBIE_TERMINAL_STATUS)
+
+    async def test_skips_terminal_zset_sweep_when_no_zset_members(self) -> None:
+        from schema_inspector.services.housekeeping import HousekeepingConfig, HousekeepingLoop
+
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+
+        connection = _FakeTerminalCandidateConnection(candidate_rows=[])
+        redis_backend = _FakeRedisBackend(zsets={})
+
+        loop = HousekeepingLoop(
+            config=HousekeepingConfig(
+                enabled=True,
+                dry_run=False,
+                stale_live_enabled=False,
+            ),
+            connection_factory=lambda: connection,
+            retention_repository=_FakeRetentionRepository(),
+            live_state_store=_FakeLiveStateStore({}),
+            live_state_repository=_FakeLiveStateRepository(),
+            redis_backend=redis_backend,
+            now_ms_factory=lambda: now_ms,
+            clock=lambda: now,
+        )
+
+        report = await loop.run_once()
+
+        self.assertEqual(report.terminal_zset_found, 0)
+        self.assertEqual(report.terminal_zset_cleared, 0)
+        # Should not have issued the query at all.
+        self.assertIsNone(connection.last_event_ids_param)
+
+
 class MaintenanceHousekeepingIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_worker_runs_housekeeping_loop_and_requests_shutdown(self) -> None:
         from schema_inspector.workers.maintenance_worker import MaintenanceWorker
@@ -445,6 +634,39 @@ class _FakeStaleLiveConnection(_FakeConnectionContext):
             return 1 if self.recent_surface_ok else None
         if "FROM api_payload_snapshot" in normalized:
             return self.live_surface_payload
+        return None
+
+
+class _FakeTerminalCandidateConnection(_FakeConnectionContext):
+    """Fake connection that returns rows for the terminal-status zombie query.
+
+    The new query in HousekeepingLoop._collect_terminal_zset_candidates filters
+    zset members against event/event_terminal_state — this fake just returns
+    canned rows for the test, ignoring the parameter array.
+    """
+
+    def __init__(self, *, candidate_rows: list[dict]) -> None:
+        self.candidate_rows = list(candidate_rows)
+        self.last_event_ids_param: list[int] | None = None
+        self.last_terminal_codes_param: list[int] | None = None
+        self.last_force_close_cutoff_param: int | None = None
+
+    async def fetch(self, query: str, *args):
+        normalized = " ".join(str(query).split())
+        if (
+            "FROM event e" in normalized
+            and "LEFT JOIN event_terminal_state ets" in normalized
+            and "ets.event_id IS NULL" in normalized
+        ):
+            if len(args) >= 3:
+                self.last_event_ids_param = list(args[0]) if args[0] is not None else None
+                self.last_terminal_codes_param = list(args[1]) if args[1] is not None else None
+                self.last_force_close_cutoff_param = args[2]
+            return list(self.candidate_rows)
+        return []
+
+    async def fetchval(self, query: str, *args):
+        del query, args
         return None
 
 
