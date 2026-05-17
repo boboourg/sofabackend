@@ -636,6 +636,60 @@ class FetchSeasonEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notstarted", query)
 
 
+class FetchTeamEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_team_events_rows powers /team/{team_id}/events/last|next/{page}.
+    Filter: event.home_team_id = $1 OR event.away_team_id = $1. Same
+    pagination contract as season events (page * page_size offset,
+    page_size + 1 limit for hasNextPage detection)."""
+
+    async def test_last_direction_filters_team_and_orders_desc(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_team_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        await fetch_team_events_rows(
+            _StubConn(),
+            team_id=42,
+            direction="last",
+            page=1,
+            page_size=20,
+        )
+        self.assertEqual(captured["args"][0], 42)
+        # offset=page*page_size=20, limit=page_size+1=21
+        self.assertEqual(captured["args"][1], 20)
+        self.assertEqual(captured["args"][2], 21)
+        query = str(captured["query"])
+        self.assertIn("home_team_id = $1", query)
+        self.assertIn("away_team_id = $1", query)
+        self.assertIn("ORDER BY e.start_timestamp DESC", query)
+
+    async def test_next_direction_orders_asc_and_filters_upcoming(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_team_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_team_events_rows(
+            _StubConn(),
+            team_id=42,
+            direction="next",
+            page=0,
+        )
+        query = str(captured["query"])
+        self.assertIn("ORDER BY e.start_timestamp ASC", query)
+        self.assertIn("notstarted", query)
+
+
 class FetchLiveRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_live_rows is the live-events counterpart of fetch_rows:
     same column projection, different WHERE clause (active-live status,

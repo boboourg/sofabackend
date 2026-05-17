@@ -1079,11 +1079,52 @@ class LocalApiApplication:
                 int(path_params["player_id"]),
                 max(int(path_params["page"]), 0),
             )
+        if template in {
+            "/api/v1/team/{team_id}/events/last/{page}",
+            "/api/v1/team/{team_id}/events/next/{page}",
+        }:
+            return await self._fetch_team_events_payload(
+                team_id=int(path_params["team_id"]),
+                page=max(int(path_params["page"]), 0),
+                direction="last" if template.endswith("/events/last/{page}") else "next",
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
             return await self._fetch_top_team_payload(route, path_params)
         return None
+
+    async def _fetch_team_events_payload(
+        self,
+        *,
+        team_id: int,
+        page: int,
+        direction: str,
+    ) -> dict[str, Any]:
+        """Synthesize /team/{team_id}/events/last|next/{page} from
+        normalized tables. Full Sofascore-shape payload."""
+        from .scheduled_events_synthesizer import build_payload, fetch_team_events_rows
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"events": [], "hasNextPage": False}
+        try:
+            rows = await fetch_team_events_rows(
+                connection,
+                team_id=team_id,
+                direction=direction,
+                page=page,
+                page_size=_SEASON_EVENTS_PAGE_SIZE,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"events": [], "hasNextPage": False}
+        await connection.close()
+        has_next_page = len(rows) > _SEASON_EVENTS_PAGE_SIZE
+        payload = build_payload(rows[:_SEASON_EVENTS_PAGE_SIZE])
+        payload["hasNextPage"] = has_next_page
+        return payload
 
     async def _fetch_season_events_payload(
         self,

@@ -265,6 +265,34 @@ LIMIT $4
 """
 )
 
+# Team events last (finished) — most recent results for a team.
+_FETCH_QUERY_TEAM_LAST = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE (e.home_team_id = $1 OR e.away_team_id = $1)
+  AND st.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
+  AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
+OFFSET $2
+LIMIT $3
+"""
+)
+
+# Team events next (notstarted) — upcoming fixtures for a team.
+_FETCH_QUERY_TEAM_NEXT = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE (e.home_team_id = $1 OR e.away_team_id = $1)
+  AND st.type = 'notstarted'
+  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW())::bigint
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp ASC NULLS LAST, e.id ASC
+OFFSET $2
+LIMIT $3
+"""
+)
+
 # Live-events fetcher: filter by active-live status type, last-12h window,
 # skip events with terminal_state (already finalized upstream) and skip
 # SofaEditor crowdsourced events (X4 rule, 2026-05-13). Matches the
@@ -383,6 +411,27 @@ async def fetch_season_events_rows(
     records = await connection.fetch(
         query, unique_tournament_id, season_id, offset, limit
     )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_team_events_rows(
+    connection: Any,
+    *,
+    team_id: int,
+    direction: str,
+    page: int,
+    page_size: int = 30,
+) -> list[dict[str, Any]]:
+    """Powers /team/{team_id}/events/last|next/{page}.
+
+    Filter on home_team_id = $1 OR away_team_id = $1. Direction switches
+    between finished (last, DESC) and notstarted (next, ASC). Returns
+    page_size+1 rows so the caller can detect hasNextPage cheaply.
+    """
+    query = _FETCH_QUERY_TEAM_NEXT if direction == "next" else _FETCH_QUERY_TEAM_LAST
+    offset = max(0, int(page)) * int(page_size)
+    limit = int(page_size) + 1
+    records = await connection.fetch(query, team_id, offset, limit)
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 
