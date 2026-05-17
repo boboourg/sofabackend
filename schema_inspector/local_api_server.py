@@ -2445,14 +2445,38 @@ class LocalApiApplication:
             )
         finally:
             await connection.close()
-        if snapshot_row is None:
+        if snapshot_row is not None and not _snapshot_row_is_soft_error(snapshot_row):
+            decoded = _decode_snapshot_payload(snapshot_row["payload"])
+            if isinstance(decoded, dict):
+                return decoded
+
+        # No usable raw snapshot → fall back to the synthesizer over
+        # event_lineup_player + event. Returns the full Sofascore-shape
+        # event envelope for any player whose lineup history is in our
+        # normalized tables.
+        from .scheduled_events_synthesizer import build_payload, fetch_player_events_rows
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
             return None
-        if _snapshot_row_is_soft_error(snapshot_row):
+        try:
+            rows = await fetch_player_events_rows(
+                connection,
+                player_id=player_id,
+                page=page,
+                page_size=_SEASON_EVENTS_PAGE_SIZE,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
             return None
-        decoded = _decode_snapshot_payload(snapshot_row["payload"])
-        if not isinstance(decoded, dict):
+        await connection.close()
+        if not rows:
             return None
-        return decoded
+        has_next_page = len(rows) > _SEASON_EVENTS_PAGE_SIZE
+        payload = build_payload(rows[:_SEASON_EVENTS_PAGE_SIZE])
+        payload["hasNextPage"] = has_next_page
+        return payload
 
     async def _fetch_event_player_rating_breakdown_payload(
         self,

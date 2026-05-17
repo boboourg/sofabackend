@@ -636,6 +636,40 @@ class FetchSeasonEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notstarted", query)
 
 
+class FetchPlayerEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_player_events_rows powers /player/{player_id}/events/last/{page}.
+
+    Player ↔ event mapping comes through event_lineup_player. Filter
+    on player_id + finished/cancelled/postponed status, ordered most
+    recent first, paginated with OFFSET + LIMIT page_size+1.
+    """
+
+    async def test_filter_passes_player_id_and_orders_desc(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_player_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        await fetch_player_events_rows(
+            _StubConn(),
+            player_id=288205,
+            page=2,
+            page_size=20,
+        )
+        self.assertEqual(captured["args"][0], 288205)
+        self.assertEqual(captured["args"][1], 40)  # page=2 * 20
+        self.assertEqual(captured["args"][2], 21)  # 20 + 1
+        query = str(captured["query"])
+        self.assertIn("event_lineup_player", query)
+        self.assertIn("player_id = $1", query)
+        self.assertIn("ORDER BY e.start_timestamp DESC", query)
+
+
 class FetchRoundEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_round_events_rows powers
     /unique-tournament/{ut_id}/season/{sid}/events/round/{round_number}.

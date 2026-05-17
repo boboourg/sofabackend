@@ -265,6 +265,25 @@ LIMIT $4
 """
 )
 
+# Player events last — events the player participated in (via lineup).
+# Joins event_lineup_player → event, filters by player_id, returns most
+# recent first. The composite index
+# idx_event_lineup_player_player_id_event_id powers the seek.
+_FETCH_QUERY_PLAYER_EVENTS_LAST = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+JOIN event_lineup_player elp ON elp.event_id = e.id
+WHERE elp.player_id = $1
+  AND st.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
+  AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
+OFFSET $2
+LIMIT $3
+"""
+)
+
+
 # Round events — events in a specific round of a unique tournament season.
 # Round number lives on event_round_info (eri alias is in the shared JOIN
 # block), so we filter on eri.round_number = $3.
@@ -440,6 +459,27 @@ async def fetch_season_events_rows(
     limit = int(page_size) + 1
     records = await connection.fetch(
         query, unique_tournament_id, season_id, offset, limit
+    )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_player_events_rows(
+    connection: Any,
+    *,
+    player_id: int,
+    page: int,
+    page_size: int = 30,
+) -> list[dict[str, Any]]:
+    """Powers /player/{player_id}/events/last/{page}.
+
+    Joins event_lineup_player → event to find events the player took
+    part in. Filter: finished/cancelled/postponed status, ordered most
+    recent first. Returns page_size+1 rows (caller detects hasNextPage).
+    """
+    offset = max(0, int(page)) * int(page_size)
+    limit = int(page_size) + 1
+    records = await connection.fetch(
+        _FETCH_QUERY_PLAYER_EVENTS_LAST, player_id, offset, limit
     )
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
