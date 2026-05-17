@@ -1093,85 +1093,34 @@ class LocalApiApplication:
         page: int,
         direction: str,
     ) -> dict[str, Any]:
-        offset = page * _SEASON_EVENTS_PAGE_SIZE
-        limit = _SEASON_EVENTS_PAGE_SIZE + 1
-        if direction == "last":
-            status_filter = """
-                  AND es.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
-                  AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
-            """
-            order_by = "e.start_timestamp DESC NULLS LAST, e.id DESC"
-        else:
-            status_filter = """
-                  AND es.type = 'notstarted'
-                  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW())::bigint
-            """
-            order_by = "e.start_timestamp ASC NULLS LAST, e.id ASC"
+        """Synthesize /unique-tournament/{ut}/season/{sid}/events/last|next/{page}
+        with the full Sofascore-shape payload (teamColors, country,
+        score breakdown, time, changes, etc.) — same shape as the rest
+        of the synthesizer-backed endpoints.
+        """
+        from .scheduled_events_synthesizer import build_payload, fetch_season_events_rows
 
-        connection = await self._connect()
         try:
-            rows = await connection.fetch(
-                f"""
-                SELECT
-                    e.id,
-                    e.slug,
-                    e.custom_id,
-                    e.start_timestamp,
-                    e.status_code,
-                    e.winner_code,
-                    e.aggregated_winner_code,
-                    e.coverage,
-                    e.home_red_cards,
-                    e.away_red_cards,
-                    es.type AS status_type,
-                    es.description AS status_description,
-                    e.home_team_id,
-                    ht.slug AS home_team_slug,
-                    ht.name AS home_team_name,
-                    ht.short_name AS home_team_short_name,
-                    e.away_team_id,
-                    at.slug AS away_team_slug,
-                    at.name AS away_team_name,
-                    at.short_name AS away_team_short_name,
-                    e.tournament_id,
-                    t.slug AS tournament_slug,
-                    t.name AS tournament_name,
-                    e.unique_tournament_id,
-                    ut.slug AS unique_tournament_slug,
-                    ut.name AS unique_tournament_name,
-                    e.season_id,
-                    s.name AS season_name,
-                    s.year AS season_year
-                FROM event AS e
-                LEFT JOIN event_status AS es ON es.code = e.status_code
-                LEFT JOIN team AS ht ON ht.id = e.home_team_id
-                LEFT JOIN team AS at ON at.id = e.away_team_id
-                LEFT JOIN tournament AS t ON t.id = e.tournament_id
-                LEFT JOIN unique_tournament AS ut ON ut.id = e.unique_tournament_id
-                LEFT JOIN season AS s ON s.id = e.season_id
-                WHERE e.unique_tournament_id = $1
-                  AND e.season_id = $2
-                  {status_filter}
-                ORDER BY {order_by}
-                OFFSET $3
-                LIMIT $4
-                """,
-                unique_tournament_id,
-                season_id,
-                offset,
-                limit,
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001 - defensive
+            return {"events": [], "hasNextPage": False}
+        try:
+            rows = await fetch_season_events_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                direction=direction,
+                page=page,
+                page_size=_SEASON_EVENTS_PAGE_SIZE,
             )
-        finally:
+        except Exception:  # noqa: BLE001 - synthesizer failure must not 500
             await connection.close()
-
+            return {"events": [], "hasNextPage": False}
+        await connection.close()
         has_next_page = len(rows) > _SEASON_EVENTS_PAGE_SIZE
-        return {
-            "events": [
-                _serialize_season_event_row(row)
-                for row in rows[:_SEASON_EVENTS_PAGE_SIZE]
-            ],
-            "hasNextPage": has_next_page,
-        }
+        payload = build_payload(rows[:_SEASON_EVENTS_PAGE_SIZE])
+        payload["hasNextPage"] = has_next_page
+        return payload
 
     async def _fetch_unique_tournament_seasons_payload(
         self,

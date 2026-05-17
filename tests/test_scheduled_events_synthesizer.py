@@ -575,6 +575,67 @@ class FetchSingleEventRowContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["home_team_team_colors"], {"primary": "#1c5b9f"})
 
 
+class FetchSeasonEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_season_events_rows powers
+    /unique-tournament/{ut_id}/season/{season_id}/events/last|next/{page}.
+    Same column projection as the other fetchers, filtered by UT+season,
+    paginated by start_timestamp DESC (last) or ASC (next)."""
+
+    async def test_last_direction_filters_finished_orders_desc(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_season_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        await fetch_season_events_rows(
+            _StubConn(),
+            unique_tournament_id=17,
+            season_id=76986,
+            direction="last",
+            page=2,
+            page_size=30,
+        )
+        # UT id is $1, season is $2, offset+limit are $3 + $4.
+        self.assertEqual(captured["args"][:2], (17, 76986))
+        # OFFSET = page * page_size = 60, LIMIT = page_size + 1 = 31
+        # (the +1 lets the caller detect hasNextPage cheaply).
+        self.assertEqual(captured["args"][2], 60)
+        self.assertEqual(captured["args"][3], 31)
+        query = str(captured["query"])
+        self.assertIn("unique_tournament_id = $1", query)
+        self.assertIn("season_id = $2", query)
+        self.assertIn("ORDER BY e.start_timestamp DESC", query)
+        # Last (finished) direction filters by finished status types.
+        self.assertIn("finished", query)
+
+    async def test_next_direction_filters_notstarted_orders_asc(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_season_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_season_events_rows(
+            _StubConn(),
+            unique_tournament_id=17,
+            season_id=76986,
+            direction="next",
+            page=0,
+            page_size=30,
+        )
+        query = str(captured["query"])
+        self.assertIn("ORDER BY e.start_timestamp ASC", query)
+        self.assertIn("notstarted", query)
+
+
 class FetchLiveRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_live_rows is the live-events counterpart of fetch_rows:
     same column projection, different WHERE clause (active-live status,

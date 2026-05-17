@@ -939,11 +939,19 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         event = response.payload["events"][0]
         self.assertEqual(event["id"], 1001)
         self.assertEqual(event["status"], {"code": 0, "type": "notstarted", "description": "Not started"})
-        self.assertEqual(event["homeTeam"], {"id": 10, "slug": "sample-home", "name": "Sample Home", "shortName": "Home"})
+        # Synthesizer emits the full Sofascore-shape team object; pin id +
+        # name + slug fields instead of exact-dict equality so we don't
+        # have to enumerate every nested key.
+        self.assertEqual(event["homeTeam"]["id"], 10)
+        self.assertEqual(event["homeTeam"]["name"], "Sample Home")
+        self.assertEqual(event["homeTeam"]["slug"], "sample-home")
         self.assertEqual(event["awayTeam"]["id"], 11)
         self.assertEqual(event["tournament"]["uniqueTournament"]["id"], 8)
         self.assertEqual(event["season"]["id"], 77559)
-        self.assertIn("es.type = 'notstarted'", normalized_connection.fetch_calls[0][0])
+        # SQL has been promoted to the synthesizer's shared query; the
+        # discriminating WHERE clause is "st.type = 'notstarted'" (st is
+        # the event_status alias).
+        self.assertIn("st.type = 'notstarted'", normalized_connection.fetch_calls[0][0])
         self.assertEqual(normalized_connection.fetch_calls[0][1], (8, 77559, 30, 31))
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
@@ -962,7 +970,7 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.payload, {"events": [], "hasNextPage": False})
-        self.assertIn("es.type IN", normalized_connection.fetch_calls[0][0])
+        self.assertIn("st.type IN", normalized_connection.fetch_calls[0][0])
         self.assertIn("ORDER BY e.start_timestamp DESC", normalized_connection.fetch_calls[0][0])
         self.assertEqual(normalized_connection.fetch_calls[0][1], (8, 77559, 60, 31))
         self.assertTrue(snapshot_connection.closed)

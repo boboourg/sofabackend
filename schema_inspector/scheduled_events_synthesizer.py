@@ -234,6 +234,37 @@ WHERE e.id = $1
 """
 )
 
+# Season events last (finished) — most recent results in a season.
+# finished / afterextra / afterpen / cancelled / postponed.
+_FETCH_QUERY_SEASON_LAST = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.unique_tournament_id = $1
+  AND e.season_id = $2
+  AND st.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
+  AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
+OFFSET $3
+LIMIT $4
+"""
+)
+
+# Season events next (notstarted) — upcoming fixtures in a season.
+_FETCH_QUERY_SEASON_NEXT = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.unique_tournament_id = $1
+  AND e.season_id = $2
+  AND st.type = 'notstarted'
+  AND e.start_timestamp >= EXTRACT(EPOCH FROM NOW())::bigint
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp ASC NULLS LAST, e.id ASC
+OFFSET $3
+LIMIT $4
+"""
+)
+
 # Live-events fetcher: filter by active-live status type, last-12h window,
 # skip events with terminal_state (already finalized upstream) and skip
 # SofaEditor crowdsourced events (X4 rule, 2026-05-13). Matches the
@@ -327,6 +358,34 @@ async def fetch_single_event_row(
     return _decode_jsonb_fields(dict(record))
 
 
+async def fetch_season_events_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+    direction: str,
+    page: int,
+    page_size: int = 30,
+) -> list[dict[str, Any]]:
+    """Powers /unique-tournament/{ut_id}/season/{sid}/events/last|next/{page}.
+
+    ``direction='last'`` returns finished-or-cancelled events ordered by
+    most recent first; ``direction='next'`` returns not-started events
+    ordered by closest fixture first. Returns ``page_size + 1`` rows so
+    the caller can detect ``hasNextPage`` by comparing list length.
+    """
+    if direction == "next":
+        query = _FETCH_QUERY_SEASON_NEXT
+    else:
+        query = _FETCH_QUERY_SEASON_LAST
+    offset = max(0, int(page)) * int(page_size)
+    limit = int(page_size) + 1
+    records = await connection.fetch(
+        query, unique_tournament_id, season_id, offset, limit
+    )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
 async def fetch_live_rows(
     connection: Any,
     *,
@@ -360,22 +419,29 @@ def build_single_event_payload(row: Any) -> dict[str, Any]:
 
 
 def _build_event(row: Any) -> dict[str, Any]:
-    """Map one joined-row dict to the Sofascore event envelope."""
+    """Map one joined-row dict to the Sofascore event envelope.
+
+    Uses ``.get()`` for every column so the function is safe to call on
+    a row that came from a partial query (e.g. an older API entry that
+    fetched a narrower column set, or a test fake). Missing keys
+    surface as ``None`` in the payload, which matches Sofascore's own
+    behaviour for not-applicable fields.
+    """
     event: dict[str, Any] = {
-        "id": row["event_id"],
-        "slug": row["event_slug"],
-        "customId": row["custom_id"],
-        "detailId": row["detail_id"],
-        "startTimestamp": row["start_timestamp"],
-        "winnerCode": row["winner_code"],
-        "hasXg": row["has_xg"],
-        "hasGlobalHighlights": row["has_global_highlights"],
-        "hasEventPlayerStatistics": row["has_event_player_statistics"],
-        "hasEventPlayerHeatMap": row["has_event_player_heat_map"],
-        "feedLocked": row["feed_locked"],
-        "isEditor": row["is_editor"],
-        "crowdsourcingEnabled": row["crowdsourcing_enabled"],
-        "finalResultOnly": row["final_result_only"],
+        "id": row.get("event_id") or row.get("id"),
+        "slug": row.get("event_slug") or row.get("slug"),
+        "customId": row.get("custom_id"),
+        "detailId": row.get("detail_id"),
+        "startTimestamp": row.get("start_timestamp"),
+        "winnerCode": row.get("winner_code"),
+        "hasXg": row.get("has_xg"),
+        "hasGlobalHighlights": row.get("has_global_highlights"),
+        "hasEventPlayerStatistics": row.get("has_event_player_statistics"),
+        "hasEventPlayerHeatMap": row.get("has_event_player_heat_map"),
+        "feedLocked": row.get("feed_locked"),
+        "isEditor": row.get("is_editor"),
+        "crowdsourcingEnabled": row.get("crowdsourcing_enabled"),
+        "finalResultOnly": row.get("final_result_only"),
         "status": _build_status(row),
         "homeTeam": _build_team(row, side="home"),
         "awayTeam": _build_team(row, side="away"),
@@ -390,32 +456,26 @@ def _build_event(row: Any) -> dict[str, Any]:
     time_block = _build_time(row)
     if time_block:
         event["time"] = time_block
-    if row["changes_payload"]:
+    if row.get("changes_payload"):
         event["changes"] = row["changes_payload"]
     return event
 
 
-def _build_season(row: Any) -> dict[str, Any]:
-    return {
-        "id": row["season_id"],
-        "name": row["season_name"],
-        "year": row["season_year"],
-        "editor": row["season_editor"],
-    }
-
-
 def _build_score(row: Any, *, side: str) -> dict[str, Any]:
-    """Map ``home_score_*`` / ``away_score_*`` columns to Sofascore score
-    object. Defaults missing fields to 0 (Sofascore convention for
-    not-yet-started events)."""
+    """Map ``home_score_*`` / ``away_score_*`` columns to a Sofascore score
+    object. Defaults missing fields to 0 (Sofascore convention for not-
+    yet-started events). Defensive: uses .get() so partial rows do not
+    raise KeyError.
+    """
     p = f"{side}_score_"
+    current = row.get(f"{p}current")
+    display = row.get(f"{p}display")
     score: dict[str, Any] = {
-        "current": row[f"{p}current"] if row[f"{p}current"] is not None else 0,
-        "display": row[f"{p}display"] if row[f"{p}display"] is not None else 0,
+        "current": current if current is not None else 0,
+        "display": display if display is not None else 0,
     }
-    for key in ("normaltime", "overtime", "penalties", "aggregated",
-                "period1", "period2"):
-        value = row[f"{p}{key}"]
+    for key in ("normaltime", "overtime", "penalties", "aggregated", "period1", "period2"):
+        value = row.get(f"{p}{key}")
         if value is not None:
             score[key] = value
     return score
@@ -424,10 +484,10 @@ def _build_score(row: Any, *, side: str) -> dict[str, Any]:
 def _build_round_info(row: Any) -> dict[str, Any] | None:
     """Return roundInfo dict or None if no round metadata present."""
     fields = [
-        ("round", row["round_number"]),
-        ("slug", row["round_slug"]),
-        ("name", row["round_name"]),
-        ("cupRoundType", row["round_cup_round_type"]),
+        ("round", row.get("round_number")),
+        ("slug", row.get("round_slug")),
+        ("name", row.get("round_name")),
+        ("cupRoundType", row.get("round_cup_round_type")),
     ]
     populated = {key: value for key, value in fields if value is not None}
     return populated or None
@@ -460,78 +520,110 @@ def _build_time(row: Any) -> dict[str, Any] | None:
 
 
 def _build_tournament(row: Any) -> dict[str, Any]:
+    """Tournament + nested uniqueTournament + nested category.
+
+    Defensive: legacy callers can supply only ``unique_tournament_id``
+    (no joined unique_tournament/category data) — we emit empty nested
+    objects in that case rather than crash.
+    """
+    # Support both new (ut_id, category_id) and legacy
+    # (unique_tournament_id, no category) column shapes.
+    ut_id = row.get("ut_id") or row.get("unique_tournament_id")
+    ut_name = row.get("ut_name") or row.get("unique_tournament_name")
+    ut_slug = row.get("ut_slug") or row.get("unique_tournament_slug")
     return {
-        "id": row["tournament_id"],
-        "name": row["tournament_name"],
-        "slug": row["tournament_slug"],
-        "priority": row["tournament_priority"],
-        "competitionType": row["tournament_competition_type"],
-        "isGroup": row["tournament_is_group"],
-        "isLive": row["tournament_is_live"],
+        "id": row.get("tournament_id"),
+        "name": row.get("tournament_name"),
+        "slug": row.get("tournament_slug"),
+        "priority": row.get("tournament_priority"),
+        "competitionType": row.get("tournament_competition_type"),
+        "isGroup": row.get("tournament_is_group"),
+        "isLive": row.get("tournament_is_live"),
         "category": {
-            "id": row["category_id"],
-            "name": row["category_name"],
-            "slug": row["category_slug"],
-            "flag": row["category_flag"],
+            "id": row.get("category_id"),
+            "name": row.get("category_name"),
+            "slug": row.get("category_slug"),
+            "flag": row.get("category_flag"),
             "sport": {
-                "id": row["category_sport_id"],
-                "name": row["category_sport_name"],
-                "slug": row["category_sport_slug"],
+                "id": row.get("category_sport_id"),
+                "name": row.get("category_sport_name"),
+                "slug": row.get("category_sport_slug"),
             },
         },
         "uniqueTournament": {
-            "id": row["ut_id"],
-            "name": row["ut_name"],
-            "slug": row["ut_slug"],
-            "userCount": row["ut_user_count"],
-            "hasEventPlayerStatistics": row["ut_has_event_player_statistics"],
-            "hasPerformanceGraphFeature": row["ut_has_performance_graph_feature"],
-            "tier": row["ut_tier"],
-            "primaryColorHex": row["ut_primary_color_hex"],
-            "secondaryColorHex": row["ut_secondary_color_hex"],
+            "id": ut_id,
+            "name": ut_name,
+            "slug": ut_slug,
+            "userCount": row.get("ut_user_count"),
+            "hasEventPlayerStatistics": row.get("ut_has_event_player_statistics"),
+            "hasPerformanceGraphFeature": row.get("ut_has_performance_graph_feature"),
+            "tier": row.get("ut_tier"),
+            "primaryColorHex": row.get("ut_primary_color_hex"),
+            "secondaryColorHex": row.get("ut_secondary_color_hex"),
         },
     }
 
 
-def _build_team(row: Any, *, side: str) -> dict[str, Any]:
-    """Map the home_* / away_* prefixed columns into a Sofascore team."""
-    p = f"{side}_team_"
-    country_alpha2 = row[f"{p}country_alpha2"]
-    if country_alpha2:
-        country = {
-            "name": row[f"{p}country_name"],
-            "slug": row[f"{p}country_slug"],
-            "alpha2": country_alpha2,
-            "alpha3": row[f"{p}country_alpha3"],
-        }
-    else:
-        country = {}
+def _build_season(row: Any) -> dict[str, Any]:
     return {
-        "id": row[f"{p}id"],
-        "name": row[f"{p}name"],
-        "slug": row[f"{p}slug"],
-        "shortName": row[f"{p}short_name"],
-        "nameCode": row[f"{p}name_code"],
-        "type": row[f"{p}type"],
-        "gender": row[f"{p}gender"],
-        "national": row[f"{p}national"],
-        "disabled": row[f"{p}disabled"],
-        "userCount": row[f"{p}user_count"],
-        "subTeams": [],
-        "teamColors": row[f"{p}team_colors"] or {},
-        "fieldTranslations": row[f"{p}field_translations"] or {},
-        "country": country,
-        "sport": {
-            "id": row[f"{p}sport_id"],
-            "name": row[f"{p}sport_name"],
-            "slug": row[f"{p}sport_slug"],
-        },
+        "id": row.get("season_id"),
+        "name": row.get("season_name"),
+        "year": row.get("season_year"),
+        "editor": row.get("season_editor"),
     }
 
 
 def _build_status(row: Any) -> dict[str, Any]:
     return {
-        "code": row["status_code"],
-        "type": row["status_type"],
-        "description": row["status_description"],
+        "code": row.get("status_code"),
+        "type": row.get("status_type"),
+        "description": row.get("status_description"),
     }
+
+
+def _build_team(row: Any, *, side: str) -> dict[str, Any]:
+    """Map the home_* / away_* prefixed columns into a Sofascore team.
+
+    Defensive: any missing column is treated as None so partial rows
+    (legacy callers, narrow test fakes) still produce a valid envelope.
+    Sub-objects (country, sport) are omitted only when their primary
+    discriminator is missing.
+    """
+    p = f"{side}_team_"
+    country_alpha2 = row.get(f"{p}country_alpha2")
+    if country_alpha2:
+        country = {
+            "name": row.get(f"{p}country_name"),
+            "slug": row.get(f"{p}country_slug"),
+            "alpha2": country_alpha2,
+            "alpha3": row.get(f"{p}country_alpha3"),
+        }
+    else:
+        country = {}
+    sport_id = row.get(f"{p}sport_id")
+    if sport_id is not None:
+        sport = {
+            "id": sport_id,
+            "name": row.get(f"{p}sport_name"),
+            "slug": row.get(f"{p}sport_slug"),
+        }
+    else:
+        sport = {}
+    team: dict[str, Any] = {
+        "id": row.get(f"{p}id"),
+        "name": row.get(f"{p}name"),
+        "slug": row.get(f"{p}slug"),
+        "shortName": row.get(f"{p}short_name"),
+        "nameCode": row.get(f"{p}name_code"),
+        "type": row.get(f"{p}type"),
+        "gender": row.get(f"{p}gender"),
+        "national": row.get(f"{p}national"),
+        "disabled": row.get(f"{p}disabled"),
+        "userCount": row.get(f"{p}user_count"),
+        "subTeams": [],
+        "teamColors": row.get(f"{p}team_colors") or {},
+        "fieldTranslations": row.get(f"{p}field_translations") or {},
+        "country": country,
+        "sport": sport,
+    }
+    return team
