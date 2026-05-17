@@ -265,6 +265,21 @@ LIMIT $4
 """
 )
 
+# Unique-tournament scheduled events — same as sport-wide scheduled, but
+# filtered to a single unique_tournament_id (Sofascore's
+# /unique-tournament/{ut_id}/scheduled-events/{date} surface).
+_FETCH_QUERY_UT_SCHEDULED = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.unique_tournament_id = $1
+  AND e.start_timestamp >= $2
+  AND e.start_timestamp <  $3
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp, e.id
+"""
+)
+
+
 # Team events last (finished) — most recent results for a team.
 _FETCH_QUERY_TEAM_LAST = (
     _FETCH_SELECT_AND_JOINS
@@ -410,6 +425,23 @@ async def fetch_season_events_rows(
     limit = int(page_size) + 1
     records = await connection.fetch(
         query, unique_tournament_id, season_id, offset, limit
+    )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_ut_scheduled_events_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    start_ts: int,
+    end_ts: int,
+) -> list[dict[str, Any]]:
+    """Powers /unique-tournament/{ut_id}/scheduled-events/{date}.
+    Same date-range filter as the sport-wide scheduled fetcher, but
+    pinned to a single unique tournament.
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_UT_SCHEDULED, unique_tournament_id, start_ts, end_ts
     )
     return [_decode_jsonb_fields(dict(record)) for record in records]
 

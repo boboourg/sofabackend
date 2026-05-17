@@ -1914,13 +1914,16 @@ class LocalApiApplication:
     async def _fetch_synthesized_scheduled_events_payload(
         self, route: RouteSpec, path_params: dict[str, str]
     ) -> dict[str, Any] | None:
-        """Synthesize ``/api/v1/sport/{slug}/scheduled-events/{date}`` from
-        normalized tables when no raw snapshot is available for that
-        date — covers future fixtures already ingested via the historical
-        tournament backfill (which fetches the whole season fixture list).
+        """Synthesize ``/scheduled-events/{date}`` from normalized tables
+        when no raw snapshot is available for that date. Handles two
+        path shapes:
 
-        Returns ``None`` when the route is not a scheduled-events path so
-        the caller falls through to the normal NOT_FOUND / empty handling.
+          /api/v1/sport/{slug}/scheduled-events/{date}
+          /api/v1/unique-tournament/{ut_id}/scheduled-events/{date}
+
+        Returns ``None`` when the route is not a scheduled-events path
+        or when no events match — the caller then falls through to the
+        normal NOT_FOUND / empty envelope handling.
         """
         path_template = route.endpoint.path_template
         if not (
@@ -1931,11 +1934,6 @@ class LocalApiApplication:
         date_str = path_params.get("date")
         if not date_str:
             return None
-        # Extract sport from the path_template — Sofascore endpoints encode
-        # the sport slug into the path itself (e.g. /sport/football/scheduled-...).
-        sport_slug = _extract_sport_slug_from_path_template(path_template)
-        if not sport_slug:
-            return None
         try:
             from datetime import datetime, timedelta, timezone
 
@@ -1945,7 +1943,11 @@ class LocalApiApplication:
         start_ts = int(day_start.timestamp())
         end_ts = int((day_start + timedelta(days=1)).timestamp())
 
-        from .scheduled_events_synthesizer import build_payload, fetch_rows
+        from .scheduled_events_synthesizer import (
+            build_payload,
+            fetch_rows,
+            fetch_ut_scheduled_events_rows,
+        )
 
         # Test harnesses construct LocalApiApplication without a DB pool —
         # silently fall through so the empty-envelope fallback fires the
@@ -1954,22 +1956,35 @@ class LocalApiApplication:
             return None
         try:
             connection = await self._connect()
-        except Exception:  # noqa: BLE001 — defensive, never crash request
+        except Exception:  # noqa: BLE001
             return None
         try:
-            rows = await fetch_rows(
-                connection,
-                sport_slug=sport_slug,
-                start_ts=start_ts,
-                end_ts=end_ts,
-            )
-        except Exception:  # noqa: BLE001 — synthesizer failure must not 500
+            if path_template.startswith("/api/v1/unique-tournament/"):
+                ut_id_str = path_params.get("unique_tournament_id")
+                if not ut_id_str:
+                    return None
+                rows = await fetch_ut_scheduled_events_rows(
+                    connection,
+                    unique_tournament_id=int(ut_id_str),
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                )
+            else:
+                # Sport-scope path: /api/v1/sport/{slug}/scheduled-events/{date}
+                sport_slug = _extract_sport_slug_from_path_template(path_template)
+                if not sport_slug:
+                    return None
+                rows = await fetch_rows(
+                    connection,
+                    sport_slug=sport_slug,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                )
+        except Exception:  # noqa: BLE001
             await connection.close()
             return None
         await connection.close()
         if not rows:
-            # No events for this date — return None so the normal empty-
-            # envelope fallback kicks in and the caller sees {"events": []}.
             return None
         return build_payload(rows)
 

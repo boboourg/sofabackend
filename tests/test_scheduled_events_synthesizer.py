@@ -636,6 +636,35 @@ class FetchSeasonEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notstarted", query)
 
 
+class FetchUtScheduledEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_ut_scheduled_events_rows powers
+    /unique-tournament/{ut_id}/scheduled-events/{date} — date-bounded
+    list of events filtered to a single unique tournament."""
+
+    async def test_filter_passes_ut_id_and_timestamp_range(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import fetch_ut_scheduled_events_rows
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                captured["args"] = args
+                return []
+
+        await fetch_ut_scheduled_events_rows(
+            _StubConn(),
+            unique_tournament_id=17,
+            start_ts=1779235200,
+            end_ts=1779321600,
+        )
+        self.assertEqual(captured["args"], (17, 1779235200, 1779321600))
+        query = str(captured["query"])
+        self.assertIn("unique_tournament_id = $1", query)
+        self.assertIn("start_timestamp >= $2", query)
+        self.assertIn("start_timestamp <  $3", query)
+
+
 class FetchTeamEventsRowsContractTests(unittest.IsolatedAsyncioTestCase):
     """fetch_team_events_rows powers /team/{team_id}/events/last|next/{page}.
     Filter: event.home_team_id = $1 OR event.away_team_id = $1. Same
