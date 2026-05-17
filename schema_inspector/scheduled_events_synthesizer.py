@@ -169,10 +169,11 @@ SELECT
     NULL::int              AS time_injury_time_1,
     NULL::int              AS time_injury_time_2,
     NULL::bigint           AS time_current_period_start_timestamp,
-    -- changes: pre-aggregated jsonb from event_change_item. MVP: return
-    -- NULL (the block is omitted). A future SELECT json_build_object(...)
-    -- LATERAL with GROUP BY can populate this without changing synthesizer.
-    NULL::jsonb            AS changes_payload
+    -- changes: aggregate the LATEST changeTimestamp's items from
+    -- event_change_item into the Sofascore-shape {changes:[...],
+    -- changeTimestamp: N}. Pkey (event_id, ordinal) keeps the seek
+    -- fast; the inner MAX() is an index-only scan over a small slice.
+    eci_agg.payload        AS changes_payload
 FROM event e
 JOIN tournament t          ON t.id  = e.tournament_id
 JOIN category c            ON c.id  = t.category_id
@@ -189,6 +190,19 @@ LEFT JOIN country ac       ON ac.alpha2 = at_.country_alpha2
 LEFT JOIN event_score hs   ON hs.event_id = e.id AND hs.side = 'home'
 LEFT JOIN event_score as_  ON as_.event_id = e.id AND as_.side = 'away'
 LEFT JOIN event_round_info eri ON eri.event_id = e.id
+LEFT JOIN LATERAL (
+    SELECT jsonb_build_object(
+        'changes', array_agg(change_value ORDER BY ordinal),
+        'changeTimestamp', change_timestamp
+    ) AS payload
+    FROM event_change_item
+    WHERE event_id = e.id
+      AND change_timestamp = (
+          SELECT MAX(change_timestamp) FROM event_change_item WHERE event_id = e.id
+      )
+    GROUP BY change_timestamp
+    LIMIT 1
+) eci_agg ON TRUE
 """
 
 # Scheduled-events fetcher: filter by start_timestamp date range.
