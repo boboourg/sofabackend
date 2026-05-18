@@ -1,0 +1,20 @@
+[Unit]
+Description=Sofascore Mirror WebSocket Server — broadcasts WS deltas (sport.*, odds.*, event.*) to mobile clients on 127.0.0.1:8001. Fed by sofascore-ws-consumer.service via redis pub/sub. Speaks the same NATS subset that Sofascore's upstream WS does.
+After=network-online.target redis-server.service sofascore-ws-consumer.service
+Wants=network-online.target sofascore-ws-consumer.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+Environment=PYTHONUNBUFFERED=1
+# nginx terminates TLS and proxies wss:// → ws://127.0.0.1:8001/ws/v1.
+# The server itself binds plain HTTP; do NOT expose 8001 to the world.
+ExecStart=/opt/sofascore/deploy/run_service.sh ws-server --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

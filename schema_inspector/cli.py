@@ -1790,26 +1790,58 @@ async def _dispatch(args) -> int:
                 service_app = ServiceApp(app)
                 await service_app.run_live_rescue_daemon()
                 return 0
+            if args.command == "ws-server":
+                from .services.ws_server_service import build_app
+                import uvicorn
+
+                redis_client = getattr(app, "redis_backend", None)
+                if redis_client is None:
+                    logger.error("ws-server requires a Redis backend; aborting.")
+                    return 2
+                fastapi_app = build_app(redis_client)
+                config = uvicorn.Config(
+                    fastapi_app,
+                    host=getattr(args, "host", "127.0.0.1"),
+                    port=int(getattr(args, "port", 8001)),
+                    log_level="info",
+                    ws_ping_interval=20.0,
+                    ws_ping_timeout=30.0,
+                )
+                server = uvicorn.Server(config)
+                logger.info(
+                    "ws-server starting on %s:%d (lifespan attached)",
+                    config.host, config.port,
+                )
+                await server.serve()
+                return 0
             if args.command == "ws-consumer":
                 from .services.ws_consumer_service import (
                     DEFAULT_SPORTS,
                     WSConsumerService,
                 )
+                from .ws_fanout_publisher import RedisFanoutPublisher
 
                 sports_arg = getattr(args, "sports", None) or ",".join(DEFAULT_SPORTS)
                 sports = tuple(s.strip() for s in sports_arg.split(",") if s.strip())
-                # AsyncpgDatabase exposes the pool as _pool — we pass
-                # it directly (the WSConsumerService treats it as an
-                # asyncpg-pool-shaped object).
+                # Mirror WS server fanout: republish every delta on
+                # ``ws:fanout:*`` redis pub/sub channels so the
+                # sofascore-ws-server.service can broadcast to clients.
+                fanout_publisher = None
+                if not getattr(args, "no_fanout", False):
+                    redis_client = getattr(app, "redis_backend", None)
+                    if redis_client is not None:
+                        fanout_publisher = RedisFanoutPublisher(redis_client)
                 consumer = WSConsumerService(
                     pool=app.database._pool,
                     sports=sports,
                     include_odds=not getattr(args, "no_odds", False),
                     reconnect_delay_seconds=float(getattr(args, "reconnect_delay", 10.0)),
+                    fanout_publisher=fanout_publisher,
                 )
                 logger.info(
-                    "ws-consumer starting (sports=%s, include_odds=%s)",
+                    "ws-consumer starting (sports=%s, include_odds=%s, fanout=%s)",
                     ",".join(sports), consumer.include_odds,
+                    fanout_publisher is not None,
                 )
                 await consumer.run_forever()
                 return 0
@@ -2250,6 +2282,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="Seconds to wait before reconnecting after a transport error.",
     )
+    ws_consumer.add_argument(
+        "--no-fanout",
+        action="store_true",
+        help=(
+            "Disable redis pub/sub fanout to the mirror WS server. "
+            "Use when running consumer-only without the mirror layer."
+        ),
+    )
+
+    ws_server = subparsers.add_parser(
+        "ws-server",
+        help=(
+            "Mirror Sofascore WebSocket server: speaks the same NATS "
+            "subset that wss://ws.sofascore.com:9222 does. Mobile clients "
+            "SUB sport.{slug} / odds.{slug}.1 / event.{id} and receive "
+            "deltas pushed in real time from the consumer-side fanout. "
+            "Fire-and-forget; no replay buffer (clients refresh REST on "
+            "reconnect)."
+        ),
+    )
+    ws_server.add_argument("--host", default="127.0.0.1", help="Bind host.")
+    ws_server.add_argument("--port", type=int, default=8001, help="Bind port.")
 
     backfill_cursor_bootstrap = subparsers.add_parser(
         "backfill-cursor-bootstrap",

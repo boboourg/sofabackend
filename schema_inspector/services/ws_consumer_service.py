@@ -66,8 +66,15 @@ DEFAULT_SPORTS = (
 )
 
 
-async def dispatch_message(pool: Any, msg: tuple[str, Any]) -> None:
-    """Route one parsed NATS message to the normalize→write pipeline.
+async def dispatch_message(
+    pool: Any,
+    msg: tuple[str, Any],
+    *,
+    fanout_publisher: Any | None = None,
+) -> None:
+    """Route one parsed NATS message to the normalize→write pipeline,
+    and (when ``fanout_publisher`` is provided) republish the raw
+    delta to redis pub/sub for the mirror WS server.
 
     Pure function modulo the asyncpg pool. Tested separately with a
     fake pool — see ``tests/test_ws_consumer_dispatch.py``.
@@ -95,14 +102,31 @@ async def dispatch_message(pool: Any, msg: tuple[str, Any]) -> None:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await apply_event_delta(conn, delta)
+        if fanout_publisher is not None:
+            await fanout_publisher.publish_event(subject=subject, payload=data)
         return
 
     if msg_type == "odds":
         bundle = normalize_odds_delta(data)
         if bundle is None:
             return
+        # Resolve the event_id from event_market before applying so
+        # the fanout can include event.{id} channel. Single SELECT is
+        # cheap (PK lookup); we share the conn for the UPDATE+invalidate.
+        resolved_event_id: int | None = None
         async with pool.acquire() as conn:
+            if bundle.offer_id is not None:
+                resolved_event_id = await conn.fetchval(
+                    "SELECT event_id FROM event_market WHERE id = $1",
+                    bundle.offer_id,
+                )
             await apply_odds_delta(conn, bundle)
+        if fanout_publisher is not None:
+            await fanout_publisher.publish_odds(
+                subject=subject,
+                payload=data,
+                event_id=resolved_event_id,
+            )
         return
 
 
@@ -123,12 +147,14 @@ class WSConsumerService:
         include_odds: bool = True,
         reconnect_delay_seconds: float = 10.0,
         ws_uri: str = WS_URI,
+        fanout_publisher: Any | None = None,
     ) -> None:
         self.pool = pool
         self.sports = sports
         self.include_odds = include_odds
         self.reconnect_delay_seconds = reconnect_delay_seconds
         self.ws_uri = ws_uri
+        self.fanout_publisher = fanout_publisher
         self._stop = asyncio.Event()
         # rolling counters for /ops integration
         self.metrics = {
@@ -219,7 +245,11 @@ class WSConsumerService:
                 if kind != "MSG":
                     continue
                 try:
-                    await dispatch_message(self.pool, msg)
+                    await dispatch_message(
+                        self.pool,
+                        msg,
+                        fanout_publisher=self.fanout_publisher,
+                    )
                     self.metrics["msgs_dispatched"] += 1
                 except Exception:
                     self.metrics["dispatch_errors"] += 1
