@@ -23,6 +23,7 @@ Public surface (incremental — added per TDD cycle):
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
@@ -604,6 +605,28 @@ def build_single_event_payload(row: Any) -> dict[str, Any]:
     Sofascore wraps the event in ``{"event": ...}`` not ``{"events": [...]}``.
     """
     return {"event": _build_event(row)}
+
+
+_EVENT_ID_PATH_RE = re.compile(r"^/api/v1/event/(\d+)(?:/|$)")
+
+
+def extract_event_id_from_path(path: str) -> int | None:
+    """Return the numeric event_id from any /api/v1/event/{id}[/...] path.
+
+    Returns None for non-event paths and for ``custom_id`` paths
+    (e.g. /api/v1/event/Pdbsceb/h2h/events) where the event identifier
+    is alphanumeric rather than numeric — those go through a different
+    normalisation flow.
+    """
+    if not path:
+        return None
+    match = _EVENT_ID_PATH_RE.match(path)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def overlay_live_fields(snapshot_payload: dict[str, Any], row: Any) -> dict[str, Any]:

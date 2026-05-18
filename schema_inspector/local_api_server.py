@@ -574,7 +574,7 @@ class LocalApiApplication:
         else:
             pattern_candidates = (concrete_pattern,)
         query = (
-            "SELECT source_url, payload, is_soft_error_payload, http_status "
+            "SELECT source_url, payload, is_soft_error_payload, http_status, fetched_at "
             "FROM api_payload_snapshot WHERE endpoint_pattern = ANY($1::text[])"
         )
         arguments: list[Any] = [list(pattern_candidates)]
@@ -604,6 +604,23 @@ class LocalApiApplication:
 
         connection = await self._connect()
         try:
+            # Stage B: stale-snapshot detection for event-scoped routes.
+            # When the bulk live-snapshot parser updates event/event_score/
+            # event_status/event_time more recently than the per-event
+            # snapshot was captured, that snapshot is stale — we must
+            # skip it so the waterfall falls through to the normalized
+            # handler (or the entity-root overlay path for /event/{id}).
+            from .scheduled_events_synthesizer import extract_event_id_from_path
+            staleness_event_id = extract_event_id_from_path(path)
+            event_updated_at = None
+            if staleness_event_id is not None:
+                try:
+                    event_updated_at = await connection.fetchval(
+                        "SELECT updated_at FROM event WHERE id = $1",
+                        staleness_event_id,
+                    )
+                except Exception:  # noqa: BLE001 - defensive: test fakes / DB hiccup
+                    event_updated_at = None
             rows = await connection.fetch(query, *arguments)
             latest_path_match: Any | None = None
             for row in rows:
@@ -615,6 +632,20 @@ class LocalApiApplication:
                 # successful response. The dispatcher will return 404 below.
                 if _snapshot_row_is_soft_error(row):
                     continue
+                # Skip stale snapshots: when event was bulk-updated more
+                # recently than this snapshot was fetched, the snapshot's
+                # status/score/time are stale and would override fresh
+                # normalized values via _reconcile_snapshot_payload's
+                # overlay (which is correct for list endpoints but
+                # wrong for single-event sub-resources where the snapshot
+                # body IS the response).
+                if event_updated_at is not None:
+                    snapshot_fetched_at = row.get("fetched_at")
+                    if (
+                        snapshot_fetched_at is not None
+                        and event_updated_at > snapshot_fetched_at
+                    ):
+                        continue
                 decoded_payload = _decode_snapshot_payload(row["payload"])
                 if _snapshot_payload_missing_normalized_details(route, decoded_payload):
                     continue

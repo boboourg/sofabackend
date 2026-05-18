@@ -509,6 +509,48 @@ class BuildPayloadStatusTests(unittest.TestCase):
         self.assertEqual(status["description"], "Not started")
 
 
+class ExtractEventIdFromPathTests(unittest.TestCase):
+    """For Stage B central stale-detection: any path that contains
+    /event/{event_id}/... or starts with /api/v1/event/{event_id} needs
+    the event id extracted so the waterfall can check freshness."""
+
+    def test_extracts_event_id_from_root_path(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import extract_event_id_from_path
+
+        self.assertEqual(extract_event_id_from_path("/api/v1/event/15171570"), 15171570)
+
+    def test_extracts_event_id_from_sub_resource_path(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import extract_event_id_from_path
+
+        self.assertEqual(
+            extract_event_id_from_path("/api/v1/event/15171570/statistics"),
+            15171570,
+        )
+        self.assertEqual(
+            extract_event_id_from_path("/api/v1/event/15171570/lineups"),
+            15171570,
+        )
+        self.assertEqual(
+            extract_event_id_from_path("/api/v1/event/15171570/player/288205/statistics"),
+            15171570,
+        )
+
+    def test_returns_none_for_non_numeric_event_id(self) -> None:
+        """custom_id paths like /event/Pdbsceb/h2h/events should not be
+        treated as numeric event-scoped paths (they go through a
+        different normalisation flow)."""
+        from schema_inspector.scheduled_events_synthesizer import extract_event_id_from_path
+
+        self.assertIsNone(extract_event_id_from_path("/api/v1/event/Pdbsceb/h2h/events"))
+
+    def test_returns_none_for_non_event_paths(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import extract_event_id_from_path
+
+        self.assertIsNone(extract_event_id_from_path("/api/v1/team/2702"))
+        self.assertIsNone(extract_event_id_from_path("/api/v1/sport/football/events/live"))
+        self.assertIsNone(extract_event_id_from_path("/api/v1/player/288205/events/last/0"))
+
+
 class OverlayLiveFieldsTests(unittest.TestCase):
     """overlay_live_fields patches volatile fields (status / homeScore /
     awayScore / time / changes) on top of a stale snapshot payload with
