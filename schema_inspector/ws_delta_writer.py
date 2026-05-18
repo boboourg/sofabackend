@@ -31,11 +31,12 @@ logger = logging.getLogger(__name__)
 # schema drift).
 _EVENT_SCORE_COLUMNS: frozenset[str] = frozenset({
     "current", "display", "aggregated", "normaltime", "overtime",
-    "penalties", "period1", "period2", "period3", "period4", "period5",
+    "penalties", "period1", "period2", "period3", "period4",
     "extra1", "extra2", "series",
-    # "point" is a tennis-specific string; event_score has no point
-    # column today — we drop it here and revisit in Stage 1.5 if the
-    # match center starts needing it.
+    # NOTE: period5 is observed in table-tennis / volleyball deltas
+    # (~5K archive rows) but event_score has no column for it today.
+    # Dropped here; would need a migration to add the column before
+    # the writer can persist it. Same for tennis "point" (string).
 })
 
 _EVENT_FIELDS_ALLOWED: frozenset[str] = frozenset({
