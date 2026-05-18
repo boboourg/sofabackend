@@ -1598,6 +1598,35 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "backfill-cursor":
+                from .storage.tournament_registry_repository import (
+                    TournamentRegistryRepository,
+                )
+
+                action = getattr(args, "action", "show")
+                repo = TournamentRegistryRepository()
+
+                if action == "reseed-stuck":
+                    cat_min = int(getattr(args, "min_cat_priority", 0))
+                    async with app.database.connection() as connection:
+                        affected = await repo.re_seed_stuck_cursors_to_newest_finished_season(
+                            connection, cat_priority_min=cat_min,
+                        )
+                    print(f"re-seed: {affected} rows updated (cat_priority_min={cat_min})")
+                    return 0
+
+                if action == "show":
+                    sport = getattr(args, "sport_slug", None)
+                    async with app.database.connection() as connection:
+                        rows = await repo.list_pending_backfill_cursors(
+                            connection, sport_slug=sport, limit=200,
+                        )
+                    import json as _json
+                    print(_json.dumps([dict(r) for r in rows], indent=2, default=str))
+                    return 0
+
+                print(f"Unknown action: {action}")
+                return 2
             if args.command == "backfill-priorities":
                 from .services.backfill_priority_config import (
                     BackfillPriorityConfig,
@@ -2088,6 +2117,27 @@ def _build_parser() -> argparse.ArgumentParser:
     historical_planner_daemon.add_argument("--date-to", help="Optional inclusive end date in YYYY-MM-DD format for manual override mode.")
     historical_planner_daemon.add_argument("--dates-per-tick", type=int, default=1, help="Maximum archival dates to publish per sport on each planner tick.")
     historical_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
+    backfill_cursor = subparsers.add_parser(
+        "backfill-cursor",
+        help=(
+            "Manage tournament_registry backfill cursors. "
+            "``reseed-stuck`` retargets UTs whose cursor sits on a "
+            "season with zero finished events to the newest finished "
+            "season for that UT."
+        ),
+    )
+    backfill_cursor.add_argument(
+        "action", choices=["show", "reseed-stuck"], help="Cursor action.",
+    )
+    backfill_cursor.add_argument(
+        "--min-cat-priority", type=int, default=0,
+        help="Lower bound on category.priority to consider (0 = all, "
+             "6 = top-5 European leagues + international).",
+    )
+    backfill_cursor.add_argument(
+        "--sport-slug", default=None, help="Optional sport filter for ``show``.",
+    )
 
     backfill_priorities = subparsers.add_parser(
         "backfill-priorities",

@@ -293,6 +293,139 @@ class TournamentRegistryRepository:
         result = await executor.execute(query, normalized_sport)
         return _rows_affected(result)
 
+    async def seed_backfill_cursors_to_newest_finished_season(
+        self,
+        executor: SqlExecutor,
+        *,
+        sport_slug: str | None = None,
+        only_uninitialised: bool = True,
+    ) -> int:
+        """E.3 replacement seed semantics: target the newest **finished**
+        season instead of the newest season by start_timestamp.
+
+        The old ``seed_backfill_cursors`` pointed cursors at the newest
+        season by ``MAX(event.start_timestamp)`` — fine for active
+        leagues, but for cup-style competitions (FIFA WC, EURO,
+        Olympic Games, ...) the newest event is the not_started future
+        fixture. The worker has nothing to hydrate, the cursor never
+        advances, and the entire cat=20 slice stalls.
+
+        This variant constrains to ``status_code = 100`` (finished) so
+        the cursor lands on the most recent edition that actually has
+        match data to ingest.
+
+        ``only_uninitialised=True`` (default) updates ONLY rows where
+        the cursor is currently NULL — safe to re-run without
+        clobbering in-progress backfills.
+
+        UTs with zero finished events get no seed (the cursor stays
+        NULL so the planner skips them via the pending-cursor filter).
+        Those become candidates for a future structure-sync pass
+        (E.2 — historical-structure-bootstrap CLI).
+
+        Returns the number of rows that received a new cursor value.
+        """
+        normalized_sport = (sport_slug or "").strip().lower() or None
+        condition = "AND tr.next_season_backfill_id IS NULL" if only_uninitialised else ""
+        query = f"""
+            WITH newest_finished AS (
+                SELECT
+                    e.unique_tournament_id,
+                    e.season_id,
+                    MAX(e.start_timestamp) AS max_start_ts,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.unique_tournament_id
+                        ORDER BY MAX(e.start_timestamp) DESC NULLS LAST, e.season_id DESC
+                    ) AS rn
+                FROM event e
+                WHERE e.status_code = 100
+                  AND e.unique_tournament_id IS NOT NULL
+                  AND e.season_id IS NOT NULL
+                  AND e.start_timestamp IS NOT NULL
+                GROUP BY e.unique_tournament_id, e.season_id
+            )
+            UPDATE tournament_registry tr
+            SET next_season_backfill_id = nf.season_id,
+                backfill_started_at = COALESCE(tr.backfill_started_at, now()),
+                updated_at = now()
+            FROM newest_finished nf
+            WHERE nf.rn = 1
+              AND tr.unique_tournament_id = nf.unique_tournament_id
+              AND tr.is_active = TRUE
+              AND tr.historical_enabled = TRUE
+              AND ($1::text IS NULL OR tr.sport_slug = $1::text)
+              {condition}
+        """
+        result = await executor.execute(query, normalized_sport)
+        return _rows_affected(result)
+
+    async def re_seed_stuck_cursors_to_newest_finished_season(
+        self,
+        executor: SqlExecutor,
+        *,
+        cat_priority_min: int = 0,
+    ) -> int:
+        """E.1 — one-shot operator method: for every UT whose current
+        ``next_season_backfill_id`` points at a season with **zero**
+        finished events, retarget the cursor to the newest finished
+        season for the same UT.
+
+        Scoping:
+          * ``cat_priority_min`` — only re-seed UTs whose category has
+            priority ≥ this threshold. ``0`` = all UTs (including
+            amateur). ``6`` = top 5 European leagues + all international.
+
+        Behaviour:
+          * UTs whose category < cat_priority_min are untouched.
+          * UTs where the cursor already points at a season with at
+            least one finished event are untouched.
+          * UTs with zero finished events in DB are untouched (no
+            valid replacement value — these need structure-sync).
+
+        Returns the number of rows actually updated.
+        """
+        query = """
+            WITH newest_finished AS (
+                SELECT
+                    e.unique_tournament_id,
+                    e.season_id,
+                    MAX(e.start_timestamp) AS max_start_ts,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.unique_tournament_id
+                        ORDER BY MAX(e.start_timestamp) DESC NULLS LAST, e.season_id DESC
+                    ) AS rn
+                FROM event e
+                WHERE e.status_code = 100
+                  AND e.unique_tournament_id IS NOT NULL
+                  AND e.season_id IS NOT NULL
+                  AND e.start_timestamp IS NOT NULL
+                GROUP BY e.unique_tournament_id, e.season_id
+            )
+            UPDATE tournament_registry tr
+            SET next_season_backfill_id = nf.season_id,
+                backfill_last_advance_at = now(),
+                updated_at = now()
+            FROM newest_finished nf, unique_tournament ut, category c
+            WHERE nf.rn = 1
+              AND tr.unique_tournament_id = nf.unique_tournament_id
+              AND ut.id = tr.unique_tournament_id
+              AND c.id = ut.category_id
+              AND c.priority >= $1
+              AND tr.is_active = TRUE
+              AND tr.historical_enabled = TRUE
+              AND tr.next_season_backfill_id IS NOT NULL
+              AND tr.next_season_backfill_id > 0
+              -- "Stuck" = current cursor points at a season with no finished events
+              AND NOT EXISTS (
+                  SELECT 1 FROM event e2
+                  WHERE e2.unique_tournament_id = tr.unique_tournament_id
+                    AND e2.season_id = tr.next_season_backfill_id
+                    AND e2.status_code = 100
+              )
+        """
+        result = await executor.execute(query, int(cat_priority_min))
+        return _rows_affected(result)
+
     async def fetch_backfill_cursor(
         self,
         executor: SqlFetchExecutor,
