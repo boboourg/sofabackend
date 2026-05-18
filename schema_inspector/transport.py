@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+import certifi
 from curl_cffi.requests import AsyncSession, RequestsError
 
 from .challenge import detect_challenge
@@ -653,6 +654,14 @@ class InspectorTransport:
             value = self._resolve_tls_field(field_name, fingerprint_profile)
             if value is not None:
                 kwargs[field_name] = value
+        # curl_cffi 0.7+ no longer ships its own cacert.pem; without an
+        # explicit ``verify`` libcurl falls back to whatever CApath the
+        # bundled libcurl was built with, which is missing inside our
+        # venv. Effect (2026-05-18 incident): 47.6 % transport_err on
+        # /api/v1/event/{event_id} with ErrCode 77 / CURLE_SSL_CACERT_BADFILE
+        # right after the 0.5.10 → 0.15.0 upgrade. ``setdefault`` so an
+        # explicit policy override (str path or False) still wins.
+        kwargs.setdefault("verify", certifi.where())
         return kwargs
 
     @staticmethod
