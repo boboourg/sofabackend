@@ -98,13 +98,28 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
             [("football", 17, 76986)],
         )
 
-    async def test_tournament_worker_skips_cursor_advance_on_stage_failures(self) -> None:
-        """When the archive returns stage_failures > 0, the cursor is
-        left in place so the next planner tick retries the same season."""
+    async def test_tournament_worker_advances_cursor_despite_stage_failures_when_events_discovered(self) -> None:
+        """2026-05-18: cup-style competitions (FIFA WC, EURO, UEFA Nations,
+        Olympics) reliably return 404 for /standings/home, /events/round/{N}
+        beyond the bracket size, and sometimes /leaderboards (transient TLS).
+        Those failures DO get counted in ``stage_failures`` even though the
+        ``/events/last/{p}`` fallback collected the full event list.
+
+        Under the old strict rule (``stage_failures == 0``), the cursor never
+        advanced for these UTs — every worker run re-fetched the same
+        completed season indefinitely (observed: UT=16 season=41087 stuck
+        for 3h+ despite 64 events successfully landed).
+
+        New rule: advance whenever the orchestrator finished with
+        ``discovered_event_ids > 0``. Stage failures are best-effort
+        enrichment; if events landed, the season is "processed".
+        """
         from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
 
         orchestrator = _FakeArchiveOrchestrator()
-        orchestrator.archive_stage_failures = 1  # simulate partial failure
+        # Mirror the real WC-2022 scenario: 3 stage failures, but 64 events.
+        orchestrator.archive_stage_failures = 3
+        orchestrator.archive_discovered_event_ids = 64
         queue = _FakeQueue()
         worker = HistoricalTournamentWorker(
             orchestrator=orchestrator,
@@ -133,7 +148,51 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "completed")
         # The targeted run happened …
         self.assertEqual(orchestrator.archive_target_seasons, [76986])
-        # … but advance was skipped because stage_failures > 0.
+        # … and cursor advanced because events landed, despite stage_failures>0.
+        self.assertEqual(
+            orchestrator.advance_cursor_calls,
+            [("football", 17, 76986)],
+        )
+
+    async def test_tournament_worker_skips_cursor_advance_when_no_events_discovered(self) -> None:
+        """The cursor must NOT advance for a season where zero events
+        landed. This protects two cases:
+          1. Transient transport failure that returned an empty fallback
+             list (we want the planner to retry, not skip the season).
+          2. A "future" target season the re-seed missed (better to loop
+             and let the operator re-seed than to drift through empty
+             seasons silently)."""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        orchestrator.archive_stage_failures = 0  # even a fully clean run …
+        orchestrator.archive_discovered_event_ids = 0  # … must not advance if no events
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="1-3b",
+                values={
+                    "job_id": "job-3b",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "key-3b",
+                },
+            )
+        )
+
+        self.assertEqual(orchestrator.archive_target_seasons, [76986])
         self.assertEqual(orchestrator.advance_cursor_calls, [])
 
     async def test_legacy_job_without_target_season_does_not_advance_cursor(self) -> None:
@@ -621,6 +680,11 @@ class _FakeArchiveOrchestrator:
         self.archive_target_seasons: list[int | None] = []
         self.advance_cursor_calls: list[tuple[str, int, int]] = []
         self.archive_stage_failures = 0
+        # discovered_event_ids: default non-zero so existing happy-path
+        # tests (which don't care about this value) still observe a
+        # successful season that justifies a cursor advance. Tests that
+        # exercise the "no events" path override this to 0.
+        self.archive_discovered_event_ids = 14
         self.enrichment_calls: list[tuple[int, str, tuple[int, ...]]] = []
         self.event_detail_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
         self.entities_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
@@ -638,8 +702,13 @@ class _FakeArchiveOrchestrator:
             return {
                 "season_ids": (int(target_season_id),),
                 "stage_failures": self.archive_stage_failures,
+                "discovered_event_ids": self.archive_discovered_event_ids,
             }
-        return {"season_ids": (701, 702), "stage_failures": self.archive_stage_failures}
+        return {
+            "season_ids": (701, 702),
+            "stage_failures": self.archive_stage_failures,
+            "discovered_event_ids": self.archive_discovered_event_ids,
+        }
 
     async def advance_backfill_cursor(
         self,

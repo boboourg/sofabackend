@@ -93,14 +93,22 @@ class HistoricalTournamentWorker:
         )
         season_ids = tuple(int(item) for item in result.get("season_ids", ()) or ())
 
-        # Advance the registry cursor only on a fully-successful targeted
-        # run. Failed/partial outcomes leave the cursor alone so the next
-        # planner tick re-attempts the same season via the delayed retry
-        # machinery.
+        # Advance the registry cursor when the targeted run successfully
+        # collected at least one event for the season. We deliberately do
+        # NOT gate on ``stage_failures == 0`` (the original 2026-05-16
+        # rule) — cup-style competitions (FIFA WC, EURO, UEFA Nations,
+        # Olympics) reliably 404 on /standings/home, /events/round/{N>=N_max},
+        # and occasionally /leaderboards (TLS) yet still land the full event
+        # list via the /events/last/{p} fallback. Counting those endpoints
+        # as fatal kept UT=16 stuck on season=41087 for 3h+ after WC 2022
+        # was already at 64/64 events. Stage failures are best-effort
+        # enrichment; if events landed, the season is "processed" and we
+        # should walk to the next one (commit 2026-05-18).
+        discovered_event_ids = int(result.get("discovered_event_ids", 0) or 0)
         if (
             target_season_id is not None
-            and result.get("stage_failures", 0) == 0
             and season_ids
+            and discovered_event_ids > 0
         ):
             advance = getattr(self.orchestrator, "advance_backfill_cursor", None)
             if callable(advance):
