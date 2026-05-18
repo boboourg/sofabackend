@@ -552,66 +552,84 @@ class ExtractEventIdFromPathTests(unittest.TestCase):
 
 
 class IsStalenessSensitiveEndpointTests(unittest.TestCase):
-    """Stage B refinement: not every event-scoped snapshot contains
-    status/score/time. Static sub-resources (team-streaks, pregame-form,
-    h2h teamDuel, comments) carry data that does not change once captured.
-    For those, we should NOT skip the stale snapshot — there's no
-    specialised normalised handler and skipping yields 404 instead of
-    the (still valid) pre-match content.
+    """Stage B (post-incidents-regression): the staleness skip is now a
+    NARROW opt-in, not a broad default.
 
-    The Stage B central skip MUST be gated by this predicate.
+    Background: the bulk live-snapshot parser bumps event.updated_at on
+    every poll (every few seconds for live matches). Per-endpoint
+    snapshots can be 5-60 seconds older than event.updated_at and still
+    contain a fully shape-correct payload (player meta, passing
+    network, team colors, isLive, addedTime, etc.).
+
+    Skipping those snapshots forces the waterfall into specialised
+    normalised handlers that can only reconstruct a tiny subset of the
+    upstream payload — losing 1-2 KB of unique fields per response.
+    That is a much worse outcome than serving a 30-second-old snapshot.
+
+    Therefore the policy is:
+      - Default: staleness-INSENSITIVE (return False). The snapshot
+        stays in the waterfall even when older than event.updated_at.
+      - Opt-in sensitive: only the /event/{event_id} root, where
+        _fetch_event_root_payload has a proper overlay path that
+        rebuilds a full payload with fresh status/score/time on top
+        of the latest snapshot.
     """
 
-    def test_status_score_sensitive_endpoints_return_true(self) -> None:
+    def test_root_event_endpoint_is_sensitive(self) -> None:
         from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
 
-        # These embed event.status / event.homeScore / event.awayScore /
-        # event.time in their payload — must skip if stale.
+        # /event/{event_id} root has _fetch_event_root_payload + overlay,
+        # so skipping the per-route snapshot lookup is safe and lets the
+        # overlay path produce fresh status/score.
         self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/lineups"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/incidents"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/statistics"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/best-players/summary"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/graph"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/shotmap"))
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/player/{player_id}/statistics"))
 
-    def test_static_sub_resources_return_false(self) -> None:
+    def test_event_sub_resources_are_insensitive(self) -> None:
         from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
 
-        # These carry pre-match/static content not embedded with live state.
-        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/team-streaks"))
-        self.assertFalse(is_staleness_sensitive_endpoint(
-            "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}"
-        ))
-        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/pregame-form"))
-        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/h2h"))
-        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/votes"))
-        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/managers"))
-        self.assertFalse(is_staleness_sensitive_endpoint(
-            "/api/v1/event/{event_id}/odds/{provider_id}/all"
-        ))
-        self.assertFalse(is_staleness_sensitive_endpoint(
-            "/api/v1/event/{event_id}/odds/{provider_id}/featured"
-        ))
-        self.assertFalse(is_staleness_sensitive_endpoint(
-            "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds"
-        ))
-        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/comments"))
+        # These have specialised handlers that only return a thin subset
+        # of the upstream payload (no player meta / passing network /
+        # team colors). Stale snapshot is strictly better than the
+        # handler's reduced payload — keep the snapshot.
+        for pattern in (
+            "/api/v1/event/{event_id}/incidents",
+            "/api/v1/event/{event_id}/lineups",
+            "/api/v1/event/{event_id}/statistics",
+            "/api/v1/event/{event_id}/best-players/summary",
+            "/api/v1/event/{event_id}/graph",
+            "/api/v1/event/{event_id}/shotmap",
+            "/api/v1/event/{event_id}/player/{player_id}/statistics",
+            "/api/v1/event/{event_id}/team-streaks",
+            "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}",
+            "/api/v1/event/{event_id}/pregame-form",
+            "/api/v1/event/{event_id}/h2h",
+            "/api/v1/event/{event_id}/votes",
+            "/api/v1/event/{event_id}/managers",
+            "/api/v1/event/{event_id}/odds/{provider_id}/all",
+            "/api/v1/event/{event_id}/odds/{provider_id}/featured",
+            "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
+            "/api/v1/event/{event_id}/comments",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertFalse(
+                    is_staleness_sensitive_endpoint(pattern),
+                    msg=f"{pattern} should be staleness-INSENSITIVE (keep snapshot)",
+                )
 
-    def test_unknown_endpoint_defaults_to_sensitive(self) -> None:
-        """Default to skipping (safe) when we have no opinion — better to
-        return 404 than serve stale status/score data for an unrecognised
-        sub-resource."""
+    def test_unknown_event_subresource_defaults_to_insensitive(self) -> None:
+        """For any unrecognised /event/{id}/... pattern, default to
+        keeping the snapshot. Stale 100% > fresh handler that returns
+        a thin payload."""
         from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
 
-        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/some-future-route"))
+        self.assertFalse(
+            is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/some-future-route")
+        )
 
     def test_handles_none_endpoint_pattern(self) -> None:
         from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
 
-        # None pattern → default sensitive (safe).
-        self.assertTrue(is_staleness_sensitive_endpoint(None))
+        # None pattern → default insensitive (keep snapshot).
+        self.assertFalse(is_staleness_sensitive_endpoint(None))
 
 
 class OverlayLiveFieldsTests(unittest.TestCase):

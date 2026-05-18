@@ -629,40 +629,48 @@ def extract_event_id_from_path(path: str) -> int | None:
         return None
 
 
-# Stage B refinement: endpoint_pattern allowlist where the cached
-# snapshot payload does NOT embed event.status / event.homeScore /
-# event.awayScore / event.time. For these patterns we should NOT skip
-# stale snapshots, because the underlying content (team-streaks,
-# pregame-form, h2h aggregates, votes, managers, odds) does not become
-# wrong when the match progresses — and there is no normalised
-# alternative, so skipping yields 404 instead of a still-valid payload.
-_STALENESS_INSENSITIVE_PATTERNS = frozenset({
-    "/api/v1/event/{event_id}/team-streaks",
-    "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}",
-    "/api/v1/event/{event_id}/pregame-form",
-    "/api/v1/event/{event_id}/h2h",
-    "/api/v1/event/{event_id}/votes",
-    "/api/v1/event/{event_id}/managers",
-    "/api/v1/event/{event_id}/odds/{provider_id}/all",
-    "/api/v1/event/{event_id}/odds/{provider_id}/featured",
-    "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
-    "/api/v1/event/{event_id}/comments",
+# Narrow opt-in allowlist of endpoint patterns whose snapshot lookup
+# should bail out when the snapshot is stale relative to event.updated_at.
+#
+# A skip is only beneficial when there is a downstream code path that
+# can produce a *better* response than the stale snapshot. In practice
+# that means: a path that rebuilds a full payload with fresh
+# status/score/time on top of the snapshot's static fields (player meta,
+# colors, tournament context, etc.).
+#
+# Today that path exists only for the /event/{event_id} root, via
+# _fetch_event_root_payload + overlay_live_fields. Every other event
+# sub-resource (incidents / lineups / statistics / best-players /
+# graph / shotmap / heatmap / passing-network / ...) falls through
+# either to a thin specialised handler that cannot reproduce the
+# upstream payload's player/assist/passing-network/team-colors detail
+# or to a plain 404. For those, a 30-60s stale snapshot with 100% of
+# the upstream shape is strictly better than a fresh 20% subset.
+#
+# Past mistake (Stage B central + first refinement): default was
+# sensitive=True with a small static allowlist of insensitive patterns.
+# That dropped 1-2 KB of unique fields per /event/{id}/incidents call
+# every time the bulk live-snapshot parser bumped event.updated_at
+# within the snapshot's lifetime (i.e. constantly during live).
+_STALENESS_SENSITIVE_PATTERNS = frozenset({
+    "/api/v1/event/{event_id}",
 })
 
 
 def is_staleness_sensitive_endpoint(endpoint_pattern: str | None) -> bool:
-    """Decide whether stale snapshot rows for this endpoint must be
-    skipped (True) or are still acceptable (False).
+    """Decide whether stale snapshot rows for this endpoint should be
+    skipped (True) so the waterfall falls through to an overlay path,
+    or kept as-is (False) because no downstream path can improve on
+    the snapshot's payload shape.
 
-    Default policy is **sensitive** (True): any endpoint that is not in
-    the explicit allowlist is treated as if its payload might embed
-    status/score/time and must be skipped when stale. This is the safe
-    default — better to return 404 than to leak a stale ``notstarted``
-    status for a live match.
+    Default policy is **insensitive** (False): keep the snapshot. Only
+    the few endpoints in _STALENESS_SENSITIVE_PATTERNS — currently just
+    the /event/{event_id} root, which has _fetch_event_root_payload +
+    overlay_live_fields — benefit from a skip.
     """
     if not endpoint_pattern:
-        return True
-    return endpoint_pattern not in _STALENESS_INSENSITIVE_PATTERNS
+        return False
+    return endpoint_pattern in _STALENESS_SENSITIVE_PATTERNS
 
 
 def overlay_live_fields(snapshot_payload: dict[str, Any], row: Any) -> dict[str, Any]:
