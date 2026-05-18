@@ -695,17 +695,35 @@ class ServiceApp:
         if callable(connection_factory):
             cursor_repository = TournamentRegistryRepository()
 
+            # D.1 (2026-05-18): strict category-priority barrier. When
+            # SOFASCORE_BACKFILL_STRICT_CATEGORY_BARRIER is true (default),
+            # the selector returns ONLY the highest pending cat.priority
+            # bucket — so cat=20 (international) drains entirely before
+            # cat=10 (England), and cat=0 (5,280 amateur UTs) only gets
+            # touched at the very end. Env=false reverts to the legacy
+            # priority_rank ASC walk for incident rollback.
+            strict_barrier_enabled = (
+                os.environ.get(
+                    "SOFASCORE_BACKFILL_STRICT_CATEGORY_BARRIER", "true"
+                ).strip().lower()
+                not in ("0", "false", "no", "off")
+            )
+
             async def _backfill_cursor_selector(*, sport_slug: str, limit: int):
                 try:
                     async with connection_factory() as connection:
+                        if strict_barrier_enabled:
+                            return await cursor_repository.select_pending_cursors_by_top_category(
+                                connection, sport_slug=sport_slug, limit=limit
+                            )
                         return await cursor_repository.list_pending_backfill_cursors(
                             connection, sport_slug=sport_slug, limit=limit
                         )
                 except Exception as exc:
                     logger.warning(
-                        "historical tournament planner: cursor selector failed, "
-                        "falling back to legacy walk: %s",
-                        exc,
+                        "historical tournament planner: cursor selector failed "
+                        "(strict_barrier=%s), falling back to legacy walk: %s",
+                        strict_barrier_enabled, exc,
                     )
                     return []
 

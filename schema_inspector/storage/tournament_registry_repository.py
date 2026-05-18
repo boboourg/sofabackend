@@ -431,6 +431,85 @@ class TournamentRegistryRepository:
         )
         return [dict(row) for row in rows]
 
+    async def select_pending_cursors_by_top_category(
+        self,
+        executor: SqlFetchExecutor,
+        *,
+        sport_slug: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return pending backfill cursors **only** from the highest
+        ``category.priority`` bucket that still has work.
+
+        Strict barrier semantics: as long as ANY UT in
+        ``category.priority = MAX(...)`` has ``next_season_backfill_id > 0``,
+        only those rows are returned. When that bucket is drained
+        (every cursor cleared) the SQL's ``MAX(c.priority)`` falls to
+        the next-highest cat.priority and that bucket becomes active.
+
+        Within the active bucket the result is sorted by
+        ``tr.priority_rank ASC`` (the per-category Sofascore-derived
+        ranking) and ``ut.user_count DESC`` (popularity tie-break) so
+        the most-watched UTs publish first.
+
+        Use this selector instead of ``list_pending_backfill_cursors``
+        for planner-side scheduling — the legacy method stays
+        unchanged because /ops/backfill-cursor wants the full ordered
+        view across all categories.
+        """
+        normalized_sport = (sport_slug or "").strip().lower()
+        rows = await executor.fetch(
+            """
+            WITH pending AS (
+                SELECT
+                    tr.source_slug,
+                    tr.sport_slug,
+                    tr.unique_tournament_id,
+                    tr.priority_rank,
+                    tr.next_season_backfill_id,
+                    c.priority AS category_priority,
+                    c.name     AS category_name,
+                    ut.user_count
+                FROM tournament_registry tr
+                JOIN unique_tournament ut ON ut.id = tr.unique_tournament_id
+                JOIN category c ON c.id = ut.category_id
+                WHERE tr.is_active = TRUE
+                  AND tr.historical_enabled = TRUE
+                  AND tr.next_season_backfill_id IS NOT NULL
+                  AND tr.next_season_backfill_id > 0
+                  AND tr.sport_slug = $1
+            ),
+            top_cat AS (
+                SELECT MAX(c.priority) AS top_cat_priority
+                FROM tournament_registry tr
+                JOIN unique_tournament ut ON ut.id = tr.unique_tournament_id
+                JOIN category c ON c.id = ut.category_id
+                WHERE tr.is_active = TRUE
+                  AND tr.historical_enabled = TRUE
+                  AND tr.next_season_backfill_id IS NOT NULL
+                  AND tr.next_season_backfill_id > 0
+                  AND tr.sport_slug = $1
+            )
+            SELECT
+                p.source_slug,
+                p.sport_slug,
+                p.unique_tournament_id,
+                p.priority_rank,
+                p.next_season_backfill_id,
+                p.category_priority,
+                p.category_name
+            FROM pending p, top_cat
+            WHERE p.category_priority = top_cat.top_cat_priority
+            ORDER BY p.priority_rank ASC,
+                     p.user_count DESC NULLS LAST,
+                     p.unique_tournament_id ASC
+            LIMIT $2
+            """,
+            normalized_sport,
+            int(limit),
+        )
+        return [dict(row) for row in rows]
+
     async def list_historical_planning_policies(
         self,
         executor: SqlFetchExecutor,
