@@ -49,6 +49,10 @@ class FakeConn:
         self._txn_queries.append((query, args))
         return None
 
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        self._txn_queries.append((query, args))
+        return None
+
 
 class FakeTxn:
     def __init__(self, conn: FakeConn) -> None:

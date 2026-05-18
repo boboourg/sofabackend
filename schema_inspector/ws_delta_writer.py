@@ -246,10 +246,10 @@ async def apply_event_delta(connection: Any, delta: NormalizedEventDelta) -> Non
 
 
 async def apply_odds_delta(connection: Any, bundle: NormalizedOddsDelta) -> None:
-    """Stage 1 no-op for odds bundles. The odds tables (event_odds_*)
-    are not yet wired into the WS path — the consumer still ingests
-    them through the polled snapshot path for now. We accept and drop.
-    """
-    # Intentionally pass — see module docstring + commit message.
-    del connection, bundle
-    return None
+    """Apply a WS odds delta to event_market_choice + invalidate the
+    persistent payload cache for the affected event. Delegates to the
+    odds-writer module which owns the choice-name resolution and the
+    UPDATE statement."""
+    from .ws_odds_writer import apply_odds_delta as _apply
+
+    await _apply(connection, bundle)

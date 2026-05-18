@@ -300,18 +300,27 @@ class ApplyEventDeltaTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApplyOddsDeltaTests(unittest.IsolatedAsyncioTestCase):
-    """Stage 1 does NOT write odds — they have no normalized home yet.
-    The writer should accept odds bundles and return silently."""
+    """Stage 1.5 wires odds through to event_market_choice. The writer
+    delegates to ws_odds_writer — that module has its own test suite
+    (test_ws_odds_writer.py). Here we only confirm the apply_odds_delta
+    facade reaches the underlying SELECT, i.e. the writer is no longer
+    a silent no-op."""
 
-    async def test_odds_apply_is_noop(self) -> None:
+    async def test_apply_odds_delta_queries_event_market(self) -> None:
         from schema_inspector.ws_delta_normalizer import NormalizedOddsDelta
         from schema_inspector.ws_delta_writer import apply_odds_delta
 
         conn = FakeConn()
-        bundle = NormalizedOddsDelta(offer_id=12345, choices={1: {"fractionalValue": "1/2"}})
+        bundle = NormalizedOddsDelta(
+            offer_id=12345,
+            choices={1: {"fractionalValue": "1/2"}},
+        )
         await apply_odds_delta(conn, bundle)
-        # No writes
-        self.assertEqual(conn.queries, [])
+        # At least one query against event_market must have been issued
+        # (the market_group lookup). FakeConn returns None so the
+        # subsequent UPDATEs are skipped — but the lookup itself proves
+        # the facade is no longer a noop.
+        self.assertTrue(any("FROM event_market" in q for q, _ in conn.queries))
 
 
 if __name__ == "__main__":
