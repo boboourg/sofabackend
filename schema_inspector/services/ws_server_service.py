@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -42,6 +43,8 @@ from ..ws_server_protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+_VERSION = "0.1"
 
 
 class MirrorWSServer:
@@ -65,6 +68,9 @@ class MirrorWSServer:
         # subscribed channels (we sub/unsub lazily as clients add subjects)
         self._listening: set[str] = set()
         self._lock = asyncio.Lock()
+        # for /ws/health
+        self._started_at: float = time.time()
+        self._msgs_sent: int = 0
 
     async def start(self) -> None:
         if self._pubsub is None:
@@ -178,6 +184,7 @@ class MirrorWSServer:
                 # Drop on full queue rather than block — fire-and-forget.
                 try:
                     q.put_nowait(frame)
+                    self._msgs_sent += 1
                 except asyncio.QueueFull:
                     pass
 
@@ -185,6 +192,34 @@ class MirrorWSServer:
 def build_app(redis: Any) -> FastAPI:
     server = MirrorWSServer(redis)
     app = FastAPI(title="Sofascore Mirror WS", lifespan=_lifespan_factory(server))
+
+    # Health endpoint — read-only, no DB hit beyond a single redis PING.
+    # Returns 200 even when redis is down so external uptime monitors
+    # don't false-alert on transient blips; ``redis: "down"`` flips
+    # ``status`` to ``degraded`` for alerting via field-level checks.
+    @app.get("/ws/health")
+    async def ws_health() -> dict[str, Any]:
+        try:
+            await redis.ping()
+            redis_status = "ok"
+        except Exception:
+            redis_status = "down"
+        total_subs = sum(
+            len(subs) for subs in server.sub_manager._by_client.values()
+        )
+        return {
+            "status": "ok" if redis_status == "ok" else "degraded",
+            "redis": redis_status,
+            "connections": len(server._client_queues),
+            "subscriptions": total_subs,
+            "fanout_channels": sorted(
+                ch for ch in server._listening if ch != "ws:fanout:_warmup_"
+            ),
+            "uptime_seconds": round(time.time() - server._started_at, 1),
+            "messages_sent": server._msgs_sent,
+            "version": _VERSION,
+            "server_id": server.server_id,
+        }
 
     @app.websocket("/ws/v1")
     async def websocket_endpoint(ws: WebSocket) -> None:
