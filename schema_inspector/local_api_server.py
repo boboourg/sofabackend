@@ -436,6 +436,27 @@ class LocalApiApplication:
                 },
             )
 
+        # Post-waterfall enrichment hooks. Sofascore returns a payload
+        # that's good as-is for 99 % of routes, but a handful want a
+        # couple of derived fields the upstream doesn't expose:
+        #   * /api/v1/unique-tournament/{ut}/season/{s}/info gets
+        #     info.start_ut + info.end_ut (round-1 and last-round
+        #     match timestamps computed from our own event tables).
+        if route.endpoint.pattern == (
+            "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/info"
+        ):
+            ut_id = path_params.get("unique_tournament_id")
+            season_id = path_params.get("season_id")
+            if ut_id is not None and season_id is not None:
+                try:
+                    payload = await self._enrich_season_info_payload(
+                        payload,
+                        ut_id=int(ut_id),
+                        season_id=int(season_id),
+                    )
+                except (TypeError, ValueError):
+                    pass
+
         if cache_key is not None:
             await self._try_payload_cache_write(
                 cache_key=cache_key,
@@ -562,6 +583,80 @@ class LocalApiApplication:
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
         )
+
+    async def _enrich_season_info_payload(
+        self,
+        payload: Any,
+        *,
+        ut_id: int,
+        season_id: int,
+    ) -> Any:
+        """Augment the Sofascore ``/api/v1/unique-tournament/{ut}/season/{s}/info``
+        response with two Unix timestamps that Sofascore itself does
+        not return: ``info.start_ut`` (round 1 earliest match) and
+        ``info.end_ut`` (last round latest match).
+
+        Both fields are **added** only when our DB has the matching
+        events ingested — NULL columns are silently skipped so the
+        wire format stays Sofascore-shape for any season we haven't
+        crawled yet.
+
+        Any DB failure is swallowed (the payload is returned
+        unmodified) so the /info endpoint never regresses to 500 over
+        a transient pool problem.
+        """
+        if not isinstance(payload, dict):
+            return payload
+        info_block = payload.get("info")
+        if not isinstance(info_block, dict):
+            return payload
+        try:
+            connection = await self._connect()
+        except Exception:
+            return payload
+        try:
+            row = await connection.fetchrow(
+                """
+                SELECT
+                    MIN(e.start_timestamp) FILTER (WHERE ri.round_number = 1) AS start_ut,
+                    MAX(e.start_timestamp) FILTER (
+                        WHERE ri.round_number = (
+                            SELECT MAX(ri2.round_number)
+                            FROM event_round_info ri2
+                            JOIN event e2 ON e2.id = ri2.event_id
+                            WHERE e2.unique_tournament_id = $1 AND e2.season_id = $2
+                        )
+                    ) AS end_ut
+                FROM event e
+                JOIN event_round_info ri ON ri.event_id = e.id
+                WHERE e.unique_tournament_id = $1 AND e.season_id = $2
+                """,
+                ut_id,
+                season_id,
+            )
+        except Exception:
+            logger.exception(
+                "season_info enricher failed for ut=%s season=%s",
+                ut_id, season_id,
+            )
+            try:
+                await connection.close()
+            except Exception:
+                pass
+            return payload
+        try:
+            await connection.close()
+        except Exception:
+            pass
+        if row is None:
+            return payload
+        start_ut = row.get("start_ut") if isinstance(row, dict) else row["start_ut"]
+        end_ut = row.get("end_ut") if isinstance(row, dict) else row["end_ut"]
+        if start_ut is not None:
+            info_block["start_ut"] = int(start_ut)
+        if end_ut is not None:
+            info_block["end_ut"] = int(end_ut)
+        return payload
 
     def _fetch_ops_backfill_priorities_payload(self) -> dict[str, Any]:
         """Reflect the current backfill priority config on disk so
