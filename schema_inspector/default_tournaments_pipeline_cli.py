@@ -597,42 +597,44 @@ async def _run_tournament_worker(
                     ),
                 )
 
-                # 2026-05-18 fix: when round_numbers is empty (we have no
-                # event_round_info for this season — typical for cup-style
-                # competitions like FIFA World Cup, EURO, Olympic Games),
-                # fall through to paginated /events/last/{p} discovery.
-                # Without this every historical edition stays at 0 events
-                # because the round-based path never finds anything to
-                # fetch.
-                if not round_numbers:
-                    last_page_count = 0
-                    for page in range(0, 20):
-                        try:
-                            page_result = await event_list_job.run_season_last(
-                                unique_tournament_id,
-                                season_id,
-                                page,
-                                sport_slug=sport_slug,
-                                timeout=timeout,
-                            )
-                        except Exception as exc:
-                            logger.info(
-                                "season_last pagination stopped at page=%d for "
-                                "unique_tournament_id=%s season_id=%s: %s",
-                                page, unique_tournament_id, season_id, exc,
-                            )
-                            break
-                        page_event_count = len(page_result.parsed.events)
-                        last_page_count = page_event_count
-                        if page_event_count == 0:
-                            break
-                    _progress(
-                        "season_last_fallback",
-                        (
-                            f"unique_tournament_id={unique_tournament_id} season_id={season_id} "
-                            f"last_page_events={last_page_count}"
-                        ),
-                    )
+                # 2026-05-18 fix: round-based discovery alone misses
+                # cup-style competitions where event_round_info either is
+                # empty or only covers a fragment of the bracket (e.g.
+                # FIFA WC 2022 stored 1 event with round=5, planner kept
+                # asking for /events/round/5 → 404, season never grew
+                # past 1 event). Always follow with paginated
+                # /events/last/{p} discovery — it works for both leagues
+                # (where round_events already covered everything; this
+                # fetch is mostly a refresh) and cups (where this is
+                # the only path that returns the full bracket).
+                pages_with_data = 0
+                for page in range(0, 20):
+                    try:
+                        page_result = await event_list_job.run_season_last(
+                            unique_tournament_id,
+                            season_id,
+                            page,
+                            sport_slug=sport_slug,
+                            timeout=timeout,
+                        )
+                    except Exception as exc:
+                        logger.info(
+                            "season_last pagination stopped at page=%d for "
+                            "unique_tournament_id=%s season_id=%s: %s",
+                            page, unique_tournament_id, season_id, exc,
+                        )
+                        break
+                    page_event_count = len(page_result.parsed.events)
+                    if page_event_count == 0:
+                        break
+                    pages_with_data += 1
+                _progress(
+                    "season_last_fallback",
+                    (
+                        f"unique_tournament_id={unique_tournament_id} season_id={season_id} "
+                        f"pages_with_data={pages_with_data}"
+                    ),
+                )
             except Exception as exc:
                 stage_failures += 1
                 logger.warning(
