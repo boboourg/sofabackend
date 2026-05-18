@@ -69,6 +69,16 @@ class MirrorWSServer:
     async def start(self) -> None:
         if self._pubsub is None:
             self._pubsub = self.redis.pubsub()
+            # redis-py async PubSub.get_message() raises "pubsub
+            # connection not set" if no channels were ever subscribed.
+            # Subscribe to a placeholder so the connection initialises
+            # before any client SUB arrives. Real subscriptions are
+            # added lazily by _sync_redis_subscriptions().
+            try:
+                await self._pubsub.subscribe("ws:fanout:_warmup_")
+                self._listening.add("ws:fanout:_warmup_")
+            except Exception:
+                logger.exception("ws-server warmup subscribe failed")
         if self._listener_task is None or self._listener_task.done():
             self._listener_task = asyncio.create_task(self._listen_redis())
 
