@@ -574,6 +574,11 @@ async def _run_tournament_worker(
             )
 
         if not skip_round_events:
+            # Round-based fetch: works for leagues with stable round
+            # structure. Failures here (e.g. cup-only /events/round/{N}
+            # returns 404) are NON-FATAL — we always continue to the
+            # /events/last/{p} fallback below so cup-style seasons
+            # still get populated.
             try:
                 async with database.connection() as connection:
                     round_numbers = await _load_round_numbers(
@@ -596,17 +601,25 @@ async def _run_tournament_worker(
                         f"rounds={len(round_numbers)}"
                     ),
                 )
+            except Exception as exc:
+                stage_failures += 1
+                logger.warning(
+                    "Default-tournaments round-events failed for unique_tournament_id=%s season_id=%s: %s",
+                    unique_tournament_id,
+                    season_id,
+                    exc,
+                )
 
-                # 2026-05-18 fix: round-based discovery alone misses
-                # cup-style competitions where event_round_info either is
-                # empty or only covers a fragment of the bracket (e.g.
-                # FIFA WC 2022 stored 1 event with round=5, planner kept
-                # asking for /events/round/5 → 404, season never grew
-                # past 1 event). Always follow with paginated
-                # /events/last/{p} discovery — it works for both leagues
-                # (where round_events already covered everything; this
-                # fetch is mostly a refresh) and cups (where this is
-                # the only path that returns the full bracket).
+            # 2026-05-18 fix: round-based discovery alone misses
+            # cup-style competitions where event_round_info either is
+            # empty or only covers a fragment of the bracket (e.g.
+            # FIFA WC 2022 stored 1 event with round=5, planner kept
+            # asking for /events/round/5 → 404, season never grew
+            # past 1 event). Always follow with paginated
+            # /events/last/{p} discovery — placed in its OWN try block
+            # so a transient round-events 404 above never prevents the
+            # fallback from running.
+            try:
                 pages_with_data = 0
                 for page in range(0, 20):
                     try:
@@ -636,9 +649,11 @@ async def _run_tournament_worker(
                     ),
                 )
             except Exception as exc:
-                stage_failures += 1
+                # Don't add to stage_failures here — fallback is best-
+                # effort; the round-events stage above already covered
+                # the failure accounting.
                 logger.warning(
-                    "Default-tournaments round-events failed for unique_tournament_id=%s season_id=%s: %s",
+                    "season_last fallback failed for unique_tournament_id=%s season_id=%s: %s",
                     unique_tournament_id,
                     season_id,
                     exc,
