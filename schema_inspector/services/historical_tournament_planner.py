@@ -7,11 +7,16 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from pathlib import Path
+
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_SYNC_TOURNAMENT_ARCHIVE
 from ..queue.streams import STREAM_HISTORICAL_TOURNAMENT
 from ..workers._stream_jobs import encode_stream_job
-from .backfill_priority_config import BackfillPriorityConfig
+from .backfill_priority_config import (
+    BackfillPriorityConfig,
+    ConfigValidationError,
+)
 
 HISTORICAL_TOURNAMENT_CURSOR_HASH = "hash:etl:historical_tournament_cursor"
 TournamentSelector = Callable[..., Awaitable[tuple[int, ...]] | tuple[int, ...]]
@@ -88,6 +93,31 @@ class HistoricalTournamentPlannerDaemon:
 
     def request_shutdown(self) -> None:
         self.shutdown_requested = True
+
+    def reload_priority_config(self, path: "Path | str") -> None:
+        """Reload backfill priorities from ``path``.
+
+        Safety rails:
+          * ConfigValidationError (malformed YAML / bad value) is caught
+            and the previous-good config is kept. A WARNING is logged so
+            ``journalctl`` shows the operator typo.
+          * Missing file resets the config to defaults (empty
+            ``sport_weights``) — this lets an operator "remove the
+            override" by deleting the file.
+        """
+        path = Path(path)
+        try:
+            new_config = BackfillPriorityConfig.load(path)
+        except ConfigValidationError as exc:
+            logger.warning(
+                "reload_priority_config: keeping previous config — %s", exc,
+            )
+            return
+        self.priority_config = new_config
+        logger.info(
+            "reload_priority_config: applied %s (sports=%d, ut_boost=%d)",
+            path, len(new_config.sport_weights), len(new_config.ut_boost),
+        )
 
     async def run_forever(self) -> None:
         while not self.shutdown_requested:

@@ -1598,6 +1598,76 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "backfill-priorities":
+                from .services.backfill_priority_config import (
+                    BackfillPriorityConfig,
+                    ConfigValidationError,
+                )
+                from pathlib import Path
+                import json as _json
+
+                cfg_path = Path(
+                    getattr(args, "config_path", None)
+                    or os.environ.get("SOFASCORE_BACKFILL_PRIORITIES_PATH")
+                    or "/opt/sofascore/config/backfill_priorities.yaml"
+                )
+                action = getattr(args, "action", "show")
+
+                if action == "show":
+                    try:
+                        cfg = BackfillPriorityConfig.load(cfg_path)
+                    except ConfigValidationError as exc:
+                        print(f"INVALID: {exc}")
+                        return 2
+                    print(_json.dumps({
+                        "path": str(cfg_path),
+                        "exists": cfg_path.exists(),
+                        "sport_weights": dict(cfg.sport_weights),
+                        "ut_boost": dict(cfg.ut_boost),
+                        "sport_concurrency_caps": dict(cfg.sport_concurrency_caps),
+                    }, indent=2))
+                    return 0
+
+                if action == "reload":
+                    import subprocess
+                    unit = "sofascore-historical-tournament-planner.service"
+                    proc = subprocess.run(
+                        ["sudo", "systemctl", "kill", "-s", "HUP", unit],
+                        capture_output=True, text=True,
+                    )
+                    if proc.returncode != 0:
+                        print(f"FAIL: {proc.stderr.strip()}")
+                        return proc.returncode
+                    print(f"OK: SIGHUP sent to {unit}")
+                    print("Check 'journalctl -u sofascore-historical-tournament-planner -n 5' "
+                          "for the reload log line.")
+                    return 0
+
+                if action == "dry-run":
+                    # Just validate parse + dump effective ratios.
+                    try:
+                        cfg = BackfillPriorityConfig.load(cfg_path)
+                    except ConfigValidationError as exc:
+                        print(f"INVALID: {exc}")
+                        return 2
+                    total = sum(cfg.sport_weights.values()) or 1.0
+                    print(f"Loaded {cfg_path}")
+                    print(f"Effective shares (per planner tick of N slots):")
+                    for sport, weight in sorted(cfg.sport_weights.items(), key=lambda kv: -kv[1]):
+                        pct = 100.0 * weight / total
+                        print(f"  {sport:25s} weight={weight:>6.1f}  {pct:>5.1f} %")
+                    if cfg.ut_boost:
+                        print(f"\nUT boost (multiplier on top of sport weight):")
+                        for ut_id, mult in cfg.ut_boost.items():
+                            print(f"  ut_id={ut_id:<8d}  multiplier={mult}")
+                    if cfg.sport_concurrency_caps:
+                        print(f"\nConcurrency caps:")
+                        for sport, cap in cfg.sport_concurrency_caps.items():
+                            print(f"  {sport:25s} max in-flight = {cap}")
+                    return 0
+
+                print(f"Unknown action: {action}")
+                return 2
             if args.command == "historical-tournament-planner-daemon":
                 service_app = ServiceApp(app)
                 await service_app.run_historical_tournament_planner_daemon(
@@ -2018,6 +2088,29 @@ def _build_parser() -> argparse.ArgumentParser:
     historical_planner_daemon.add_argument("--date-to", help="Optional inclusive end date in YYYY-MM-DD format for manual override mode.")
     historical_planner_daemon.add_argument("--dates-per-tick", type=int, default=1, help="Maximum archival dates to publish per sport on each planner tick.")
     historical_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
+    backfill_priorities = subparsers.add_parser(
+        "backfill-priorities",
+        help=(
+            "Inspect or reload backfill priority config "
+            "(/opt/sofascore/config/backfill_priorities.yaml). See "
+            "docs/BACKFILL_PRIORITIES.md."
+        ),
+    )
+    backfill_priorities.add_argument(
+        "action",
+        choices=["show", "reload", "dry-run"],
+        help=(
+            "show: parse the file + print effective config; "
+            "reload: SIGHUP the historical-tournament-planner unit; "
+            "dry-run: parse + print per-sport share ratios."
+        ),
+    )
+    backfill_priorities.add_argument(
+        "--config-path",
+        default=None,
+        help="Override the default config path.",
+    )
 
     historical_tournament_planner_daemon = subparsers.add_parser("historical-tournament-planner-daemon", help="Run the historical tournament/season planner loop.")
     historical_tournament_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")

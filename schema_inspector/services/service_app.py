@@ -102,11 +102,47 @@ from .historical_planner import (
     build_historical_planning_targets,
     compute_historical_horizon,
 )
+from .backfill_priority_config import (
+    BackfillPriorityConfig,
+    ConfigValidationError,
+)
 from .historical_tournament_planner import (
     HistoricalTournamentCursorStore,
     HistoricalTournamentPlannerDaemon,
     HistoricalTournamentPlanningTarget,
 )
+
+
+# Default path for the operator-tunable backfill priority config.
+# Override via env SOFASCORE_BACKFILL_PRIORITIES_PATH if you keep
+# the file elsewhere (e.g. for tests or multi-tenant deployments).
+_BACKFILL_PRIORITIES_DEFAULT_PATH = "/opt/sofascore/config/backfill_priorities.yaml"
+
+
+def _load_backfill_priority_config_or_warn() -> BackfillPriorityConfig | None:
+    """Load the priority config at planner startup. ``None`` keeps
+    the legacy uniform-rotation behaviour — log + carry on when:
+      * the file is absent (typical fresh deploy);
+      * the YAML is malformed (operator typo; the planner shouldn't
+        fail to start over a config glitch).
+    """
+    from pathlib import Path
+
+    path = Path(os.environ.get("SOFASCORE_BACKFILL_PRIORITIES_PATH") or _BACKFILL_PRIORITIES_DEFAULT_PATH)
+    try:
+        cfg = BackfillPriorityConfig.load(path)
+    except ConfigValidationError as exc:
+        logger.warning(
+            "backfill priorities at %s are malformed (%s) — running with no priority config",
+            path, exc,
+        )
+        return None
+    if not cfg.sport_weights and not cfg.ut_boost:
+        # Empty config (file missing or all sections empty) — None keeps
+        # the planner in legacy mode so we don't pay the per-sport budget
+        # split overhead for free.
+        return None
+    return cfg
 from .resource_planner import ResourcePlannerDaemon
 from .resource_scope import (
     CustomIdOfManagedEventsResolver,
@@ -685,6 +721,7 @@ class ServiceApp:
             loop_interval_s=loop_interval_seconds,
             target_loader=target_loader,
             backfill_cursor_selector=backfill_cursor_selector,
+            priority_config=_load_backfill_priority_config_or_warn(),
             # Task 5 (2026-05-15): live-side governor on top of stream
             # backpressure — see build_historical_planner_daemon comment.
             backpressure=CompositeBackpressure(
@@ -1472,6 +1509,31 @@ class ServiceApp:
             tournaments_per_tick=tournaments_per_tick,
             loop_interval_seconds=loop_interval_seconds,
         )
+        # SIGHUP → reload priorities from disk without restart.
+        # Operator workflow:  `sudo systemctl kill -s HUP <unit>`.
+        # On Windows asyncio has no add_signal_handler — guarded so
+        # tests + dev shell never crash on import / startup.
+        import signal as _signal
+        try:
+            loop = asyncio.get_running_loop()
+            from pathlib import Path
+            cfg_path = Path(
+                os.environ.get("SOFASCORE_BACKFILL_PRIORITIES_PATH")
+                or _BACKFILL_PRIORITIES_DEFAULT_PATH
+            )
+            loop.add_signal_handler(
+                _signal.SIGHUP,
+                lambda: daemon.reload_priority_config(cfg_path),
+            )
+            logger.info(
+                "historical-tournament-planner: SIGHUP → reload from %s",
+                cfg_path,
+            )
+        except (AttributeError, NotImplementedError, RuntimeError) as exc:
+            logger.info(
+                "SIGHUP signal handler not installed (%s) — reload only via restart",
+                exc,
+            )
         await daemon.run_forever()
 
     async def run_discovery_worker(
