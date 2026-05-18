@@ -71,22 +71,44 @@ async def apply_event_delta(connection: Any, delta: NormalizedEventDelta) -> Non
     """
     event_id = delta.event_id
 
-    # 1. event_status lookup row (insert-if-missing).
+    # 1. event_status lookup row.
+    # event_status.type is NOT NULL. WS deltas frequently ship just
+    # {code, description} without ``type`` for events whose status was
+    # last set during a poll. INSERTing such a row would violate the
+    # constraint, so we split into two paths:
+    #   - if ``type`` is present: full UPSERT (existing rows get any
+    #     non-null fields refreshed).
+    #   - if ``type`` is absent: UPDATE the existing row's description
+    #     only; do not INSERT a brand-new status code (all 25 codes
+    #     observed in the 6-day archive are already seeded).
     if delta.event_status_fields:
         code = delta.event_status_fields.get("code")
         if code is not None:
-            await connection.execute(
-                """
-                INSERT INTO event_status (code, description, type)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (code) DO UPDATE SET
-                    description = COALESCE(EXCLUDED.description, event_status.description),
-                    type        = COALESCE(EXCLUDED.type, event_status.type)
-                """,
-                code,
-                delta.event_status_fields.get("description"),
-                delta.event_status_fields.get("type"),
-            )
+            type_value = delta.event_status_fields.get("type")
+            description_value = delta.event_status_fields.get("description")
+            if type_value is not None:
+                await connection.execute(
+                    """
+                    INSERT INTO event_status (code, description, type)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (code) DO UPDATE SET
+                        description = COALESCE(EXCLUDED.description, event_status.description),
+                        type        = COALESCE(EXCLUDED.type, event_status.type)
+                    """,
+                    code,
+                    description_value,
+                    type_value,
+                )
+            elif description_value is not None:
+                await connection.execute(
+                    """
+                    UPDATE event_status
+                    SET description = $2
+                    WHERE code = $1
+                    """,
+                    code,
+                    description_value,
+                )
 
     # 2. event UPDATE — combine status_code with any misc fields.
     update_columns: dict[str, Any] = {}
