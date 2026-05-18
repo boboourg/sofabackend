@@ -402,6 +402,19 @@ class LocalApiApplication:
             payload = await self._fetch_sport_event_count_payload()
             return ApiResponse(status_code=HTTPStatus.OK, payload=payload)
 
+        # Variant B Stage 1: persistent payload cache for hot endpoints.
+        # Single PK lookup against event_payload_cache; on miss we run
+        # the normal waterfall and lazily write back the freshly built
+        # payload. Cache is invalidated by callers that update the
+        # underlying normalized state (event/event_score/etc).
+        cache_key, cache_endpoint_pattern, cache_event_id, cache_sport_slug = (
+            self._derive_payload_cache_key(route, path, raw_query, path_params)
+        )
+        if cache_key is not None:
+            cached = await self._try_payload_cache_read(cache_key)
+            if cached is not None:
+                return ApiResponse(status_code=HTTPStatus.OK, payload=cached)
+
         fast_path_handled, payload = await self._fetch_entity_root_fast_path(path, raw_query)
         if not fast_path_handled:
             payload = await self._fetch_snapshot_payload(route, path, raw_query, path_params)
@@ -421,6 +434,15 @@ class LocalApiApplication:
                     "query": parse_qs(raw_query, keep_blank_values=True),
                     "endpointPattern": route.endpoint.pattern,
                 },
+            )
+
+        if cache_key is not None:
+            await self._try_payload_cache_write(
+                cache_key=cache_key,
+                endpoint_pattern=cache_endpoint_pattern,
+                event_id=cache_event_id,
+                sport_slug=cache_sport_slug,
+                payload=payload,
             )
 
         return ApiResponse(status_code=HTTPStatus.OK, payload=payload)
@@ -535,6 +557,137 @@ class LocalApiApplication:
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
         )
+
+    # Variant B Stage 1: persistent payload cache for hot endpoints.
+    # The set of endpoints below is the read-heavy minority — top 5 by
+    # request rate from the mobile client (event root, sport-live list,
+    # incidents, lineups, statistics). Every cache hit is a single PK
+    # lookup against event_payload_cache instead of the full
+    # snapshot+overlay waterfall.
+    _PAYLOAD_CACHE_PATTERNS: frozenset[str] = frozenset({
+        "/api/v1/event/{event_id}",
+        "/api/v1/event/{event_id}/incidents",
+        "/api/v1/event/{event_id}/lineups",
+        "/api/v1/event/{event_id}/statistics",
+        "/api/v1/sport/{sport_slug}/events/live",
+    })
+
+    def _derive_payload_cache_key(
+        self,
+        route: RouteSpec,
+        path: str,
+        raw_query: str,
+        path_params: dict[str, str],
+    ) -> tuple[str | None, str | None, int | None, str | None]:
+        """Return (cache_key, endpoint_pattern, event_id, sport_slug) for
+        cacheable requests; (None, None, None, None) otherwise.
+
+        We only cache canonical no-query requests; any query string
+        (?page=N, ?provider=...) bypasses the cache entirely because
+        the materialised payload is built for a single concrete
+        endpoint+context combination."""
+        if raw_query:
+            return None, None, None, None
+        pattern = route.endpoint.pattern
+        if pattern not in self._PAYLOAD_CACHE_PATTERNS:
+            return None, None, None, None
+        from .event_payload_cache_repository import make_cache_key
+
+        event_id_str = path_params.get("event_id")
+        if event_id_str is not None and event_id_str.isdigit():
+            event_id = int(event_id_str)
+            return (
+                make_cache_key(pattern, "event", event_id),
+                pattern,
+                event_id,
+                None,
+            )
+        sport_slug = path_params.get("sport_slug")
+        if sport_slug:
+            return (
+                make_cache_key(pattern, "sport", sport_slug),
+                pattern,
+                None,
+                sport_slug,
+            )
+        return None, None, None, None
+
+    async def _try_payload_cache_read(self, cache_key: str) -> Any | None:
+        """Best-effort read of event_payload_cache by PK. Returns None
+        on miss, on expired row, on any DB error (so a transient pool
+        problem can never break the API — we just fall through to the
+        normal waterfall)."""
+        from .event_payload_cache_repository import read_cache
+
+        try:
+            connection = await self._connect()
+        except Exception:
+            return None
+        try:
+            return await read_cache(connection, cache_key)
+        except Exception:
+            logger.exception("event_payload_cache read failed for key=%s", cache_key)
+            return None
+        finally:
+            try:
+                await connection.close()
+            except Exception:
+                pass
+
+    async def _try_payload_cache_write(
+        self,
+        *,
+        cache_key: str,
+        endpoint_pattern: str | None,
+        event_id: int | None,
+        sport_slug: str | None,
+        payload: Any,
+    ) -> None:
+        """Best-effort write of a freshly built payload into
+        event_payload_cache. TTL is derived from the payload's status
+        (live → 5s, scheduled → 30s, finished → 1h, default → 10s)."""
+        if endpoint_pattern is None or payload is None:
+            return
+        from .event_payload_cache_repository import resolve_ttl_seconds, write_cache
+
+        # Derive status type so we pick the right TTL bucket.
+        status_type: str | None = None
+        if isinstance(payload, dict):
+            event = payload.get("event")
+            if isinstance(event, dict):
+                status = event.get("status")
+                if isinstance(status, dict):
+                    status_type = status.get("type")
+            elif isinstance(payload.get("events"), list) and payload["events"]:
+                first = payload["events"][0]
+                if isinstance(first, dict):
+                    status = first.get("status")
+                    if isinstance(status, dict):
+                        status_type = status.get("type")
+        ttl_seconds = resolve_ttl_seconds(status_type)
+        try:
+            connection = await self._connect()
+        except Exception:
+            return
+        try:
+            await write_cache(
+                connection,
+                cache_key=cache_key,
+                endpoint_pattern=endpoint_pattern,
+                context_entity_type="event" if event_id is not None else ("sport" if sport_slug else None),
+                context_entity_id=event_id,
+                sport_slug=sport_slug,
+                payload=payload,
+                ttl_seconds=ttl_seconds,
+                source_version=None,
+            )
+        except Exception:
+            logger.exception("event_payload_cache write failed for key=%s", cache_key)
+        finally:
+            try:
+                await connection.close()
+            except Exception:
+                pass
 
     async def _fetch_snapshot_payload(
         self,

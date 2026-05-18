@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
@@ -9,6 +10,8 @@ from typing import Any, Iterable, Protocol
 import orjson
 
 from .db import register_post_commit_hook
+
+logger = logging.getLogger(__name__)
 from .event_list_parser import EventListBundle
 from .services.surface_correction_detector import SurfaceEventState
 from .storage._terminal_guard import terminal_guard_case
@@ -352,6 +355,14 @@ class EventListRepository:
         await self._upsert_event_filter_values(executor, bundle)
         await self._upsert_event_change_items(executor, bundle)
         await self._insert_payload_snapshots(executor, bundle)
+        # Variant B Stage 1: invalidate event_payload_cache rows tied to
+        # any event we just updated. This keeps the persistent payload
+        # cache (used by local_api_server.handle_api_get for hot
+        # endpoints) from serving stale status/score after a bulk live
+        # snapshot poll. Best-effort: any failure in invalidation is
+        # logged but does not abort the bundle persist — the TTL on
+        # cache rows is the safety net.
+        await self._invalidate_payload_cache(executor, bundle)
 
         return EventListWriteResult(
             endpoint_registry_rows=len(bundle.registry_entries),
@@ -1063,6 +1074,43 @@ class EventListRepository:
             """,
             rows,
         )
+
+    async def _invalidate_payload_cache(self, executor: SqlExecutor, bundle: EventListBundle) -> None:
+        """Drop event_payload_cache rows tied to events / sports we
+        just updated. The persistent payload cache (Variant B Stage 1)
+        relies on this hook to avoid serving stale status/score after a
+        bulk live snapshot poll. Best-effort: if the cache table is
+        missing (older schema) or the DELETE fails, the cache's
+        ``expires_at`` TTL is the safety net so we just log and move on.
+        """
+        event_ids = sorted({int(item.id) for item in bundle.events})
+        sport_slugs = sorted({item.slug for item in bundle.sports if item.slug})
+        if not event_ids and not sport_slugs:
+            return
+        try:
+            if event_ids:
+                await executor.execute(
+                    """
+                    DELETE FROM event_payload_cache
+                    WHERE context_entity_type = 'event'
+                      AND context_entity_id = ANY($1::bigint[])
+                    """,
+                    event_ids,
+                )
+            if sport_slugs:
+                await executor.execute(
+                    """
+                    DELETE FROM event_payload_cache
+                    WHERE sport_slug = ANY($1::text[])
+                    """,
+                    sport_slugs,
+                )
+        except Exception:  # noqa: BLE001 - tolerate missing table / db hiccup
+            logger.exception(
+                "event_payload_cache invalidation failed for %d events / %d sports",
+                len(event_ids),
+                len(sport_slugs),
+            )
 
 
 async def _executemany(executor: SqlExecutor, sql: str, rows: list[tuple[Any, ...]]) -> None:
