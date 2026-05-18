@@ -11,6 +11,7 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_SYNC_TOURNAMENT_ARCHIVE
 from ..queue.streams import STREAM_HISTORICAL_TOURNAMENT
 from ..workers._stream_jobs import encode_stream_job
+from .backfill_priority_config import BackfillPriorityConfig
 
 HISTORICAL_TOURNAMENT_CURSOR_HASH = "hash:etl:historical_tournament_cursor"
 TournamentSelector = Callable[..., Awaitable[tuple[int, ...]] | tuple[int, ...]]
@@ -61,6 +62,7 @@ class HistoricalTournamentPlannerDaemon:
         backpressure=None,
         target_loader=None,
         backfill_cursor_selector: Callable[..., Awaitable[list[dict]]] | None = None,
+        priority_config: BackfillPriorityConfig | None = None,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -78,6 +80,10 @@ class HistoricalTournamentPlannerDaemon:
         # falls back to the legacy UT-only selector path so the daemon
         # keeps working before bootstrap and during gradual rollouts.
         self.backfill_cursor_selector = backfill_cursor_selector
+        # C.3 (2026-05-18): operator-tunable per-sport / per-UT weights.
+        # ``None`` keeps the pre-config behaviour (uniform target rotation).
+        # See docs/BACKFILL_PRIORITIES.md.
+        self.priority_config = priority_config
         self.shutdown_requested = False
 
     def request_shutdown(self) -> None:
@@ -90,6 +96,53 @@ class HistoricalTournamentPlannerDaemon:
                 break
             await asyncio.sleep(self.loop_interval_s)
 
+    def _compute_per_target_limits(
+        self,
+        targets,
+    ) -> dict[str, int] | None:
+        """Slice ``tournaments_per_tick`` across sport targets according
+        to ``priority_config.sport_weights``. Returns ``None`` when no
+        config is in effect — callers fall back to the legacy
+        per-target full-budget behaviour.
+
+        Sports with weight=0 (or missing from the map) get budget=0 and
+        are filtered out by the caller. The rounding rule:
+          * compute exact share = budget * weight / total_weight
+          * floor each share to int
+          * distribute the floor-remainder across the highest-share
+            sports so the sum of integer slices == budget
+        This guarantees every non-zero sport gets at least 1 slot when
+        budget >= count(eligible_sports).
+        """
+        cfg = self.priority_config
+        if cfg is None:
+            return None
+
+        weighted = []
+        for target in targets:
+            w = float(cfg.sport_weights.get(target.sport_slug, 0.0))
+            if w > 0.0:
+                weighted.append((target.sport_slug, w))
+        if not weighted:
+            return {t.sport_slug: 0 for t in targets}
+        total_weight = sum(w for _, w in weighted)
+        budget = self.tournaments_per_tick
+
+        # Largest-remainder method (Hare quota) — stable distribution.
+        exact_shares = [(s, budget * w / total_weight) for s, w in weighted]
+        floor_shares = [(s, int(share), share - int(share)) for s, share in exact_shares]
+        result = {s: floor for s, floor, _ in floor_shares}
+        remainder = budget - sum(result.values())
+        if remainder > 0:
+            # hand out the remainder to the highest fractional parts.
+            floor_shares.sort(key=lambda item: item[2], reverse=True)
+            for s, _, _ in floor_shares[:remainder]:
+                result[s] += 1
+        # Fill paused sports with explicit 0.
+        for target in targets:
+            result.setdefault(target.sport_slug, 0)
+        return result
+
     async def tick(self) -> int:
         if self.backpressure is not None:
             reason = self.backpressure.blocking_reason()
@@ -97,6 +150,14 @@ class HistoricalTournamentPlannerDaemon:
                 logger.info("Historical tournament planner paused by backpressure: %s", reason)
                 return 0
         targets = await _await_maybe(self._target_loader()) if self._target_loader else self._static_targets
+        # C.3: per-target slice of tournaments_per_tick when a
+        # priority config is active. Targets with sport_weight=0 (or
+        # missing) are skipped entirely. ut_boost is honoured downstream
+        # by sorting fetched cursor_rows by weight_for_ut DESC.
+        per_target_limit = self._compute_per_target_limits(targets)
+        if per_target_limit is not None:
+            # Drop sports with budget=0 from the rotation.
+            targets = tuple(t for t in targets if per_target_limit.get(t.sport_slug, 0) > 0)
         published = 0
         for target in targets:
             # Phase 1 (2026-05-16): cursor-aware path first. The selector
@@ -105,13 +166,32 @@ class HistoricalTournamentPlannerDaemon:
             # publish per-(UT, season) jobs and skip the legacy walk for
             # this target.
             if self.backfill_cursor_selector is not None:
+                effective_limit = (
+                    per_target_limit[target.sport_slug]
+                    if per_target_limit is not None
+                    else self.tournaments_per_tick
+                )
                 cursor_rows = await _await_maybe(
                     self.backfill_cursor_selector(
                         sport_slug=target.sport_slug,
-                        limit=self.tournaments_per_tick,
+                        limit=effective_limit,
                     )
                 )
                 if cursor_rows:
+                    if self.priority_config is not None:
+                        # ut_boost: sort rows so the boosted UTs publish
+                        # first. weight_for_ut returns sport_weight *
+                        # ut_multiplier (or just sport_weight when no
+                        # boost) — sorting by it descending puts boosted
+                        # rows at the head.
+                        cursor_rows = sorted(
+                            cursor_rows,
+                            key=lambda r: self.priority_config.weight_for_ut(
+                                ut_id=int(r["unique_tournament_id"]),
+                                sport_slug=target.sport_slug,
+                            ),
+                            reverse=True,
+                        )
                     for row in cursor_rows:
                         ut_id = int(row["unique_tournament_id"])
                         season_id = int(row["next_season_backfill_id"])
