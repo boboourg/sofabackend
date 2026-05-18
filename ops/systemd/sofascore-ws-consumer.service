@@ -1,0 +1,24 @@
+[Unit]
+Description=Sofascore WS Consumer — pushes Sofascore WebSocket deltas (wss://ws.sofascore.com:9222) into normalized event tables and invalidates event_payload_cache. Cuts the post-event latency from the 5s polling cycle to <100ms NATS push.
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+Environment=PYTHONUNBUFFERED=1
+# By default subscribes to all 13 sports + odds. To cut volume add
+# `--sports football` (single arg) or `--no-odds` to ExecStart, then
+# `systemctl daemon-reload && systemctl restart sofascore-ws-consumer`.
+ExecStart=/opt/sofascore/deploy/run_service.sh ws-consumer
+Restart=always
+# Long-ish backoff so we don't hammer Sofascore CDN when they rate-limit
+# our IP — the consumer's own reconnect loop already handles short
+# transport blips with a 10s pause.
+RestartSec=30
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

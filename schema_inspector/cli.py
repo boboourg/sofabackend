@@ -1790,6 +1790,26 @@ async def _dispatch(args) -> int:
                 service_app = ServiceApp(app)
                 await service_app.run_live_rescue_daemon()
                 return 0
+            if args.command == "ws-consumer":
+                from .services.ws_consumer_service import (
+                    DEFAULT_SPORTS,
+                    WSConsumerService,
+                )
+
+                sports_arg = getattr(args, "sports", None) or ",".join(DEFAULT_SPORTS)
+                sports = tuple(s.strip() for s in sports_arg.split(",") if s.strip())
+                consumer = WSConsumerService(
+                    pool=app.database.pool,
+                    sports=sports,
+                    include_odds=not getattr(args, "no_odds", False),
+                    reconnect_delay_seconds=float(getattr(args, "reconnect_delay", 10.0)),
+                )
+                logger.info(
+                    "ws-consumer starting (sports=%s, include_odds=%s)",
+                    ",".join(sports), consumer.include_odds,
+                )
+                await consumer.run_forever()
+                return 0
             if args.command == "backfill-cursor-bootstrap":
                 from .storage.tournament_registry_repository import TournamentRegistryRepository
 
@@ -2196,6 +2216,37 @@ def _build_parser() -> argparse.ArgumentParser:
     # No CLI arguments — config is fully env-driven (mirrors housekeeping)
     # so operators can toggle behaviour via .env + systemctl restart without
     # editing unit files.
+
+    ws_consumer = subparsers.add_parser(
+        "ws-consumer",
+        help=(
+            "Stream Sofascore WS deltas (wss://ws.sofascore.com:9222) into "
+            "the normalized event tables and invalidate event_payload_cache. "
+            "Replaces the latency floor of the 5s polling path with ~100ms "
+            "push-based updates for live state."
+        ),
+    )
+    ws_consumer.add_argument(
+        "--sports",
+        default=None,
+        help=(
+            "Comma-separated sport slugs to subscribe to. "
+            "Default: all 13 (football,basketball,tennis,table-tennis,"
+            "volleyball,handball,ice-hockey,baseball,american-football,"
+            "rugby,cricket,futsal,esports)."
+        ),
+    )
+    ws_consumer.add_argument(
+        "--no-odds",
+        action="store_true",
+        help="Skip odds.* subscriptions (cuts WS volume ~65%%).",
+    )
+    ws_consumer.add_argument(
+        "--reconnect-delay",
+        type=float,
+        default=10.0,
+        help="Seconds to wait before reconnecting after a transport error.",
+    )
 
     backfill_cursor_bootstrap = subparsers.add_parser(
         "backfill-cursor-bootstrap",
