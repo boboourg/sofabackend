@@ -553,10 +553,65 @@ class LocalApiApplication:
                     limit_uts=limit_uts,
                 ),
             )
+        if path == "/ops/backfill-priorities":
+            return ApiResponse(
+                status_code=HTTPStatus.OK,
+                payload=self._fetch_ops_backfill_priorities_payload(),
+            )
         return ApiResponse(
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
         )
+
+    def _fetch_ops_backfill_priorities_payload(self) -> dict[str, Any]:
+        """Reflect the current backfill priority config on disk so
+        operators can verify what the planner will use on its next
+        SIGHUP — without ssh + cat. Read-only.
+        """
+        import os
+        from pathlib import Path
+
+        from .services.backfill_priority_config import (
+            BackfillPriorityConfig,
+            ConfigValidationError,
+        )
+
+        cfg_path = Path(
+            os.environ.get("SOFASCORE_BACKFILL_PRIORITIES_PATH")
+            or "/opt/sofascore/config/backfill_priorities.yaml"
+        )
+        if not cfg_path.exists():
+            return {
+                "config_path": str(cfg_path),
+                "exists": False,
+                "status": "default_uniform",
+                "note": "No priority config file present — planner uses uniform rotation across all sports.",
+            }
+        try:
+            cfg = BackfillPriorityConfig.load(cfg_path)
+        except ConfigValidationError as exc:
+            return {
+                "config_path": str(cfg_path),
+                "exists": True,
+                "status": "invalid",
+                "error": str(exc),
+                "note": "Planner has the previous-good config loaded (last successful SIGHUP).",
+            }
+        # Compute display ratios so operators see the effective % per sport.
+        total_weight = sum(cfg.sport_weights.values()) or 0.0
+        sport_share_pct: dict[str, float] = {}
+        if total_weight > 0:
+            for sport, weight in cfg.sport_weights.items():
+                sport_share_pct[sport] = round(100.0 * weight / total_weight, 1)
+        return {
+            "config_path": str(cfg_path),
+            "exists": True,
+            "status": "ok",
+            "sport_weights": dict(cfg.sport_weights),
+            "sport_share_pct": sport_share_pct,
+            "ut_boost": dict(cfg.ut_boost),
+            "sport_concurrency_caps": dict(cfg.sport_concurrency_caps),
+        }
 
     # Variant B Stage 1: persistent payload cache for hot endpoints.
     # The set of endpoints below is the read-heavy minority — top 5 by
