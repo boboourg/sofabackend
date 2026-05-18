@@ -1793,12 +1793,23 @@ async def _dispatch(args) -> int:
             if args.command == "ws-server":
                 from .services.ws_server_service import build_app
                 import uvicorn
+                from redis.asyncio import Redis as AsyncRedis  # type: ignore
 
-                redis_client = getattr(app, "redis_backend", None)
-                if redis_client is None:
-                    logger.error("ws-server requires a Redis backend; aborting.")
+                # The shared sync ``redis_backend`` is not safe to use
+                # from the asyncio pubsub loop (await on int return).
+                # We open a small, dedicated **async** client just for
+                # the WS server's pub/sub listener.
+                env = _load_project_env()
+                redis_url = (
+                    args.redis_url
+                    or env.get("REDIS_URL")
+                    or env.get("SOFASCORE_REDIS_URL")
+                )
+                if not redis_url:
+                    logger.error("ws-server requires REDIS_URL; aborting.")
                     return 2
-                fastapi_app = build_app(redis_client)
+                async_redis = AsyncRedis.from_url(redis_url, decode_responses=True)
+                fastapi_app = build_app(async_redis)
                 config = uvicorn.Config(
                     fastapi_app,
                     host=getattr(args, "host", "127.0.0.1"),

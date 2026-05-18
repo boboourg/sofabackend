@@ -21,6 +21,8 @@ no-op (used in tests + when the mirror WS server is not deployed).
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 from typing import Any
@@ -32,9 +34,16 @@ _CHANNEL_PREFIX = "ws:fanout"
 
 
 class RedisFanoutPublisher:
-    """Thin wrapper around an async redis client. ``redis`` may be
-    ``None`` — in that case every publish is a no-op so the consumer
-    runs unchanged on hosts where the mirror WS layer is not deployed.
+    """Thin wrapper around either an **async** redis client (whose
+    ``publish`` returns an awaitable) or a **sync** one (whose
+    ``publish`` returns an int). We detect at call time so the same
+    publisher works for the consumer (sync ``redis_backend`` already
+    in the ServiceApp) and for the test suite (a FakeRedis with
+    ``async def publish``).
+
+    ``redis`` may be ``None`` — in that case every publish is a no-op
+    so the consumer runs unchanged on hosts where the mirror WS layer
+    is not deployed.
     """
 
     def __init__(self, redis: Any | None) -> None:
@@ -44,7 +53,9 @@ class RedisFanoutPublisher:
         if self.redis is None:
             return
         try:
-            await self.redis.publish(channel, message)
+            result = self.redis.publish(channel, message)
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             logger.exception("ws_fanout publish failed for channel=%s", channel)
 
