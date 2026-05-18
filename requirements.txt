@@ -1,4 +1,4 @@
-curl_cffi==0.5.10
+curl_cffi>=0.7,<1.0
 asyncpg==0.30.0
 orjson==3.11.8
 fastapi==0.115.12
