@@ -603,13 +603,15 @@ class LocalApiApplication:
         if total_weight > 0:
             for sport, weight in cfg.sport_weights.items():
                 sport_share_pct[sport] = round(100.0 * weight / total_weight, 1)
+        # JSON-safe: ut_boost keys are ints in the parsed config, but
+        # orjson (and most clients) want str keys at the wire level.
         return {
             "config_path": str(cfg_path),
             "exists": True,
             "status": "ok",
             "sport_weights": dict(cfg.sport_weights),
             "sport_share_pct": sport_share_pct,
-            "ut_boost": dict(cfg.ut_boost),
+            "ut_boost": {str(k): v for k, v in cfg.ut_boost.items()},
             "sport_concurrency_caps": dict(cfg.sport_concurrency_caps),
         }
 

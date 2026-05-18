@@ -51,7 +51,8 @@ class OpsBackfillPrioritiesEndpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["sport_weights"], {"football": 4.0, "tennis": 1.0})
         self.assertEqual(result["sport_share_pct"], {"football": 80.0, "tennis": 20.0})
-        self.assertEqual(result["ut_boost"], {17: 3.0})
+        # ut_boost keys are stringified for JSON-safe transport.
+        self.assertEqual(result["ut_boost"], {"17": 3.0})
 
     def test_malformed_file_reports_invalid_with_error(self) -> None:
         path = _write_yaml("""
