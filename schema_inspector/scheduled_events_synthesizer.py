@@ -39,6 +39,7 @@ _FETCH_SELECT_AND_JOINS = """
 SELECT
     e.id                                        AS event_id,
     e.slug                                      AS event_slug,
+    e.updated_at                                AS event_updated_at,
     e.custom_id                                 AS custom_id,
     e.detail_id                                 AS detail_id,
     e.start_timestamp                           AS start_timestamp,
@@ -603,6 +604,35 @@ def build_single_event_payload(row: Any) -> dict[str, Any]:
     Sofascore wraps the event in ``{"event": ...}`` not ``{"events": [...]}``.
     """
     return {"event": _build_event(row)}
+
+
+def overlay_live_fields(snapshot_payload: dict[str, Any], row: Any) -> dict[str, Any]:
+    """Patch volatile fields (status / homeScore / awayScore / time /
+    changes) on a stale ``/event/{id}`` snapshot with fresh values from
+    a normalized synth row.
+
+    The static parts of the snapshot (teamColors, country, fieldTranslations,
+    season, tournament, hasXg, feedLocked, ...) survive untouched —
+    overlay only mutates the four blocks that the bulk live-snapshot
+    parser keeps fresh in our normalized tables.
+
+    Mutates and returns ``snapshot_payload`` in place; callers that
+    care about pristine inputs should ``copy.deepcopy`` first.
+    """
+    if not isinstance(snapshot_payload, dict):
+        return snapshot_payload
+    event = snapshot_payload.get("event")
+    if not isinstance(event, dict):
+        return snapshot_payload
+    event["status"] = _build_status(row)
+    event["homeScore"] = _build_score(row, side="home")
+    event["awayScore"] = _build_score(row, side="away")
+    time_block = _build_time(row)
+    if time_block:
+        event["time"] = time_block
+    if row.get("changes_payload"):
+        event["changes"] = row["changes_payload"]
+    return snapshot_payload
 
 
 def _build_event(row: Any) -> dict[str, Any]:

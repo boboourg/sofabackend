@@ -3074,7 +3074,7 @@ class LocalApiApplication:
 
             snapshot_row = await connection.fetchrow(
                 """
-                SELECT payload
+                SELECT id, payload, fetched_at
                 FROM api_payload_snapshot
                 WHERE endpoint_pattern = '/api/v1/event/{event_id}'
                   AND context_entity_type = 'event'
@@ -3084,39 +3084,54 @@ class LocalApiApplication:
                 """,
                 event_id,
             )
+
+            from .scheduled_events_synthesizer import (
+                build_single_event_payload,
+                fetch_single_event_row,
+                overlay_live_fields,
+            )
+
+            # Pull the synth row first — needed both for the overlay
+            # path (when snapshot is stale vs normalized) and as the
+            # final fallback (when no snapshot exists at all).
+            synth_row = await fetch_single_event_row(connection, event_id=event_id)
+            synth_usable = synth_row is not None and "event_id" in synth_row
+
             if snapshot_row is not None:
                 decoded = _decode_snapshot_payload(snapshot_row["payload"])
                 if isinstance(decoded, dict):
                     rewrapped = _wrap_stripped_entity_payload(decoded, "event")
+                    # Live-aware overlay: when the bulk live snapshot
+                    # parser updated event/event_score/event_status/
+                    # event_time more recently than the per-event
+                    # snapshot was captured, overlay those volatile
+                    # fields. This fixes the "5 minute live match shows
+                    # notstarted in /event/{id}" bug.
+                    if synth_usable:
+                        snapshot_fetched_at = snapshot_row.get("fetched_at")
+                        event_updated_at = synth_row.get("event_updated_at")
+                        if (
+                            snapshot_fetched_at is not None
+                            and event_updated_at is not None
+                            and event_updated_at > snapshot_fetched_at
+                        ):
+                            try:
+                                rewrapped = overlay_live_fields(rewrapped, synth_row)
+                            except (KeyError, TypeError, ValueError):
+                                # Overlay failure must not 500 the
+                                # request — fall back to the snapshot
+                                # as-is.
+                                pass
                     return _apply_terminal_status_to_event_payload(rewrapped, terminal_status_raw)
 
-            # Full Sofascore-shape synthesizer over normalized tables —
-            # joins team / tournament / category / sport / season / score /
-            # round_info / change_item and assembles the same envelope shape
-            # we already use for /scheduled-events and /events/live. This
-            # is the synthesizer pattern's last waterfall step: when no
-            # raw snapshot is captured, we still answer with a complete
-            # payload built from our normalized data.
-            from .scheduled_events_synthesizer import (
-                build_single_event_payload,
-                fetch_single_event_row,
-            )
-
-            synth_row = await fetch_single_event_row(connection, event_id=event_id)
-            # Defensive: the synthesizer expects fully-joined keys
-            # (event_id, event_slug, ...). If the connection returned a
-            # legacy-shape row (e.g. from a test fake that matched a
-            # broader "FROM event" pattern), fall through to the
-            # minimal-envelope path rather than 500.
-            if synth_row is not None and "event_id" in synth_row:
+            # No usable snapshot → full synthesizer envelope.
+            if synth_usable:
                 try:
                     return _apply_terminal_status_to_event_payload(
                         build_single_event_payload(synth_row),
                         terminal_status_raw,
                     )
                 except (KeyError, TypeError, ValueError):
-                    # Row was joined but missing optional sub-objects —
-                    # do not crash the request, fall back to minimal.
                     pass
 
             # Fallback to the legacy minimal envelope if the JOIN missed

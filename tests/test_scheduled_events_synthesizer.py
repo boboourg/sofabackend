@@ -509,6 +509,134 @@ class BuildPayloadStatusTests(unittest.TestCase):
         self.assertEqual(status["description"], "Not started")
 
 
+class OverlayLiveFieldsTests(unittest.TestCase):
+    """overlay_live_fields patches volatile fields (status / homeScore /
+    awayScore / time / changes) on top of a stale snapshot payload with
+    fresh values from a normalized synth row.
+
+    Use case: per-event /event/{id} snapshot was captured before the
+    match started (status=notstarted, no score). Bulk live snapshot
+    has since updated event_score + event_status + event_time. Without
+    overlay the API would still serve the stale snapshot — overlay
+    keeps the snapshot's static fields (teamColors, country, sport,
+    ...) but replaces the volatile ones from the synth row.
+    """
+
+    def test_overlay_replaces_status_in_event_envelope(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import overlay_live_fields
+
+        stale_snapshot = {
+            "event": {
+                "id": 15171570,
+                "status": {"code": 0, "type": "notstarted", "description": "Not started"},
+                "homeScore": None,
+                "awayScore": None,
+                "homeTeam": {"id": 100, "teamColors": {"primary": "#fff"}},
+            }
+        }
+        fresh_row = _minimal_row(
+            event_id=15171570,
+            status_code=6,
+            status_type="inprogress",
+            status_description="1st half",
+        )
+
+        result = overlay_live_fields(stale_snapshot, fresh_row)
+
+        self.assertEqual(result["event"]["status"]["code"], 6)
+        self.assertEqual(result["event"]["status"]["type"], "inprogress")
+        self.assertEqual(result["event"]["status"]["description"], "1st half")
+
+    def test_overlay_replaces_scores(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import overlay_live_fields
+
+        snapshot = {"event": {"id": 1, "status": {}, "homeScore": None, "awayScore": None}}
+        row = _minimal_row(
+            event_id=1,
+            home_score_current=2,
+            home_score_display=2,
+            home_score_period1=1,
+            home_score_period2=1,
+            away_score_current=1,
+            away_score_display=1,
+            away_score_period1=0,
+            away_score_period2=1,
+        )
+
+        result = overlay_live_fields(snapshot, row)
+
+        self.assertEqual(result["event"]["homeScore"]["current"], 2)
+        self.assertEqual(result["event"]["awayScore"]["current"], 1)
+        self.assertEqual(result["event"]["homeScore"]["period2"], 1)
+
+    def test_overlay_replaces_time_block(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import overlay_live_fields
+
+        snapshot = {"event": {"id": 1, "status": {}, "time": {}}}
+        row = _minimal_row(
+            event_id=1,
+            time_injury_time_1=3,
+            time_current_period_start_timestamp=1779063160,
+        )
+
+        result = overlay_live_fields(snapshot, row)
+
+        self.assertEqual(result["event"]["time"]["injuryTime1"], 3)
+        self.assertEqual(result["event"]["time"]["currentPeriodStartTimestamp"], 1779063160)
+
+    def test_overlay_keeps_static_snapshot_fields(self) -> None:
+        """Non-volatile snapshot fields (teamColors, country, season,
+        tournament, userCount, fieldTranslations, etc.) must survive
+        the overlay — overlay only touches status/score/time/changes."""
+        from schema_inspector.scheduled_events_synthesizer import overlay_live_fields
+
+        snapshot = {
+            "event": {
+                "id": 1,
+                "status": {"code": 0, "type": "notstarted"},
+                "homeTeam": {
+                    "id": 100,
+                    "teamColors": {"primary": "#fff"},
+                    "country": {"name": "Italy"},
+                    "userCount": 5000,
+                },
+                "season": {"id": 99, "year": "25/26"},
+                "tournament": {"id": 23, "name": "Serie A"},
+                "hasXg": True,
+                "feedLocked": False,
+            }
+        }
+        row = _minimal_row(event_id=1, status_code=6)
+
+        result = overlay_live_fields(snapshot, row)
+
+        # Volatile field replaced.
+        self.assertEqual(result["event"]["status"]["code"], 6)
+        # Static fields untouched.
+        self.assertEqual(result["event"]["homeTeam"]["teamColors"], {"primary": "#fff"})
+        self.assertEqual(result["event"]["homeTeam"]["country"], {"name": "Italy"})
+        self.assertEqual(result["event"]["homeTeam"]["userCount"], 5000)
+        self.assertEqual(result["event"]["season"]["year"], "25/26")
+        self.assertEqual(result["event"]["tournament"]["name"], "Serie A")
+        self.assertTrue(result["event"]["hasXg"])
+
+    def test_overlay_adds_changes_block_if_present_in_row(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import overlay_live_fields
+
+        snapshot = {"event": {"id": 1, "status": {}}}
+        row = _minimal_row(
+            event_id=1,
+            changes_payload={"changes": ["status.code"], "changeTimestamp": 1779063500},
+        )
+
+        result = overlay_live_fields(snapshot, row)
+
+        self.assertEqual(
+            result["event"]["changes"],
+            {"changes": ["status.code"], "changeTimestamp": 1779063500},
+        )
+
+
 class BuildSingleEventPayloadTests(unittest.TestCase):
     """build_single_event_payload wraps one event in {"event": {...}}
     envelope — the Sofascore shape for /api/v1/event/{event_id}."""
