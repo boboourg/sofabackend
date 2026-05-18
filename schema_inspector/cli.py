@@ -1798,8 +1798,11 @@ async def _dispatch(args) -> int:
 
                 sports_arg = getattr(args, "sports", None) or ",".join(DEFAULT_SPORTS)
                 sports = tuple(s.strip() for s in sports_arg.split(",") if s.strip())
+                # AsyncpgDatabase exposes the pool as _pool — we pass
+                # it directly (the WSConsumerService treats it as an
+                # asyncpg-pool-shaped object).
                 consumer = WSConsumerService(
-                    pool=app.database.pool,
+                    pool=app.database._pool,
                     sports=sports,
                     include_odds=not getattr(args, "no_odds", False),
                     reconnect_delay_seconds=float(getattr(args, "reconnect_delay", 10.0)),
