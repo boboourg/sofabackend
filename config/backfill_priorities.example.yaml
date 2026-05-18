@@ -1,0 +1,62 @@
+# Backfill priorities — operator-tunable weights for the
+# historical-tournament planner.
+#
+# Copy this file to /opt/sofascore/config/backfill_priorities.yaml
+# and edit. Reload with one of:
+#   sudo systemctl kill -s HUP sofascore-historical-tournament-planner.service
+#   python -m schema_inspector.cli backfill-priorities reload
+#
+# Missing fields default to "uniform / unbounded" — i.e. the planner
+# treats every sport as weight=1 and every UT as multiplier=1.
+
+# ──── Per-sport weights ───────────────────────────────────────────────
+#
+# Higher = more historical_tournament jobs scheduled for this sport
+# per planner tick. The numbers are RELATIVE — only the ratio matters
+# (sum is normalised internally). A sport with weight=0 is paused
+# until you raise it.
+sport_weights:
+  football: 20         # main product (per docs/CLAUDE.md)
+  basketball: 5
+  tennis: 5
+  ice-hockey: 3
+  baseball: 3
+  handball: 1
+  volleyball: 1
+  table-tennis: 1
+  futsal: 1
+  rugby: 1
+  cricket: 1
+  esports: 1
+  american-football: 1
+
+# ──── Per-UT boost (multiplier on top of sport_weights) ───────────────
+#
+# Use this to pull specific tournaments ahead of their sport's
+# baseline. Effective weight = sport_weights[<sport>] * multiplier.
+#
+# Find ut_id via:
+#   psql -c "SELECT id, name FROM unique_tournament WHERE name ILIKE '%premier%';"
+# or look at /ops/backfill-cursor.
+ut_boost:
+  - ut_id: 1           # EURO
+    multiplier: 10.0
+  - ut_id: 16          # FIFA World Cup
+    multiplier: 10.0
+  - ut_id: 17          # Premier League
+    multiplier: 5.0
+  - ut_id: 8           # LaLiga
+    multiplier: 3.0
+  - ut_id: 13          # World Cup Qual. CAF
+    multiplier: 3.0
+
+# ──── Per-sport concurrency cap ────────────────────────────────────────
+#
+# Hard cap on in-flight historical_tournament jobs per sport. Prevents
+# one busy sport from starving the others when the worker pool is
+# small. ``null`` (or unset) = unbounded.
+sport_concurrency_caps:
+  football: 50
+  basketball: 20
+  tennis: 20
+  # all others = unbounded
