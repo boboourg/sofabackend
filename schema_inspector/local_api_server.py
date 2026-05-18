@@ -610,10 +610,23 @@ class LocalApiApplication:
             # snapshot was captured, that snapshot is stale — we must
             # skip it so the waterfall falls through to the normalized
             # handler (or the entity-root overlay path for /event/{id}).
-            from .scheduled_events_synthesizer import extract_event_id_from_path
+            #
+            # Gated by is_staleness_sensitive_endpoint() so static
+            # sub-resources (team-streaks, pregame-form, h2h aggregates,
+            # votes, managers, odds) keep their pre-match snapshot
+            # instead of falling through to a 404 — none of those
+            # payloads embed event.status / event.homeScore so staleness
+            # is harmless for them.
+            from .scheduled_events_synthesizer import (
+                extract_event_id_from_path,
+                is_staleness_sensitive_endpoint,
+            )
             staleness_event_id = extract_event_id_from_path(path)
+            staleness_sensitive = is_staleness_sensitive_endpoint(
+                route.endpoint.pattern
+            )
             event_updated_at = None
-            if staleness_event_id is not None:
+            if staleness_event_id is not None and staleness_sensitive:
                 try:
                     event_updated_at = await connection.fetchval(
                         "SELECT updated_at FROM event WHERE id = $1",

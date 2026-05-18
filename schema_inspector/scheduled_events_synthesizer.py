@@ -629,6 +629,42 @@ def extract_event_id_from_path(path: str) -> int | None:
         return None
 
 
+# Stage B refinement: endpoint_pattern allowlist where the cached
+# snapshot payload does NOT embed event.status / event.homeScore /
+# event.awayScore / event.time. For these patterns we should NOT skip
+# stale snapshots, because the underlying content (team-streaks,
+# pregame-form, h2h aggregates, votes, managers, odds) does not become
+# wrong when the match progresses — and there is no normalised
+# alternative, so skipping yields 404 instead of a still-valid payload.
+_STALENESS_INSENSITIVE_PATTERNS = frozenset({
+    "/api/v1/event/{event_id}/team-streaks",
+    "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}",
+    "/api/v1/event/{event_id}/pregame-form",
+    "/api/v1/event/{event_id}/h2h",
+    "/api/v1/event/{event_id}/votes",
+    "/api/v1/event/{event_id}/managers",
+    "/api/v1/event/{event_id}/odds/{provider_id}/all",
+    "/api/v1/event/{event_id}/odds/{provider_id}/featured",
+    "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
+    "/api/v1/event/{event_id}/comments",
+})
+
+
+def is_staleness_sensitive_endpoint(endpoint_pattern: str | None) -> bool:
+    """Decide whether stale snapshot rows for this endpoint must be
+    skipped (True) or are still acceptable (False).
+
+    Default policy is **sensitive** (True): any endpoint that is not in
+    the explicit allowlist is treated as if its payload might embed
+    status/score/time and must be skipped when stale. This is the safe
+    default — better to return 404 than to leak a stale ``notstarted``
+    status for a live match.
+    """
+    if not endpoint_pattern:
+        return True
+    return endpoint_pattern not in _STALENESS_INSENSITIVE_PATTERNS
+
+
 def overlay_live_fields(snapshot_payload: dict[str, Any], row: Any) -> dict[str, Any]:
     """Patch volatile fields (status / homeScore / awayScore / time /
     changes) on a stale ``/event/{id}`` snapshot with fresh values from

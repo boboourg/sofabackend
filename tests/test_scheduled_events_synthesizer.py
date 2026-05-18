@@ -551,6 +551,69 @@ class ExtractEventIdFromPathTests(unittest.TestCase):
         self.assertIsNone(extract_event_id_from_path("/api/v1/player/288205/events/last/0"))
 
 
+class IsStalenessSensitiveEndpointTests(unittest.TestCase):
+    """Stage B refinement: not every event-scoped snapshot contains
+    status/score/time. Static sub-resources (team-streaks, pregame-form,
+    h2h teamDuel, comments) carry data that does not change once captured.
+    For those, we should NOT skip the stale snapshot — there's no
+    specialised normalised handler and skipping yields 404 instead of
+    the (still valid) pre-match content.
+
+    The Stage B central skip MUST be gated by this predicate.
+    """
+
+    def test_status_score_sensitive_endpoints_return_true(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
+
+        # These embed event.status / event.homeScore / event.awayScore /
+        # event.time in their payload — must skip if stale.
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/lineups"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/incidents"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/statistics"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/best-players/summary"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/graph"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/shotmap"))
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/player/{player_id}/statistics"))
+
+    def test_static_sub_resources_return_false(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
+
+        # These carry pre-match/static content not embedded with live state.
+        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/team-streaks"))
+        self.assertFalse(is_staleness_sensitive_endpoint(
+            "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}"
+        ))
+        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/pregame-form"))
+        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/h2h"))
+        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/votes"))
+        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/managers"))
+        self.assertFalse(is_staleness_sensitive_endpoint(
+            "/api/v1/event/{event_id}/odds/{provider_id}/all"
+        ))
+        self.assertFalse(is_staleness_sensitive_endpoint(
+            "/api/v1/event/{event_id}/odds/{provider_id}/featured"
+        ))
+        self.assertFalse(is_staleness_sensitive_endpoint(
+            "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds"
+        ))
+        self.assertFalse(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/comments"))
+
+    def test_unknown_endpoint_defaults_to_sensitive(self) -> None:
+        """Default to skipping (safe) when we have no opinion — better to
+        return 404 than serve stale status/score data for an unrecognised
+        sub-resource."""
+        from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
+
+        self.assertTrue(is_staleness_sensitive_endpoint("/api/v1/event/{event_id}/some-future-route"))
+
+    def test_handles_none_endpoint_pattern(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import is_staleness_sensitive_endpoint
+
+        # None pattern → default sensitive (safe).
+        self.assertTrue(is_staleness_sensitive_endpoint(None))
+
+
 class OverlayLiveFieldsTests(unittest.TestCase):
     """overlay_live_fields patches volatile fields (status / homeScore /
     awayScore / time / changes) on top of a stale snapshot payload with
