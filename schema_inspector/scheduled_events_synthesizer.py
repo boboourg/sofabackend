@@ -401,6 +401,33 @@ LIMIT 500
 _FETCH_QUERY = _FETCH_QUERY_SCHEDULED
 
 
+# Phase 2.4 — synthesize ``/event/{custom_id}/h2h/events``. Step 1 of
+# the CTE resolves the anchor event's (home_team_id, away_team_id) pair
+# by custom_id; step 2 filters the same ``event`` table for every match
+# played between those two teams (either direction), ordered most
+# recent first. Source data is already in our DB; no upstream call.
+_FETCH_QUERY_H2H_EVENTS = (
+    """
+    WITH anchor AS (
+        SELECT home_team_id, away_team_id
+        FROM event
+        WHERE custom_id = $1
+          AND home_team_id IS NOT NULL
+          AND away_team_id IS NOT NULL
+        LIMIT 1
+    )
+    """
+    + _FETCH_SELECT_AND_JOINS
+    + """
+    JOIN anchor a ON
+        (e.home_team_id = a.home_team_id AND e.away_team_id = a.away_team_id)
+        OR (e.home_team_id = a.away_team_id AND e.away_team_id = a.home_team_id)
+    ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
+    LIMIT $2
+    """
+)
+
+
 # Phase 2.1 — synthesize ``/calendar/.../months-with-events`` from
 # ``event.start_timestamp``. The Sofascore endpoint returns months that
 # have at least one event for a given (unique_tournament, season). One
@@ -594,6 +621,27 @@ async def fetch_team_events_rows(
     offset = max(0, int(page)) * int(page_size)
     limit = int(page_size) + 1
     records = await connection.fetch(query, team_id, offset, limit)
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_h2h_events_rows(
+    connection: Any,
+    *,
+    custom_id: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Powers ``/api/v1/event/{custom_id}/h2h/events``.
+
+    Step 1: resolve ``custom_id`` to the anchor event's team pair.
+    Step 2: return every event we have between the same two teams in
+    either direction, ordered most recent first, capped at ``limit``.
+
+    Returns an empty list if the custom_id doesn't match any event we
+    have (no anchor → CTE empty → outer JOIN empty).
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_H2H_EVENTS, str(custom_id), int(limit)
+    )
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 

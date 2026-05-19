@@ -1360,6 +1360,10 @@ class LocalApiApplication:
             return await self._fetch_event_lineups_payload(int(path_params["event_id"]))
         if template == "/api/v1/event/{event_id}/comments":
             return await self._fetch_event_comments_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{custom_id}/h2h/events":
+            return await self._fetch_h2h_events_payload(
+                custom_id=str(path_params["custom_id"]),
+            )
         if template == "/api/v1/event/{event_id}/h2h":
             return await self._fetch_event_h2h_payload(int(path_params["event_id"]))
         if template == "/api/v1/event/{event_id}/managers":
@@ -1491,6 +1495,44 @@ class LocalApiApplication:
         # endpoint Sofascore uses the key "featuredEvents", so rewrap.
         inner = build_payload(rows)
         return {"featuredEvents": inner.get("events", [])}
+
+    async def _fetch_h2h_events_payload(
+        self,
+        *,
+        custom_id: str,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Synthesize ``/event/{custom_id}/h2h/events``.
+
+        Phase 2.4 of REDUNDANT_ENDPOINTS_AUDIT.md: the head-to-head
+        fixture list is entirely in our ``event`` table — anchor by the
+        ``custom_id`` of the current event, then filter every match
+        between those two teams in either direction. No upstream call.
+
+        DB unavailable or query failure both yield ``{"events": []}`` so
+        the dispatcher never returns 500 to the client. The anchor not
+        being found in our DB is treated the same as "no h2h history" —
+        also empty list (the alternative would be a 404 which would
+        diverge from Sofascore's behavior of always returning an
+        envelope).
+        """
+        from .scheduled_events_synthesizer import build_payload, fetch_h2h_events_rows
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"events": []}
+        try:
+            rows = await fetch_h2h_events_rows(
+                connection,
+                custom_id=custom_id,
+                limit=limit,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"events": []}
+        await connection.close()
+        return build_payload(rows)
 
     async def _fetch_calendar_months_with_events_payload(
         self,

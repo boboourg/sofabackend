@@ -620,14 +620,14 @@ EVENT_H2H_EVENTS_ENDPOINT = SofascoreEndpoint(
     notes=(
         "CustomId-based H2H events feed. Path uses {custom_id} (string) "
         "rather than {event_id} — only endpoint in registry that does so. "
-        "D13.2: CustomIdOfRegistryEventsResolver yields custom_id targets "
-        "for every finished football event in the rolling event window "
-        "whose tournament is active+current_enabled in tournament_registry."
+        "Phase 2.4 (2026-05-19, docs/REDUNDANT_ENDPOINTS_AUDIT.md §F.3): "
+        "synthesized from event history. CustomIdOfRegistryEventsResolver "
+        "no longer feeds the resource refresh loop — the path stays for "
+        "Swagger / on-demand dispatcher access. The local API server "
+        "builds the response via ``fetch_h2h_events_rows`` over the "
+        "``event`` table (anchor by custom_id, filter both directions of "
+        "the resulting team pair)."
     ),
-    refresh_interval_seconds=7 * 24 * 3600,
-    refresh_priority=70,
-    scope_kind="custom-id-of-registry-events",
-    freshness_ttl_seconds=6 * 24 * 3600,
 )
 
 EVENT_PREGAME_FORM_ENDPOINT = SofascoreEndpoint(
