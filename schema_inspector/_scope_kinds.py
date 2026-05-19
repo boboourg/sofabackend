@@ -42,6 +42,13 @@ KNOWN_SCOPE_KINDS: frozenset[str] = frozenset(
         "season-of-active-ut-events",
         "season-of-active-ut-standings",
         "season-of-registry-ut",
+        # Item 1 (2026-05-19): historical /rounds pre-fetch scope.
+        # Covers any (UT, season) pair from registry-active +
+        # historical_enabled UTs whose season_round table is still
+        # empty. Decouples round catalog fetching from the cursor
+        # walk so the strict cat-priority barrier doesn't block
+        # UCL/EURO/etc. round structure landing.
+        "season-of-registry-ut-rounds-historical",
         "team-of-active-ut",
         "team-of-active-ut-first-page",
         "team-of-active-ut-season",

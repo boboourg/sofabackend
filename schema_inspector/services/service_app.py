@@ -161,6 +161,7 @@ from .resource_scope import (
     SeasonOfActiveUTEventsResolver,
     SeasonOfActiveUTStandingsResolver,
     SeasonOfRegistryUTResolver,
+    SeasonOfRegistryUTRoundsHistoricalResolver,
     TeamOfActiveUTFirstPageResolver,
     TeamOfActiveUTResolver,
     TeamOfActiveUTSeasonResolver,
@@ -969,6 +970,18 @@ class ServiceApp:
             # 200 for cups). The 4xx is absorbed by ResourceNegativeCache
             # so league UTs only contribute one wasted request per 7 days.
             SeasonOfRegistryUTResolver.kind: SeasonOfRegistryUTResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            # Item 1 (2026-05-19, UCL strategy C): pre-fetch ``/rounds``
+            # for ANY (UT, season) where the catalog is still empty.
+            # Decouples round structure ingestion from the cursor walk
+            # so UCL/EURO/etc. (cat>=19, blocked by strict barrier)
+            # still get Phase 4 round_slug routing once the catalog
+            # lands. ``NOT EXISTS season_round`` filter makes the
+            # resolver naturally drop pairs after first successful
+            # fetch.
+            SeasonOfRegistryUTRoundsHistoricalResolver.kind: SeasonOfRegistryUTRoundsHistoricalResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
             ),

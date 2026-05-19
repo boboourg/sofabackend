@@ -425,6 +425,25 @@ def season_rounds_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/rounds",
         envelope_key="rounds",
         target_table="season_round",
+        # Item 1 (2026-05-19, UCL strategy C): opt into the resource
+        # refresh loop via the new historical scope. Pre-Item-1 this
+        # endpoint had no scope_kind — it landed only when the
+        # cursor walk happened to fetch ``competition_job.run(
+        # season_id=X)``, which never happened for cat=19+ UTs
+        # blocked behind cat=20's strict barrier.
+        #
+        # The new scope yields (UT, season) pairs from active +
+        # historical_enabled UTs where ``season_round`` is empty.
+        # Once the catalog lands, the ``NOT EXISTS`` filter drops
+        # the pair from subsequent ticks, so the refresh interval
+        # is effectively "fetch once, never re-fetch" for finished
+        # cup seasons. Active seasons re-trigger on the cadence
+        # below if their catalog gets evicted (uncommon but possible
+        # under operator interventions).
+        refresh_interval_seconds=7 * 24 * 3600,
+        refresh_priority=60,
+        scope_kind="season-of-registry-ut-rounds-historical",
+        freshness_ttl_seconds=6 * 24 * 3600,
     )
 
 
