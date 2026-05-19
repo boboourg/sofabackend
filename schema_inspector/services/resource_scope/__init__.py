@@ -33,6 +33,9 @@ from .season_of_active_ut import (
     SeasonOfActiveUTStandingsResolver,
 )
 from .season_of_registry_ut import SeasonOfRegistryUTResolver
+from .season_of_registry_ut_cuptrees_historical import (
+    SeasonOfRegistryUTCuptreesHistoricalResolver,
+)
 from .season_of_registry_ut_rounds_historical import (
     SeasonOfRegistryUTRoundsHistoricalResolver,
 )
@@ -70,6 +73,7 @@ __all__ = [
     "SeasonOfActiveUTEventsResolver",
     "SeasonOfActiveUTStandingsResolver",
     "SeasonOfRegistryUTResolver",
+    "SeasonOfRegistryUTCuptreesHistoricalResolver",
     "SeasonOfRegistryUTRoundsHistoricalResolver",
     "TeamOfActiveUTResolver",
     "TeamOfActiveUTFirstPageResolver",

@@ -211,14 +211,16 @@ class RoundsEndpointPointsToNewScopeTests(unittest.TestCase):
             "season-of-registry-ut-rounds-historical",
         )
 
-    def test_cuptrees_endpoint_keeps_legacy_scope(self) -> None:
-        """Item 4 will handle ``/cuptrees`` separately. Item 1 must
-        not silently broaden cuptree coverage."""
+    def test_cuptrees_endpoint_uses_independent_historical_scope(self) -> None:
+        """Item 4 (2026-05-19) introduced its own
+        ``season-of-registry-ut-cuptrees-historical`` scope for
+        ``/cuptrees`` — parallel to Item 1's rounds-historical but
+        keeping the cadence + pilot rollout independent."""
         from schema_inspector.endpoints import UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT
 
         self.assertEqual(
             UNIQUE_TOURNAMENT_SEASON_CUPTREES_ENDPOINT.scope_kind,
-            "season-of-registry-ut",
+            "season-of-registry-ut-cuptrees-historical",
         )
 
 

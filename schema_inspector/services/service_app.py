@@ -160,6 +160,7 @@ from .resource_scope import (
     SeasonOfActiveUTBaseResolver,
     SeasonOfActiveUTEventsResolver,
     SeasonOfActiveUTStandingsResolver,
+    SeasonOfRegistryUTCuptreesHistoricalResolver,
     SeasonOfRegistryUTResolver,
     SeasonOfRegistryUTRoundsHistoricalResolver,
     TeamOfActiveUTFirstPageResolver,
@@ -982,6 +983,14 @@ class ServiceApp:
             # resolver naturally drop pairs after first successful
             # fetch.
             SeasonOfRegistryUTRoundsHistoricalResolver.kind: SeasonOfRegistryUTRoundsHistoricalResolver(
+                database=self.app.database,
+                redis_backend=self.app.redis_backend,
+            ),
+            # Item 4 (2026-05-19): historical /cuptrees pre-fetch.
+            # Same shape as the rounds-historical resolver but
+            # filtered on ``season_cup_tree`` emptiness. ResourceNegativeCache
+            # absorbs the 404s from league UTs after the first sweep.
+            SeasonOfRegistryUTCuptreesHistoricalResolver.kind: SeasonOfRegistryUTCuptreesHistoricalResolver(
                 database=self.app.database,
                 redis_backend=self.app.redis_backend,
             ),

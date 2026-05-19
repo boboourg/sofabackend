@@ -462,11 +462,21 @@ def season_cuptrees_endpoint() -> SofascoreEndpoint:
             "404 once and the negative cache suppresses re-publishing for 7 days. After the "
             "first sweep only the actual cup tournaments contribute traffic."
         ),
-        # D5: weekly refresh, low priority. Scope is the broad registry-driven
-        # (ut, season) set so cup tournaments without standings still land here.
+        # D5: weekly refresh, low priority.
+        #
+        # Item 4 (2026-05-19): switched from ``season-of-registry-ut``
+        # (±60d window) to the new
+        # ``season-of-registry-ut-cuptrees-historical`` scope. The new
+        # scope yields any (UT, season) where ``season_cup_tree`` is
+        # empty — including historical UCL knockout, FIFA WC 2018-
+        # 2022, EURO 2020, domestic cup history, etc. Once the
+        # bracket lands (or 404 absorbed by the negative cache for
+        # league UTs), the pair drops out of the scope. No re-fetch
+        # cadence pressure — bracket structure is immutable for
+        # finished cups.
         refresh_interval_seconds=7 * 24 * 3600,
         refresh_priority=70,
-        scope_kind="season-of-registry-ut",
+        scope_kind="season-of-registry-ut-cuptrees-historical",
         freshness_ttl_seconds=6 * 24 * 3600,
     )
 

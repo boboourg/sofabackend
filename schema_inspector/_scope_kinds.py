@@ -49,6 +49,11 @@ KNOWN_SCOPE_KINDS: frozenset[str] = frozenset(
         # walk so the strict cat-priority barrier doesn't block
         # UCL/EURO/etc. round structure landing.
         "season-of-registry-ut-rounds-historical",
+        # Item 4 (2026-05-19): historical /cuptrees pre-fetch scope.
+        # Mirror of the rounds-historical scope but targets the
+        # bracket-tree endpoint. Parallel rollout knobs let us pilot
+        # cuptrees coverage independently from rounds.
+        "season-of-registry-ut-cuptrees-historical",
         "team-of-active-ut",
         "team-of-active-ut-first-page",
         "team-of-active-ut-season",
