@@ -579,6 +579,11 @@ class LocalApiApplication:
                 status_code=HTTPStatus.OK,
                 payload=self._fetch_ops_backfill_priorities_payload(),
             )
+        if path == "/ops/endpoints/by-origin":
+            return ApiResponse(
+                status_code=HTTPStatus.OK,
+                payload=self._fetch_ops_endpoints_by_origin_payload(),
+            )
         return ApiResponse(
             status_code=HTTPStatus.NOT_FOUND,
             payload={"error": "Route is not registered in the operational API.", "path": path},
@@ -657,6 +662,39 @@ class LocalApiApplication:
         if end_ut is not None:
             info_block["end_ut"] = int(end_ut)
         return payload
+
+    def _fetch_ops_endpoints_by_origin_payload(self) -> dict[str, Any]:
+        """Group all registered endpoints by ``EndpointOrigin``.
+
+        Fix 2 (2026-05-19) operational visibility:
+
+        * ``upstream``  — fetched from Sofascore (proxy budget applies).
+        * ``synthetic`` — built locally from DB; survives a Sofascore
+          outage at serve time.
+        * ``federated`` — snapshot primary + synthesize fallback.
+
+        Used by deploy checklists ("what's left running if Sofascore
+        goes down?") and monitoring overlays.
+        """
+        from .endpoints import EndpointOrigin, local_api_endpoints
+
+        endpoints = local_api_endpoints()
+        grouped: dict[str, list[dict[str, Any]]] = {
+            member.value: [] for member in EndpointOrigin
+        }
+        for endpoint in endpoints:
+            grouped[endpoint.origin.value].append(
+                {
+                    "path_template": endpoint.path_template,
+                    "envelope_key": endpoint.envelope_key,
+                    "target_table": endpoint.target_table,
+                }
+            )
+        return {
+            "total": len(endpoints),
+            "counts": {origin: len(items) for origin, items in grouped.items()},
+            "endpoints": grouped,
+        }
 
     def _fetch_ops_backfill_priorities_payload(self) -> dict[str, Any]:
         """Reflect the current backfill priority config on disk so

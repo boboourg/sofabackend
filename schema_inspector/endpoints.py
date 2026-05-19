@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from urllib.parse import urlencode
 
 from .sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
@@ -10,6 +11,38 @@ from .sport_profiles import SUPPORTED_SPORT_SLUGS, resolve_sport_profile
 SOFASCORE_BASE_URL = "https://www.sofascore.com"
 
 LOCAL_API_SUPPORTED_SPORTS = SUPPORTED_SPORT_SLUGS
+
+
+class EndpointOrigin(str, Enum):
+    """Where the local-API response payload comes from for a given endpoint.
+
+    Added 2026-05-19 (fix 2 of REDUNDANT_ENDPOINTS_AUDIT follow-ups) to
+    make the "this endpoint does not need Sofascore at serve time" fact
+    explicit at the declaration site. Used by:
+
+    * health checks — which endpoints survive a Sofascore outage?
+    * monitoring — proxy budget metrics belong to ``UPSTREAM`` only;
+    * code review — synthesized endpoints have different reliability /
+      latency / freshness contracts than fetched ones.
+
+    Inheriting from ``str`` keeps JSON serialization trivial (``json.dumps
+    (origin)`` yields the value string) for ``/ops/`` reports.
+    """
+
+    # Default for ~100 endpoints. Payload comes from Sofascore via the
+    # resource refresh worker / discovery planner / direct fetch.
+    UPSTREAM = "upstream"
+
+    # Built entirely from our DB at request time; no Sofascore call.
+    # Examples (Phase 2.1 / 2.4): /calendar/.../months-with-events,
+    # /event/{custom_id}/h2h/events.
+    SYNTHETIC = "synthetic"
+
+    # Snapshot primary + synthesizer fallback (or vice versa). Examples
+    # planned (Phase 2.5 once dispatcher wiring lands):
+    # /standings/away as ``total - home`` arithmetic when the stored
+    # ``away`` rows go stale.
+    FEDERATED = "federated"
 
 
 @dataclass(frozen=True)
@@ -45,6 +78,11 @@ class SofascoreEndpoint:
     notes: str | None = None
     source_slug: str = "sofascore"
     contract_version: str = "v1"
+    # 2026-05-19 (fix 2): payload-source classification. Default is
+    # ``UPSTREAM`` (Sofascore-fetched) so every existing constant stays
+    # binary compatible — only endpoints that explicitly opt out get a
+    # different classification. See ``EndpointOrigin`` docstring.
+    origin: EndpointOrigin = EndpointOrigin.UPSTREAM
     # Resource Refresh Loop metadata (optional, opt-in).
     refresh_interval_seconds: int | None = None
     refresh_priority: int = 50
@@ -436,6 +474,10 @@ def calendar_months_with_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/calendar/unique-tournament/{unique_tournament_id}/season/{season_id}/months-with-events",
         envelope_key="months",
         target_table="api_payload_snapshot",
+        # 2026-05-19 (fix 2): payload built from event.start_timestamp
+        # via ``scheduled_events_synthesizer.fetch_calendar_months_rows``
+        # — no Sofascore call at serve time.
+        origin=EndpointOrigin.SYNTHETIC,
     )
 
 
@@ -628,6 +670,9 @@ EVENT_H2H_EVENTS_ENDPOINT = SofascoreEndpoint(
         "``event`` table (anchor by custom_id, filter both directions of "
         "the resulting team pair)."
     ),
+    # 2026-05-19 (fix 2): see notes — response built locally, no
+    # upstream call at serve time.
+    origin=EndpointOrigin.SYNTHETIC,
 )
 
 EVENT_PREGAME_FORM_ENDPOINT = SofascoreEndpoint(
