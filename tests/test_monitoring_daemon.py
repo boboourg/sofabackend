@@ -215,7 +215,12 @@ class TickAlertFireSuppressTests(unittest.IsolatedAsyncioTestCase):
         snapshots_iter[:] = [crit_snap]
         report = await daemon._tick()  # WARN → CRIT escalation
         self.assertEqual(report.alerts_fired, 1)
-        self.assertEqual(sink.messages[-1].split("\n")[0][:6], "[CRIT]")
+        # 2026-05-19 (Item 5): ``monitoring/signals.py`` prefixes CRIT
+        # messages with ``🔴 `` for at-a-glance severity scanning in
+        # the Slack channel. The leading emoji + space precedes
+        # ``[CRIT]`` — assert via ``in`` rather than fixed-offset
+        # slicing so future emoji tweaks don't break this test.
+        self.assertIn("[CRIT]", sink.messages[-1].split("\n")[0])
 
     async def test_ok_value_does_not_alert(self) -> None:
         daemon, sink, dedupe = _make_daemon(snapshots=[_make_ok_snapshot()])

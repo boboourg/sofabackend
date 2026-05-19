@@ -269,7 +269,22 @@ class LiveFreshnessSummaryTests(unittest.IsolatedAsyncioTestCase):
         # dataclasses.asdict preserves tuple for tuple fields; JSON
         # serialiser (orjson) handles both list and tuple identically.
         self.assertIsInstance(as_dict["slos"], (list, tuple))
-        self.assertEqual(len(as_dict["slos"]), 3)
+        # 2026-05-19 (Item 5): production now emits 4 SLOs after the
+        # tier_1_quarantined_events SLO was added in
+        # ``ops/health.py:380``. Adjusted the count + pinned the SLO
+        # names so future additions/renames trip a diff in this test
+        # rather than a silent count change.
+        self.assertEqual(len(as_dict["slos"]), 4)
+        slo_names = {slo["name"] for slo in as_dict["slos"]}
+        self.assertEqual(
+            slo_names,
+            {
+                "oldest_hot_score_age_seconds",
+                "refresh_live_event_success_rate_5min",
+                "tier_1_blocked_rate_cumulative",
+                "tier_1_quarantined_events",
+            },
+        )
         for slo in as_dict["slos"]:
             self.assertIn("name", slo)
             self.assertIn("actual", slo)
