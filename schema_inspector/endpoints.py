@@ -529,6 +529,14 @@ def local_api_endpoints(sport_slugs: tuple[str, ...] = LOCAL_API_SUPPORTED_SPORT
     add(SPORT_ALL_EVENT_COUNT_ENDPOINT)
     add(CATEGORY_UNIQUE_TOURNAMENTS_ENDPOINT)
 
+    # Phase 2.1 (2026-05-19, docs/REDUNDANT_ENDPOINTS_AUDIT.md §H):
+    # ``/calendar/.../months-with-events`` was a phantom endpoint constant
+    # — declared but never registered. It is now synthesized from
+    # ``event.start_timestamp`` in the local API server; registering it
+    # here puts the route under the same dispatcher as every other
+    # endpoint and prevents 404s for clients that ask Sofascore-style.
+    add(calendar_months_with_events_endpoint())
+
     for endpoint in COMPETITION_ENDPOINTS + STANDINGS_ENDPOINTS + STATISTICS_ENDPOINTS + ENTITIES_ENDPOINTS:
         add(endpoint)
 

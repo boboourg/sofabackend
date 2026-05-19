@@ -1447,6 +1447,14 @@ class LocalApiApplication:
             return await self._fetch_featured_events_payload(
                 unique_tournament_id=int(path_params["unique_tournament_id"]),
             )
+        if template == (
+            "/api/v1/calendar/unique-tournament/{unique_tournament_id}"
+            "/season/{season_id}/months-with-events"
+        ):
+            return await self._fetch_calendar_months_with_events_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+                season_id=int(path_params["season_id"]),
+            )
         if route.endpoint.target_table == "top_player_snapshot":
             return await self._fetch_top_player_payload(route, path_params)
         if route.endpoint.target_table == "top_team_snapshot":
@@ -1483,6 +1491,46 @@ class LocalApiApplication:
         # endpoint Sofascore uses the key "featuredEvents", so rewrap.
         inner = build_payload(rows)
         return {"featuredEvents": inner.get("events", [])}
+
+    async def _fetch_calendar_months_with_events_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int,
+    ) -> dict[str, Any]:
+        """Synthesize ``/calendar/unique-tournament/{ut}/season/{s}/months-with-events``.
+
+        Phase 2.1 of REDUNDANT_ENDPOINTS_AUDIT.md: this endpoint was a
+        phantom upstream — never wired into our fetch path, no
+        ``scope_kind`` on the constant, no synthesizer. Sofascore
+        returns the list of YYYY-MM month strings that have at least
+        one event for the given (UT, season). Reproducing it locally
+        is one DISTINCT scan over ``event.start_timestamp``.
+
+        Always returns ``{"months": [...]}`` — defaults to empty list
+        when the DB is unreachable so the dispatcher never propagates a
+        connection error to the HTTP client.
+        """
+        from .scheduled_events_synthesizer import (
+            build_calendar_months_payload,
+            fetch_calendar_months_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"months": []}
+        try:
+            rows = await fetch_calendar_months_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"months": []}
+        await connection.close()
+        return build_calendar_months_payload(rows)
 
     async def _fetch_round_events_payload(
         self,

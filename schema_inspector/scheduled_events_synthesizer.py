@@ -401,6 +401,28 @@ LIMIT 500
 _FETCH_QUERY = _FETCH_QUERY_SCHEDULED
 
 
+# Phase 2.1 — synthesize ``/calendar/.../months-with-events`` from
+# ``event.start_timestamp``. The Sofascore endpoint returns months that
+# have at least one event for a given (unique_tournament, season). One
+# DISTINCT scan over the ``event`` table reproduces it.
+#
+# Output format: ``YYYY-MM`` strings sorted chronologically ascending.
+_FETCH_QUERY_CALENDAR_MONTHS = (
+    """
+    SELECT DISTINCT
+        TO_CHAR(
+            TO_TIMESTAMP(e.start_timestamp) AT TIME ZONE 'UTC',
+            'YYYY-MM'
+        ) AS month
+    FROM event e
+    WHERE e.unique_tournament_id = $1
+      AND e.season_id = $2
+      AND e.start_timestamp IS NOT NULL
+    ORDER BY month
+    """
+)
+
+
 # JSONB columns that asyncpg can return as raw strings depending on
 # server-side codec setup. We decode them here so the synthesizer sees
 # dicts and the emitted payload is valid JSON-of-JSON (not double-encoded
@@ -575,6 +597,29 @@ async def fetch_team_events_rows(
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 
+async def fetch_calendar_months_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+) -> list[dict[str, Any]]:
+    """Powers ``/api/v1/calendar/unique-tournament/{ut}/season/{s}/months-with-events``.
+
+    DISTINCT YYYY-MM month strings drawn from ``event.start_timestamp``
+    for the given (unique_tournament, season). Sorted chronologically
+    ascending (oldest first). Rows with NULL ``start_timestamp`` are
+    excluded — they have no month to bucket into.
+
+    Result rows are plain dicts with a single ``"month"`` key. The
+    response builder (:func:`build_calendar_months_payload`) flattens
+    them into the ``{"months": [...]}`` Sofascore envelope.
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_CALENDAR_MONTHS, unique_tournament_id, season_id
+    )
+    return [dict(record) for record in records]
+
+
 async def fetch_live_rows(
     connection: Any,
     *,
@@ -593,6 +638,29 @@ async def fetch_live_rows(
     del lookback_hours  # currently fixed at 12 hours in SQL
     records = await connection.fetch(_FETCH_QUERY_LIVE, sport_slug, list(_LIVE_STATUS_TYPES))
     return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+def build_calendar_months_payload(rows: Sequence[Any]) -> dict[str, Any]:
+    """Wrap the months fetcher rows in the Sofascore envelope.
+
+    Drops rows with NULL/empty month values (defensive — the fetcher
+    already filters via ``start_timestamp IS NOT NULL``, but a test
+    pins the dedupe+null-strip behavior in case the input is hand-
+    constructed). Order is preserved from the input list (the fetcher
+    already returns them chronologically ASC).
+    """
+    seen: set[str] = set()
+    months: list[str] = []
+    for row in rows:
+        value = row.get("month") if isinstance(row, dict) else getattr(row, "month", None)
+        if not value:
+            continue
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        months.append(text)
+    return {"months": months}
 
 
 def build_payload(rows: Sequence[Any]) -> dict[str, Any]:
