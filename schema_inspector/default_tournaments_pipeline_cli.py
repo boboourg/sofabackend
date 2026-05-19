@@ -618,31 +618,55 @@ async def _run_tournament_worker(
                         unique_tournament_id=unique_tournament_id,
                         season_id=season_id,
                     )
-                for round_number, round_slug in rounds_catalog:
-                    if round_slug is None:
-                        # Group-stage / league round — bare endpoint.
-                        await event_list_job.run_round(
-                            unique_tournament_id,
-                            season_id,
-                            round_number,
-                            sport_slug=sport_slug,
-                            timeout=timeout,
+                    # Phase 5.3 (2026-05-19): reuse the same connection
+                    # for the per-round existence checks below — saves
+                    # a connect roundtrip per catalog entry and keeps
+                    # the EXISTS cheap (~ms per call).
+                    for round_number, round_slug in rounds_catalog:
+                        # Phase 5.3: skip the upstream fetch when
+                        # ``event_round_info`` already carries rows for
+                        # this exact (UT, season, round_number, slug)
+                        # cell. Phase 4 landed the canonical structure
+                        # on the first cursor walk; subsequent walks
+                        # (cursor revisit, periodic resets) don't need
+                        # to re-fetch the same finished round. The
+                        # ROUNDS capability still gets marked below
+                        # because the events ARE present — Fix 1's
+                        # cursor advance gate doesn't care whether the
+                        # data landed in this run or a previous one.
+                        already_populated = await _round_already_populated(
+                            connection,
+                            unique_tournament_id=unique_tournament_id,
+                            season_id=season_id,
+                            round_number=round_number,
+                            round_slug=round_slug,
                         )
-                    else:
-                        # Phase 4: named knockout round — Sofascore
-                        # exposes it via ``/events/round/{N}/slug/{slug}``.
-                        # The bare slug-less URL returns the ambiguous
-                        # "compact" payload that was the root cause of
-                        # the FIFA WC 2022 ``round=5 for all 64 events``
-                        # bug fixed in this phase.
-                        await event_list_job.run_round_with_slug(
-                            unique_tournament_id,
-                            season_id,
-                            round_number,
-                            round_slug,
-                            sport_slug=sport_slug,
-                            timeout=timeout,
-                        )
+                        if already_populated:
+                            continue
+                        if round_slug is None:
+                            # Group-stage / league round — bare endpoint.
+                            await event_list_job.run_round(
+                                unique_tournament_id,
+                                season_id,
+                                round_number,
+                                sport_slug=sport_slug,
+                                timeout=timeout,
+                            )
+                        else:
+                            # Phase 4: named knockout round — Sofascore
+                            # exposes it via ``/events/round/{N}/slug/{slug}``.
+                            # The bare slug-less URL returns the ambiguous
+                            # "compact" payload that was the root cause of
+                            # the FIFA WC 2022 ``round=5 for all 64 events``
+                            # bug fixed in this phase.
+                            await event_list_job.run_round_with_slug(
+                                unique_tournament_id,
+                                season_id,
+                                round_number,
+                                round_slug,
+                                sport_slug=sport_slug,
+                                timeout=timeout,
+                            )
                 if rounds_catalog:
                     # 2026-05-19 (fix 1): ROUNDS capability only counts if
                     # we actually had a catalog AND fetched its rounds
@@ -919,6 +943,83 @@ async def _run_event_detail_batch(
 
     deduped_event_ids = tuple(dict.fromkeys(int(event_id) for event_id in event_ids))
     return tuple(await asyncio.gather(*(_run_one(event_id) for event_id in deduped_event_ids)))
+
+
+async def _round_already_populated(
+    connection,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+    round_number: int,
+    round_slug: str | None,
+) -> bool:
+    """Phase 5.3 (2026-05-19): cheap EXISTS check over
+    ``event_round_info`` joined with ``event`` for the given
+    (UT, season, round_number, round_slug).
+
+    Returns True when at least one row matches — i.e. Phase 4
+    ingestion already landed events for this exact cup-stage cell.
+    The orchestrator uses this to skip the per-round fetch on
+    subsequent cursor walks through finished seasons.
+
+    Null-safe slug comparison: group-stage rows carry ``slug IS NULL``
+    and the orchestrator passes ``round_slug=None`` for them. SQL ``=``
+    treats NULLs as not-equal, so we use ``IS NOT DISTINCT FROM``
+    which evaluates NULL=NULL as TRUE — otherwise group-stage skip
+    never fires.
+
+    ``fetchval`` may return ``None`` from asyncpg for boolean SELECTs
+    that produce no row (unlikely with EXISTS, but defensive). We
+    normalise to ``False`` so callers can rely on a plain bool.
+    """
+    result = await connection.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1
+            FROM event_round_info eri
+            JOIN event e ON e.id = eri.event_id
+            WHERE e.unique_tournament_id = $1
+              AND e.season_id = $2
+              AND eri.round_number = $3
+              AND eri.slug IS NOT DISTINCT FROM $4
+            LIMIT 1
+        )
+        """,
+        unique_tournament_id,
+        season_id,
+        round_number,
+        round_slug,
+    )
+    return bool(result)
+
+
+async def _should_skip_round_fetch(
+    *,
+    populated_check,
+    connection,
+    unique_tournament_id: int,
+    season_id: int,
+    round_number: int,
+    round_slug: str | None,
+) -> bool:
+    """Thin decision adapter so the per-round skip logic is unit-
+    testable without spinning the whole orchestrator.
+
+    ``populated_check`` is the injectable callable (production binds
+    it to :func:`_round_already_populated`; tests pass simple stubs).
+    Returns True iff the caller should skip the per-round fetch.
+
+    Wrapping a single boolean inside its own function feels light, but
+    it keeps the test surface symmetric: tests pin the *decision* the
+    orchestrator makes, not the SQL the helper runs.
+    """
+    return await populated_check(
+        connection,
+        unique_tournament_id=unique_tournament_id,
+        season_id=season_id,
+        round_number=round_number,
+        round_slug=round_slug,
+    )
 
 
 async def _load_season_rounds_catalog(

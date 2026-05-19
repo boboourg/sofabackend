@@ -67,13 +67,25 @@ async def _dispatch_rounds_under_test(
     *,
     unique_tournament_id: int,
     season_id: int,
+    populated_predicate=None,
 ) -> None:
     """Mirror the loop that the orchestrator runs. Keeping a small
     sibling helper here avoids spinning up the entire
     ``_run_one_tournament`` machinery just to test routing — the
     decision is a 5-line ``if/else`` inside the loop. If the
-    orchestrator's branching shape changes, these tests break."""
+    orchestrator's branching shape changes, these tests break.
+
+    Phase 5.3 (2026-05-19): ``populated_predicate`` lets the test
+    inject the skip-when-populated outcome per catalog entry. The
+    default ``None`` means "never populated" (every entry fetched);
+    a callable returning True for some entries simulates Phase 5.3
+    skipping them.
+    """
     for round_number, round_slug in catalog:
+        if populated_predicate is not None and populated_predicate(
+            round_number, round_slug
+        ):
+            continue
         if round_slug is None:
             await job.run_round(
                 unique_tournament_id,
@@ -187,6 +199,117 @@ class OrchestratorRoundRoutingTests(unittest.IsolatedAsyncioTestCase):
             catalog,
             unique_tournament_id=999,
             season_id=999,
+        )
+
+        self.assertEqual(job.bare_round_calls, [])
+        self.assertEqual(job.slug_round_calls, [])
+
+
+class OrchestratorSkipWhenPopulatedTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 5.3 (2026-05-19): skip the per-round fetch when
+    ``event_round_info`` is already populated. The orchestrator
+    iterates the catalog and consults ``_round_already_populated``
+    before each fetch; ``True`` means "skip this round entry,
+    continue to the next"."""
+
+    async def test_skip_fires_when_populated_predicate_true(self) -> None:
+        """If the populated predicate returns True for an entry, the
+        corresponding ``run_round[_with_slug]`` call MUST NOT fire."""
+        job = _CapturingJob()
+        catalog = ((29, "final"),)
+
+        # Predicate says "yes, already populated" for round 29 final.
+        await _dispatch_rounds_under_test(
+            job,
+            catalog,
+            unique_tournament_id=16,
+            season_id=41087,
+            populated_predicate=lambda n, s: True,
+        )
+
+        self.assertEqual(job.bare_round_calls, [])
+        self.assertEqual(job.slug_round_calls, [])
+
+    async def test_no_skip_when_populated_predicate_false(self) -> None:
+        """If the predicate returns False for an entry, the fetch
+        proceeds as usual (Phase 4 behaviour preserved when no rows
+        exist yet)."""
+        job = _CapturingJob()
+        catalog = ((29, "final"),)
+
+        await _dispatch_rounds_under_test(
+            job,
+            catalog,
+            unique_tournament_id=16,
+            season_id=41087,
+            populated_predicate=lambda n, s: False,
+        )
+
+        self.assertEqual(
+            job.slug_round_calls, [(16, 41087, 29, "final")]
+        )
+
+    async def test_partial_skip_in_mixed_catalog(self) -> None:
+        """Real scenario: cursor walk revisiting a finished WC season.
+        Group stage already populated by previous walk; one fresh
+        knockout round just added by an editorial update. Phase 5.3
+        skips the populated rounds and only fetches the unpopulated
+        one — saving 7 upstream calls (group d1/2/3 + R16 + QF + SF
+        + 3rd place) and still landing the missing final."""
+        job = _CapturingJob()
+        catalog = (
+            (1, None),
+            (2, None),
+            (3, None),
+            (5, "round-of-16"),
+            (27, "quarterfinals"),
+            (28, "semifinals"),
+            (50, "match-for-3rd-place"),
+            (29, "final"),  # only this one not yet populated
+        )
+
+        def _predicate(round_number: int, slug: str | None) -> bool:
+            # Final is the only un-populated entry — every other one
+            # already has rows in event_round_info from a previous
+            # walk.
+            return not (round_number == 29 and slug == "final")
+
+        await _dispatch_rounds_under_test(
+            job,
+            catalog,
+            unique_tournament_id=16,
+            season_id=41087,
+            populated_predicate=_predicate,
+        )
+
+        self.assertEqual(job.bare_round_calls, [])
+        self.assertEqual(
+            job.slug_round_calls, [(16, 41087, 29, "final")]
+        )
+
+    async def test_full_skip_when_everything_populated(self) -> None:
+        """The expected steady-state for finished cup seasons that the
+        cursor has already walked through once: every catalog entry
+        skipped, zero upstream fetches. Phase 5.3 is the optimisation
+        that turns repeat cursor walks into no-ops."""
+        job = _CapturingJob()
+        catalog = (
+            (1, None),
+            (2, None),
+            (3, None),
+            (5, "round-of-16"),
+            (27, "quarterfinals"),
+            (28, "semifinals"),
+            (29, "final"),
+            (50, "match-for-3rd-place"),
+        )
+
+        await _dispatch_rounds_under_test(
+            job,
+            catalog,
+            unique_tournament_id=16,
+            season_id=41087,
+            populated_predicate=lambda n, s: True,
         )
 
         self.assertEqual(job.bare_round_calls, [])
