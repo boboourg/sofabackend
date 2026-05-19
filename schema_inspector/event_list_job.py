@@ -102,6 +102,35 @@ class EventListIngestJob:
             ),
         )
 
+    async def run_round_with_slug(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        round_number: int,
+        slug: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListIngestResult:
+        """Phase 4 (2026-05-19): wraps the slug-aware parser fetch.
+
+        The distinctive ``round_slug:`` prefix in ``job_name`` lets
+        traffic-audit dashboards split slug-routed traffic from the
+        bare ``round:`` fetches (the latter is still used for group-
+        stage rounds whose ``season_round.round_slug`` is NULL).
+        """
+        return await self._run(
+            f"round_slug:{unique_tournament_id}:{season_id}:{round_number}:{slug}",
+            self.parser.fetch_round_events_with_slug(
+                unique_tournament_id,
+                season_id,
+                round_number,
+                slug,
+                sport_slug=sport_slug,
+                timeout=timeout,
+            ),
+        )
+
     async def run_season_last(
         self,
         unique_tournament_id: int,

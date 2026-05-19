@@ -382,6 +382,30 @@ UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT = SofascoreEndpoint(
     notes="Bracket/playoff tree payload; event-like nodes are recursively extracted for skeleton event ingestion.",
 )
 
+# Phase 4 (2026-05-19): named knockout round endpoint. Sofascore's
+# frontend uses this URL shape for cup-stage events whose
+# ``season_round.round_slug`` is non-NULL (e.g. ``round/29/slug/final``,
+# ``round/27/slug/quarterfinals``). The bare ``/events/round/{N}``
+# endpoint returns ambiguous "compact" payloads for cups — every
+# event ends up with the latest knockout round_number, which is
+# what produced the WC 2022 ``round=5 for all 64 events`` bug.
+#
+# Fetched on-demand by the historical archive orchestrator: per
+# ``season_round`` catalog entry where ``round_slug IS NOT NULL`` it
+# calls the slug-aware URL; group-stage entries (slug NULL) keep
+# using the existing slug-less endpoint above.
+#
+# Like the slug-less round endpoint, parsed rows land in the
+# ``event`` table.
+UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT = SofascoreEndpoint(
+    path_template=(
+        "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}"
+        "/events/round/{round_number}/slug/{round_slug}"
+    ),
+    envelope_key="events",
+    target_table="event",
+)
+
 
 def season_rounds_endpoint() -> SofascoreEndpoint:
     return SofascoreEndpoint(

@@ -607,33 +607,54 @@ async def _run_tournament_worker(
             # /events/last/{p} fallback below so cup-style seasons
             # still get populated.
             try:
+                # Phase 4 (2026-05-19): read the canonical round catalog
+                # from ``season_round`` (Sofascore /season/{s}/rounds
+                # mirror) instead of from ``event_round_info``. The old
+                # approach was chicken-and-egg for cup-style seasons —
+                # see ``_load_season_rounds_catalog`` docstring.
                 async with database.connection() as connection:
-                    round_numbers = await _load_round_numbers(
+                    rounds_catalog = await _load_season_rounds_catalog(
                         connection,
                         unique_tournament_id=unique_tournament_id,
                         season_id=season_id,
                     )
-                for round_number in round_numbers:
-                    await event_list_job.run_round(
-                        unique_tournament_id,
-                        season_id,
-                        round_number,
-                        sport_slug=sport_slug,
-                        timeout=timeout,
-                    )
-                if round_numbers:
+                for round_number, round_slug in rounds_catalog:
+                    if round_slug is None:
+                        # Group-stage / league round — bare endpoint.
+                        await event_list_job.run_round(
+                            unique_tournament_id,
+                            season_id,
+                            round_number,
+                            sport_slug=sport_slug,
+                            timeout=timeout,
+                        )
+                    else:
+                        # Phase 4: named knockout round — Sofascore
+                        # exposes it via ``/events/round/{N}/slug/{slug}``.
+                        # The bare slug-less URL returns the ambiguous
+                        # "compact" payload that was the root cause of
+                        # the FIFA WC 2022 ``round=5 for all 64 events``
+                        # bug fixed in this phase.
+                        await event_list_job.run_round_with_slug(
+                            unique_tournament_id,
+                            season_id,
+                            round_number,
+                            round_slug,
+                            sport_slug=sport_slug,
+                            timeout=timeout,
+                        )
+                if rounds_catalog:
                     # 2026-05-19 (fix 1): ROUNDS capability only counts if
-                    # we actually had rounds to fetch AND fetched them
-                    # without raising. Empty round_numbers (cup-style
-                    # competition with no round metadata) deliberately
-                    # does NOT mark ROUNDS as completed — it just means
-                    # the stage was skipped.
+                    # we actually had a catalog AND fetched its rounds
+                    # without raising. Empty catalog (a season whose
+                    # /season/{s}/rounds payload hasn't landed yet)
+                    # deliberately does NOT mark ROUNDS as completed.
                     capabilities.add(ROUNDS)
                 _progress(
                     "round_events",
                     (
                         f"unique_tournament_id={unique_tournament_id} season_id={season_id} "
-                        f"rounds={len(round_numbers)}"
+                        f"rounds={len(rounds_catalog)}"
                     ),
                 )
             except Exception as exc:
@@ -898,6 +919,62 @@ async def _run_event_detail_batch(
 
     deduped_event_ids = tuple(dict.fromkeys(int(event_id) for event_id in event_ids))
     return tuple(await asyncio.gather(*(_run_one(event_id) for event_id in deduped_event_ids)))
+
+
+async def _load_season_rounds_catalog(
+    connection,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+) -> tuple[tuple[int, str | None], ...]:
+    """Phase 4 (2026-05-19): return Sofascore's canonical round catalog
+    for a (UT, season) — straight from the ``season_round`` table
+    (mirror of ``/season/{s}/rounds``).
+
+    Replaces ``_load_round_numbers`` which read from
+    ``event_round_info``. The old helper had a chicken-and-egg:
+    it needed events to know which rounds to fetch, but events
+    came from round fetches. For cup-style seasons that broke
+    completely (FIFA WC 2022 all 64 events stamped with
+    ``round_number=5`` because the ``/events/last/{p}`` fallback's
+    compact payload is the only thing that ever landed).
+
+    ``season_round`` is populated by the ``/season/{s}/rounds``
+    parser long before any per-round event fetch. Reading the
+    catalog from there is the canonical source.
+
+    Return shape: ``((round_number, round_slug), ...)`` sorted by
+    ``round_number`` ASC. ``round_slug`` is ``None`` for group-stage
+    rounds (Sofascore returns no slug on those) and a string for
+    named knockout rounds (e.g. ``"final"``, ``"quarterfinals"``).
+    The orchestrator routes on the slug being None vs not:
+    None → bare ``/events/round/{N}``; not None →
+    ``/events/round/{N}/slug/{slug}``.
+
+    Empty / whitespace slugs are normalized to ``None`` so the
+    orchestrator's ``if slug is None`` branch works uniformly.
+    """
+    rows = await connection.fetch(
+        """
+        SELECT round_number, round_slug
+        FROM season_round
+        WHERE unique_tournament_id = $1
+          AND season_id = $2
+        ORDER BY round_number
+        """,
+        unique_tournament_id,
+        season_id,
+    )
+    catalog: list[tuple[int, str | None]] = []
+    for row in rows:
+        raw_slug = row["round_slug"]
+        slug = None
+        if isinstance(raw_slug, str):
+            stripped = raw_slug.strip()
+            if stripped:
+                slug = stripped
+        catalog.append((int(row["round_number"]), slug))
+    return tuple(catalog)
 
 
 async def _load_round_numbers(

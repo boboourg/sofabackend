@@ -11,6 +11,7 @@ from .endpoints import (
     EndpointRegistryEntry,
     UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
     UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+    UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
     UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
     UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
     event_list_registry_entries,
@@ -300,6 +301,37 @@ class EventListParser:
             unique_tournament_id=unique_tournament_id,
             season_id=season_id,
             round_number=round_number,
+        )
+
+    async def fetch_round_events_with_slug(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        round_number: int,
+        slug: str,
+        *,
+        sport_slug: str = "football",
+        timeout: float = 20.0,
+    ) -> EventListBundle:
+        """Phase 4 (2026-05-19): named-knockout-round event list.
+
+        Dispatches the slug-aware Sofascore URL for cup-stage events
+        whose ``season_round.round_slug`` is non-NULL. The slug-less
+        ``fetch_round_events`` returns ambiguous "compact" payloads
+        for cups (all rounds collapse to one round_number); using the
+        slug-aware URL is what makes per-round-name discovery work
+        (e.g. ``round/29/slug/final`` → the actual final).
+        """
+        return await self._fetch_event_collection(
+            UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
+            timeout=timeout,
+            context_entity_type="season",
+            context_entity_id=season_id,
+            sport_slug=sport_slug,
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            round_number=round_number,
+            round_slug=slug,
         )
 
     async def fetch_season_last_events(
