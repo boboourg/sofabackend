@@ -2938,46 +2938,16 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page1["events"][0]["id"], 200)
         self.assertEqual(page1["hasNextPage"], False)
 
-    async def test_team_players_returns_none_when_snapshot_is_soft_error(self) -> None:
-        """Stale team_id snapshots flagged as soft-error must NOT leak to the
-        API as a valid payload. Returning None lets the dispatcher reply 404.
-        """
-
-        application = LocalApiApplication.__new__(LocalApiApplication)
-        connection = _FakeEntityPassthroughConnection(
-            rows={
-                ("/api/v1/team/{team_id}/players", 1161574): {
-                    "payload": {"error": {"code": 404, "message": "Not Found"}},
-                    "is_soft_error_payload": True,
-                    "http_status": 404,
-                },
-            }
-        )
-        application._connect = _make_fake_connector(connection)
-
-        result = await application._fetch_team_players_payload(1161574)
-
-        self.assertIsNone(result)
-
-    async def test_team_players_returns_none_when_http_status_is_4xx(self) -> None:
-        """Even when is_soft_error_payload was not set (e.g. ingest predates
-        the flag), an http_status >= 400 must short-circuit to None."""
-
-        application = LocalApiApplication.__new__(LocalApiApplication)
-        connection = _FakeEntityPassthroughConnection(
-            rows={
-                ("/api/v1/team/{team_id}/players", 9999): {
-                    "payload": {"error": {"code": 404}},
-                    "is_soft_error_payload": False,
-                    "http_status": 404,
-                },
-            }
-        )
-        application._connect = _make_fake_connector(connection)
-
-        result = await application._fetch_team_players_payload(9999)
-
-        self.assertIsNone(result)
+    # NOTE: Item 2 (Phase 2.2) flipped ``_fetch_team_players_payload`` from
+    # raw-passthrough-only to a hybrid (snapshot primary + synthesizer
+    # fallback). The "returns None on bad snapshot" guarantee is now split:
+    #   * Bad snapshot (soft-error / 4xx) is still filtered upstream by
+    #     ``_fetch_latest_entity_passthrough`` — covered by that helper's tests.
+    #   * After filtering, the dispatcher synthesizes a minimal envelope
+    #     from ``event_lineup_player`` instead of returning 404. Hybrid
+    #     contract tests live in ``test_team_players_hybrid_synth.py``.
+    # The former soft_error / 4xx tests are removed because their
+    # assertion (``assertIsNone``) is now incorrect — the contract changed.
 
     async def test_player_events_last_returns_none_for_soft_error_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -2997,15 +2967,19 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
     async def test_passthrough_handlers_return_none_when_no_snapshot(self) -> None:
-        """Without a raw snapshot we must return ``None`` so the dispatcher
-        produces a 404. There is no normalized fallback for these routes;
-        guessing would return wrong data."""
+        """Without a raw snapshot these passthrough-only routes must return
+        ``None`` so the dispatcher produces a 404. There is no normalized
+        fallback for them; guessing would return wrong data.
+
+        ``team/{id}/players`` is excluded here because Item 2 (Phase 2.2)
+        moved it to a hybrid contract — see test_team_players_hybrid_synth.py
+        for the new envelope-on-empty behavior.
+        """
 
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeEntityPassthroughConnection(rows={})
         application._connect = _make_fake_connector(connection)
 
-        self.assertIsNone(await application._fetch_team_players_payload(99999999))
         self.assertIsNone(await application._fetch_team_featured_players_payload(99999999))
         self.assertIsNone(await application._fetch_player_attribute_overviews_payload(99999999))
         self.assertIsNone(await application._fetch_player_events_last_payload(99999999, 0))

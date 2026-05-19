@@ -2967,19 +2967,47 @@ class LocalApiApplication:
         return decoded
 
     async def _fetch_team_players_payload(self, team_id: int) -> dict[str, Any] | None:
-        """``/api/v1/team/{team_id}/players`` — raw passthrough only.
+        """``/api/v1/team/{team_id}/players`` — hybrid.
 
-        Upstream returns ``{"players": [...], "foreignPlayers": [...],
-        "nationalPlayers": [...]}`` with subsets we do not normalize.
-        Reconstruction from normalized tables would lose the foreign/national
-        partitioning; raw is the only 1:1 source.
+        Phase 2.2 (Item 2, 2026-05-19): raw passthrough stays as the
+        primary serving path — when fresh, the Sofascore wire format
+        includes the editorial ``foreignPlayers`` / ``nationalPlayers``
+        partitions (1:1 with upstream). When no snapshot exists, the
+        synthesizer assembles a minimal squad list from
+        ``event_lineup_player`` lineups in the last 60 days.
+
+        The synthesised envelope omits the editorial partitions —
+        their logic isn't simple country compare and we'd risk
+        emitting incorrect categorisation. Frontend list rendering
+        still works against the basic ``players`` array; profile
+        pages with partition-aware UI need the snapshot.
         """
 
-        return await self._fetch_latest_entity_passthrough(
+        snapshot = await self._fetch_latest_entity_passthrough(
             endpoint_pattern="/api/v1/team/{team_id}/players",
             context_entity_type="team",
             context_entity_id=team_id,
         )
+        if snapshot is not None:
+            return snapshot
+
+        # Phase 2.2 fallback: synthesize from event_lineup_player.
+        from .scheduled_events_synthesizer import (
+            build_team_players_payload,
+            fetch_team_squad_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"players": []}
+        try:
+            rows = await fetch_team_squad_rows(connection, team_id=team_id)
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"players": []}
+        await connection.close()
+        return build_team_players_payload(rows)
 
     async def _fetch_team_featured_players_payload(self, team_id: int) -> dict[str, Any] | None:
         """``/api/v1/team/{team_id}/featured-players`` — raw passthrough only.
@@ -2996,18 +3024,47 @@ class LocalApiApplication:
         )
 
     async def _fetch_team_transfers_payload(self, team_id: int) -> dict[str, Any] | None:
-        """``/api/v1/team/{team_id}/transfers`` — raw passthrough.
+        """``/api/v1/team/{team_id}/transfers`` — hybrid.
 
-        Upstream returns ``{transfersIn: [...], transfersOut: [...]}`` with
-        full nested player + fee metadata. No pagination, no query params.
-        Refreshed every 30 days through the resource refresh loop.
+        Phase 2.3 (Item 2, 2026-05-19): the original raw passthrough
+        from ``api_payload_snapshot`` stays as the primary serving
+        path — 1:1 with Sofascore's deeply nested wire envelope
+        (fieldTranslations, sport, country, teamColors, …). When no
+        snapshot exists for the team, fall back to a minimal
+        synthesizer over ``player_transfer_history`` so the API
+        returns ``{transfersIn, transfersOut}`` with id/name/slug +
+        date/fee instead of 404.
+
+        Trade-off captured in the synthesizer docstring: synthesized
+        responses cover the list-rendering use case (most frontend
+        callers); rich profile fields stay snapshot-only.
         """
 
-        return await self._fetch_latest_entity_passthrough(
+        snapshot = await self._fetch_latest_entity_passthrough(
             endpoint_pattern="/api/v1/team/{team_id}/transfers",
             context_entity_type="team",
             context_entity_id=team_id,
         )
+        if snapshot is not None:
+            return snapshot
+
+        # Phase 2.3 fallback: synthesize from player_transfer_history.
+        from .scheduled_events_synthesizer import (
+            build_team_transfers_payload,
+            fetch_team_transfers_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"transfersIn": [], "transfersOut": []}
+        try:
+            rows = await fetch_team_transfers_rows(connection, team_id=team_id)
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"transfersIn": [], "transfersOut": []}
+        await connection.close()
+        return build_team_transfers_payload(rows, team_id=team_id)
 
     async def _fetch_player_attribute_overviews_payload(self, player_id: int) -> dict[str, Any] | None:
         """``/api/v1/player/{player_id}/attribute-overviews`` — raw passthrough only.

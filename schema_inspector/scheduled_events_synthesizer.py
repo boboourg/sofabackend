@@ -425,6 +425,70 @@ LIMIT 500
 _FETCH_QUERY = _FETCH_QUERY_SCHEDULED
 
 
+# Phase 2.2 (Item 2, 2026-05-19) — synthesize ``/team/{id}/players``
+# from recent lineup activity. Hybrid model with snapshot primary;
+# this synthesizer fires only when the snapshot is missing.
+#
+# The squad list reflects players seen in this team's lineups within
+# the last 60 days. Sofascore's editorial ``foreignPlayers`` /
+# ``nationalPlayers`` partitions are intentionally NOT synthesized
+# (their logic isn't simple country compare — Sofascore considers
+# naturalisation, dual nationality, etc.). When the snapshot lands,
+# all three partitions ride through 1:1.
+_FETCH_QUERY_TEAM_SQUAD = (
+    """
+    SELECT DISTINCT
+        p.id                AS player_id,
+        p.name              AS player_name,
+        p.slug              AS player_slug,
+        elp.position        AS position,
+        elp.jersey_number   AS jersey_number
+    FROM event_lineup_player elp
+    JOIN player p ON p.id = elp.player_id
+    JOIN event e ON e.id = elp.event_id
+    WHERE elp.team_id = $1
+      AND e.start_timestamp >= $2
+    ORDER BY p.name NULLS LAST
+    """
+)
+
+
+# Phase 2.3 (Item 2, 2026-05-19) — synthesize ``/team/{id}/transfers``
+# from ``player_transfer_history``. Hybrid model: raw passthrough is
+# the primary serving path (1:1 wire format with nested editorial
+# fields); this synthesizer fires only as fallback when no snapshot
+# exists, producing a minimal Sofascore-shape envelope with the
+# fields frontend lists actually use (player id/name/slug, transfer
+# date, fee, from/to team names + ids).
+#
+# Single query covers both directions; the builder splits into
+# transfersIn / transfersOut based on which side carries
+# ``team_id`` parameter. Ordered DESC by transfer_date_timestamp to
+# match Sofascore's most-recent-first wire order.
+_FETCH_QUERY_TEAM_TRANSFERS = (
+    """
+    SELECT
+        pth.id                                   AS id,
+        pth.type                                 AS type,
+        pth.player_id                            AS player_id,
+        p.name                                   AS player_name,
+        p.slug                                   AS player_slug,
+        pth.transfer_from_team_id                AS transfer_from_team_id,
+        pth.from_team_name                       AS from_team_name,
+        pth.transfer_to_team_id                  AS transfer_to_team_id,
+        pth.to_team_name                         AS to_team_name,
+        pth.transfer_date_timestamp              AS transfer_date_timestamp,
+        pth.transfer_fee                         AS transfer_fee,
+        pth.transfer_fee_description             AS transfer_fee_description
+    FROM player_transfer_history pth
+    LEFT JOIN player p ON p.id = pth.player_id
+    WHERE pth.transfer_to_team_id = $1
+       OR pth.transfer_from_team_id = $1
+    ORDER BY pth.transfer_date_timestamp DESC NULLS LAST, pth.id DESC
+    """
+)
+
+
 # Phase 5.1 — synthesize ``/season/{s}/groups`` from sub-tournaments.
 #
 # Sofascore groups under cup-style unique tournaments (FIFA WC,
@@ -827,6 +891,43 @@ async def fetch_groups_rows(
     return [dict(record) for record in records]
 
 
+async def fetch_team_squad_rows(
+    connection: Any,
+    *,
+    team_id: int,
+) -> list[dict[str, Any]]:
+    """Phase 2.2 (Item 2, 2026-05-19): squad rows for a team —
+    DISTINCT players from ``event_lineup_player`` filtered to
+    matches whose ``start_timestamp`` is within the last 60 days.
+
+    Returned rows are plain dicts ready for
+    :func:`build_team_players_payload`. The 60-day window ensures
+    the synthesized squad list reflects current activity; players
+    who left the club months ago drop off naturally.
+    """
+    import time
+    cutoff = int(time.time()) - 60 * 86_400
+    records = await connection.fetch(_FETCH_QUERY_TEAM_SQUAD, team_id, cutoff)
+    return [dict(record) for record in records]
+
+
+async def fetch_team_transfers_rows(
+    connection: Any,
+    *,
+    team_id: int,
+) -> list[dict[str, Any]]:
+    """Phase 2.3 (Item 2, 2026-05-19): pulls transfer history rows
+    for a team in either direction (in / out).
+
+    Returned rows are plain dicts ready for
+    :func:`build_team_transfers_payload`. The builder applies the
+    direction split based on which of ``transfer_to_team_id`` /
+    ``transfer_from_team_id`` matches the caller's ``team_id``.
+    """
+    records = await connection.fetch(_FETCH_QUERY_TEAM_TRANSFERS, team_id)
+    return [dict(record) for record in records]
+
+
 async def fetch_h2h_events_rows(
     connection: Any,
     *,
@@ -889,6 +990,107 @@ async def fetch_live_rows(
     del lookback_hours  # currently fixed at 12 hours in SQL
     records = await connection.fetch(_FETCH_QUERY_LIVE, sport_slug, list(_LIVE_STATUS_TYPES))
     return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+def build_team_players_payload(rows: Sequence[Any]) -> dict[str, Any]:
+    """Phase 2.2 (Item 2, 2026-05-19): minimal Sofascore-shape
+    ``{"players": [{"player": {...}}, ...]}`` envelope.
+
+    Each entry wraps the player in a ``player`` key (matching the
+    upstream wire format). Minimal fields: id, name, slug, position,
+    jerseyNumber. Editorial partitions ``foreignPlayers`` /
+    ``nationalPlayers`` deliberately omitted — see hybrid model
+    docstring in ``_FETCH_QUERY_TEAM_SQUAD`` for rationale.
+
+    Dedupes on ``player_id`` defensively (the SQL already DISTINCTs)
+    so hand-constructed inputs don't emit doubles. Rows with NULL
+    ``player_id`` are dropped (data anomaly).
+    """
+    seen: set[int] = set()
+    players: list[dict[str, Any]] = []
+    for row in rows:
+
+        def _get(name: str) -> Any:
+            if isinstance(row, dict):
+                return row.get(name)
+            return getattr(row, name, None)
+
+        player_id = _get("player_id")
+        if player_id is None:
+            continue
+        try:
+            pid = int(player_id)
+        except (TypeError, ValueError):
+            continue
+        if pid in seen:
+            continue
+        seen.add(pid)
+        players.append(
+            {
+                "player": {
+                    "id": pid,
+                    "name": _get("player_name"),
+                    "slug": _get("player_slug"),
+                    "position": _get("position"),
+                    "jerseyNumber": _get("jersey_number"),
+                }
+            }
+        )
+    return {"players": players}
+
+
+def build_team_transfers_payload(
+    rows: Sequence[Any], *, team_id: int
+) -> dict[str, Any]:
+    """Phase 2.3 (Item 2, 2026-05-19): minimal Sofascore-shape
+    ``{"transfersIn": [...], "transfersOut": [...]}`` envelope from
+    transfer-history rows.
+
+    Direction split: a row whose ``transfer_to_team_id`` matches
+    ``team_id`` is an incoming transfer; ``transfer_from_team_id``
+    match is outgoing. Rows where neither column matches (data
+    integrity anomaly — shouldn't happen given the SQL ``WHERE``
+    filter, but defensive) are dropped.
+
+    Player object is minimal — id/name/slug only. Rich editorial
+    fields (fieldTranslations, sport, country, dateOfBirth,
+    proposedMarketValue, …) live in the raw snapshot path only. The
+    explicit trade-off, captured in the hybrid model docstring, is
+    that synthesized responses cover the **list-rendering use case**
+    not full player-profile fidelity.
+    """
+    transfers_in: list[dict[str, Any]] = []
+    transfers_out: list[dict[str, Any]] = []
+    for row in rows:
+
+        def _get(name: str) -> Any:
+            if isinstance(row, dict):
+                return row.get(name)
+            return getattr(row, name, None)
+
+        to_team_id = _get("transfer_to_team_id")
+        from_team_id = _get("transfer_from_team_id")
+        if to_team_id != team_id and from_team_id != team_id:
+            continue
+        entry: dict[str, Any] = {
+            "id": int(_get("id")) if _get("id") is not None else None,
+            "type": int(_get("type")) if _get("type") is not None else None,
+            "player": {
+                "id": int(_get("player_id")) if _get("player_id") is not None else None,
+                "name": _get("player_name"),
+                "slug": _get("player_slug"),
+            },
+            "fromTeamName": _get("from_team_name"),
+            "toTeamName": _get("to_team_name"),
+            "transferDateTimestamp": _get("transfer_date_timestamp"),
+            "transferFee": _get("transfer_fee"),
+            "transferFeeDescription": _get("transfer_fee_description"),
+        }
+        if to_team_id == team_id:
+            transfers_in.append(entry)
+        else:
+            transfers_out.append(entry)
+    return {"transfersIn": transfers_in, "transfersOut": transfers_out}
 
 
 def build_groups_payload(rows: Sequence[Any]) -> dict[str, Any]:
