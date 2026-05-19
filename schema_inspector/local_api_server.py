@@ -1490,6 +1490,16 @@ class LocalApiApplication:
                 season_id=int(path_params["season_id"]),
                 round_number=int(path_params["round_number"]),
             )
+        if template == (
+            "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}"
+            "/events/round/{round_number}/slug/{round_slug}"
+        ):
+            return await self._fetch_round_slug_events_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+                season_id=int(path_params["season_id"]),
+                round_number=int(path_params["round_number"]),
+                slug=str(path_params["round_slug"]),
+            )
         if template == "/api/v1/unique-tournament/{unique_tournament_id}/featured-events":
             return await self._fetch_featured_events_payload(
                 unique_tournament_id=int(path_params["unique_tournament_id"]),
@@ -1685,6 +1695,51 @@ class LocalApiApplication:
                 unique_tournament_id=unique_tournament_id,
                 season_id=season_id,
                 round_number=round_number,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"events": []}
+        await connection.close()
+        return build_payload(rows)
+
+    async def _fetch_round_slug_events_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int,
+        round_number: int,
+        slug: str,
+    ) -> dict[str, Any]:
+        """Phase 5.2 (2026-05-19): synthesize
+        /unique-tournament/{ut}/season/{sid}/events/round/{N}/slug/{slug}.
+
+        Phase 4 ingestion landed ``event_round_info`` rows with the
+        correct (round_number, slug) per event for cup-style cups
+        (FIFA WC, classic UCL, etc.). This dispatcher serves the URL
+        from DB without re-fetching upstream — same wire envelope
+        ``{"events": [...]}`` the frontend already expects.
+
+        DB-unreachable + fetch-raise both yield ``{"events": []}`` so
+        the dispatcher never returns 500 for a transient infra hiccup.
+        Wire-format identical to ``_fetch_round_events_payload`` —
+        only the SQL filter differs.
+        """
+        from .scheduled_events_synthesizer import (
+            build_payload,
+            fetch_round_slug_events_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"events": []}
+        try:
+            rows = await fetch_round_slug_events_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                round_number=round_number,
+                slug=slug,
             )
         except Exception:  # noqa: BLE001
             await connection.close()

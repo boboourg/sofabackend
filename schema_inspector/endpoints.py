@@ -404,6 +404,19 @@ UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT = SofascoreEndpoint(
     ),
     envelope_key="events",
     target_table="event",
+    # Phase 5.2 (2026-05-19): promoted to FEDERATED.
+    #
+    # Phase 4 wires the orchestrator to fetch this URL during the
+    # historical cursor walk (one-time per (UT, season) — populates
+    # ``event_round_info`` with correct round_number + slug per
+    # event). Phase 5.2 adds the local API serving path: from then on
+    # the route is served from DB via
+    # ``fetch_round_slug_events_rows``, no upstream call needed.
+    #
+    # Snapshot-primary semantics stay (cursor walk still produces a
+    # canonical snapshot); the synthesizer is the always-on serving
+    # path with a 1:1 wire envelope.
+    origin=EndpointOrigin.FEDERATED,
 )
 
 

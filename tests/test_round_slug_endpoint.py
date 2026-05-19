@@ -83,7 +83,12 @@ class RoundSlugEndpointDeclarationTests(unittest.TestCase):
             UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT.refresh_interval_seconds
         )
 
-    def test_origin_default_upstream(self) -> None:
+    def test_origin_is_federated_after_phase_5_2(self) -> None:
+        """Phase 4 launched the endpoint as UPSTREAM (snapshot only).
+        Phase 5.2 (2026-05-19) added DB-synthesis path + promoted the
+        endpoint to FEDERATED: snapshot capture stays for canonical
+        wire fidelity, synthesizer always serves from
+        ``event_round_info`` (no upstream call at serve time)."""
         from schema_inspector.endpoints import (
             EndpointOrigin,
             UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
@@ -91,7 +96,7 @@ class RoundSlugEndpointDeclarationTests(unittest.TestCase):
 
         self.assertEqual(
             UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT.origin,
-            EndpointOrigin.UPSTREAM,
+            EndpointOrigin.FEDERATED,
         )
 
 

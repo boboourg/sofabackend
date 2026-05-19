@@ -321,6 +321,30 @@ ORDER BY e.start_timestamp, e.id
 )
 
 
+# Phase 5.2 (2026-05-19): slug-aware round filter.
+#
+# Sofascore's ``/events/round/{N}/slug/{slug}`` URL serves the events
+# for a named knockout round (e.g. ``round=29 slug=final``). Phase 4
+# made sure ``event_round_info`` carries both ``round_number`` AND
+# ``slug`` per event for cup-style competitions; this synthesizer
+# filters on both so we serve the route from DB without re-fetching
+# upstream. The slug disambiguates same-``round_number`` rows that
+# can exist for different stages (e.g. UCL classic format had
+# ``round_number=4`` for both group matchday 4 AND knockout Round
+# of 16; only the latter has ``slug='round-of-16'``).
+_FETCH_QUERY_ROUND_SLUG_EVENTS = (
+    _FETCH_SELECT_AND_JOINS
+    + """
+WHERE e.unique_tournament_id = $1
+  AND e.season_id = $2
+  AND eri.round_number = $3
+  AND eri.slug = $4
+  AND e.is_editor IS NOT TRUE
+ORDER BY e.start_timestamp, e.id
+"""
+)
+
+
 # Unique-tournament scheduled events — same as sport-wide scheduled, but
 # filtered to a single unique_tournament_id (Sofascore's
 # /unique-tournament/{ut_id}/scheduled-events/{date} surface).
@@ -611,6 +635,38 @@ async def fetch_round_events_rows(
     """
     records = await connection.fetch(
         _FETCH_QUERY_ROUND_EVENTS, unique_tournament_id, season_id, round_number
+    )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+async def fetch_round_slug_events_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+    round_number: int,
+    slug: str,
+) -> list[dict[str, Any]]:
+    """Phase 5.2 (2026-05-19): powers
+    /unique-tournament/{ut}/season/{s}/events/round/{N}/slug/{slug}.
+
+    Filter: UT + season + event_round_info.round_number + slug. The
+    slug filter disambiguates same-``round_number`` rows that can
+    legitimately coexist for different stages of a cup competition
+    (classic UCL had ``round=4 slug=NULL`` for group matchday 4 AND
+    ``round=4 slug=round-of-16`` for the knockout stage).
+
+    Phase 4 ingestion populated the ``event_round_info`` rows we
+    filter on; this synthesizer serves the slug-aware URL directly
+    from DB. Once Phase 5.3 lands the skip-when-populated check,
+    cursor walks won't re-fetch this endpoint on subsequent passes.
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_ROUND_SLUG_EVENTS,
+        unique_tournament_id,
+        season_id,
+        round_number,
+        slug,
     )
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
