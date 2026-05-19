@@ -408,13 +408,16 @@ def team_last_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/team/{team_id}/events/last/{page}",
         envelope_key="events",
         target_table="event",
-        # Stage 5: page=0 auto-refresh for active-UT teams. Same logic as
-        # season events list -- generic _fetch_snapshot_payload serves the
-        # raw upstream payload once worker has filled api_payload_snapshot.
-        refresh_interval_seconds=6 * 3600,
-        refresh_priority=45,
-        scope_kind="team-of-active-ut-first-page",
-        freshness_ttl_seconds=5 * 3600,
+        # Phase 1 (2026-05-19, docs/REDUNDANT_ENDPOINTS_AUDIT.md §A.1):
+        # refresh disabled. ``target_table="event"`` means every row this
+        # endpoint produces is already provided by the canonical UT-level
+        # discovery path (``unique-tournament/{ut}/season/{s}/events/...``)
+        # which the historical/scheduled planners already walk. Stage 5's
+        # 6h team-of-active-ut-first-page refresh added ~160 redundant HTTP
+        # per EPL-sized league per day with zero unique event rows. The
+        # endpoint constant is preserved so on-demand callers (CLI,
+        # team_detail_cli, local API passthrough for legacy frontend probes)
+        # still resolve, but the Resource Refresh Loop no longer picks it up.
     )
 
 
@@ -423,10 +426,8 @@ def team_next_events_endpoint() -> SofascoreEndpoint:
         path_template="/api/v1/team/{team_id}/events/next/{page}",
         envelope_key="events",
         target_table="event",
-        refresh_interval_seconds=6 * 3600,
-        refresh_priority=45,
-        scope_kind="team-of-active-ut-first-page",
-        freshness_ttl_seconds=5 * 3600,
+        # Phase 1 (2026-05-19): refresh disabled — see team_last_events_endpoint
+        # for the full rationale.
     )
 
 
@@ -1207,14 +1208,20 @@ PLAYER_EVENTS_LAST_ENDPOINT = SofascoreEndpoint(
     refresh_priority=45,
     scope_kind="player-of-active-squad-first-page",
     freshness_ttl_seconds=5 * 3600,
-    # Stage 8 / C.4: worker-side auto-pagination. On hasNextPage=true the
-    # worker chains page=K+1 with no inter-page delay (worker pool capacity
-    # is the natural rate limit). On hasNextPage=false the entity is marked
-    # in PaginationDoneStore. Subsequent page=0 refreshes from the planner
-    # check the marker and skip starting a new walk for 14 days.
-    auto_paginate=True,
-    audit_interval_seconds=14 * 24 * 3600,
-    max_pages=50,
+    # Phase 1 (2026-05-19, docs/REDUNDANT_ENDPOINTS_AUDIT.md §A.2):
+    # auto-pagination disabled. ``page>=1`` is fully derivable from
+    # ``event_player_statistics JOIN event``: ``events[]`` are already in
+    # ``event``, ``playedForTeamMap`` from ``event_player_statistics.team_id``,
+    # ``statisticsMap`` from ``event_player_statistics`` rows. Chaining 50
+    # pages × 500 active players × every 6h was ~10K HTTP/day per
+    # EPL-sized league for zero new event_id rows. The local API server
+    # already synthesizes pages>=1 via ``scheduled_events_synthesizer``
+    # ``_FETCH_QUERY_PLAYER_EVENTS_LAST`` -- the worker chain was redundant.
+    #
+    # Stage 8 / C.4 chain mechanism stays in the worker code (generic, no
+    # endpoint references it now) so any future endpoint can opt back in.
+    # PaginationDoneStore entries written before this change become inert
+    # because no chain ever consults them again.
 )
 
 ENTITIES_ENDPOINTS = (

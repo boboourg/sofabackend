@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from typing import Any
 
@@ -7,6 +8,20 @@ from schema_inspector.endpoints import (
     PLAYER_EVENTS_LAST_ENDPOINT,
     TEAM_PLAYERS_ENDPOINT,
     SofascoreEndpoint,
+)
+
+
+# Phase 1 (2026-05-19): PLAYER_EVENTS_LAST_ENDPOINT no longer opts into
+# auto-pagination in production (see docs/REDUNDANT_ENDPOINTS_AUDIT.md §A.2).
+# The chain mechanism itself stays in the worker so any future endpoint can
+# opt back in. These tests exercise the *mechanism* through a derived copy
+# that re-enables auto_paginate -- pattern and target_table stay identical
+# so the worker dispatch path is unchanged.
+_AUTO_PAGINATE_ENDPOINT = dataclasses.replace(
+    PLAYER_EVENTS_LAST_ENDPOINT,
+    auto_paginate=True,
+    audit_interval_seconds=14 * 86400,
+    max_pages=50,
 )
 from schema_inspector.fetch_models import FetchOutcomeEnvelope, FetchTask
 from schema_inspector.queue.pagination_done import PaginationDoneStore
@@ -310,13 +325,13 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         reader = _make_async_reader({"events": [{"id": 1}], "hasNextPage": True})
         worker = _build_worker(
             executor,
-            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            endpoints=(_AUTO_PAGINATE_ENDPOINT,),
             pagination_done=pagination,
             snapshot_reader=reader,
             queue=queue,
         )
         envelope = _make_envelope(
-            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
             entity_type="player",
             entity_id=750,
             path_params={"player_id": 750, "page": 0},
@@ -334,7 +349,7 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         # Pagination_done NOT marked yet -- chain still in progress.
         self.assertFalse(
             pagination.is_completed_recently(
-                endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+                endpoint_pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
                 entity_id=750,
                 audit_interval_seconds=14 * 86400,
             )
@@ -347,13 +362,13 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         reader = _make_async_reader({"events": [], "hasNextPage": False})
         worker = _build_worker(
             executor,
-            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            endpoints=(_AUTO_PAGINATE_ENDPOINT,),
             pagination_done=pagination,
             snapshot_reader=reader,
             queue=queue,
         )
         envelope = _make_envelope(
-            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
             entity_type="player",
             entity_id=750,
             path_params={"player_id": 750, "page": 17},
@@ -366,7 +381,7 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         # pagination_done stamped.
         self.assertTrue(
             pagination.is_completed_recently(
-                endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+                endpoint_pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
                 entity_id=750,
                 audit_interval_seconds=14 * 86400,
             )
@@ -408,19 +423,19 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         queue = _PublishingQueue()
         pagination = PaginationDoneStore(_FakePaginationBackend())
         pagination.mark_completed(
-            endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            endpoint_pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
             entity_id=750,
         )
         reader = _make_async_reader({"events": [], "hasNextPage": True})
         worker = _build_worker(
             executor,
-            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            endpoints=(_AUTO_PAGINATE_ENDPOINT,),
             pagination_done=pagination,
             snapshot_reader=reader,
             queue=queue,
         )
         envelope = _make_envelope(
-            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
             entity_type="player",
             entity_id=750,
             path_params={"player_id": 750, "page": 5},
@@ -439,14 +454,14 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         reader = _make_async_reader({"events": [], "hasNextPage": True})
         worker = _build_worker(
             executor,
-            endpoints=(PLAYER_EVENTS_LAST_ENDPOINT,),
+            endpoints=(_AUTO_PAGINATE_ENDPOINT,),
             pagination_done=pagination,
             snapshot_reader=reader,
             queue=queue,
         )
-        # PLAYER_EVENTS_LAST_ENDPOINT.max_pages == 50, so page=49 + 1 hits the fuse.
+        # _AUTO_PAGINATE_ENDPOINT.max_pages == 50, so page=49 + 1 hits the fuse.
         envelope = _make_envelope(
-            pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+            pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
             entity_type="player",
             entity_id=750,
             path_params={"player_id": 750, "page": 49},
@@ -459,7 +474,7 @@ class ResourceRefreshWorkerTests(unittest.IsolatedAsyncioTestCase):
         # the next planner tick from immediately starting another walk.
         self.assertTrue(
             pagination.is_completed_recently(
-                endpoint_pattern=PLAYER_EVENTS_LAST_ENDPOINT.pattern,
+                endpoint_pattern=_AUTO_PAGINATE_ENDPOINT.pattern,
                 entity_id=750,
                 audit_interval_seconds=14 * 86400,
             )
