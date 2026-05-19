@@ -253,7 +253,12 @@ class EventListParserTests(unittest.IsolatedAsyncioTestCase):
         bundle = await parser.fetch_scheduled_events("2026-04-10")
 
         self.assertEqual(fake_client.seen_urls, [scheduled_url])
-        self.assertEqual(len(bundle.registry_entries), 10)
+        # 2026-05-19 (Phase 4): the 11th entry is
+        # ``UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT`` — added to
+        # ``event_list_endpoints`` so the seeder populates
+        # ``endpoint_registry``. Prod was hitting FK violations on
+        # every slug-routed fetch until this entry landed.
+        self.assertEqual(len(bundle.registry_entries), 11)
         self.assertIn(
             UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT.path_template,
             {item.path_template for item in bundle.registry_entries},

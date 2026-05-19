@@ -154,5 +154,48 @@ class RoundSlugEndpointUrlBuildTests(unittest.TestCase):
         )
 
 
+class RoundSlugEndpointRegistryEntryTests(unittest.TestCase):
+    """Prod-bug regression pin (2026-05-19): the slug-aware endpoint
+    must show up in ``event_list_registry_entries`` so the seeder
+    populates the ``endpoint_registry`` table. Without this, every
+    slug-routed fetch hits an FK constraint violation when the worker
+    tries to write the snapshot:
+
+        Key (endpoint_pattern)=(...events/round/{round_number}/slug/{round_slug})
+        is not present in table "endpoint_registry".
+
+    Observed in prod within seconds of the initial Phase 4 deploy.
+    """
+
+    def test_endpoint_in_event_list_registry_entries(self) -> None:
+        from schema_inspector.endpoints import (
+            UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
+            event_list_registry_entries,
+        )
+
+        patterns = {entry.pattern for entry in event_list_registry_entries()}
+        self.assertIn(UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT.pattern, patterns)
+
+    def test_endpoint_in_event_list_endpoints_tuple(self) -> None:
+        """``event_list_endpoints()`` is the upstream of the registry
+        entries function — pin membership there too, with each sport
+        slug we ship, so a future ``sport_slug`` switch can't drop the
+        endpoint silently."""
+        from schema_inspector.endpoints import (
+            UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
+            event_list_endpoints,
+        )
+
+        for sport_slug in ("football", "basketball", "tennis"):
+            endpoints = event_list_endpoints(sport_slug)
+            self.assertIn(
+                UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
+                endpoints,
+                f"Slug-aware round endpoint missing from event_list_endpoints({sport_slug!r}). "
+                f"Without it the endpoint_registry seeder skips the row and prod "
+                f"hits FK violations on every slug-routed fetch.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

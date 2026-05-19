@@ -556,6 +556,13 @@ def event_list_endpoints(sport_slug: str = "football") -> tuple[SofascoreEndpoin
         UNIQUE_TOURNAMENT_SCHEDULED_EVENTS_ENDPOINT,
         UNIQUE_TOURNAMENT_FEATURED_EVENTS_ENDPOINT,
         UNIQUE_TOURNAMENT_ROUND_EVENTS_ENDPOINT,
+        # Phase 4 (2026-05-19): slug-aware named-knockout-round endpoint.
+        # Must be in this tuple so ``event_list_registry_entries`` seeds
+        # the row in ``endpoint_registry``; without it the FK from
+        # ``api_payload_snapshot.endpoint_pattern`` blocks every
+        # slug-routed fetch with a constraint violation (prod symptom
+        # observed in worker logs right after the initial deploy).
+        UNIQUE_TOURNAMENT_ROUND_EVENTS_SLUG_ENDPOINT,
         UNIQUE_TOURNAMENT_SEASON_BRACKETS_ENDPOINT,
         season_last_events_endpoint(),
         season_next_events_endpoint(),
