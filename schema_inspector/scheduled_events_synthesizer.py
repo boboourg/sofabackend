@@ -401,6 +401,35 @@ LIMIT 500
 _FETCH_QUERY = _FETCH_QUERY_SCHEDULED
 
 
+# Phase 5.1 — synthesize ``/season/{s}/groups`` from sub-tournaments.
+#
+# Sofascore groups under cup-style unique tournaments (FIFA WC,
+# classic UCL until 2023/24) live as individual sub-tournaments
+# under the umbrella ``unique_tournament_id``. Each event in our DB
+# references its sub-tournament via ``event.tournament_id``, and the
+# sub-tournament row in ``tournament`` carries a name like
+# ``"FIFA World Cup, Group A"``.
+#
+# The DISTINCT scan over ``event`` + ``tournament`` for the given
+# (UT, season) yields one row per group-stage sub-tournament. The
+# payload builder filters to ``tournament_name`` matching the
+# ``Group X`` pattern (Sofascore's wire format strips everything
+# before the comma) and emits the Sofascore envelope.
+_FETCH_QUERY_GROUPS = (
+    """
+    SELECT DISTINCT
+        e.tournament_id      AS tournament_id,
+        t.name               AS tournament_name
+    FROM event e
+    JOIN tournament t ON t.id = e.tournament_id
+    WHERE e.unique_tournament_id = $1
+      AND e.season_id = $2
+      AND t.name IS NOT NULL
+    ORDER BY t.name
+    """
+)
+
+
 # Phase 2.4 — synthesize ``/event/{custom_id}/h2h/events``. Step 1 of
 # the CTE resolves the anchor event's (home_team_id, away_team_id) pair
 # by custom_id; step 2 filters the same ``event`` table for every match
@@ -716,6 +745,32 @@ def synthesize_away_standing_rows(
     return synthesized
 
 
+async def fetch_groups_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+) -> list[dict[str, Any]]:
+    """Phase 5.1 — DISTINCT sub-tournaments under a (UT, season) pair.
+
+    Source of truth: ``event`` table (knows about both
+    ``unique_tournament_id`` and ``tournament_id``) JOIN ``tournament``
+    (for the human-readable name we slice the group letter out of).
+    Returned rows have ``tournament_id`` and ``tournament_name`` keys.
+
+    Note: this returns ALL sub-tournaments — knockout, qualification,
+    playoff round, etc. The group filter (``Group X``) is applied in
+    ``build_groups_payload`` so non-group rows are dropped at envelope
+    assembly. Keeping that filter in Python (rather than the SQL
+    ``WHERE`` clause) makes the helper reusable if/when we add other
+    sub-tournament endpoints later (e.g. ``/knockout``).
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_GROUPS, unique_tournament_id, season_id
+    )
+    return [dict(record) for record in records]
+
+
 async def fetch_h2h_events_rows(
     connection: Any,
     *,
@@ -778,6 +833,43 @@ async def fetch_live_rows(
     del lookback_hours  # currently fixed at 12 hours in SQL
     records = await connection.fetch(_FETCH_QUERY_LIVE, sport_slug, list(_LIVE_STATUS_TYPES))
     return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
+def build_groups_payload(rows: Sequence[Any]) -> dict[str, Any]:
+    """Wrap ``fetch_groups_rows`` output in Sofascore's ``/groups``
+    envelope.
+
+    Sofascore tournament names look like ``"<Cup>, Group X"`` —
+    everything after the rightmost ``", "`` is the group name (Sofascore
+    UI strips the cup prefix). Rows whose name lacks that pattern or
+    whose suffix doesn't start with ``Group `` are dropped — they
+    represent non-group sub-tournaments (Knockout, Qualification,
+    Playoff Round, single-phase Swiss UCL, etc.).
+
+    Output shape:
+        {"groups": [
+            {"groupName": "Group A", "tournamentId": 3954},
+            ...
+        ]}
+    """
+    groups: list[dict[str, Any]] = []
+    for row in rows:
+        tournament_id = (
+            row.get("tournament_id") if isinstance(row, dict) else getattr(row, "tournament_id", None)
+        )
+        tournament_name = (
+            row.get("tournament_name") if isinstance(row, dict) else getattr(row, "tournament_name", None)
+        )
+        if tournament_id is None or not isinstance(tournament_name, str):
+            continue
+        # The group suffix comes after the rightmost ``", "``. If the
+        # name has no comma, the entire string IS the suffix — that's a
+        # single-phase Swiss tournament and not a group.
+        suffix = tournament_name.rsplit(", ", 1)[-1].strip()
+        if not suffix.startswith("Group "):
+            continue
+        groups.append({"groupName": suffix, "tournamentId": int(tournament_id)})
+    return {"groups": groups}
 
 
 def build_calendar_months_payload(rows: Sequence[Any]) -> dict[str, Any]:

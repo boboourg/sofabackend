@@ -1453,6 +1453,11 @@ class LocalApiApplication:
                 unique_tournament_id=int(path_params["unique_tournament_id"]),
                 season_id=int(path_params["season_id"]),
             )
+        if template == "/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups":
+            return await self._fetch_groups_payload(
+                unique_tournament_id=int(path_params["unique_tournament_id"]),
+                season_id=int(path_params["season_id"]),
+            )
         if template == "/api/v1/player/{player_id}/transfer-history":
             return await self._fetch_player_transfer_history_payload(int(path_params["player_id"]))
         if template == "/api/v1/player/{player_id}/statistics":
@@ -1533,6 +1538,54 @@ class LocalApiApplication:
         # endpoint Sofascore uses the key "featuredEvents", so rewrap.
         inner = build_payload(rows)
         return {"featuredEvents": inner.get("events", [])}
+
+    async def _fetch_groups_payload(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int,
+    ) -> dict[str, Any]:
+        """Phase 5.1 (2026-05-19): synthesize Sofascore's ``/groups``
+        envelope from the ``tournament`` sub-tournaments we discovered
+        through the event-list flow.
+
+        Source-of-truth chain:
+          event.unique_tournament_id + event.season_id → event.tournament_id
+            ↪ tournament.name LIKE "<Cup>, Group X"
+              ↪ envelope ``{groupName, tournamentId}``
+
+        Works for ALL cup-style competitions with the classic "8 groups"
+        format (FIFA WC, UCL until 2023/24, EURO, Copa America, etc.)
+        without any upstream call. The legacy resource refresh loop
+        only covered the ±60 day window via leaderboards; this
+        synthesizer unlocks the full history for the frontend group
+        pages.
+
+        DB-unreachable or query failure both yield ``{"groups": []}``
+        so the dispatcher never propagates a 500. Swiss-format
+        tournaments (UCL 2024/25+, single-phase league) correctly
+        return an empty list — there are no groups to enumerate.
+        """
+        from .scheduled_events_synthesizer import (
+            build_groups_payload,
+            fetch_groups_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"groups": []}
+        try:
+            rows = await fetch_groups_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"groups": []}
+        await connection.close()
+        return build_groups_payload(rows)
 
     async def _fetch_h2h_events_payload(
         self,

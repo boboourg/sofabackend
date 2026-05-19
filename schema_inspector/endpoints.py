@@ -1445,6 +1445,16 @@ UNIQUE_TOURNAMENT_GROUPS_ENDPOINT = SofascoreEndpoint(
     path_template="/api/v1/unique-tournament/{unique_tournament_id}/season/{season_id}/groups",
     envelope_key="groups",
     target_table="season_group",
+    # Phase 5.1 (2026-05-19): promoted to FEDERATED. Each group under a
+    # cup-style unique tournament (FIFA WC, classic UCL until 2023/24,
+    # EURO, Copa America) lives as a sub-tournament in our ``tournament``
+    # table — the synthesizer assembles ``{groupName, tournamentId}``
+    # entries from there without any upstream call. The leaderboards-
+    # driven snapshot capture stays as the primary source when fresh
+    # (1:1 wire format); the synthesizer covers the historical ±60 day
+    # gap and Swiss-format tournaments (UCL 2024/25+) correctly emit
+    # ``{"groups": []}``.
+    origin=EndpointOrigin.FEDERATED,
 )
 
 UNIQUE_TOURNAMENT_PLAYER_OF_THE_SEASON_ENDPOINT = SofascoreEndpoint(
