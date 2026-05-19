@@ -624,6 +624,98 @@ async def fetch_team_events_rows(
     return [_decode_jsonb_fields(dict(record)) for record in records]
 
 
+def synthesize_away_standing_rows(
+    total_rows: Sequence[Any],
+    home_rows: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Phase 2.5 — compute the ``away`` standings rows arithmetically.
+
+    For every team present in ``total_rows``, ``away = total - home``
+    for the seven additive metrics: matches, wins, draws, losses,
+    scoresFor, scoresAgainst, points. Teams in ``home_rows`` but not
+    ``total_rows`` are skipped (no baseline to subtract from — likely
+    a data anomaly). Teams in ``total_rows`` but not ``home_rows`` are
+    treated as having played 0 home matches (away simply equals total).
+
+    Position is re-ranked over the synthesized rows by
+    ``(points DESC, goal_diff DESC, scoresFor DESC)`` — Sofascore's
+    standard tie-breaker. The position field is the only one where
+    Sofascore could disagree slightly (custom league-specific
+    tie-breaking rules), so this synthesizer is best-effort for
+    position but exact for every other column.
+
+    ``score_diff_formatted`` is regenerated from the synthesized
+    (scoresFor - scoresAgainst) with the ``+N`` / ``-N`` / ``0``
+    convention Sofascore uses.
+
+    Input rows are the same dict shape returned by
+    ``_fetch_standings_payload``'s inner SELECT — team_id, team_name,
+    team_slug, team_short_name, matches, wins, draws, losses,
+    scores_for, scores_against, points, position. The returned rows
+    have the same shape with values recomputed.
+    """
+    home_by_team: dict[int, dict[str, Any]] = {
+        int(row["team_id"]): row for row in home_rows
+    }
+    synthesized: list[dict[str, Any]] = []
+    for total_row in total_rows:
+        team_id = int(total_row["team_id"])
+        home_row = home_by_team.get(team_id)
+
+        def _sub(key: str) -> int:
+            t = int(total_row.get(key) or 0)
+            h = int(home_row.get(key) or 0) if home_row is not None else 0
+            return t - h
+
+        matches = _sub("matches")
+        wins = _sub("wins")
+        draws = _sub("draws")
+        losses = _sub("losses")
+        scores_for = _sub("scores_for")
+        scores_against = _sub("scores_against")
+        points = _sub("points")
+
+        diff = scores_for - scores_against
+        if diff > 0:
+            score_diff_formatted = f"+{diff}"
+        elif diff < 0:
+            score_diff_formatted = str(diff)
+        else:
+            score_diff_formatted = "0"
+
+        synthesized.append(
+            {
+                "team_id": team_id,
+                "team_name": total_row.get("team_name"),
+                "team_slug": total_row.get("team_slug"),
+                "team_short_name": total_row.get("team_short_name"),
+                "matches": matches,
+                "wins": wins,
+                "draws": draws,
+                "losses": losses,
+                "scores_for": scores_for,
+                "scores_against": scores_against,
+                "points": points,
+                "score_diff_formatted": score_diff_formatted,
+                "position": 0,  # placeholder; re-ranked below
+            }
+        )
+
+    # Re-rank by (points DESC, goal_diff DESC, scoresFor DESC). Stable
+    # sort keeps insertion order for ties beyond the tie-breaker.
+    synthesized.sort(
+        key=lambda r: (
+            -int(r["points"]),
+            -(int(r["scores_for"]) - int(r["scores_against"])),
+            -int(r["scores_for"]),
+        )
+    )
+    for idx, row in enumerate(synthesized, start=1):
+        row["position"] = idx
+
+    return synthesized
+
+
 async def fetch_h2h_events_rows(
     connection: Any,
     *,

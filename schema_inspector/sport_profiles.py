@@ -79,7 +79,14 @@ FOOTBALL_PROFILE = SportProfile(
     sport_slug="football",
     live_discovery_interval_seconds=15.0,
     hot_poll_seconds=10,
-    standings_scopes=("total", "home", "away"),
+    # Phase 2.5 (2026-05-19, docs/REDUNDANT_ENDPOINTS_AUDIT.md §B):
+    # ``away`` dropped — it is fully derivable from total - home for
+    # additive metrics (matches, wins, draws, losses, goals, points).
+    # The local API server synthesizes the ``away`` envelope on demand
+    # via ``synthesize_away_standing_rows`` so frontend requests still
+    # work 1:1 with Sofascore's wire format. Saves 1/3 of the per-UT
+    # 30-minute standings refresh budget.
+    standings_scopes=("total", "home"),
     team_event_scopes=("home", "away", "total"),
     top_players_suffix="overall",
     top_players_per_game_suffix="all/overall",
