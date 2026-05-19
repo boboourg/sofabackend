@@ -167,6 +167,7 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = _FakeArchiveOrchestrator()
         orchestrator.archive_stage_failures = 0  # even a fully clean run …
         orchestrator.archive_discovered_event_ids = 0  # … must not advance if no events
+        orchestrator.archive_capabilities_completed = ()  # no capabilities reported = no advance
         queue = _FakeQueue()
         worker = HistoricalTournamentWorker(
             orchestrator=orchestrator,
@@ -229,6 +230,206 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(orchestrator.archive_target_seasons, [None])
         self.assertEqual(orchestrator.advance_cursor_calls, [])
+
+    # ─── Fix 1 (2026-05-19): capability-aware advance gate ────────────────
+
+    async def test_advance_fires_when_required_capabilities_completed(self) -> None:
+        """Capability-driven advance: the worker checks that the orchestrator
+        reported ``capabilities_completed`` is a superset of the required
+        set returned by ``required_capabilities_for_cursor_advance()``.
+
+        v1 required = {EVENTS}. When the orchestrator says it completed
+        ``("events",)``, the gate fires.
+
+        Crucial discriminator: we set ``discovered_event_ids = 0`` to
+        prove the worker is NOT just falling back to the legacy proxy.
+        A capability-aware worker advances; a legacy-only worker does
+        not. (The capabilities_completed key takes precedence.)"""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        orchestrator.archive_capabilities_completed = ("events",)
+        orchestrator.archive_stage_failures = 5  # noise from optional stages
+        orchestrator.archive_discovered_event_ids = 0  # legacy gate would skip; capability gate fires
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="cap-1",
+                values={
+                    "job_id": "cap-job-1",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "cap-key-1",
+                },
+            )
+        )
+
+        self.assertEqual(orchestrator.advance_cursor_calls, [("football", 17, 76986)])
+
+    async def test_advance_skipped_when_capabilities_completed_empty(self) -> None:
+        """An empty ``capabilities_completed`` set means the orchestrator
+        couldn't produce anything useful — the cursor must stay put so the
+        next planner tick retries the same season."""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        orchestrator.archive_capabilities_completed = ()
+        orchestrator.archive_discovered_event_ids = 0
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="cap-2",
+                values={
+                    "job_id": "cap-job-2",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "cap-key-2",
+                },
+            )
+        )
+
+        self.assertEqual(orchestrator.advance_cursor_calls, [])
+
+    async def test_advance_skipped_when_completed_missing_required_capability(self) -> None:
+        """Even when other capabilities completed, if the *required* one
+        (``EVENTS`` in v1) is missing, the cursor stays put. This prevents
+        a season where standings/leaderboards landed but the event list
+        failed from silently advancing past unhydrated data.
+
+        Crucial discriminator: ``discovered_event_ids = 999`` (legacy gate
+        WOULD advance), capabilities lack EVENTS. A capability-aware
+        worker correctly skips; a legacy-only worker incorrectly advances."""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        # Standings + leaderboards landed but EVENTS did NOT — should NOT advance.
+        orchestrator.archive_capabilities_completed = ("standings", "leaderboards")
+        orchestrator.archive_discovered_event_ids = 999  # legacy gate WOULD advance
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="cap-3",
+                values={
+                    "job_id": "cap-job-3",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "cap-key-3",
+                },
+            )
+        )
+
+        self.assertEqual(orchestrator.advance_cursor_calls, [])
+
+    async def test_advance_falls_back_to_discovered_event_ids_when_capabilities_missing(
+        self,
+    ) -> None:
+        """Backward compatibility: orchestrator results that don't include
+        ``capabilities_completed`` (older deployments / test fakes still
+        being updated) get the legacy ``discovered_event_ids > 0`` path
+        so we don't regress the 2026-05-18 fix while the new gate rolls
+        out."""
+        from schema_inspector.workers.historical_archive_worker import HistoricalTournamentWorker
+
+        orchestrator = _FakeArchiveOrchestrator()
+        # Simulate a "legacy" result by emptying capabilities AND keeping
+        # discovered_event_ids non-zero. Real legacy orchestrators just
+        # omit the capabilities_completed key entirely; the worker MUST
+        # treat ``key absent`` as ``fall back`` — pin both shapes here.
+
+        # Shape A: capabilities_completed = () (empty tuple, key present)
+        # Should NOT fall back — empty tuple is a deliberate signal of
+        # "nothing completed". Tested above in
+        # ``test_advance_skipped_when_capabilities_completed_empty``.
+
+        # Shape B: orchestrator omits the key entirely. Patch the fake
+        # via a monkey method that returns a dict without the key.
+        original = orchestrator.run_historical_tournament_archive
+
+        async def _legacy_result(*, unique_tournament_id, sport_slug, target_season_id=None):
+            await original(
+                unique_tournament_id=unique_tournament_id,
+                sport_slug=sport_slug,
+                target_season_id=target_season_id,
+            )  # mutate state same as the real one
+            # Return a result WITHOUT the new key, but WITH events.
+            if target_season_id is not None:
+                return {
+                    "season_ids": (int(target_season_id),),
+                    "stage_failures": 0,
+                    "discovered_event_ids": 64,
+                    # capabilities_completed deliberately absent
+                }
+            return {
+                "season_ids": (701,),
+                "stage_failures": 0,
+                "discovered_event_ids": 64,
+            }
+
+        orchestrator.run_historical_tournament_archive = _legacy_result  # type: ignore[assignment]
+
+        queue = _FakeQueue()
+        worker = HistoricalTournamentWorker(
+            orchestrator=orchestrator,
+            queue=queue,
+            consumer="worker-historical-tournament-1",
+        )
+
+        await worker.handle(
+            StreamEntry(
+                stream=STREAM_HISTORICAL_TOURNAMENT,
+                message_id="cap-4",
+                values={
+                    "job_id": "cap-job-4",
+                    "job_type": "sync_tournament_archive",
+                    "sport_slug": "football",
+                    "entity_type": "unique_tournament",
+                    "entity_id": "17",
+                    "scope": "historical",
+                    "params_json": '{"target_season_id": 76986}',
+                    "attempt": "1",
+                    "idempotency_key": "cap-key-4",
+                },
+            )
+        )
+
+        # Legacy-shaped result with events → advance fires via fallback.
+        self.assertEqual(orchestrator.advance_cursor_calls, [("football", 17, 76986)])
 
 
 class HistoricalEnrichmentWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -402,6 +603,11 @@ class HistoricalArchiveServiceTests(unittest.IsolatedAsyncioTestCase):
                 "discovered_event_ids": 14,
                 "stage_failures": 0,
                 "success": True,
+                # 2026-05-19 (fix 1): the service layer always includes
+                # ``capabilities_completed`` in the response dict, even
+                # when the orchestrator result is a legacy stub without
+                # the attribute (defaults to empty tuple).
+                "capabilities_completed": (),
             },
         )
         _LAST_ARCHIVE_APP = None
@@ -685,6 +891,12 @@ class _FakeArchiveOrchestrator:
         # successful season that justifies a cursor advance. Tests that
         # exercise the "no events" path override this to 0.
         self.archive_discovered_event_ids = 14
+        # capabilities_completed (2026-05-19, fix 1): the orchestrator
+        # reports which season-level capabilities succeeded. Default
+        # ("events",) mirrors the happy path — at least one event landed.
+        # The "no events" path test overrides this to () to model the
+        # orchestrator reporting that nothing usable was collected.
+        self.archive_capabilities_completed: tuple[str, ...] = ("events",)
         self.enrichment_calls: list[tuple[int, str, tuple[int, ...]]] = []
         self.event_detail_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
         self.entities_batch_calls: list[tuple[int, str, tuple[int, ...]]] = []
@@ -703,11 +915,13 @@ class _FakeArchiveOrchestrator:
                 "season_ids": (int(target_season_id),),
                 "stage_failures": self.archive_stage_failures,
                 "discovered_event_ids": self.archive_discovered_event_ids,
+                "capabilities_completed": self.archive_capabilities_completed,
             }
         return {
             "season_ids": (701, 702),
             "stage_failures": self.archive_stage_failures,
             "discovered_event_ids": self.archive_discovered_event_ids,
+            "capabilities_completed": self.archive_capabilities_completed,
         }
 
     async def advance_backfill_cursor(

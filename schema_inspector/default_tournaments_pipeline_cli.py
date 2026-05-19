@@ -37,6 +37,17 @@ class _WorkerResult:
     discovered_player_ids: int
     discovered_event_ids: int
     stage_failures: int
+    # 2026-05-19 (fix 1): season-level capabilities the orchestrator
+    # successfully completed during the run. Read by the historical
+    # archive worker's cursor advance gate via
+    # ``required_capabilities_for_cursor_advance()`` — see
+    # ``schema_inspector.services.season_capabilities`` for the full
+    # rationale (replacing the legacy ``stage_failures == 0`` /
+    # ``discovered_event_ids > 0`` proxies with explicit dependency
+    # graph). ``frozenset[str]`` keys come from the same module's
+    # constants (EVENTS, ROUNDS, STANDINGS, LEADERBOARDS, STATISTICS,
+    # BRACKETS).
+    capabilities_completed: frozenset[str] = frozenset()
     error: str | None = None
 
 
@@ -360,12 +371,25 @@ async def _run_tournament_worker(
     timeout: float,
     target_season_id: int | None = None,
 ) -> _WorkerResult:
+    from .services.season_capabilities import (
+        EVENTS,
+        LEADERBOARDS,
+        ROUNDS,
+        STANDINGS,
+        STATISTICS,
+    )
+
     logger = logging.getLogger(__name__)
     stage_failures = 0
     completed_seasons = 0
     team_ids: list[int] = []
     player_ids: list[int] = []
     event_ids: list[int] = []
+    # 2026-05-19 (fix 1): track which season-level capabilities completed
+    # so the worker's cursor-advance gate can use the capability subset
+    # check instead of legacy ``stage_failures == 0`` /
+    # ``discovered_event_ids > 0`` proxies.
+    capabilities: set[str] = set()
     player_overall_requests: list[PlayerOverallRequest] = []
     team_overall_requests: list[TeamOverallRequest] = []
     player_heatmap_requests: list[PlayerHeatmapRequest] = []
@@ -468,6 +492,7 @@ async def _run_tournament_worker(
                     include_info=True,
                     timeout=timeout,
                 )
+                capabilities.add(STATISTICS)
                 _progress(
                     "statistics",
                     (
@@ -493,6 +518,7 @@ async def _run_tournament_worker(
                     scopes=standings_scopes,
                     timeout=timeout,
                 )
+                capabilities.add(STANDINGS)
                 season_team_ids = tuple(
                     dict.fromkeys(row.team_id for row in standings_result.parsed.standing_rows if row.team_id is not None)
                 )
@@ -538,6 +564,7 @@ async def _run_tournament_worker(
                     include_trending_top_players=False,
                     timeout=timeout,
                 )
+                capabilities.add(LEADERBOARDS)
                 _progress(
                     "leaderboards",
                     (
@@ -594,6 +621,14 @@ async def _run_tournament_worker(
                         sport_slug=sport_slug,
                         timeout=timeout,
                     )
+                if round_numbers:
+                    # 2026-05-19 (fix 1): ROUNDS capability only counts if
+                    # we actually had rounds to fetch AND fetched them
+                    # without raising. Empty round_numbers (cup-style
+                    # competition with no round metadata) deliberately
+                    # does NOT mark ROUNDS as completed — it just means
+                    # the stage was skipped.
+                    capabilities.add(ROUNDS)
                 _progress(
                     "round_events",
                     (
@@ -665,6 +700,15 @@ async def _run_tournament_worker(
                 unique_tournament_id=unique_tournament_id,
                 season_id=season_id,
             )
+        if season_event_ids:
+            # 2026-05-19 (fix 1): EVENTS capability is the only required
+            # entry in ``required_capabilities_for_cursor_advance()`` —
+            # the season must have at least one event in our DB before
+            # the cursor walks forward. This intentionally permits
+            # cup-style competitions to advance even when standings /
+            # leaderboards / round_events 404'd, because their event
+            # list landed via the /events/last/{p} fallback above.
+            capabilities.add(EVENTS)
         if season_event_ids:
             event_ids.extend(season_event_ids)
 
@@ -775,6 +819,7 @@ async def _run_tournament_worker(
         discovered_player_ids=len(resolved_player_ids),
         discovered_event_ids=len(tuple(dict.fromkeys(event_ids))),
         stage_failures=stage_failures,
+        capabilities_completed=frozenset(capabilities),
     )
 
 

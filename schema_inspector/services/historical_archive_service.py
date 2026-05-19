@@ -75,12 +75,20 @@ async def run_historical_tournament_archive(
         timeout=timeout,
         target_season_id=target_season_id,
     )
+    # 2026-05-19 (fix 1): pass through the capability set so the
+    # ``HistoricalTournamentWorker`` advance gate can use the capability
+    # subset check. ``getattr`` with default protects against legacy
+    # SimpleNamespace stubs in tests that don't set the field — the
+    # worker treats absent ``capabilities_completed`` as the
+    # backward-compat fallback to ``discovered_event_ids > 0``.
+    capabilities = getattr(result, "capabilities_completed", frozenset())
     return {
         "season_ids": tuple(int(item) for item in result.season_ids),
         "completed_seasons": int(result.completed_seasons),
         "discovered_event_ids": int(result.discovered_event_ids),
         "stage_failures": int(result.stage_failures),
         "success": bool(result.success),
+        "capabilities_completed": tuple(sorted(capabilities)),
     }
 
 

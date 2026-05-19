@@ -17,6 +17,10 @@ from ..queue.streams import (
     STREAM_HISTORICAL_TOURNAMENT,
     StreamEntry,
 )
+from ..services.season_capabilities import (
+    EVENTS,
+    required_capabilities_for_cursor_advance,
+)
 from ..services.worker_runtime import WorkerRuntime
 from ._stream_jobs import decode_stream_job, encode_stream_job
 
@@ -93,22 +97,49 @@ class HistoricalTournamentWorker:
         )
         season_ids = tuple(int(item) for item in result.get("season_ids", ()) or ())
 
-        # Advance the registry cursor when the targeted run successfully
-        # collected at least one event for the season. We deliberately do
-        # NOT gate on ``stage_failures == 0`` (the original 2026-05-16
-        # rule) — cup-style competitions (FIFA WC, EURO, UEFA Nations,
-        # Olympics) reliably 404 on /standings/home, /events/round/{N>=N_max},
-        # and occasionally /leaderboards (TLS) yet still land the full event
-        # list via the /events/last/{p} fallback. Counting those endpoints
-        # as fatal kept UT=16 stuck on season=41087 for 3h+ after WC 2022
-        # was already at 64/64 events. Stage failures are best-effort
-        # enrichment; if events landed, the season is "processed" and we
-        # should walk to the next one (commit 2026-05-18).
-        discovered_event_ids = int(result.get("discovered_event_ids", 0) or 0)
+        # Advance the registry cursor when the orchestrator reports that
+        # all *required* season-level capabilities completed.
+        #
+        # Evolution of this gate:
+        #   1) 2026-05-16: ``stage_failures == 0``. Broke for cup-style
+        #      competitions (FIFA WC, EURO) that 404 on /standings/home and
+        #      similar optional endpoints — UT=16 season=41087 stayed
+        #      stuck for 3h+ with 64/64 events already collected.
+        #   2) 2026-05-18 (hack-fix): ``discovered_event_ids > 0``. Fixed
+        #      the symptom but didn't express intent. Stage failures were
+        #      silently ignored.
+        #   3) 2026-05-19 (this code): capability dependency graph. The
+        #      orchestrator reports ``capabilities_completed`` (the set of
+        #      season-level capabilities it produced — events, rounds,
+        #      standings, leaderboards, etc.). The worker advances when
+        #      the *required* subset (defined in
+        #      ``schema_inspector.services.season_capabilities``) is a
+        #      subset of the *completed* set. Adding a new required
+        #      capability later is a 1-line change in that module.
+        #
+        # Backward compatibility: when ``capabilities_completed`` is
+        # entirely absent from ``result`` (legacy orchestrators or test
+        # fakes still being updated), we fall back to the
+        # ``discovered_event_ids > 0`` proxy so we don't regress the
+        # 2026-05-18 fix while the new gate rolls out. An empty
+        # ``capabilities_completed`` (key present, value ``()``) is a
+        # deliberate "nothing useful completed" signal — NO fallback.
+        should_advance = False
+        if "capabilities_completed" in result:
+            completed = frozenset(
+                str(item) for item in (result.get("capabilities_completed") or ())
+            )
+            required = required_capabilities_for_cursor_advance()
+            should_advance = required.issubset(completed)
+        else:
+            # Legacy path — orchestrator pre-dates the capability model.
+            discovered_event_ids = int(result.get("discovered_event_ids", 0) or 0)
+            should_advance = discovered_event_ids > 0
+
         if (
             target_season_id is not None
             and season_ids
-            and discovered_event_ids > 0
+            and should_advance
         ):
             advance = getattr(self.orchestrator, "advance_backfill_cursor", None)
             if callable(advance):
