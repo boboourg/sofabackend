@@ -122,6 +122,34 @@ class SofascoreEndpoint:
     # issue the GET in case the HEAD endpoint is temporarily lying.
     prefer_head_probe: bool = False
 
+    def __post_init__(self) -> None:
+        """Fix 3 (2026-05-19): validate ``scope_kind`` against the
+        canonical set advertised by the resolver registry.
+
+        A typo (``team-of-active-uts`` with extra ``s``) silently
+        bypassed the planner before — the resolver lookup found no
+        match and the endpoint never got refresh-loop coverage. Now
+        the typo blows up at module import time so the operator sees
+        ``ValueError: Unknown scope_kind=...`` instead of debugging
+        "why isn't this endpoint being refreshed?" hours later.
+
+        ``scope_kind=None`` (the default, used by the majority of
+        endpoints) bypasses validation entirely.
+        """
+        if self.scope_kind is None:
+            return
+        # Top-level module (no side imports) — avoids the
+        # ``services/__init__.py`` cycle that would fire if we
+        # imported from ``services.resource_scope`` here.
+        from ._scope_kinds import KNOWN_SCOPE_KINDS
+
+        if self.scope_kind not in KNOWN_SCOPE_KINDS:
+            raise ValueError(
+                f"Unknown scope_kind={self.scope_kind!r} on endpoint "
+                f"{self.path_template!r}. Valid kinds: "
+                f"{sorted(KNOWN_SCOPE_KINDS)}"
+            )
+
     @property
     def pattern(self) -> str:
         if self.query_template:

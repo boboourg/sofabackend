@@ -38,7 +38,17 @@ from .team_of_active_ut_first_page import TeamOfActiveUTFirstPageResolver
 from .team_of_active_ut_season import TeamOfActiveUTSeasonResolver
 from .team_of_registry_ut import TeamOfRegistryUTResolver
 
+# Re-export the canonical set declared in ``endpoints.py`` so callers
+# that import through this package still get the constant. The
+# constant lives at the top level (not here) to avoid a circular
+# import: ``endpoints.py`` is loaded before ``services/__init__.py``,
+# and ``services/__init__.py`` transitively pulls in modules that
+# need ``endpoints`` to already be initialised.
+from ..._scope_kinds import KNOWN_SCOPE_KINDS  # noqa: E402
+
+
 __all__ = [
+    "KNOWN_SCOPE_KINDS",
     "ResourceTarget",
     "ScopeResolver",
     "CustomIdOfManagedEventsResolver",

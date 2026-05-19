@@ -66,7 +66,12 @@ class _FakeQueue:
 
 
 class _FakeResolver:
-    kind = "test"
+    # 2026-05-19 (fix 3): use a real registered scope_kind so this
+    # fake matches the endpoint fixture's default (which Fix 3
+    # validation requires to be in KNOWN_SCOPE_KINDS). Tests that
+    # care about distinct kinds override ``resolver.kind`` after
+    # construction.
+    kind = "team-of-active-ut"
 
     def __init__(self, targets: Iterable[ResourceTarget]) -> None:
         self.targets = tuple(targets)
@@ -81,7 +86,11 @@ def _stub_endpoint(
     *,
     pattern: str = "/api/v1/team/{team_id}/players",
     refresh_interval: int | None = 3600,
-    scope_kind: str | None = "test",
+    # 2026-05-19 (fix 3): scope_kind is validated against
+    # ``KNOWN_SCOPE_KINDS`` at construction time. Default to a real
+    # registered kind so test fixtures don't trip the validator.
+    # Tests that care about specific scopes pass them explicitly.
+    scope_kind: str | None = "team-of-active-ut",
     freshness_ttl: int | None = 1800,
 ) -> SofascoreEndpoint:
     return SofascoreEndpoint(
@@ -241,8 +250,18 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published, 1)
 
     async def test_missing_resolver_logs_and_skips(self) -> None:
-        endpoint = _stub_endpoint(scope_kind="not-registered")
+        # Endpoint advertises a real registered kind, but the planner
+        # gets a resolver_map that doesn't include that kind — the
+        # planner must log + skip rather than crash. (Pre-Fix-3 this
+        # test used "not-registered" as a fake kind; Fix 3 validates
+        # against KNOWN_SCOPE_KINDS so we now use a real kind and
+        # achieve the same "no resolver for this kind" condition by
+        # passing a resolver with a *different* kind.)
+        endpoint = _stub_endpoint(scope_kind="player-of-national-team-history")
         resolver = _FakeResolver([_team_target(42)])
+        # ``resolver`` defaults to kind="team-of-active-ut" via _build,
+        # so it won't match the endpoint's scope_kind — exactly the
+        # "missing resolver" condition this test exercises.
         planner, queue, _ = self._build(endpoint=endpoint, resolver=resolver)
         published = await planner.tick()
         self.assertEqual(published, 0)
@@ -289,22 +308,28 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
                 # distinct kinds.
                 raise NotImplementedError
 
-        # Use distinct scope_kinds and register separate resolvers per endpoint.
+        # Use distinct scope_kinds and register separate resolvers per
+        # endpoint. Picks 3 real kinds from KNOWN_SCOPE_KINDS so Fix 3
+        # validation passes (the test only cares about distinct strings,
+        # not their semantic meaning).
         endpoint_a = _stub_endpoint(
-            pattern="/api/v1/team/{team_id}/players", scope_kind="kind-a"
+            pattern="/api/v1/team/{team_id}/players",
+            scope_kind="team-of-active-ut",
         )
         endpoint_b = _stub_endpoint(
-            pattern="/api/v1/player/{player_id}/transfer-history", scope_kind="kind-b"
+            pattern="/api/v1/player/{player_id}/transfer-history",
+            scope_kind="player-of-active-squad",
         )
         endpoint_c = _stub_endpoint(
-            pattern="/api/v1/player/{player_id}/attribute-overviews", scope_kind="kind-c"
+            pattern="/api/v1/player/{player_id}/attribute-overviews",
+            scope_kind="player-of-national-team-history",
         )
         resolver_a = _FakeResolver(targets_a)
-        resolver_a.kind = "kind-a"
+        resolver_a.kind = "team-of-active-ut"
         resolver_b = _FakeResolver(targets_b)
-        resolver_b.kind = "kind-b"
+        resolver_b.kind = "player-of-active-squad"
         resolver_c = _FakeResolver(targets_c)
-        resolver_c.kind = "kind-c"
+        resolver_c.kind = "player-of-national-team-history"
 
         queue = _FakeQueue()
         cursor_store = ResourceCursorStore(_FakeRedis())
@@ -313,9 +338,9 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
             cursor_store=cursor_store,
             endpoints=(endpoint_a, endpoint_b, endpoint_c),
             resolvers={
-                "kind-a": resolver_a,
-                "kind-b": resolver_b,
-                "kind-c": resolver_c,
+                "team-of-active-ut": resolver_a,
+                "player-of-active-squad": resolver_b,
+                "player-of-national-team-history": resolver_c,
             },
             stream="stream:etl:resource_refresh",
             tick_interval_seconds=30.0,
@@ -401,7 +426,10 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
             envelope_key="summary,uniqueTournamentsMap",
             target_table="api_payload_snapshot",
             refresh_interval_seconds=24 * 3600,
-            scope_kind="test",
+            # 2026-05-19 (fix 3): real registered kind required by validator.
+            # Use the same kind as ``_FakeResolver.kind`` so the planner's
+            # resolver_map dispatch finds the (mocked) resolver.
+            scope_kind="team-of-active-ut",
             freshness_ttl_seconds=22 * 3600,
             empty_predicate="last_year_summary",
             empty_data_ttl_seconds=14 * 86400,
@@ -445,7 +473,10 @@ class ResourcePlannerDaemonTests(unittest.IsolatedAsyncioTestCase):
             envelope_key="summary,uniqueTournamentsMap",
             target_table="api_payload_snapshot",
             refresh_interval_seconds=24 * 3600,
-            scope_kind="test",
+            # 2026-05-19 (fix 3): real registered kind required by validator.
+            # Use the same kind as ``_FakeResolver.kind`` so the planner's
+            # resolver_map dispatch finds the (mocked) resolver.
+            scope_kind="team-of-active-ut",
             freshness_ttl_seconds=22 * 3600,
             empty_predicate="last_year_summary",
             empty_data_ttl_seconds=14 * 86400,
