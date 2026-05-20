@@ -657,6 +657,28 @@ CREATE TABLE season_player_of_the_season (
     PRIMARY KEY (unique_tournament_id, season_id)
 );
 
+-- Stage 3.1 (2026-05-20 historical layer): champion-per-season.
+-- ``unique_tournament.title_holder_team_id`` (line 116) is single-slot
+-- and overwritten by competition_repository on every upsert, so the
+-- chain of past champions is lost. The composite-PK below gives each
+-- ``(unique_tournament_id, season_id)`` exactly one row, allowing
+-- natural per-season historicity through the primary key alone.
+-- Populated either by the new SeasonStandingsParser stream-flow path
+-- (source='standings') or by an offline derivation pass that reads
+-- final ``standing_row.position=1`` (source='standings_backfill').
+CREATE TABLE unique_tournament_season_champion (
+    unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),
+    season_id BIGINT NOT NULL REFERENCES season(id),
+    team_id BIGINT NOT NULL REFERENCES team(id),
+    ordinal INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'standings',
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (unique_tournament_id, season_id)
+);
+
+CREATE INDEX idx_unique_tournament_season_champion_team
+    ON unique_tournament_season_champion(team_id);
+
 CREATE TABLE period (
     id BIGINT PRIMARY KEY,
     unique_tournament_id BIGINT NOT NULL REFERENCES unique_tournament(id),

@@ -1327,6 +1327,12 @@ _HISTORICAL_COMMANDS = frozenset({
     "worker-historical-maintenance",
     "historical-planner-daemon",
     "historical-tournament-planner-daemon",
+    # Stage 3.4 (2026-05-20): one-shot backfill for a single (UT, season).
+    # Membership here routes the dispatcher through
+    # ``load_historical_runtime_config`` so backfill consumes the
+    # non-residential historical proxy pool, not residential proxies
+    # reserved for live polling.
+    "historical-backfill",
 })
 
 
@@ -1745,6 +1751,33 @@ async def _dispatch(args) -> int:
                     sport_slugs=tuple(args.sport_slug or ()),
                     tournaments_per_tick=args.tournaments_per_tick,
                     loop_interval_seconds=args.loop_interval_seconds,
+                )
+                return 0
+            if args.command == "historical-backfill":
+                # Stage 3.4 (2026-05-20): one-shot backfill of a single
+                # (UT, season). Delegate to the existing helper so we
+                # do not duplicate the multi-stage ingest. target_season_id
+                # scopes the run to exactly the requested season —
+                # without it the helper would loop over the UT's
+                # backfill cursor.
+                from .services.historical_archive_service import (
+                    run_historical_tournament_archive,
+                )
+                report = await run_historical_tournament_archive(
+                    app,
+                    unique_tournament_id=int(args.unique_tournament_id),
+                    sport_slug=str(args.sport_slug),
+                    seasons_per_tournament=0,
+                    event_concurrency=int(args.event_concurrency),
+                    timeout=float(args.timeout),
+                    target_season_id=int(args.season_id),
+                )
+                logger.info(
+                    "historical-backfill: ut=%s season=%s sport=%s report=%s",
+                    args.unique_tournament_id,
+                    args.season_id,
+                    args.sport_slug,
+                    report,
                 )
                 return 0
             if args.command == "structure-planner-daemon":
@@ -2256,6 +2289,43 @@ def _build_parser() -> argparse.ArgumentParser:
     historical_tournament_planner_daemon.add_argument("--consumer-name", default="historical-tournament-planner-1", help="Opaque planner instance label for logs and tmux naming.")
     historical_tournament_planner_daemon.add_argument("--tournaments-per-tick", type=int, default=10, help="Maximum archival tournaments to publish per sport on each planner tick.")
     historical_tournament_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=10.0, help="Daemon tick loop interval.")
+
+    # Stage 3.4 (2026-05-20 historical layer): one-shot synchronous
+    # backfill for a single (unique_tournament_id, season_id) pair.
+    # Walks the same pipeline as the historical tournament worker
+    # (services.historical_archive_service.run_historical_tournament_archive)
+    # but exits when the requested season completes — ideal for
+    # operator-driven archive runs of named seasons (e.g. EPL 1999,
+    # Champions League 2009/10). Uses the non-residential historical
+    # proxy pool via _HISTORICAL_COMMANDS membership above.
+    historical_backfill = subparsers.add_parser(
+        "historical-backfill",
+        help=(
+            "One-shot synchronous backfill for a specific "
+            "(unique_tournament_id, season_id). Reuses the historical "
+            "tournament archive pipeline and exits on completion."
+        ),
+    )
+    historical_backfill.add_argument(
+        "--unique-tournament-id", type=int, required=True,
+        help="Sofascore unique_tournament id (e.g. 7 = UEFA Champions League, 17 = English Premier League).",
+    )
+    historical_backfill.add_argument(
+        "--season-id", type=int, required=True,
+        help="Sofascore season id for the season to backfill (e.g. 41897 for EPL 2024/25).",
+    )
+    historical_backfill.add_argument(
+        "--sport-slug", default="football",
+        help="Sport slug for sport_profile resolution. Defaults to 'football'.",
+    )
+    historical_backfill.add_argument(
+        "--event-concurrency", type=int, default=4,
+        help="Concurrent /event fetches inside the archive pipeline. Default 4.",
+    )
+    historical_backfill.add_argument(
+        "--timeout", type=float, default=20.0,
+        help="Per-request timeout in seconds. Default 20.0.",
+    )
 
     structure_planner_daemon = subparsers.add_parser(
         "structure-planner-daemon",

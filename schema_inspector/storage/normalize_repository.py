@@ -152,6 +152,15 @@ class NormalizeRepository:
         )
         await self._persist_season_rounds(executor, result.metric_rows.get("season_round", ()))
         await self._persist_season_cup_trees(executor, result.metric_rows)
+        # Stage 3.3 (2026-05-20 historical layer): champion-per-season.
+        # Emitted by SeasonStandingsParser from /standings/{scope=total}
+        # payloads. Composite-PK (ut, season) gives natural per-season
+        # historicity; Stage 1 guards prevent identical re-ingests from
+        # bloating the table.
+        await self._persist_unique_tournament_season_champion(
+            executor,
+            rows=result.metric_rows.get("unique_tournament_season_champion", ()),
+        )
         await self._confirm_lineup_team_refs(executor, result, inserted)
         await self._persist_lineups(executor, result, inserted)
         await self._persist_event_statistics(executor, result.metric_rows.get("event_statistic", ()))
@@ -1836,6 +1845,60 @@ class NormalizeRepository:
                 fractional_value = EXCLUDED.fractional_value
             """,
             normalized_rows,
+        )
+
+    async def _persist_unique_tournament_season_champion(
+        self,
+        executor: SqlExecutor,
+        *,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        """Persist champion-per-season rows emitted by
+        SeasonStandingsParser.
+
+        Stage 1 patterns applied unconditionally:
+
+        * **Sort by (ut, season, team_id)** before executemany so two
+          parallel transactions touching overlapping seasons (e.g. a
+          live snapshot of EPL 2024/25 and a backfill of EPL 2023/24
+          racing) take row-locks in canonical order — same anti-deadlock
+          discipline as ``_upsert_child_pass`` (Stage 1.1).
+        * **IS DISTINCT FROM** guard inside ``ON CONFLICT DO UPDATE``
+          so identical re-ingests of a closed season produce zero
+          dead tuples — same anti-bloat discipline as the team /
+          player upserts (Stage 1.2).
+        """
+        normalized: list[tuple[object, ...]] = []
+        for row in rows:
+            ut_id = _as_int(row.get("unique_tournament_id"))
+            season_id = _as_int(row.get("season_id"))
+            team_id = _as_int(row.get("team_id"))
+            if ut_id is None or season_id is None or team_id is None:
+                continue
+            ordinal = _as_int(row.get("ordinal")) or 1
+            source = str(row.get("source") or "standings")
+            normalized.append((ut_id, season_id, team_id, ordinal, source))
+        if not normalized:
+            return
+        normalized.sort(key=lambda row: (row[0], row[1], row[2]))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO unique_tournament_season_champion (
+                unique_tournament_id, season_id, team_id, ordinal, source
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (unique_tournament_id, season_id) DO UPDATE SET
+                team_id = EXCLUDED.team_id,
+                ordinal = EXCLUDED.ordinal,
+                source = EXCLUDED.source,
+                observed_at = now()
+            WHERE
+                unique_tournament_season_champion.team_id IS DISTINCT FROM EXCLUDED.team_id
+                OR unique_tournament_season_champion.ordinal IS DISTINCT FROM EXCLUDED.ordinal
+                OR unique_tournament_season_champion.source IS DISTINCT FROM EXCLUDED.source
+            """,
+            normalized,
         )
 
     async def _persist_season_rounds(

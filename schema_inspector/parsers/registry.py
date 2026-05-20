@@ -24,6 +24,7 @@ from .families.event_votes import EventVotesParser
 from .families.event_winning_odds import EventWinningOddsParser
 from .families.season_cuptrees import SeasonCupTreesParser
 from .families.season_rounds import SeasonRoundsParser
+from .families.season_standings import SeasonStandingsParser
 from .special.baseball_innings import BaseballInningsParser
 from .special.baseball_pitches import BaseballPitchesParser
 from .special.event_player_rating_breakdown import EventPlayerRatingBreakdownParser
@@ -58,6 +59,7 @@ class ParserRegistry:
             EventPlayerStatisticsParser(),
             SeasonRoundsParser(),
             SeasonCupTreesParser(),
+            SeasonStandingsParser(),
             EntityProfilesParser(),
             BaseballInningsParser(),
             BaseballPitchesParser(),
