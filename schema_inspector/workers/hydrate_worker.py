@@ -57,6 +57,7 @@ class HydrateWorker:
         max_concurrency: int | None = None,
         circuit_breaker=None,
         circuit_breaker_inprogress_count_provider=None,
+        hydrate_inflight_store=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
@@ -67,6 +68,12 @@ class HydrateWorker:
         self.stream = stream
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
+        # Phase 2.1 (2026-05-20 perf audit): Redis single-flight lock keyed
+        # on event_id. When None (legacy / unit tests), the worker behaves
+        # as before — no dedup. service_app wires this in production via
+        # ``HydrateInFlightStore`` so two parallel hydrate workers cannot
+        # process the same event concurrently.
+        self.hydrate_inflight_store = hydrate_inflight_store
         # P5b: per-event circuit breaker. ``circuit_breaker`` is an
         # ``EventCircuitBreaker(lane="hydrate")`` instance or None (when
         # the rollout flag ``HYDRATE_EVENT_CIRCUIT_BREAKER_ENABLED`` is
@@ -152,6 +159,34 @@ class HydrateWorker:
                     )
                     return "quarantined_skip"
 
+        # Phase 2.1 (2026-05-20 perf audit): in-flight single-flight lock.
+        # Two ``sofascore-hydrate@N`` workers may legitimately pull a job
+        # for the same event_id (planner re-publish before ack, discovery
+        # double-enqueue from multiple scopes). Without this guard, both
+        # workers race on parallel /event GETs + overlapping DB upserts.
+        lock_acquired = False
+        lock_owner = f"{self.consumer}:{entry.message_id}:{job.job_id}"
+        if self.hydrate_inflight_store is not None:
+            try:
+                lock_acquired = bool(
+                    self.hydrate_inflight_store.claim(
+                        event_id=event_id, owner=lock_owner
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "hydrate_worker: in-flight claim failed event_id=%s: %r",
+                    event_id,
+                    exc,
+                )
+                lock_acquired = True  # fail open: don't block on Redis errors
+            if not lock_acquired:
+                logger.info(
+                    "hydrate_worker: in-flight skip event_id=%s consumer=%s job=%s",
+                    event_id, self.consumer, job.job_id,
+                )
+                return "inflight_skip"
+
         try:
             await self.orchestrator.run_event(
                 event_id=event_id,
@@ -187,6 +222,21 @@ class HydrateWorker:
                     logger.debug(
                         "Hydrate circuit breaker record_success failed for event_id=%s: %s",
                         event_id, q_exc,
+                    )
+        finally:
+            # Phase 2.1 (2026-05-20 perf audit): release the single-flight
+            # lock in finally — covers both success and exception paths.
+            # TTL gives a worst-case bound if the worker is SIGKILL-ed.
+            if lock_acquired and self.hydrate_inflight_store is not None:
+                try:
+                    self.hydrate_inflight_store.release(
+                        event_id=event_id, owner=lock_owner
+                    )
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    logger.debug(
+                        "hydrate_worker: in-flight release failed event_id=%s: %r",
+                        event_id,
+                        exc,
                     )
         return "completed"
 

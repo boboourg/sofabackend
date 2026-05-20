@@ -22,6 +22,7 @@ from ..queue.live_details_throttle import LiveDetailsThrottle
 from ..queue.live_edges_throttle import LiveEdgesThrottle
 from ..queue.live_tier_1_quarantine import LiveTier1RetryQuarantineStore
 from ..queue.live_inflight import (
+    HydrateInFlightStore,
     LiveEventDetailsInFlightStore,
     LiveEventInFlightStore,
     LiveEventRootInFlightStore,
@@ -298,6 +299,10 @@ class ServiceApp:
         self.delayed_envelope_store = DelayedEnvelopeStore(self.app.redis_backend)
         self.completion_store = DedupeStore(self.app.redis_backend)
         self.live_event_inflight_store = LiveEventInFlightStore(self.app.redis_backend)
+        # Phase 2.1 (2026-05-20 perf audit): cross-consumer single-flight
+        # guard for HydrateWorker. Prevents two parallel
+        # sofascore-hydrate@N processes from racing on the same event_id.
+        self.hydrate_inflight_store = HydrateInFlightStore(self.app.redis_backend)
         # P0(a) split-details rollout primitives. Constructed unconditionally
         # so the dependency wiring is stable regardless of
         # ``LIVE_SPLIT_DETAILS_FANOUT`` env state — only the live-tier
@@ -1210,6 +1215,10 @@ class ServiceApp:
             block_ms=block_ms,
             job_audit_logger=self.job_audit_logger,
             circuit_breaker=circuit_breaker,
+            # Phase 2.1 (2026-05-20 perf audit): cross-consumer in-flight
+            # lock. Two sofascore-hydrate@N workers cannot now process
+            # the same event_id concurrently.
+            hydrate_inflight_store=self.hydrate_inflight_store,
         )
 
     def build_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:

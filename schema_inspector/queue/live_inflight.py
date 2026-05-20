@@ -11,9 +11,11 @@ logger = logging.getLogger(__name__)
 LIVE_EVENT_INFLIGHT_KEY = "live:refresh_inflight:{event_id}"
 LIVE_EVENT_DETAILS_INFLIGHT_KEY = "live:details_inflight:{event_id}"
 LIVE_EVENT_ROOT_INFLIGHT_KEY = "live:root_inflight:{event_id}"
+HYDRATE_INFLIGHT_KEY = "hydrate:inflight:{event_id}"
 _DEFAULT_TTL_MS = 600_000
 _DEFAULT_DETAILS_TTL_MS = 300_000
 _DEFAULT_ROOT_TTL_MS = 60_000
+_DEFAULT_HYDRATE_TTL_MS = 300_000
 
 _RELEASE_IF_OWNER_SCRIPT = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -133,6 +135,48 @@ class LiveEventRootInFlightStore:
 
     def release(self, *, event_id: int, owner: str) -> None:
         key = LIVE_EVENT_ROOT_INFLIGHT_KEY.format(event_id=int(event_id))
+        if _release_with_lua(self.backend, key, str(owner)):
+            return
+        current = _decode_value(_call_backend(getattr(self.backend, "get"), key))
+        if current != str(owner):
+            return
+        _call_backend(getattr(self.backend, "delete"), key)
+
+
+class HydrateInFlightStore:
+    """Cross-consumer single-flight guard for HydrateWorker.
+
+    Phase 2.1 (2026-05-20 perf audit): the previous HydrateWorker had
+    no in-flight deduplication, so two ``sofascore-hydrate@N`` instances
+    could legitimately pull a job for the same ``event_id`` (planner
+    re-publishes while the first message is unacked, or discovery
+    enqueues from multiple scopes within one tick). Both workers would
+    then call ``orchestrator.run_event(event_id)`` in parallel, racing
+    on the same DB upserts and wasting proxy budget.
+
+    Same lock semantics as ``LiveEventInFlightStore`` — atomic SET NX PX
+    claim, Lua-script owner-validated release. Default TTL 300s
+    accommodates the longest legitimate hydrate run (full-detail
+    fanout under slow proxy conditions).
+    """
+
+    def __init__(self, backend: Any, *, ttl_ms: int | None = None) -> None:
+        self.backend = backend
+        self.ttl_ms = int(
+            ttl_ms
+            if ttl_ms is not None
+            else _env_positive_int(
+                "SOFASCORE_HYDRATE_INFLIGHT_TTL_MS",
+                _DEFAULT_HYDRATE_TTL_MS,
+            )
+        )
+
+    def claim(self, *, event_id: int, owner: str) -> bool:
+        key = HYDRATE_INFLIGHT_KEY.format(event_id=int(event_id))
+        return bool(_call_backend(self.backend.set, key, str(owner), nx=True, px=self.ttl_ms))
+
+    def release(self, *, event_id: int, owner: str) -> None:
+        key = HYDRATE_INFLIGHT_KEY.format(event_id=int(event_id))
         if _release_with_lua(self.backend, key, str(owner)):
             return
         current = _decode_value(_call_backend(getattr(self.backend, "get"), key))

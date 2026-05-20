@@ -420,6 +420,13 @@ class HybridApp:
         requested_hydration_mode = str(hydration_mode or "full").strip().lower()
         effective_hydration_mode = requested_hydration_mode
         should_mark_live_bootstrap = False
+        # Phase 2.2 (2026-05-20 perf audit): track explicit ownership so
+        # the finally block can release the hydrate_lock only when this
+        # invocation actually acquired it. Without this flag the CLI
+        # path could leak the lock for the full 60s TTL on crashes in
+        # the prefetch / commit / persist chain — every subsequent live
+        # poll for that event would silently early-return.
+        acquired_hydrate_lock = False
         if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
             async with self.database.connection() as connection:
                 is_bootstrapped = await self.live_bootstrap_coordinator.is_bootstrapped(connection, event_id=event_id)
@@ -431,46 +438,69 @@ class HybridApp:
                         fetch_outcomes=(),
                         parse_results=(),
                     )
+                acquired_hydrate_lock = True
                 effective_hydration_mode = "full"
                 should_mark_live_bootstrap = True
         try:
-            prefetched_run = await self._prefetch_event_run(
-                event_id=event_id,
-                sport_slug=str(resolved_sport_slug or "football"),
+            try:
+                prefetched_run = await self._prefetch_event_run(
+                    event_id=event_id,
+                    sport_slug=str(resolved_sport_slug or "football"),
+                    hydration_mode=effective_hydration_mode,
+                )
+            except _PrefetchFailedError as wrap:
+                # P3 audit-trail fix: persist whatever request_log records the
+                # prefetch executor accumulated (proxy_address, attempts_json,
+                # latency_ms, error_message per attempt) before re-raising.
+                # Snapshots are deliberately skipped — they represent partial
+                # state that the normalize pipeline would never re-process,
+                # and persisting them would leak inconsistent rows that read-
+                # side queries cannot detect.  Without this best-effort
+                # commit, the forensics records die with garbage collection
+                # when ``prefetch_executor`` goes out of scope at the next
+                # stack frame, and api_request_log has zero rows for failed
+                # root fetches on the live tier_1/tier_2/tier_3/warm paths.
+                #
+                # ``_commit_request_logs_only`` is wrapped in its own
+                # try/except so its failure cannot mask the original
+                # exception — at worst we log a warning and lose the audit
+                # trail for that one prefetch.
+                await self._commit_request_logs_only(wrap.executor)
+                raise wrap.original
+            self._warn_if_prefetched_run_large(prefetched_run)
+            committed_run = await self._commit_prefetched_run(prefetched_run)
+            result = await self._persist_prefetched_run(
+                committed_run,
                 hydration_mode=effective_hydration_mode,
             )
-        except _PrefetchFailedError as wrap:
-            # P3 audit-trail fix: persist whatever request_log records the
-            # prefetch executor accumulated (proxy_address, attempts_json,
-            # latency_ms, error_message per attempt) before re-raising.
-            # Snapshots are deliberately skipped — they represent partial
-            # state that the normalize pipeline would never re-process,
-            # and persisting them would leak inconsistent rows that read-
-            # side queries cannot detect.  Without this best-effort
-            # commit, the forensics records die with garbage collection
-            # when ``prefetch_executor`` goes out of scope at the next
-            # stack frame, and api_request_log has zero rows for failed
-            # root fetches on the live tier_1/tier_2/tier_3/warm paths.
-            #
-            # ``_commit_request_logs_only`` is wrapped in its own
-            # try/except so its failure cannot mask the original
-            # exception — at worst we log a warning and lose the audit
-            # trail for that one prefetch.
-            await self._commit_request_logs_only(wrap.executor)
-            raise wrap.original
-        self._warn_if_prefetched_run_large(prefetched_run)
-        committed_run = await self._commit_prefetched_run(prefetched_run)
-        result = await self._persist_prefetched_run(
-            committed_run,
-            hydration_mode=effective_hydration_mode,
-        )
-        if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
-            async with self.database.transaction() as connection:
-                if getattr(result, "finalized", False):
-                    await self.live_bootstrap_coordinator.reset_bootstrap(connection, event_id=event_id)
-                elif should_mark_live_bootstrap:
-                    await self.live_bootstrap_coordinator.mark_bootstrapped(connection, event_id=event_id)
-        return result
+            if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
+                async with self.database.transaction() as connection:
+                    if getattr(result, "finalized", False):
+                        await self.live_bootstrap_coordinator.reset_bootstrap(connection, event_id=event_id)
+                    elif should_mark_live_bootstrap:
+                        await self.live_bootstrap_coordinator.mark_bootstrapped(connection, event_id=event_id)
+            return result
+        finally:
+            # Phase 2.2 (2026-05-20 perf audit): release the bootstrap
+            # hydrate_lock unconditionally if this invocation acquired
+            # it — covers both success and exception paths. Without
+            # this, a crash in any of _prefetch / _commit / _persist
+            # would leave the lock set for its full TTL, dropping
+            # every subsequent live poll for the event.
+            if (
+                acquired_hydrate_lock
+                and self.live_bootstrap_coordinator is not None
+            ):
+                try:
+                    self.live_bootstrap_coordinator.release_hydrate_lock(
+                        event_id=event_id
+                    )
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    logger.warning(
+                        "App.run_event: release_hydrate_lock failed event_id=%s: %r",
+                        event_id,
+                        exc,
+                    )
 
     async def run_event_details(
         self,

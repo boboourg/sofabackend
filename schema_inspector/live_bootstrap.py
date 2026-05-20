@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 BOOTSTRAP_CACHE_KEY = "live:bootstrap_done:{event_id}"
 HYDRATE_LOCK_KEY = "live:hydrate_lock:{event_id}"
 
+# Phase 2.3 (2026-05-20 perf audit): owner-validated atomic release.
+# Mirrors ``schema_inspector.queue.live_inflight._RELEASE_IF_OWNER_SCRIPT``
+# to fix the GET → CHECK → DELETE race where, between this worker's
+# GET and DELETE, the TTL could expire and another worker could claim
+# the key — our DELETE would then wipe the new owner's lock.
+_RELEASE_IF_OWNER_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+end
+return 0
+"""
+
 
 class LiveBootstrapCoordinator:
     def __init__(
@@ -86,18 +98,45 @@ class LiveBootstrapCoordinator:
     def release_hydrate_lock(self, *, event_id: int) -> bool:
         """Explicit lock release. Idempotent — safe to call multiple times.
 
-        Compares the current lock owner against ``self.worker_id``; only
-        deletes the key when this worker still owns it (avoids racing a
-        worker that grabbed the lock after our TTL expired and started
-        its own bootstrap).
+        Phase 2.3 (2026-05-20 perf audit) atomic release: prefer a single
+        Lua EVAL that does ``GET + DEL if owner matches`` so the check
+        and the delete are one Redis round-trip. Falls back to the
+        legacy non-atomic GET → CHECK → DELETE only when the backend
+        does not expose ``eval`` (e.g. some test fakes).
 
         Returns True if the lock was deleted by this call, False
-        otherwise (no key, or owned by someone else, or Redis error).
+        otherwise (no key, owned by someone else, or Redis error).
         """
 
         if self.redis_backend is None:
             return False
         key = HYDRATE_LOCK_KEY.format(event_id=int(event_id))
+
+        # Preferred path: atomic Lua eval.
+        eval_method = getattr(self.redis_backend, "eval", None)
+        if callable(eval_method):
+            try:
+                result = eval_method(
+                    _RELEASE_IF_OWNER_SCRIPT, 1, key, self.worker_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "live_bootstrap: release EVAL failed event_id=%s: %r — "
+                    "falling back to GET/DELETE",
+                    event_id,
+                    exc,
+                )
+            else:
+                deleted = bool(int(result or 0))
+                if deleted:
+                    logger.info(
+                        "live_bootstrap: lock released event_id=%s worker=%s",
+                        event_id,
+                        self.worker_id,
+                    )
+                return deleted
+
+        # Fallback path (non-atomic, retained for backends without eval).
         try:
             current = _as_text(self.redis_backend.get(key))
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -106,10 +145,8 @@ class LiveBootstrapCoordinator:
             )
             return False
         if current is None:
-            # Lock already gone (expired or someone else cleared it). OK.
             return False
         if current != self.worker_id:
-            # Someone else owns it now (our TTL expired mid-fanout).
             logger.warning(
                 "live_bootstrap: release skipped, owner mismatch event_id=%s "
                 "expected=%s actual=%s",
