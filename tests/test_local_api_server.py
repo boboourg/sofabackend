@@ -2491,6 +2491,54 @@ class LocalApiEntityRootFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["player"]["id"], 288205)
         self.assertEqual(result["player"]["team"]["id"], 42)
 
+    async def test_player_root_uses_historic_lineup_team_when_available(self) -> None:
+        """Stage 2.1 (2026-05-20 architecture rework, Anomaly A):
+        ``/api/v1/player/{id}`` must return the team the player ACTUALLY
+        played for on his most recent lineup, not the perpetually-current
+        ``player.team_id`` column. Without this, a retired player still
+        appears under his very last (possibly transferred) club, and any
+        historical query through the synth-path reports the wrong club.
+
+        Scenario: ``player.team_id`` was last written when the player
+        moved to club id=999 (e.g. Saudi league transfer). But his most
+        recent lineup row is for club id=42 (historic club). The synth
+        path must surface the lineup-derived club."""
+
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        connection = _FakeFetchRowConnection(
+            rows={
+                # player.team_id = 999 (post-transfer current club).
+                ("normalized_player", 288205): {
+                    "id": 288205,
+                    "slug": "k-m",
+                    "name": "K. Mbappé",
+                    "short_name": "K.M.",
+                    "team_id": 999,
+                },
+                # Lineup-derived team_id = 42 (historic club).
+                ("player_team_history", 288205): {
+                    "team_id": 42,
+                    "side": "home",
+                    "home_team_id": 42,
+                    "away_team_id": 7,
+                },
+            }
+        )
+        application._connect = _make_fake_connector(connection)
+
+        result = await application._fetch_player_root_payload(288205)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["player"]["id"], 288205)
+        self.assertEqual(
+            result["player"]["team"]["id"], 42,
+            msg=(
+                "Stage 2.1: lineup-derived historic team (42) must win "
+                "over the current player.team_id (999). Without this, "
+                "API lies about retired/transferred players."
+            ),
+        )
+
     async def test_manager_root_falls_back_to_normalized_row(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeFetchRowConnection(
@@ -3216,6 +3264,8 @@ class _FakeFetchRowConnection:
             return "normalized_event"
         if "FROM team" in normalized:
             return "normalized_team"
+        if "FROM event_lineup_player" in normalized:
+            return "player_team_history"
         if "FROM player" in normalized:
             return "normalized_player"
         if "FROM manager" in normalized:

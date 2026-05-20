@@ -4027,7 +4027,28 @@ class LocalApiApplication:
             )
             if normalized_row is None:
                 return None
-            return _synthesize_player_root_payload(normalized_row)
+            payload = _synthesize_player_root_payload(normalized_row)
+            # Stage 2.1 (2026-05-20 architecture rework, Anomaly A):
+            # override the synth-derived team with the team the player
+            # ACTUALLY played for on his most recent lineup. The hard
+            # column ``player.team_id`` always reflects the CURRENT
+            # club (overwritten on every upsert), so for retired /
+            # transferred players the synth path used to lie. We use
+            # the existing ``idx_event_lineup_player_player_id_event_id``
+            # (migrations/2026-05-18) so the extra fetch is 1-5 ms.
+            # When the player has no lineup rows at all (very fresh
+            # account), ``lookup_player_team_at`` returns None and the
+            # original synth payload is kept untouched.
+            try:
+                from .storage.player_history_repository import lookup_player_team_at
+                historic_team_id = await lookup_player_team_at(
+                    connection, player_id=player_id
+                )
+            except Exception:  # noqa: BLE001 — fail-open
+                historic_team_id = None
+            if historic_team_id is not None:
+                payload["player"]["team"] = {"id": int(historic_team_id)}
+            return payload
         finally:
             await connection.close()
 
