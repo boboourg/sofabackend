@@ -534,9 +534,25 @@ class LocalApiApplication:
         if path == "/ops/health":
             return ApiResponse(status_code=HTTPStatus.OK, payload=await self._fetch_ops_health_payload())
         if path == "/ops/snapshots/summary":
-            # Default is the fast reltuples + BRIN path (~10-50 ms). Pass
-            # ``?detail=true`` only when exact distinct counts are needed.
+            # Default is the fast reltuples + BRIN path (~10-50 ms).
+            # Phase 2.6 (2026-05-20 perf audit): the ``?detail=true``
+            # exact path runs 5 COUNT(DISTINCT) on the 148 GB
+            # api_payload_snapshot table and reliably exceeds the
+            # 30s statement_timeout. Gate it behind an env-configured
+            # token so health probes / accidental ``?detail=true`` GETs
+            # cannot trigger it. Missing or wrong token = silent
+            # fall-through to the fast estimate (no 403 — telemetry
+            # callers shouldn't break).
             detail_flag = _query_str(raw_query, "detail", default="false").lower() in {"1", "true", "yes"}
+            if detail_flag:
+                expected_token = os.environ.get("SOFASCORE_OPS_DETAIL_TOKEN")
+                provided_token = _query_str(raw_query, "token", default="")
+                if not expected_token or provided_token != expected_token:
+                    logger.warning(
+                        "/ops/snapshots/summary?detail=true requested without "
+                        "valid token; falling back to fast estimate path"
+                    )
+                    detail_flag = False
             return ApiResponse(
                 status_code=HTTPStatus.OK,
                 payload=await self._fetch_ops_snapshots_summary_payload(detail=detail_flag),
@@ -1963,9 +1979,17 @@ class LocalApiApplication:
                   AND e.unique_tournament_id = $2
                   AND COALESCE(aps.is_soft_error_payload, FALSE) = FALSE
                   AND COALESCE(aps.http_status, 200) < 400
+                  -- Phase 2.7 (2026-05-20 perf audit): drop empty-
+                  -- highlights snapshots at the SQL layer so a long-
+                  -- running UT (Premier League, 4000+ events) does not
+                  -- materialise full JSONB for every event just to drop
+                  -- 95% in Python.
+                  AND jsonb_typeof(aps.payload -> 'highlights') = 'array'
+                  AND jsonb_array_length(aps.payload -> 'highlights') > 0
                 ORDER BY aps.context_entity_id,
                          aps.fetched_at DESC NULLS LAST,
                          aps.id DESC
+                LIMIT 500
                 """,
                 _EVENT_HIGHLIGHTS_ENDPOINT_PATTERN,
                 unique_tournament_id,

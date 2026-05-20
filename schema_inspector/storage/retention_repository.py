@@ -115,27 +115,35 @@ class RetentionRepository:
         cutoff: datetime,
         batch_size: int,
     ) -> int:
-        command_tag = await executor.execute(
-            """
-            WITH victims AS (
-                SELECT p.id
-                FROM api_payload_snapshot p
-                WHERE p.scope_key IS NULL
-                  AND p.fetched_at < $1
-                  AND NOT EXISTS (
-                      SELECT 1 FROM api_snapshot_head h
-                      WHERE h.latest_snapshot_id = p.id
-                  )
-                ORDER BY p.id
-                LIMIT $2
+        # Phase 2.5 (2026-05-20 perf audit): the batched DELETE
+        # legitimately takes ~60s on the 148 GB api_payload_snapshot
+        # table (NOT EXISTS anti-join against api_snapshot_head plus
+        # CASCADE / SET NULL FK fan-out). The global P0 fix sets
+        # sofascore_user.statement_timeout = 30s — without escaping it
+        # inside the txn, retention will fail mid-batch.
+        async with executor.transaction():
+            await executor.execute("SET LOCAL statement_timeout = '120s'")
+            command_tag = await executor.execute(
+                """
+                WITH victims AS (
+                    SELECT p.id
+                    FROM api_payload_snapshot p
+                    WHERE p.scope_key IS NULL
+                      AND p.fetched_at < $1
+                      AND NOT EXISTS (
+                          SELECT 1 FROM api_snapshot_head h
+                          WHERE h.latest_snapshot_id = p.id
+                      )
+                    ORDER BY p.id
+                    LIMIT $2
+                )
+                DELETE FROM api_payload_snapshot
+                USING victims
+                WHERE api_payload_snapshot.id = victims.id
+                """,
+                cutoff,
+                int(batch_size),
             )
-            DELETE FROM api_payload_snapshot
-            USING victims
-            WHERE api_payload_snapshot.id = victims.id
-            """,
-            cutoff,
-            int(batch_size),
-        )
         return _parse_delete_tag(command_tag)
 
     # ------------------------------------------------------------------
