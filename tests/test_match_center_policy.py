@@ -204,13 +204,16 @@ def test_football_tier_two_blocks_comments_but_keeps_safe_routes() -> None:
 
 
 def test_football_highlights_wait_until_finished_plus_one_nominal_hour() -> None:
+    # Stage 5.2 (2026-05-21): threshold bumped from 150 → 180 minutes.
+    # Empirical: upstream highlights bucket still empty at 150 minutes
+    # for top matches.
     assert football_highlights_allowed(
         sport_slug="football",
         detail_id=1,
         status_type="finished",
         has_global_highlights=True,
         start_timestamp=1_000,
-        now_timestamp=1_000 + 149 * 60,
+        now_timestamp=1_000 + 179 * 60,
     ) is False
     assert football_highlights_allowed(
         sport_slug="football",
@@ -218,7 +221,7 @@ def test_football_highlights_wait_until_finished_plus_one_nominal_hour() -> None
         status_type="finished",
         has_global_highlights=True,
         start_timestamp=1_000,
-        now_timestamp=1_000 + 150 * 60,
+        now_timestamp=1_000 + 180 * 60,
     ) is True
 
 

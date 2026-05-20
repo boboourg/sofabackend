@@ -10,7 +10,11 @@ from __future__ import annotations
 from typing import Iterable, TypeVar
 
 
-FOOTBALL_HIGHLIGHTS_DELAY_SECONDS = 150 * 60
+# Stage 5.2 (2026-05-21): highlights delay bumped from 150 → 180
+# minutes. Empirical observation: upstream highlights bucket is still
+# empty at 150 minutes for top-tier matches (longer post-match editorial
+# pipeline). 180 minutes (3 h) hits the bucket on the first try.
+FOOTBALL_HIGHLIGHTS_DELAY_SECONDS = 180 * 60
 
 _TIER_1_DETAIL_IDS = frozenset({1})
 _TIER_2_DETAIL_IDS = frozenset({4, 6})
@@ -23,19 +27,39 @@ _FINISHED_STATUS_TYPES = frozenset({"finished", "afterextra", "afterpen", "aet",
 _NOTSTARTED_CORE_EDGES = frozenset({"incidents", "lineups"})
 _ACTIVE_CORE_EDGES = frozenset({"statistics", "lineups", "incidents", "graph"})
 
-_FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS = frozenset(
+# Stage 5.2 (2026-05-21): split pre-match detail endpoints into a
+# cold lane (static metadata, fetched 1-14 days before kickoff) and a
+# hot lane (cold + dynamic editorial picks like odds and votes,
+# activated within 24 h of kickoff). The split prevents wasting proxy
+# budget on odds/votes for matches 10 days out — they rotate too
+# frequently and the value of an early fetch is near zero.
+FOOTBALL_PREMATCH_HOT_WINDOW_SECONDS = 24 * 3600
+
+_FOOTBALL_PREMATCH_COLD_DETAIL_ENDPOINTS = frozenset(
     {
         "/api/v1/event/{event_id}/managers",
         "/api/v1/event/{event_id}/h2h",
         "/api/v1/event/{custom_id}/h2h/events",
         "/api/v1/event/{event_id}/pregame-form",
+        "/api/v1/event/{event_id}/team-streaks",
+    }
+)
+_FOOTBALL_PREMATCH_HOT_ONLY_DETAIL_ENDPOINTS = frozenset(
+    {
         "/api/v1/event/{event_id}/votes",
         "/api/v1/event/{event_id}/odds/{provider_id}/all",
         "/api/v1/event/{event_id}/odds/{provider_id}/featured",
         "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds",
-        "/api/v1/event/{event_id}/team-streaks",
         "/api/v1/event/{event_id}/team-streaks/betting-odds/{provider_id}",
     }
+)
+# Full pre-match envelope (hot lane). Kept as a single name so existing
+# callers (e.g. tier_5 path below, _allowed_detail_patterns_for_status)
+# continue to see the complete pre-match allowlist when caller does not
+# pass start_timestamp / now_timestamp.
+_FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS = (
+    _FOOTBALL_PREMATCH_COLD_DETAIL_ENDPOINTS
+    | _FOOTBALL_PREMATCH_HOT_ONLY_DETAIL_ENDPOINTS
 )
 _FOOTBALL_INPROGRESS_DETAIL_ENDPOINTS = _FOOTBALL_NOTSTARTED_DETAIL_ENDPOINTS | {
     "/api/v1/event/{event_id}/graph",
@@ -266,6 +290,18 @@ def football_detail_endpoint_allowed(
     allowed_patterns = _allowed_detail_patterns_for_status(normalized_status)
     if normalized_pattern not in allowed_patterns:
         return False
+    # Stage 5.2 (2026-05-21): pre-match cold/hot split. For notstarted
+    # events the dynamic editorial endpoints (odds, votes, winning-odds,
+    # betting-odds team-streaks) are gated to the hot window
+    # (<=24h until kickoff). Static endpoints (managers, h2h, pregame-
+    # form, team-streaks, h2h/events) remain available across the full
+    # 1-14 day cold window.
+    if (
+        normalized_status in _NOTSTARTED_STATUS_TYPES
+        and normalized_pattern in _FOOTBALL_PREMATCH_HOT_ONLY_DETAIL_ENDPOINTS
+        and not _is_within_prematch_hot_window(start_timestamp, now_timestamp)
+    ):
+        return False
     # X3 patch (2026-05-12): tier_5 (= detailId missing on root payload) is
     # the dominant cohort — empirical UI audit on Premier League pre-match
     # event 15999228 (uniqueTournament=17) showed `detailId` is simply not
@@ -409,3 +445,22 @@ def _as_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_within_prematch_hot_window(
+    start_timestamp: int | None, now_timestamp: int | None
+) -> bool:
+    """True when kickoff is at most ``FOOTBALL_PREMATCH_HOT_WINDOW_SECONDS``
+    away (or in the past — though notstarted + past kickoff is an odd
+    state). Used to gate dynamic editorial endpoints in pre-match.
+
+    Returns False conservatively when either timestamp is missing so a
+    bare planner publish does not accidentally enable hot-lane fetches
+    for matches whose start time hasn't been ingested yet.
+    """
+
+    start_ts = _as_int(start_timestamp)
+    now_ts = _as_int(now_timestamp)
+    if start_ts is None or now_ts is None:
+        return False
+    return (start_ts - now_ts) <= FOOTBALL_PREMATCH_HOT_WINDOW_SECONDS
