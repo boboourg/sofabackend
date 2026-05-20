@@ -489,6 +489,49 @@ _FETCH_QUERY_TEAM_TRANSFERS = (
 )
 
 
+# Hybrid synth for
+# ``/unique-tournament/{ut}/season/{s}/team-of-the-week/{period_id}``.
+#
+# Sofascore's wire shape is flat: ``{"formation": "...", "players":
+# [{"player": {...}, "team": {...}, "rating": "..."}]}``. The generic
+# normalized dispatcher previously read ``team_of_the_week`` alone and
+# emitted ``{"teamOfTheWeeks": [{"formation", "periodId"}]}`` — two
+# bugs: wrong outer wrapper + missing ``players`` array because the
+# squad lives in a separate ``team_of_the_week_player`` table.
+#
+# This synth produces the correct flat envelope by JOIN-ing the parent
+# row with the lineup table, plus ``player`` and ``team`` for nested
+# id/name/slug fields. Snapshot path still serves rich editorial
+# (event, country, teamColors, fieldTranslations) 1:1 when fresh.
+#
+# Empty result → ``{"players": []}`` (no formation key) — matches the
+# DB-down fallback in the dispatcher for a consistent frontend shape.
+_FETCH_QUERY_TEAM_OF_THE_WEEK = (
+    """
+    SELECT
+        totw.formation             AS formation,
+        totwp.entry_id             AS entry_id,
+        totwp.order_value          AS order_value,
+        totwp.rating               AS rating,
+        totwp.player_id            AS player_id,
+        p.name                     AS player_name,
+        p.slug                     AS player_slug,
+        totwp.team_id              AS team_id,
+        t.name                     AS team_name,
+        t.slug                     AS team_slug,
+        t.short_name               AS team_short_name,
+        t.name_code                AS team_name_code,
+        t.gender                   AS team_gender
+    FROM team_of_the_week totw
+    LEFT JOIN team_of_the_week_player totwp ON totwp.period_id = totw.period_id
+    LEFT JOIN player p ON p.id = totwp.player_id
+    LEFT JOIN team t   ON t.id = totwp.team_id
+    WHERE totw.period_id = $1
+    ORDER BY totwp.order_value NULLS LAST, totwp.entry_id
+    """
+)
+
+
 # Phase 5.1 — synthesize ``/season/{s}/groups`` from sub-tournaments.
 #
 # Sofascore groups under cup-style unique tournaments (FIFA WC,
@@ -928,6 +971,23 @@ async def fetch_team_transfers_rows(
     return [dict(record) for record in records]
 
 
+async def fetch_team_of_the_week_rows(
+    connection: Any,
+    *,
+    period_id: int,
+) -> list[dict[str, Any]]:
+    """Pulls the ``team_of_the_week`` row joined with the lineup table
+    (``team_of_the_week_player``) and the player/team metadata needed
+    by :func:`build_team_of_the_week_payload`.
+
+    Returns 0 rows if ``period_id`` doesn't match any stored ToTW;
+    returns 1 row (with NULL lineup columns) if the parent exists but
+    no players are stored — the builder handles both shapes.
+    """
+    records = await connection.fetch(_FETCH_QUERY_TEAM_OF_THE_WEEK, period_id)
+    return [dict(record) for record in records]
+
+
 async def fetch_h2h_events_rows(
     connection: Any,
     *,
@@ -1091,6 +1151,82 @@ def build_team_transfers_payload(
         else:
             transfers_out.append(entry)
     return {"transfersIn": transfers_in, "transfersOut": transfers_out}
+
+
+def build_team_of_the_week_payload(rows: Sequence[Any]) -> dict[str, Any]:
+    """Flat Sofascore-shape ``{"formation": "...", "players": [...]}``.
+
+    Each entry is ``{"player": {id, name, slug}, "team": {id, name,
+    slug, shortName, nameCode, gender}, "rating": "..."}``. Rich
+    editorial fields (``team.fieldTranslations``, ``team.teamColors``,
+    ``team.sport``, ``player.country``, ``event``, etc.) are omitted —
+    they live in the raw snapshot path only.
+
+    Empty rows or rows lacking ``player_id`` (data anomaly) are
+    skipped. Result is sorted by ``order_value`` defensively (the SQL
+    ORDER BY already sorts, but a hand-constructed input should still
+    yield deterministic output).
+    """
+    if not rows:
+        return {"players": []}
+
+    def _get(row: Any, name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    formation: Any = None
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        if formation is None:
+            formation = _get(row, "formation")
+        player_id = _get(row, "player_id")
+        if player_id is None:
+            continue
+        try:
+            pid = int(player_id)
+        except (TypeError, ValueError):
+            continue
+        team_id_raw = _get(row, "team_id")
+        try:
+            team_id_int = int(team_id_raw) if team_id_raw is not None else None
+        except (TypeError, ValueError):
+            team_id_int = None
+        order_value_raw = _get(row, "order_value")
+        try:
+            order_value_int = int(order_value_raw) if order_value_raw is not None else 0
+        except (TypeError, ValueError):
+            order_value_int = 0
+        entries.append(
+            {
+                "_order": order_value_int,
+                "player": {
+                    "id": pid,
+                    "name": _get(row, "player_name"),
+                    "slug": _get(row, "player_slug"),
+                },
+                "team": {
+                    "id": team_id_int,
+                    "name": _get(row, "team_name"),
+                    "slug": _get(row, "team_slug"),
+                    "shortName": _get(row, "team_short_name"),
+                    "nameCode": _get(row, "team_name_code"),
+                    "gender": _get(row, "team_gender"),
+                },
+                "rating": _get(row, "rating"),
+            }
+        )
+
+    entries.sort(key=lambda e: e["_order"])
+    for entry in entries:
+        del entry["_order"]
+
+    payload: dict[str, Any] = {"players": entries}
+    if formation is not None:
+        payload["formation"] = formation
+        # Place formation first to match upstream key order (cosmetic).
+        payload = {"formation": formation, "players": entries}
+    return payload
 
 
 def build_groups_payload(rows: Sequence[Any]) -> dict[str, Any]:

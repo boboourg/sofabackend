@@ -1468,6 +1468,15 @@ class LocalApiApplication:
             return await self._fetch_team_featured_players_payload(int(path_params["team_id"]))
         if template == "/api/v1/team/{team_id}/transfers":
             return await self._fetch_team_transfers_payload(int(path_params["team_id"]))
+        if template == (
+            "/api/v1/unique-tournament/{unique_tournament_id}"
+            "/season/{season_id}/team-of-the-week/{period_id}"
+        ):
+            return await self._fetch_team_of_the_week_payload(
+                int(path_params["unique_tournament_id"]),
+                int(path_params["season_id"]),
+                int(path_params["period_id"]),
+            )
         if template == "/api/v1/player/{player_id}/attribute-overviews":
             return await self._fetch_player_attribute_overviews_payload(int(path_params["player_id"]))
         if template == "/api/v1/player/{player_id}/events/last/{page}":
@@ -3008,6 +3017,61 @@ class LocalApiApplication:
             return {"players": []}
         await connection.close()
         return build_team_players_payload(rows)
+
+    async def _fetch_team_of_the_week_payload(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+        period_id: int,
+    ) -> dict[str, Any] | None:
+        """``/api/v1/unique-tournament/{ut}/season/{s}/team-of-the-week/{period_id}`` —
+        hybrid.
+
+        Before this fix the endpoint went through the generic normalized
+        dispatcher which read ``team_of_the_week`` (period_id, formation)
+        alone and wrapped it in ``{"teamOfTheWeeks": [{...}]}``. Two bugs:
+
+        * Wrong outer wrapper (Sofascore returns the flat object, not
+          an array under ``teamOfTheWeeks``).
+        * Missing ``players`` array — the squad lives in a separate
+          ``team_of_the_week_player`` table that was never JOIN-ed.
+
+        Hybrid model: snapshot primary preserves the full upstream wire
+        format (with nested event, country, teamColors, fieldTranslations,
+        etc.); synthesizer fallback emits a minimal Sofascore-shape
+        envelope ``{"formation", "players": [{"player", "team",
+        "rating"}, ...]}`` from the normalized tables.
+        """
+
+        del unique_tournament_id, season_id  # passthrough keys context only
+
+        snapshot = await self._fetch_latest_entity_passthrough(
+            endpoint_pattern=(
+                "/api/v1/unique-tournament/{unique_tournament_id}"
+                "/season/{season_id}/team-of-the-week/{period_id}"
+            ),
+            context_entity_type="period",
+            context_entity_id=period_id,
+        )
+        if snapshot is not None:
+            return snapshot
+
+        from .scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+            fetch_team_of_the_week_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"players": []}
+        try:
+            rows = await fetch_team_of_the_week_rows(connection, period_id=period_id)
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"players": []}
+        await connection.close()
+        return build_team_of_the_week_payload(rows)
 
     async def _fetch_team_featured_players_payload(self, team_id: int) -> dict[str, Any] | None:
         """``/api/v1/team/{team_id}/featured-players`` — raw passthrough only.
