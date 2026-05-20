@@ -594,19 +594,39 @@ _FETCH_QUERY_TEAM_OF_THE_WEEK = (
         totwp.entry_id             AS entry_id,
         totwp.order_value          AS order_value,
         totwp.rating               AS rating,
+        -- player rich (B2 2026-05-20)
         totwp.player_id            AS player_id,
         p.name                     AS player_name,
         p.slug                     AS player_slug,
+        p.short_name               AS player_short_name,
+        p.user_count               AS player_user_count,
+        p.position                 AS player_position,
+        p.jersey_number            AS player_jersey_number,
+        p.gender                   AS player_gender,
+        p.sofascore_id             AS player_sofascore_id,
+        p.field_translations       AS player_field_translations,
+        -- team rich (B2 2026-05-20)
         totwp.team_id              AS team_id,
         t.name                     AS team_name,
         t.slug                     AS team_slug,
         t.short_name               AS team_short_name,
         t.name_code                AS team_name_code,
-        t.gender                   AS team_gender
+        t.gender                   AS team_gender,
+        t.user_count               AS team_user_count,
+        t.type                     AS team_type,
+        t.national                 AS team_national,
+        t.disabled                 AS team_disabled,
+        t.team_colors              AS team_colors,
+        t.field_translations       AS team_field_translations,
+        -- sport for team (B2 2026-05-20)
+        sp.id                      AS sport_id,
+        sp.name                    AS sport_name,
+        sp.slug                    AS sport_slug
     FROM team_of_the_week totw
     LEFT JOIN team_of_the_week_player totwp ON totwp.period_id = totw.period_id
     LEFT JOIN player p ON p.id = totwp.player_id
     LEFT JOIN team t   ON t.id = totwp.team_id
+    LEFT JOIN sport sp ON sp.id = t.sport_id
     WHERE totw.period_id = $1
     ORDER BY totwp.order_value NULLS LAST, totwp.entry_id
     """
@@ -1410,19 +1430,56 @@ def build_cuptrees_payload(rows: Sequence[Any]) -> dict[str, Any]:
     return {"cupTrees": trees}
 
 
+def _decode_jsonb_value(value: Any) -> Any:
+    """asyncpg returns JSONB either as already-decoded dict/list or
+    (when text codec is used) as raw JSON string. Builders that emit
+    JSONB columns into the wire payload need both paths.
+    """
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return _orjson_loads(bytes(value)) if _orjson_loads else None
+        except Exception:  # noqa: BLE001
+            return None
+    if isinstance(value, str):
+        try:
+            import json as _json
+            return _json.loads(value)
+        except Exception:  # noqa: BLE001
+            return None
+    return value
+
+
+try:
+    from orjson import loads as _orjson_loads  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    _orjson_loads = None  # type: ignore[assignment]
+
+
 def build_team_of_the_week_payload(rows: Sequence[Any]) -> dict[str, Any]:
     """Flat Sofascore-shape ``{"formation": "...", "players": [...]}``.
 
-    Each entry is ``{"player": {id, name, slug}, "team": {id, name,
-    slug, shortName, nameCode, gender}, "rating": "..."}``. Rich
-    editorial fields (``team.fieldTranslations``, ``team.teamColors``,
-    ``team.sport``, ``player.country``, ``event``, etc.) are omitted —
-    they live in the raw snapshot path only.
+    Each entry mirrors the upstream wire format:
+        {
+            "id": <entry_id>,
+            "order": <order_value>,
+            "type": "rated",  # literal — all ToTW players carry this
+            "rating": "...",
+            "player": {id, name, slug, shortName, userCount, position,
+                       jerseyNumber, gender, sofascoreId, fieldTranslations},
+            "team":   {id, name, slug, shortName, nameCode, gender,
+                       userCount, type, national, disabled, teamColors,
+                       fieldTranslations, sport: {id, name, slug}}
+        }
 
-    Empty rows or rows lacking ``player_id`` (data anomaly) are
-    skipped. Result is sorted by ``order_value`` defensively (the SQL
-    ORDER BY already sorts, but a hand-constructed input should still
-    yield deterministic output).
+    ``event`` nested is NOT emitted by this synth (would require
+    ``team_of_the_week_player.event_id`` schema migration — see B3).
+    When a snapshot is available, the dispatcher returns it 1:1 with
+    full ``event`` nesting; this synth is the fallback shape.
+
+    Rows lacking ``player_id`` (data anomaly) are skipped. Result is
+    sorted by ``order_value`` defensively.
     """
     if not rows:
         return {"players": []}
@@ -1432,6 +1489,14 @@ def build_team_of_the_week_payload(rows: Sequence[Any]) -> dict[str, Any]:
             return row.get(name)
         return getattr(row, name, None)
 
+    def _maybe_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     formation: Any = None
     entries: list[dict[str, Any]] = []
     for row in rows:
@@ -1440,50 +1505,71 @@ def build_team_of_the_week_payload(rows: Sequence[Any]) -> dict[str, Any]:
         player_id = _get(row, "player_id")
         if player_id is None:
             continue
-        try:
-            pid = int(player_id)
-        except (TypeError, ValueError):
+        pid = _maybe_int(player_id)
+        if pid is None:
             continue
-        team_id_raw = _get(row, "team_id")
-        try:
-            team_id_int = int(team_id_raw) if team_id_raw is not None else None
-        except (TypeError, ValueError):
-            team_id_int = None
-        order_value_raw = _get(row, "order_value")
-        try:
-            order_value_int = int(order_value_raw) if order_value_raw is not None else 0
-        except (TypeError, ValueError):
-            order_value_int = 0
-        entries.append(
-            {
-                "_order": order_value_int,
-                "player": {
-                    "id": pid,
-                    "name": _get(row, "player_name"),
-                    "slug": _get(row, "player_slug"),
-                },
-                "team": {
-                    "id": team_id_int,
-                    "name": _get(row, "team_name"),
-                    "slug": _get(row, "team_slug"),
-                    "shortName": _get(row, "team_short_name"),
-                    "nameCode": _get(row, "team_name_code"),
-                    "gender": _get(row, "team_gender"),
-                },
-                "rating": _get(row, "rating"),
+        entry_id_int = _maybe_int(_get(row, "entry_id"))
+        order_value_int = _maybe_int(_get(row, "order_value")) or 0
+        team_id_int = _maybe_int(_get(row, "team_id"))
+        # Sport nested only emitted when we have at least id+slug.
+        sport_id = _maybe_int(_get(row, "sport_id"))
+        sport_slug = _get(row, "sport_slug")
+        sport_obj: dict[str, Any] | None = None
+        if sport_id is not None and sport_slug is not None:
+            sport_obj = {
+                "id": sport_id,
+                "name": _get(row, "sport_name"),
+                "slug": sport_slug,
             }
-        )
+        entry: dict[str, Any] = {
+            "_order": order_value_int,
+            "id": entry_id_int,
+            "order": order_value_int,
+            # Upstream wire format pins this literal — ToTW = "rated".
+            "type": "rated",
+            "rating": _get(row, "rating"),
+            "player": {
+                "id": pid,
+                "name": _get(row, "player_name"),
+                "slug": _get(row, "player_slug"),
+                "shortName": _get(row, "player_short_name"),
+                "userCount": _get(row, "player_user_count"),
+                "position": _get(row, "player_position"),
+                "jerseyNumber": _get(row, "player_jersey_number"),
+                "gender": _get(row, "player_gender"),
+                "sofascoreId": _get(row, "player_sofascore_id"),
+                "fieldTranslations": _decode_jsonb_value(
+                    _get(row, "player_field_translations")
+                ),
+            },
+            "team": {
+                "id": team_id_int,
+                "name": _get(row, "team_name"),
+                "slug": _get(row, "team_slug"),
+                "shortName": _get(row, "team_short_name"),
+                "nameCode": _get(row, "team_name_code"),
+                "gender": _get(row, "team_gender"),
+                "userCount": _get(row, "team_user_count"),
+                "type": _get(row, "team_type"),
+                "national": _get(row, "team_national"),
+                "disabled": _get(row, "team_disabled"),
+                "teamColors": _decode_jsonb_value(_get(row, "team_colors")),
+                "fieldTranslations": _decode_jsonb_value(
+                    _get(row, "team_field_translations")
+                ),
+                "sport": sport_obj,
+            },
+        }
+        entries.append(entry)
 
     entries.sort(key=lambda e: e["_order"])
     for entry in entries:
         del entry["_order"]
 
-    payload: dict[str, Any] = {"players": entries}
     if formation is not None:
-        payload["formation"] = formation
         # Place formation first to match upstream key order (cosmetic).
-        payload = {"formation": formation, "players": entries}
-    return payload
+        return {"formation": formation, "players": entries}
+    return {"players": entries}
 
 
 def build_groups_payload(rows: Sequence[Any]) -> dict[str, Any]:

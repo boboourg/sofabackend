@@ -308,5 +308,225 @@ class LocalApiTeamOfTheWeekHybridTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"players": []})
 
 
+class BuildTeamOfTheWeekPayloadRichFieldsTests(unittest.TestCase):
+    """B2 (2026-05-20): synth payload extended to match upstream
+    Sofascore wire shape for player + team nested fields.
+
+    Upstream entry shape (verified via InspectorTransport):
+        {
+            "id": <entry_id>,         ← top-level (NEW)
+            "order": <int>,            ← top-level (NEW)
+            "type": "rated",           ← top-level literal (NEW)
+            "rating": "...",
+            "player": {id, name, slug, shortName, userCount, position,
+                       jerseyNumber, gender, sofascoreId, fieldTranslations},
+            "team": {id, name, slug, shortName, nameCode, gender,
+                     userCount, type, national, disabled, teamColors,
+                     fieldTranslations, sport: {id, name, slug}},
+        }
+
+    ``event`` nested NOT covered in B2 (requires schema migration —
+    see B3). Snapshot path preserves event 1:1 when present.
+    """
+
+    def test_entry_carries_top_level_id_order_and_rated_type(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+        )
+
+        rows = [
+            {
+                "formation": "4-3-3", "entry_id": 99, "order_value": 1,
+                "rating": "8.7", "player_id": 1, "player_name": "X",
+                "player_slug": "x", "team_id": 2, "team_name": "T",
+                "team_slug": "t", "team_short_name": "T",
+                "team_name_code": "TT", "team_gender": "M",
+            },
+        ]
+        payload = build_team_of_the_week_payload(rows)
+        entry = payload["players"][0]
+        self.assertEqual(entry["id"], 99)
+        self.assertEqual(entry["order"], 1)
+        # Upstream returns literal "rated" for every player in ToTW.
+        self.assertEqual(entry["type"], "rated")
+
+    def test_player_nested_carries_rich_fields(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+        )
+
+        rows = [
+            {
+                "formation": "4-3-3", "entry_id": 1, "order_value": 1,
+                "rating": "8.7", "player_id": 287643,
+                "player_name": "Oleksandr Zinchenko",
+                "player_slug": "oleksandr-zinchenko",
+                "player_short_name": "O. Zinchenko",
+                "player_user_count": 12345,
+                "player_position": "D",
+                "player_jersey_number": "47",
+                "player_gender": "M",
+                "player_sofascore_id": "abc123",
+                "player_field_translations": {
+                    "nameTranslation": {"ru": "Зинченко"}
+                },
+                "team_id": 42, "team_name": "Arsenal", "team_slug": "arsenal",
+                "team_short_name": "Arsenal", "team_name_code": "ARS",
+                "team_gender": "M",
+            },
+        ]
+        payload = build_team_of_the_week_payload(rows)
+        p = payload["players"][0]["player"]
+        self.assertEqual(p["shortName"], "O. Zinchenko")
+        self.assertEqual(p["userCount"], 12345)
+        self.assertEqual(p["position"], "D")
+        self.assertEqual(p["jerseyNumber"], "47")
+        self.assertEqual(p["gender"], "M")
+        self.assertEqual(p["sofascoreId"], "abc123")
+        self.assertEqual(
+            p["fieldTranslations"],
+            {"nameTranslation": {"ru": "Зинченко"}},
+        )
+
+    def test_team_nested_carries_rich_fields_and_sport(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+        )
+
+        rows = [
+            {
+                "formation": "4-3-3", "entry_id": 1, "order_value": 1,
+                "rating": "8.7", "player_id": 100,
+                "player_name": "A", "player_slug": "a",
+                "team_id": 2697, "team_name": "Inter", "team_slug": "inter",
+                "team_short_name": "Inter", "team_name_code": "INT",
+                "team_gender": "M",
+                "team_user_count": 1973685,
+                "team_type": 0,
+                "team_national": False,
+                "team_disabled": False,
+                "team_colors": {
+                    "primary": "#1a57cc",
+                    "secondary": "#000000",
+                    "text": "#000000",
+                },
+                "team_field_translations": {
+                    "nameTranslation": {"ru": "Интер"}
+                },
+                "sport_id": 1, "sport_name": "Football", "sport_slug": "football",
+            },
+        ]
+        payload = build_team_of_the_week_payload(rows)
+        t = payload["players"][0]["team"]
+        self.assertEqual(t["userCount"], 1973685)
+        self.assertEqual(t["type"], 0)
+        self.assertEqual(t["national"], False)
+        self.assertEqual(t["disabled"], False)
+        self.assertEqual(
+            t["teamColors"],
+            {"primary": "#1a57cc", "secondary": "#000000", "text": "#000000"},
+        )
+        self.assertEqual(
+            t["fieldTranslations"],
+            {"nameTranslation": {"ru": "Интер"}},
+        )
+        self.assertEqual(
+            t["sport"],
+            {"id": 1, "name": "Football", "slug": "football"},
+        )
+
+    def test_jsonb_strings_are_decoded(self) -> None:
+        """asyncpg can return JSONB as already-decoded dicts OR as raw
+        strings depending on codec settings. Builder should handle both."""
+        from schema_inspector.scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+        )
+
+        rows = [
+            {
+                "formation": "4-3-3", "entry_id": 1, "order_value": 1,
+                "rating": "8.5", "player_id": 1,
+                "player_name": "A", "player_slug": "a",
+                # JSONB as raw string (some envs)
+                "player_field_translations": '{"nameTranslation": {"ru": "А"}}',
+                "team_id": 2, "team_name": "T", "team_slug": "t",
+                "team_short_name": "T", "team_name_code": "T",
+                "team_gender": "M",
+                "team_colors": '{"primary": "#000000"}',
+            },
+        ]
+        payload = build_team_of_the_week_payload(rows)
+        p = payload["players"][0]["player"]
+        t = payload["players"][0]["team"]
+        # Strings should be decoded to dicts.
+        self.assertEqual(p["fieldTranslations"], {"nameTranslation": {"ru": "А"}})
+        self.assertEqual(t["teamColors"], {"primary": "#000000"})
+
+
+class FetchTeamOfTheWeekRichSqlContractTests(unittest.IsolatedAsyncioTestCase):
+    """Pin the SQL JOIN graph for the rich fetch — must include
+    player rich columns + team rich columns + sport JOIN."""
+
+    async def test_query_selects_player_rich_columns(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            fetch_team_of_the_week_rows,
+        )
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_team_of_the_week_rows(_StubConn(), period_id=19131)
+        q = str(captured["query"])
+        self.assertIn("p.short_name", q)
+        self.assertIn("p.user_count", q)
+        self.assertIn("p.position", q)
+        self.assertIn("p.jersey_number", q)
+        self.assertIn("p.gender", q)
+        self.assertIn("p.sofascore_id", q)
+        self.assertIn("p.field_translations", q)
+
+    async def test_query_selects_team_rich_columns(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            fetch_team_of_the_week_rows,
+        )
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_team_of_the_week_rows(_StubConn(), period_id=19131)
+        q = str(captured["query"])
+        self.assertIn("t.user_count", q)
+        self.assertIn("t.type", q)
+        self.assertIn("t.national", q)
+        self.assertIn("t.disabled", q)
+        self.assertIn("t.team_colors", q)
+        self.assertIn("t.field_translations", q)
+
+    async def test_query_joins_sport_via_team_sport_id(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            fetch_team_of_the_week_rows,
+        )
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_team_of_the_week_rows(_StubConn(), period_id=19131)
+        q = str(captured["query"])
+        self.assertRegex(q, r"sport\s+\w+\s+ON\s+\w+\.id\s*=\s*t\.sport_id")
+        self.assertIn(".name", q)
+
+
 if __name__ == "__main__":
     unittest.main()
