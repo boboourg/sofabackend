@@ -2,8 +2,16 @@
 -- Read PERFORMANCE_AUDIT_2026-05-20.md for the analysis.
 --
 -- Apply with CONCURRENTLY (does not block writes). Run each
--- statement separately if your client can't use multi-statement
--- transactions with CONCURRENTLY.
+-- statement in its OWN session (psql -c) because CONCURRENTLY
+-- cannot run inside a transaction block.
+--
+-- IMPORTANT: the prod sofascore_user role has lock_timeout=5s set
+-- via ALTER ROLE (P0 fix 2026-05-20). CREATE INDEX CONCURRENTLY
+-- briefly needs ShareUpdateExclusive — which will be killed by
+-- the 5s timeout. Always run with lock_timeout disabled for the
+-- duration, e.g.:
+--
+--   PGOPTIONS='-c lock_timeout=0 -c statement_timeout=0' psql -c "<stmt>"
 
 -- =====================================================================
 -- INDEX 1: event_market_choice — fix 28.7B seq_tup_read in prod
@@ -44,10 +52,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_event_live_window
 -- =====================================================================
 -- INDEX 4 + 5: etl_job_run — fix 3.2B seq_tup_read (42.8% seq scan ratio)
 -- =====================================================================
--- Queries by job_id, by (created_at + status filter for retries/dead jobs).
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_etl_job_run_created_status
-    ON etl_job_run (created_at DESC, status)
+-- Queries by job_id, by (started_at + status filter for retries/dead jobs).
+-- Note: column is started_at (not created_at) — verified against schema.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_etl_job_run_started_status
+    ON etl_job_run (started_at DESC, status)
     WHERE status IN ('failed', 'retry_scheduled');
 
+-- idx_etl_job_run_job_id already exists in prod (1.4 GB). Re-stating
+-- here for new environments that may not have it.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_etl_job_run_job_id
     ON etl_job_run (job_id);
