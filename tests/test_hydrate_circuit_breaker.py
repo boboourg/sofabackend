@@ -80,7 +80,15 @@ class _RaisingOrchestrator:
         self.exc = exc
         self.calls: list[tuple[int, str | None, str]] = []
 
-    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+    async def run_event(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str | None,
+        hydration_mode: str = "full",
+        scope: str | None = None,
+    ):
+        del scope
         self.calls.append((event_id, sport_slug, hydration_mode))
         raise self.exc
 
@@ -89,7 +97,15 @@ class _SucceedingOrchestrator:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str | None, str]] = []
 
-    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+    async def run_event(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str | None,
+        hydration_mode: str = "full",
+        scope: str | None = None,
+    ):
+        del scope
         self.calls.append((event_id, sport_slug, hydration_mode))
         return {"event_id": event_id}
 

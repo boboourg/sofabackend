@@ -1720,6 +1720,25 @@ class ServiceApp:
         worker = self.build_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
+    def build_final_sync_planner_daemon(self):
+        """Task 2 Phase B (2026-05-20): factory for the FinalSyncPlannerDaemon.
+
+        Reuses the existing LiveStateRepository (which now exposes
+        ``pending_lock_event_ids``) and publishes into the existing
+        ``stream:etl:hydrate`` so no new worker pool is needed.
+        """
+        from .final_sync_planner import FinalSyncPlannerDaemon
+
+        return FinalSyncPlannerDaemon(
+            database=self.app.database,
+            queue=self.stream_queue,
+            repository=self.app.live_state_repository,
+        )
+
+    async def run_final_sync_planner_daemon(self) -> None:
+        daemon = self.build_final_sync_planner_daemon()
+        await daemon.run_forever()
+
     async def run_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_historical_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()

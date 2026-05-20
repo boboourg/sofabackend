@@ -1798,6 +1798,30 @@ async def _dispatch(args) -> int:
                     lag_threshold=args.lag_threshold,
                 )
                 return 0
+            if args.command == "final-sync-planner-daemon":
+                # Task 2 Phase B (2026-05-20): publishes one-shot
+                # hydrate jobs with scope="final_sync" for events
+                # finalised more than SOFASCORE_FINAL_SYNC_DELAY_SECONDS
+                # ago. The orchestrator stamps locked_at on success.
+                service_app = ServiceApp(app)
+                await service_app.run_final_sync_planner_daemon()
+                return 0
+            if args.command == "unlock-event":
+                # Task 2 Phase B operator escape hatch: clear
+                # event_terminal_state.locked_at so a frozen event
+                # can re-enter the normal flow.
+                async with app.database.connection() as connection:
+                    cleared = await app.live_state_repository.clear_event_lock(
+                        connection, event_id=int(args.event_id)
+                    )
+                if cleared:
+                    print(f"unlock-event: cleared locked_at for event_id={args.event_id}")
+                else:
+                    print(
+                        f"unlock-event: no-op for event_id={args.event_id} "
+                        f"(no terminal row, or already unlocked)"
+                    )
+                return 0
             if args.command == "worker-resource-refresh":
                 service_app = ServiceApp(app)
                 await service_app.run_resource_refresh_worker(
@@ -2140,6 +2164,29 @@ def _build_parser() -> argparse.ArgumentParser:
     live_discovery_planner_daemon = subparsers.add_parser("live-discovery-planner-daemon", help="Run the continuous live sport-surface planner loop.")
     live_discovery_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")
     live_discovery_planner_daemon.add_argument("--loop-interval-seconds", type=float, default=5.0, help="Daemon tick loop interval.")
+
+    final_sync_planner_daemon = subparsers.add_parser(
+        "final-sync-planner-daemon",
+        help=(
+            "Run the FinalSyncPlannerDaemon. Publishes one-shot hydrate jobs "
+            "(scope=final_sync) for events finalised more than "
+            "SOFASCORE_FINAL_SYNC_DELAY_SECONDS ago. The orchestrator stamps "
+            "event_terminal_state.locked_at on success, freezing the event "
+            "from further processing."
+        ),
+    )
+    # daemon takes no extra args — config via env vars.
+
+    unlock_event = subparsers.add_parser(
+        "unlock-event",
+        help=(
+            "Operator escape hatch: clear event_terminal_state.locked_at "
+            "so a frozen event can re-enter the FinalSyncPlanner queue."
+        ),
+    )
+    unlock_event.add_argument(
+        "--event-id", required=True, type=int, help="Event ID to unlock."
+    )
 
     historical_planner_daemon = subparsers.add_parser("historical-planner-daemon", help="Run the rolling historical planner loop.")
     historical_planner_daemon.add_argument("--sport-slug", action="append", default=[], help="Optional repeatable sport slug. Defaults to all supported sports.")

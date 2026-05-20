@@ -196,6 +196,9 @@ class HydrateWorker:
                     sport_slug=sport_slug,
                     scope=job.scope,
                 ),
+                # Task 2 Phase B (2026-05-20): forward scope so the
+                # orchestrator can stamp locked_at on scope="final_sync".
+                scope=job.scope,
             )
         except Exception as exc:
             # P5b: only count retryable failures (libcurl timeouts,

@@ -266,7 +266,17 @@ class _FakeOrchestrator:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str | None, str]] = []
 
-    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+    async def run_event(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str | None,
+        hydration_mode: str = "full",
+        scope: str | None = None,
+    ):
+        # Task 2 Phase B (2026-05-20): orchestrator gained ``scope``
+        # parameter; mock accepts the kwarg for forward compatibility.
+        del scope
         self.calls.append((event_id, sport_slug, hydration_mode))
         return {"event_id": event_id}
 

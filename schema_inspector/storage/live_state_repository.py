@@ -17,6 +17,28 @@ class SqlFetchExecutor(SqlExecutor, Protocol):
     async def fetch(self, query: str, *args: object) -> Any: ...
 
 
+def _command_tag_affected(command_tag: object) -> int:
+    """Extract the row count from asyncpg command-tag strings like
+    ``"UPDATE 3"``, ``"DELETE 17"``, ``"INSERT 0 5"``. Fakes that
+    return an int directly are also tolerated.
+    """
+
+    if command_tag is None:
+        return 0
+    if isinstance(command_tag, int):
+        return int(command_tag)
+    parts = str(command_tag).strip().split()
+    if not parts:
+        return 0
+    # INSERT tag is "INSERT 0 N" — count is the LAST integer.
+    for token in reversed(parts):
+        try:
+            return int(token)
+        except ValueError:
+            continue
+    return 0
+
+
 @dataclass(frozen=True)
 class EventLiveStateHistoryRecord:
     event_id: int
@@ -89,6 +111,10 @@ class LiveStateRepository:
                 terminal_status = EXCLUDED.terminal_status,
                 finalized_at = EXCLUDED.finalized_at,
                 final_snapshot_id = EXCLUDED.final_snapshot_id
+                -- Task 2 Phase A: locked_at intentionally NOT touched.
+                -- Once stamped by FinalSyncPlanner the lock is permanent;
+                -- re-finalize events (zombie sweep, late-arrival
+                -- corrections) must not silently unfreeze a frozen event.
             """,
             record.event_id,
             record.terminal_status,
@@ -123,6 +149,111 @@ class LiveStateRepository:
             coerce_timestamptz(record.finalized_at),
             record.final_snapshot_id,
         )
+
+    # ------------------------------------------------------------------
+    # Task 2 Phase A (2026-05-20) — final-sync lifecycle helpers
+    # ------------------------------------------------------------------
+
+    async def is_event_locked(
+        self, executor: SqlExecutor, *, event_id: int
+    ) -> bool:
+        """True iff this event has been frozen (locked_at IS NOT NULL).
+
+        Used by HydrateWorker / LiveWorkerService / read-path as a
+        defensive gate to skip work on permanently-frozen events.
+        Cheap index-only scan via ``idx_event_terminal_state_locked``.
+        """
+        value = await executor.fetchval(
+            """
+            SELECT 1
+            FROM event_terminal_state
+            WHERE event_id = $1
+              AND locked_at IS NOT NULL
+            LIMIT 1
+            """,
+            int(event_id),
+        )
+        return value is not None
+
+    async def set_event_locked(
+        self,
+        executor: SqlExecutor,
+        *,
+        event_id: int,
+    ) -> bool:
+        """Stamp ``locked_at = now()`` on the event's terminal row.
+
+        Idempotent: if ``locked_at`` is already set, leaves the
+        existing timestamp untouched (preserves audit trail). Returns
+        True iff a row was updated (i.e. the event had a terminal_state
+        row and was not previously locked).
+
+        Called by ``pilot_orchestrator.run_event`` after a successful
+        ``scope="final_sync"`` run.
+        """
+        command_tag = await executor.execute(
+            """
+            UPDATE event_terminal_state
+            SET locked_at = now()
+            WHERE event_id = $1
+              AND locked_at IS NULL
+            """,
+            int(event_id),
+        )
+        return _command_tag_affected(command_tag) > 0
+
+    async def clear_event_lock(
+        self,
+        executor: SqlExecutor,
+        *,
+        event_id: int,
+    ) -> bool:
+        """Operator escape hatch — reset locked_at to NULL.
+
+        Powers the ``unlock-event`` CLI command. After clearing the
+        lock the event re-enters the normal flow: FinalSyncPlanner
+        will eventually pick it up again (assuming its finalized_at is
+        still old enough).
+        """
+        command_tag = await executor.execute(
+            """
+            UPDATE event_terminal_state
+            SET locked_at = NULL
+            WHERE event_id = $1
+              AND locked_at IS NOT NULL
+            """,
+            int(event_id),
+        )
+        return _command_tag_affected(command_tag) > 0
+
+    async def pending_lock_event_ids(
+        self,
+        executor: SqlExecutor,
+        *,
+        delay_seconds: int,
+        limit: int,
+    ) -> list[int]:
+        """FinalSyncPlanner-side queue feed: events that finalised more
+        than ``delay_seconds`` ago and are not yet locked.
+
+        Ordered by ``finalized_at`` ascending so the oldest get a final
+        sync first. Index ``idx_event_terminal_state_pending_lock`` is
+        partial on ``WHERE locked_at IS NULL`` — scan stays bounded to
+        events still in flight.
+        """
+        rows = await executor.fetch(
+            """
+            SELECT event_id
+            FROM event_terminal_state
+            WHERE locked_at IS NULL
+              AND finalized_at <= now() - make_interval(secs => $1)
+            ORDER BY finalized_at ASC, event_id ASC
+            LIMIT $2
+            """,
+            int(delay_seconds),
+            int(limit),
+        )
+        return [int(row["event_id"]) for row in rows]
 
     async def mark_event_stale_live_retired(
         self,

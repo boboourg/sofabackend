@@ -88,6 +88,17 @@ _ROOT_FETCH_RETRYABLE_CLASSIFICATIONS = frozenset(
 )
 MISSING_ROOT_RETIRE_THRESHOLD = 3
 MISSING_ROOT_RETIRE_LOOKBACK = 20
+
+# Task 2 Phase A (2026-05-20): final-sync lifecycle delay. After an
+# event finishes, the system holds it in the hot path for this many
+# seconds so late-arrival statistics corrections can still land; then
+# the FinalSyncPlannerDaemon publishes one final hydrate job
+# (scope="final_sync") and the orchestrator stamps locked_at, freezing
+# the event from further processing.
+FINAL_SYNC_DELAY_SECONDS = int(
+    os.environ.get("SOFASCORE_FINAL_SYNC_DELAY_SECONDS") or 7200
+)
+FINAL_SYNC_SCOPE = "final_sync"
 PLAYER_PROFILE_FRESHNESS_TTL_SECONDS = 86_400
 TEAM_PROFILE_FRESHNESS_TTL_SECONDS = 86_400
 MANAGER_PROFILE_FRESHNESS_TTL_SECONDS = 604_800
@@ -311,10 +322,18 @@ class PilotOrchestrator:
         event_id: int,
         sport_slug: str,
         hydration_mode: str = "full",
+        scope: str | None = None,
     ) -> PilotRunReport:
         self._pending_capability_records.clear()
         if self.fetch_executor is None:
             raise RuntimeError("fetch_executor is required for run_event")
+
+        # Task 2 Phase B (2026-05-20): scope marker. When the
+        # FinalSyncPlannerDaemon enqueues a final-sync run we receive
+        # ``scope="final_sync"`` here; after the pipeline completes
+        # successfully we stamp ``event_terminal_state.locked_at`` to
+        # freeze the event permanently.
+        normalized_scope = (str(scope).strip().lower() if scope else "")
 
         requested_hydration_mode = str(hydration_mode or "full").strip().lower()
         effective_hydration_mode = requested_hydration_mode
@@ -1022,6 +1041,29 @@ class PilotOrchestrator:
             await self.live_bootstrap_coordinator.mark_bootstrapped(self.sql_executor, event_id=event_id)
 
         await self._flush_capabilities()
+
+        # Task 2 Phase B (2026-05-20): stamp event_terminal_state.locked_at
+        # on the success path of a scope="final_sync" run. The lock is
+        # idempotent (no-op if already set) and persistent — subsequent
+        # planners / workers / read-path will skip the event forever.
+        # On exception this code is unreached, so the FinalSyncPlanner
+        # will re-queue on the next tick.
+        if normalized_scope == FINAL_SYNC_SCOPE and self.live_state_repository is not None:
+            if root_outcome.classification in {"success_json", "success_empty_json"}:
+                try:
+                    await self.live_state_repository.set_event_locked(
+                        self.sql_executor, event_id=event_id
+                    )
+                    logger.info(
+                        "final_sync: stamped locked_at for event_id=%s",
+                        event_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "final_sync: set_event_locked failed event_id=%s: %r",
+                        event_id,
+                        exc,
+                    )
 
         return PilotRunReport(
             sport_slug=sport_slug,

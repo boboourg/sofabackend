@@ -1,0 +1,19 @@
+[Unit]
+Description=Sofascore Final-Sync Planner Daemon (2h lock + permanent freeze)
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+Environment=PYTHONUNBUFFERED=1
+# SOFASCORE_FINAL_SYNC_DELAY_SECONDS env override accepted; default 7200 (2h).
+ExecStart=/opt/sofascore/deploy/run_service.sh final-sync-planner-daemon
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
