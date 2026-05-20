@@ -134,6 +134,16 @@ class RetentionRepository:
                           SELECT 1 FROM api_snapshot_head h
                           WHERE h.latest_snapshot_id = p.id
                       )
+                      -- Task 2 Phase D (2026-05-20): pin final snapshots
+                      -- of locked events. Once event_terminal_state
+                      -- stamps locked_at the payload is the canonical
+                      -- frozen body — retention must NEVER delete it,
+                      -- otherwise the read-path loses ground truth.
+                      AND NOT EXISTS (
+                          SELECT 1 FROM event_terminal_state ets
+                          WHERE ets.final_snapshot_id = p.id
+                            AND ets.locked_at IS NOT NULL
+                      )
                     ORDER BY p.id
                     LIMIT $2
                 )

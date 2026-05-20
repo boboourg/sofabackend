@@ -26,6 +26,7 @@ from ..queue.streams import (
 )
 from ..services.worker_runtime import BatchDispatchPlan, WorkerRuntime, resolve_worker_max_concurrency
 from ._stream_jobs import decode_stream_job
+from .hydrate_worker import _scope_bypasses_terminal_lock
 
 _HOT_PREFETCH_COUNT = 25
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ class LiveWorkerService:
         edges_backpressure_limit: int | None = None,
         quarantine_store=None,
         quarantine_inprogress_count_provider=None,
+        live_state_repository=None,
+        database=None,
     ) -> None:
         normalized_lane = str(lane).strip().lower()
         if normalized_lane not in {"hot", "warm", "tier_1", "tier_2", "tier_3"}:
@@ -119,6 +122,9 @@ class LiveWorkerService:
         # but no runaway protection); intended for test setups.
         self.quarantine_store = quarantine_store
         self.quarantine_inprogress_count_provider = quarantine_inprogress_count_provider
+        # Task 2 Phase C (2026-05-20): terminal-lock gate.
+        self.live_state_repository = live_state_repository
+        self.database = database
         self.lane = normalized_lane
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
@@ -154,6 +160,36 @@ class LiveWorkerService:
             raise RuntimeError("Live worker requires event entity_id in stream payload.")
         event_id = int(job.entity_id)
         sport_slug = job.sport_slug or self.default_sport_slug
+
+        # Task 2 Phase C (2026-05-20): terminal-lock skip gate.
+        # Frozen events (event_terminal_state.locked_at IS NOT NULL)
+        # bypass the entire live pipeline. The planner ALREADY skips
+        # via Redis live_state.is_finalized — this is defense-in-depth
+        # against stale stream messages that bypassed the planner gate
+        # (XAUTOCLAIM of pending messages, manual republishes, etc.).
+        if (
+            self.live_state_repository is not None
+            and self.database is not None
+            and not _scope_bypasses_terminal_lock(job.scope)
+        ):
+            try:
+                async with self.database.connection() as connection:
+                    locked = await self.live_state_repository.is_event_locked(
+                        connection, event_id=event_id
+                    )
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                logger.debug(
+                    "live_worker: locked-check failed event_id=%s: %r",
+                    event_id, exc,
+                )
+                locked = False
+            if locked:
+                logger.info(
+                    "live_worker: terminal-lock skip event_id=%s lane=%s "
+                    "scope=%s job=%s",
+                    event_id, self.lane, job.scope, job.job_id,
+                )
+                return "terminal_locked_skip"
 
         # P0(b) tier_1 root-only fast path. Only kicks in for ``tier_1``
         # lane workers (NOT tier_2/tier_3/warm/hot) AND only for normal

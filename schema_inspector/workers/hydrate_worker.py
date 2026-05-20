@@ -21,6 +21,25 @@ def _env_flag_enabled(name: str) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _scope_bypasses_terminal_lock(scope: object) -> bool:
+    """Task 2 Phase C (2026-05-20): which scopes are allowed through
+    the terminal-lock gate.
+
+    * ``final_sync`` — the stamping path itself; cannot freeze an event
+      it is in the middle of finalising.
+    * ``historical*`` — deliberate replay of past data; archive runs
+      legitimately re-hydrate frozen events.
+    """
+    if scope is None:
+        return False
+    normalized = str(scope).strip().lower()
+    if normalized == "final_sync":
+        return True
+    if normalized.startswith("historical"):
+        return True
+    return False
+
+
 def _is_retryable_for_quarantine(exc: Exception) -> bool:
     """P5b: same retryable classification as P0(c).2 worker code.
 
@@ -58,6 +77,8 @@ class HydrateWorker:
         circuit_breaker=None,
         circuit_breaker_inprogress_count_provider=None,
         hydrate_inflight_store=None,
+        live_state_repository=None,
+        database=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.delayed_scheduler = delayed_scheduler
@@ -74,6 +95,14 @@ class HydrateWorker:
         # ``HydrateInFlightStore`` so two parallel hydrate workers cannot
         # process the same event concurrently.
         self.hydrate_inflight_store = hydrate_inflight_store
+        # Task 2 Phase C (2026-05-20): terminal-lock gate. Consults
+        # ``event_terminal_state.locked_at`` before invoking the
+        # orchestrator. Bypassed for ``scope == "final_sync"`` (the
+        # stamping path) and ``scope.startswith("historical")``
+        # (deliberate replay). Backwards-compatible — leave None / no
+        # database to skip the gate entirely.
+        self.live_state_repository = live_state_repository
+        self.database = database
         # P5b: per-event circuit breaker. ``circuit_breaker`` is an
         # ``EventCircuitBreaker(lane="hydrate")`` instance or None (when
         # the rollout flag ``HYDRATE_EVENT_CIRCUIT_BREAKER_ENABLED`` is
@@ -158,6 +187,37 @@ class HydrateWorker:
                         event_id, job.job_type, max(0, until_ms - now_ms),
                     )
                     return "quarantined_skip"
+
+        # Task 2 Phase C (2026-05-20): terminal-lock skip gate. If the
+        # event has been frozen (event_terminal_state.locked_at IS NOT
+        # NULL), every non-historical / non-final-sync job is a no-op.
+        # This prevents misrouted discovery, stale Redis Stream
+        # messages, and scheduled re-walks from re-hydrating frozen
+        # events. Bypass:
+        #   - scope == "final_sync"        — the stamping path itself
+        #   - scope.startswith("historical")— deliberate replay
+        if (
+            self.live_state_repository is not None
+            and self.database is not None
+            and not _scope_bypasses_terminal_lock(job.scope)
+        ):
+            try:
+                async with self.database.connection() as connection:
+                    locked = await self.live_state_repository.is_event_locked(
+                        connection, event_id=event_id
+                    )
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                logger.debug(
+                    "hydrate_worker: locked-check failed event_id=%s: %r",
+                    event_id, exc,
+                )
+                locked = False
+            if locked:
+                logger.info(
+                    "hydrate_worker: terminal-lock skip event_id=%s scope=%s job=%s",
+                    event_id, job.scope, job.job_id,
+                )
+                return "terminal_locked_skip"
 
         # Phase 2.1 (2026-05-20 perf audit): in-flight single-flight lock.
         # Two ``sofascore-hydrate@N`` workers may legitimately pull a job

@@ -254,6 +254,9 @@ class HydrateWorkerInFlightLockTests(unittest.IsolatedAsyncioTestCase):
         worker.circuit_breaker_inprogress_count_provider = None
         worker.now_ms_factory = lambda: 0
         worker.hydrate_inflight_store = lock_store
+        # Task 2 Phase C (2026-05-20): new attrs — None disables the gate.
+        worker.live_state_repository = None
+        worker.database = None
 
         entry = StreamEntry(
             stream="stream:etl:hydrate",
@@ -300,6 +303,9 @@ class HydrateWorkerInFlightLockTests(unittest.IsolatedAsyncioTestCase):
         worker.circuit_breaker_inprogress_count_provider = None
         worker.now_ms_factory = lambda: 0
         worker.hydrate_inflight_store = lock_store
+        # Task 2 Phase C (2026-05-20): new attrs — None disables the gate.
+        worker.live_state_repository = None
+        worker.database = None
 
         entry = StreamEntry(
             stream="stream:etl:hydrate",
@@ -345,6 +351,9 @@ class HydrateWorkerInFlightLockTests(unittest.IsolatedAsyncioTestCase):
         worker.circuit_breaker_inprogress_count_provider = None
         worker.now_ms_factory = lambda: 0
         worker.hydrate_inflight_store = lock_store
+        # Task 2 Phase C (2026-05-20): new attrs — None disables the gate.
+        worker.live_state_repository = None
+        worker.database = None
 
         entry = StreamEntry(
             stream="stream:etl:hydrate",

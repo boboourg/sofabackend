@@ -1219,6 +1219,14 @@ class ServiceApp:
             # lock. Two sofascore-hydrate@N workers cannot now process
             # the same event_id concurrently.
             hydrate_inflight_store=self.hydrate_inflight_store,
+            # Task 2 Phase C (2026-05-20): terminal-lock gate. Workers
+            # skip frozen events (event_terminal_state.locked_at IS NOT
+            # NULL) unless scope is "final_sync" or "historical*".
+            # ``getattr`` keeps legacy test fakes (no attr) working.
+            live_state_repository=getattr(
+                self.app, "live_state_repository", None
+            ),
+            database=getattr(self.app, "database", None),
         )
 
     def build_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> HydrateWorker:
@@ -1395,6 +1403,13 @@ class ServiceApp:
             root_in_flight_store=self.live_event_root_inflight_store,
             edges_throttle=self.live_edges_throttle,
             quarantine_store=quarantine_store,
+            # Task 2 Phase C (2026-05-20): terminal-lock gate.
+            # ``getattr`` with default keeps SimpleNamespace test
+            # fakes (no live_state_repository attribute) working.
+            live_state_repository=getattr(
+                self.app, "live_state_repository", None
+            ),
+            database=getattr(self.app, "database", None),
         )
 
     def build_live_details_worker(self, *, consumer_name: str, block_ms: int = 5_000):
@@ -1459,6 +1474,9 @@ class ServiceApp:
             live_state_store=self.live_state_store,
             stream_queue=self.stream_queue,
             tier_override_registry=getattr(self.app, "tier_override_registry", None),
+            # Task 2 Phase C (2026-05-20): defensive lock gate in
+            # no_live_state branch.
+            live_state_repository=self.app.live_state_repository,
         )
 
     def build_maintenance_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> MaintenanceWorker:

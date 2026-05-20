@@ -143,6 +143,7 @@ class LiveRescueLoop:
         tier_override_registry: Any = None,
         now_ms_factory: Callable[[], int] | None = None,
         clock: Callable[[], datetime] | None = None,
+        live_state_repository: Any = None,
     ) -> None:
         self.config = config
         self._connection_factory = connection_factory
@@ -152,6 +153,10 @@ class LiveRescueLoop:
         self.tier_override_registry = tier_override_registry
         self._now_ms = now_ms_factory or (lambda: int(time.time() * 1000))
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # Task 2 Phase C (2026-05-20): terminal-lock check for the
+        # no_live_state branch — if the DB says the event is frozen,
+        # don't force-hydrate it back.
+        self.live_state_repository = live_state_repository
         self._shutdown = False
 
     # ------------------------------------------------------------------
@@ -203,7 +208,7 @@ class LiveRescueLoop:
             if not live_surface_ids:
                 continue
             report.scanned += len(live_surface_ids)
-            candidates = self._collect_candidates(
+            candidates = await self._collect_candidates(
                 sport_slug=sport_slug,
                 event_ids=live_surface_ids,
                 stale_cutoff_ms=stale_cutoff_ms,
@@ -251,7 +256,7 @@ class LiveRescueLoop:
     # Candidate selection
     # ------------------------------------------------------------------
 
-    def _collect_candidates(
+    async def _collect_candidates(
         self,
         *,
         sport_slug: str,
@@ -267,6 +272,23 @@ class LiveRescueLoop:
             except Exception:  # noqa: BLE001 — fetch failure → treat as missing
                 state = None
             if state is None:
+                # Task 2 Phase C (2026-05-20): if the event has been
+                # permanently frozen via FinalSyncPlanner, do NOT
+                # re-liven it. The DB row outlives the Redis live-state
+                # hash (which is evicted by housekeeping zombie sweep);
+                # without this check the rescue loop would re-publish
+                # hydrate jobs forever for already-frozen events.
+                if self.live_state_repository is not None:
+                    try:
+                        async with self._connection_factory() as connection:
+                            locked = await self.live_state_repository.is_event_locked(
+                                connection, event_id=int(event_id)
+                            )
+                    except Exception:  # noqa: BLE001 — fail-open
+                        locked = False
+                    if locked:
+                        report.finalized += 1
+                        continue
                 report.no_live_state += 1
                 candidates.append(
                     StuckEventCandidate(

@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TTL_SECONDS = 10
 
+# Task 2 Phase D (2026-05-20): events whose
+# ``event_terminal_state.locked_at IS NOT NULL`` are frozen forever.
+# Their cached payload is immutable, so a 24-hour TTL is a safe
+# minimum — the read-path also reads the lock flag directly and can
+# return the snapshot 1:1 even after this expiry. Treat as a perf
+# hint, not a correctness gate.
+LOCKED_TTL_SECONDS = 86400
+
 # TTL policy by upstream ``status.type``. Mirrors the Redis api:resp:*
 # layer that the local_api_server already uses, so the persistent cache
 # has the same staleness window as the in-memory one.

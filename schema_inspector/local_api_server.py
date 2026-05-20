@@ -3843,9 +3843,15 @@ class LocalApiApplication:
             # were the event root, producing the wrong shape (home/away/
             # incidents instead of the proper event envelope). This was
             # caught by the D10 1:1 audit on event 14023930.
+            # Task 2 Phase D (2026-05-20): include locked_at so the
+            # read-path can short-circuit overlay synthesis for frozen
+            # events. When locked_at IS NOT NULL the captured final
+            # snapshot is the authoritative payload — no overlay, no
+            # synth fallback, just return the bytes.
             terminal_row = await connection.fetchrow(
                 """
-                SELECT ets.terminal_status, ets.finalized_at, aps.payload AS final_payload
+                SELECT ets.terminal_status, ets.finalized_at, ets.locked_at,
+                       aps.payload AS final_payload
                 FROM event_terminal_state AS ets
                 LEFT JOIN api_payload_snapshot AS aps
                     ON aps.id = ets.final_snapshot_id
@@ -3859,6 +3865,15 @@ class LocalApiApplication:
                 decoded = _decode_snapshot_payload(terminal_row.get("final_payload"))
                 if isinstance(decoded, dict):
                     return _wrap_stripped_entity_payload(decoded, "event")
+                # Task 2 Phase D: even without a decoded final snapshot
+                # we want to respect the lock — but we have nothing
+                # to return except the synth fallback. Setting
+                # ``event_is_locked`` lets downstream skip the live
+                # overlay for the synth path.
+            event_is_locked = (
+                terminal_row is not None
+                and terminal_row.get("locked_at") is not None
+            )
 
             snapshot_row = await connection.fetchrow(
                 """
