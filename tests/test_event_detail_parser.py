@@ -198,6 +198,13 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         h2h_url = EVENT_H2H_ENDPOINT.build_url(event_id=14083191)
         pregame_url = EVENT_PREGAME_FORM_ENDPOINT.build_url(event_id=14083191)
         votes_url = EVENT_VOTES_ENDPOINT.build_url(event_id=14083191)
+        # Stage 4.2 (2026-05-20): fetch_bundle now also pulls
+        # /incidents and /statistics. Old tests stub them with
+        # soft-404 — same as votes/comments — so the bundle-shape
+        # assertions are unaffected.
+        from schema_inspector.endpoints import EVENT_INCIDENTS_ENDPOINT as _EI, EVENT_STATISTICS_ENDPOINT as _ES
+        incidents_url_14083191 = _EI.build_url(event_id=14083191)
+        statistics_url_14083191 = _ES.build_url(event_id=14083191)
         comments_url = EVENT_COMMENTS_ENDPOINT.build_url(event_id=14083191)
         graph_url = EVENT_GRAPH_ENDPOINT.build_url(event_id=14083191)
         home_heatmap_url = EVENT_HEATMAP_ENDPOINT.build_url(event_id=14083191, team_id=42)
@@ -389,6 +396,10 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
                     "vote": {"vote1": 10, "voteX": 2, "vote2": 5},
                     "bothTeamsToScoreVote": {"voteYes": 7, "voteNo": 3},
                 },
+                # Stage 4.2 (2026-05-20): incidents + statistics now
+                # part of fetch_bundle. Stubbed soft-404 here.
+                incidents_url_14083191: _not_found_error(incidents_url_14083191),
+                statistics_url_14083191: _not_found_error(statistics_url_14083191),
                 comments_url: {
                     "comments": [
                         {
@@ -583,6 +594,10 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         comments_url = EVENT_COMMENTS_ENDPOINT.build_url(event_id=14083192)
         graph_url = EVENT_GRAPH_ENDPOINT.build_url(event_id=14083192)
         heatmap_url = EVENT_HEATMAP_ENDPOINT.build_url(event_id=14083192, team_id=42)
+        # Stage 4.2 (2026-05-20): fetch_bundle now also pulls incidents + statistics.
+        from schema_inspector.endpoints import EVENT_INCIDENTS_ENDPOINT as _EI2, EVENT_STATISTICS_ENDPOINT as _ES2
+        incidents_url_14083192 = _EI2.build_url(event_id=14083192)
+        statistics_url_14083192 = _ES2.build_url(event_id=14083192)
 
         fake_client = _FakeSofascoreClient(
             {
@@ -612,6 +627,9 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
                 h2h_url: _not_found_error(h2h_url),
                 pregame_url: _not_found_error(pregame_url),
                 votes_url: _not_found_error(votes_url),
+                # Stage 4.2: stubbed soft-404 for the new fetch_bundle members.
+                incidents_url_14083192: _not_found_error(incidents_url_14083192),
+                statistics_url_14083192: _not_found_error(statistics_url_14083192),
             }
         )
 
@@ -638,6 +656,10 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
         graph_url = EVENT_GRAPH_ENDPOINT.build_url(event_id=15921219)
         home_heatmap_url = EVENT_HEATMAP_ENDPOINT.build_url(event_id=15921219, team_id=199527)
         away_heatmap_url = EVENT_HEATMAP_ENDPOINT.build_url(event_id=15921219, team_id=199528)
+        # Stage 4.2 (2026-05-20): incidents + statistics also fetched.
+        from schema_inspector.endpoints import EVENT_INCIDENTS_ENDPOINT as _EI3, EVENT_STATISTICS_ENDPOINT as _ES3
+        incidents_url_15921219 = _EI3.build_url(event_id=15921219)
+        statistics_url_15921219 = _ES3.build_url(event_id=15921219)
 
         fake_client = _FakeSofascoreClient(
             {
@@ -679,6 +701,9 @@ class EventDetailParserTests(unittest.IsolatedAsyncioTestCase):
                 pregame_url: _not_found_error(pregame_url),
                 votes_url: _not_found_error(votes_url),
                 comments_url: _not_found_error(comments_url),
+                # Stage 4.2: stubbed soft-404 for the new fetch_bundle members.
+                incidents_url_15921219: _not_found_error(incidents_url_15921219),
+                statistics_url_15921219: _not_found_error(statistics_url_15921219),
                 point_by_point_url: {
                     "points": [{"set": 1, "game": 1, "server": "home"}],
                     "displayScore": "15-0",

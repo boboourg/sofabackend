@@ -1799,6 +1799,16 @@ async def _dispatch(args) -> int:
                 # scopes the run to exactly the requested season —
                 # without it the helper would loop over the UT's
                 # backfill cursor.
+                #
+                # Stage 4.1 (2026-05-20 match-center fix): override the
+                # hardcoded skip_event_detail=True / skip_entities=True
+                # defaults so the operator-driven CLI actually pulls
+                # the per-match content (lineups, incidents, statistics,
+                # best-players, player-stats). Worker-historical-
+                # tournament keeps the defaults because it publishes
+                # enrichment child-jobs afterwards — the CLI handler
+                # bypasses that publish path and must do the per-event
+                # fan-out synchronously.
                 from .services.historical_archive_service import (
                     run_historical_tournament_archive,
                 )
@@ -1810,6 +1820,8 @@ async def _dispatch(args) -> int:
                     event_concurrency=int(args.event_concurrency),
                     timeout=float(args.timeout),
                     target_season_id=int(args.season_id),
+                    skip_event_detail=False,
+                    skip_entities=False,
                 )
                 logger.info(
                     "historical-backfill: ut=%s season=%s sport=%s report=%s",

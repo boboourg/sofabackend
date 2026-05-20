@@ -26,6 +26,19 @@ async def run_historical_tournament_archive(
     event_concurrency: int = 4,
     timeout: float = 20.0,
     target_season_id: int | None = None,
+    # Stage 4.1 (2026-05-20 match-center fix): expose the previously
+    # hardcoded skip-flags so the operator-driven CLI handler can opt
+    # INTO per-event fan-out without having to fork the helper.
+    # Defaults preserve the worker-historical-tournament flow:
+    # that path keeps skip=True here and runs the per-event work
+    # afterwards via enrichment child-jobs published to
+    # STREAM_HISTORICAL_ENRICHMENT (historical_archive_worker.py:160-172).
+    # The CLI handler (cli.py historical-backfill) bypasses the worker
+    # path entirely, so it must pass skip_event_detail=False and
+    # skip_entities=False explicitly to get lineups/incidents/
+    # statistics/player-stats for archive matches.
+    skip_event_detail: bool = True,
+    skip_entities: bool = True,
 ) -> dict[str, object]:
     adapter = build_source_adapter(
         app.runtime_config.source_slug,
@@ -67,8 +80,8 @@ async def run_historical_tournament_archive(
         event_concurrency=max(1, int(event_concurrency)),
         skip_featured_events=False,
         skip_round_events=False,
-        skip_event_detail=True,
-        skip_entities=True,
+        skip_event_detail=skip_event_detail,
+        skip_entities=skip_entities,
         skip_statistics=False,
         skip_standings=False,
         skip_leaderboards=False,

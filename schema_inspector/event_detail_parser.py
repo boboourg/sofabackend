@@ -19,6 +19,12 @@ from .endpoints import (
     EVENT_GRAPH_ENDPOINT,
     EVENT_H2H_ENDPOINT,
     EVENT_HEATMAP_ENDPOINT,
+    # Stage 4.2 (2026-05-20 match-center fix): import the two
+    # endpoints that previously lived only in the live-delta path
+    # (pilot_orchestrator._endpoint_for_edge_kind). With them in
+    # EventDetailParser.fetch_bundle, historical-backfill now pulls
+    # goals and match stats for archive matches too.
+    EVENT_INCIDENTS_ENDPOINT,
     EVENT_LINEUPS_ENDPOINT,
     EVENT_MANAGERS_ENDPOINT,
     EVENT_ODDS_ALL_ENDPOINT,
@@ -27,6 +33,7 @@ from .endpoints import (
     EVENT_PLAYER_STATISTICS_ENDPOINT,
     EVENT_POINT_BY_POINT_ENDPOINT,
     EVENT_PREGAME_FORM_ENDPOINT,
+    EVENT_STATISTICS_ENDPOINT,
     EVENT_TENNIS_POWER_ENDPOINT,
     EVENT_VOTES_ENDPOINT,
     EVENT_WINNING_ODDS_ENDPOINT,
@@ -571,6 +578,14 @@ class EventDetailParser:
                 self._fetch_h2h(event_id, state, timeout=timeout),
                 self._fetch_pregame_form(event_id, state, timeout=timeout),
                 self._fetch_votes(event_id, state, timeout=timeout),
+                # Stage 4.2 (2026-05-20 match-center fix): pull goals
+                # and per-period match stats for every event. Before
+                # this, /incidents and /statistics were ONLY in the
+                # live-delta path (pilot_orchestrator), so archive
+                # matches never had goals normalised into
+                # event_incident or stats into event_statistic.
+                self._fetch_incidents(event_id, state, timeout=timeout),
+                self._fetch_statistics(event_id, state, timeout=timeout),
             ]
             if state.supports_match_live_detail_resources(event_id):
                 tasks.append(self._fetch_comments(event_id, state, timeout=timeout))
@@ -659,6 +674,54 @@ class EventDetailParser:
         )
         if payload is not None:
             state.ingest_lineups(event_id, payload)
+
+    async def _fetch_incidents(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        """Stage 4.2 (2026-05-20): pull /event/{id}/incidents into the
+        raw snapshot stream. Normalisation of goals/cards/substitutions
+        into ``event_incident`` is done downstream by the standard
+        ``EventIncidentsParser`` (already registered in
+        ``ParserRegistry.default()``); ``EventDetailBackfillJob`` invokes
+        the registry on each captured snapshot so the row lands in the
+        relational schema even for archive matches.
+
+        Sofascore returns soft-404 / empty payload for events where
+        upstream simply has no incidents recorded — the helper uses
+        ``_fetch_optional_root_payload`` which handles that gracefully
+        by skipping the snapshot."""
+        endpoint = EVENT_INCIDENTS_ENDPOINT
+        await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
+
+    async def _fetch_statistics(
+        self,
+        event_id: int,
+        state: "_EventDetailAccumulator",
+        *,
+        timeout: float,
+    ) -> None:
+        """Stage 4.2 (2026-05-20): pull /event/{id}/statistics into the
+        raw snapshot stream. Same downstream-normalisation contract as
+        :meth:`_fetch_incidents` — goals/possession/shots-on-target are
+        parsed by ``EventStatisticsParser`` and persisted to
+        ``event_statistic`` via ``_persist_event_statistics`` in
+        ``normalize_repository``."""
+        endpoint = EVENT_STATISTICS_ENDPOINT
+        await self._fetch_optional_root_payload(
+            endpoint,
+            event_id=event_id,
+            state=state,
+            timeout=timeout,
+        )
 
     async def _fetch_managers(
         self,
