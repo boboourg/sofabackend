@@ -783,19 +783,33 @@ class EventListStorageTests(unittest.IsolatedAsyncioTestCase):
                 f"COALESCE(event.{guarded}, EXCLUDED.{guarded})",
                 normalized,
             )
-        # Reference data must keep the legacy straight EXCLUDED assignment
-        # to avoid blocking legitimate corrections (slug typo fix, FK
-        # repointing, VAR-reversible red cards, capability flag flips).
+        # Reference data must allow legitimate corrections (slug typo
+        # fix, FK repointing, VAR-reversible red cards, capability flag
+        # flips). Two patterns satisfy this:
+        # * Legacy ``col = EXCLUDED.col`` — overwrite anytime (still
+        #   allowed for non-FK reference data like red cards / has_xg).
+        # * ``col = COALESCE(EXCLUDED.col, event.col)`` — added 2026-05-20
+        #   for FK columns (tournament_id, home_team_id, away_team_id,
+        #   slug, unique_tournament_id, season_id) so a compact endpoint
+        #   payload (e.g. team-events scope) that omits the column does
+        #   NOT erase the previously stored value. Non-null updates from
+        #   the new payload still win — EXCLUDED.col is the first arg.
         for unguarded in (
-            "slug",
-            "tournament_id",
-            "home_team_id",
-            "away_team_id",
             "home_red_cards",
             "away_red_cards",
             "has_xg",
         ):
             self.assertIn(f"{unguarded} = EXCLUDED.{unguarded}", normalized)
+        for coalesce_col in (
+            "slug",
+            "tournament_id",
+            "home_team_id",
+            "away_team_id",
+        ):
+            self.assertIn(
+                f"{coalesce_col} = COALESCE(EXCLUDED.{coalesce_col}, event.{coalesce_col})",
+                normalized,
+            )
         # Terminal status types lifted from planner/live.py
         # ::TERMINAL_STATUS_TYPES — keep both lists in sync.
         for terminal_type in (

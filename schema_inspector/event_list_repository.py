@@ -837,14 +837,19 @@ class EventListRepository:
                 $31, $32, $33, $34, $35
             )
             ON CONFLICT (id) DO UPDATE SET
-                slug = EXCLUDED.slug,
-                custom_id = EXCLUDED.custom_id,
-                detail_id = EXCLUDED.detail_id,
-                tournament_id = EXCLUDED.tournament_id,
-                unique_tournament_id = EXCLUDED.unique_tournament_id,
-                season_id = EXCLUDED.season_id,
-                home_team_id = EXCLUDED.home_team_id,
-                away_team_id = EXCLUDED.away_team_id,
+                slug = COALESCE(EXCLUDED.slug, event.slug),
+                custom_id = COALESCE(EXCLUDED.custom_id, event.custom_id),
+                detail_id = COALESCE(EXCLUDED.detail_id, event.detail_id),
+                -- NULL-resilient FK columns: a compact endpoint payload
+                -- (e.g. team-events scope) may omit season/tournament
+                -- context. Without COALESCE, the previously stored value
+                -- gets wiped, which broke /round/N/slug/X routing for
+                -- UCL 22/23 (event 11289024 had season_id=NULL).
+                tournament_id = COALESCE(EXCLUDED.tournament_id, event.tournament_id),
+                unique_tournament_id = COALESCE(EXCLUDED.unique_tournament_id, event.unique_tournament_id),
+                season_id = COALESCE(EXCLUDED.season_id, event.season_id),
+                home_team_id = COALESCE(EXCLUDED.home_team_id, event.home_team_id),
+                away_team_id = COALESCE(EXCLUDED.away_team_id, event.away_team_id),
                 status_code = {status_guard},
                 season_statistics_type = EXCLUDED.season_statistics_type,
                 start_timestamp = EXCLUDED.start_timestamp,
@@ -882,12 +887,20 @@ class EventListRepository:
             """
             INSERT INTO event_round_info (event_id, round_number, slug, name, cup_round_type)
             VALUES ($1, $2, $3, $4, $5)
+            -- NULL-resilient upsert: Sofascore returns different shapes
+            -- per endpoint (rich /events/last/{p} carries slug + name;
+            -- compact /team-events scope omits them). Without COALESCE,
+            -- a re-ingest from a compact source wipes the slug/name
+            -- previously populated from the rich source — broke
+            -- /round/{N}/slug/{slug} routing for UCL 22/23 Knockout
+            -- Phase events (event_round_info.slug=NULL for City vs
+            -- Inter Final, Quarterfinals etc.).
             ON CONFLICT (event_id) DO UPDATE SET
-                round_number = EXCLUDED.round_number,
-                slug = EXCLUDED.slug,
-                name = EXCLUDED.name,
-                cup_round_type = EXCLUDED.cup_round_type
-            """,
+                round_number = COALESCE(EXCLUDED.round_number, event_round_info.round_number),
+                slug = COALESCE(EXCLUDED.slug, event_round_info.slug),
+                name = COALESCE(EXCLUDED.name, event_round_info.name),
+                cup_round_type = COALESCE(EXCLUDED.cup_round_type, event_round_info.cup_round_type)
+""",
             rows,
         )
 
