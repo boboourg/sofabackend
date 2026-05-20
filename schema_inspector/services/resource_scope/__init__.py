@@ -43,6 +43,7 @@ from .team_of_active_ut import TeamOfActiveUTResolver
 from .team_of_active_ut_first_page import TeamOfActiveUTFirstPageResolver
 from .team_of_active_ut_season import TeamOfActiveUTSeasonResolver
 from .team_of_registry_ut import TeamOfRegistryUTResolver
+from .team_with_upcoming_match import TeamWithUpcomingMatchResolver
 
 # Re-export the canonical set declared in ``endpoints.py`` so callers
 # that import through this package still get the constant. The
@@ -79,6 +80,7 @@ __all__ = [
     "TeamOfActiveUTFirstPageResolver",
     "TeamOfActiveUTSeasonResolver",
     "TeamOfRegistryUTResolver",
+    "TeamWithUpcomingMatchResolver",
     "load_managed_pairs",
     "parse_managed_pairs",
 ]

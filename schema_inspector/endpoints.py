@@ -1313,13 +1313,23 @@ TEAM_FEATURED_PLAYERS_ENDPOINT = SofascoreEndpoint(
     envelope_key="featuredPlayers",
     target_table="api_payload_snapshot",
     notes="Sofascore editorial featured players keyed by event id. Raw passthrough only.",
-    # Stage 5: featured-players is an editorial pick keyed by upcoming/recent
-    # eventId. The set rotates every match, so 24h cadence keeps it fresh
-    # without flooding (most teams play 1-2 matches per week).
+    # Stage 5.1 (2026-05-21): scope is now ``team-with-upcoming-match`` —
+    # the resolver returns ONLY teams whose next fixture sits inside the
+    # 14-day pre-match window (event.status_code = 0, start_timestamp
+    # BETWEEN now AND now + 14d). Combined with the long
+    # ``freshness_ttl_seconds = 14d`` the endpoint fetches once per
+    # fixture cycle and stays cached through live + finished phases of
+    # the match. Teams without any upcoming fixture never enter the
+    # scope.
+    #
+    # ``refresh_interval_seconds`` stays at 24h — this is the planner
+    # tick cadence at which the resolver is re-queried, not the per-
+    # team fetch frequency. The per-team frequency is governed
+    # exclusively by the freshness TTL + the scope filter.
     refresh_interval_seconds=24 * 3600,
     refresh_priority=55,
-    scope_kind="team-of-active-ut",
-    freshness_ttl_seconds=22 * 3600,
+    scope_kind="team-with-upcoming-match",
+    freshness_ttl_seconds=14 * 86400,
     prefer_head_probe=True,  # P0.2 — 94.5% soft-error on prod
 )
 

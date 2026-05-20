@@ -58,6 +58,10 @@ KNOWN_SCOPE_KINDS: frozenset[str] = frozenset(
         "team-of-active-ut-first-page",
         "team-of-active-ut-season",
         "team-of-registry-ut",
+        # Stage 5.1 (2026-05-21): pre-match-only team scope used by
+        # TEAM_FEATURED_PLAYERS_ENDPOINT. Returns teams whose next
+        # fixture sits inside the 14-day pre-match window.
+        "team-with-upcoming-match",
     }
 )
 

@@ -198,6 +198,7 @@ class ScopeKindRegistryDriftTests(unittest.TestCase):
             TeamOfActiveUTFirstPageResolver,
             TeamOfActiveUTSeasonResolver,
             TeamOfRegistryUTResolver,
+            TeamWithUpcomingMatchResolver,
         )
         from schema_inspector._scope_kinds import KNOWN_SCOPE_KINDS
 
@@ -223,6 +224,7 @@ class ScopeKindRegistryDriftTests(unittest.TestCase):
                 TeamOfActiveUTFirstPageResolver.kind,
                 TeamOfActiveUTSeasonResolver.kind,
                 TeamOfRegistryUTResolver.kind,
+                TeamWithUpcomingMatchResolver.kind,
             }
         )
 
