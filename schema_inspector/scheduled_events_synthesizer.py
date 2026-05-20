@@ -340,6 +340,24 @@ WHERE e.unique_tournament_id = $1
   AND eri.round_number = $3
   AND eri.slug = $4
   AND e.is_editor IS NOT TRUE
+  -- Bug fix 2026-05-20: same (UT, season, round, slug) can match
+  -- across multiple sub-tournaments (e.g. UCL 22/23 round=29
+  -- slug='final' matched both Knockout stage tournament_id=23
+  -- priority=716 AND Preliminary Round tournament_id=66813
+  -- priority=488). Sofascore filter keeps only the highest-priority
+  -- sub-tournament's events; we replicate that with a correlated
+  -- MAX. COALESCE(t.priority, 0) handles legacy rows lacking priority.
+  AND COALESCE(t.priority, 0) = (
+      SELECT MAX(COALESCE(t2.priority, 0))
+      FROM event e2
+      JOIN event_round_info eri2 ON eri2.event_id = e2.id
+      JOIN tournament t2 ON t2.id = e2.tournament_id
+      WHERE e2.unique_tournament_id = $1
+        AND e2.season_id = $2
+        AND eri2.round_number = $3
+        AND eri2.slug = $4
+        AND e2.is_editor IS NOT TRUE
+  )
 ORDER BY e.start_timestamp, e.id
 """
 )
