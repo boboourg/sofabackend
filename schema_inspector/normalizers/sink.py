@@ -5,9 +5,36 @@ from __future__ import annotations
 from dataclasses import replace
 
 
+# Fix E (2026-05-20 architecture audit, anomaly E): event_incidents and
+# event_statistics now forward team / player blocks to the repository
+# layer. Sofascore embeds full nested ``team`` / ``player`` objects
+# inside incident-payload (scorer, assister, substituted player, team
+# of card) and stats-payload (home / away team meta). Previously the
+# allowlist was {"event"} only — extract_entities lifted the blocks
+# out of the JSON but the sink discarded them before
+# persist_parse_result, leaving the parent FK targets missing and
+# forcing a permanent FK violation if a stub player was later
+# referenced by event_player_statistics / breakdown / best_players in
+# the same transaction.
+#
+# Pairing:
+#   * Fix D in NormalizeRepository._upsert_child_pass introduces a
+#     stub-upsert (ON CONFLICT DO NOTHING) for nameless players so the
+#     FK target physically exists even when Sofascore returns only an
+#     ``{"id": X}`` skeleton.
+#   * This Fix E in sink.py lets that stub-upsert ACTUALLY see the
+#     player row in the first place; without the allowlist extension,
+#     the stub-track never gets a chance to fire for incidents-only
+#     payloads.
+#
+# event_statistics deliberately excludes player — the schema for
+# event_statistic has no player FK, and per-event statistics blocks
+# never carry individual player entries. team is added so home/away
+# team meta lands in the parent pass before any sibling snapshot
+# (best_players, incidents) tries to reference it.
 DEFAULT_ENTITY_KIND_ALLOWLIST_BY_PARSER_FAMILY = {
-    "event_statistics": frozenset({"event"}),
-    "event_incidents": frozenset({"event"}),
+    "event_statistics": frozenset({"event", "team"}),
+    "event_incidents": frozenset({"event", "team", "player"}),
     "event_graph": frozenset({"event"}),
     "event_best_players": frozenset({"event", "player"}),
     "event_lineups": frozenset({"event", "team", "player"}),

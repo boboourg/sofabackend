@@ -984,12 +984,24 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executor.execute_calls, [])
         self.assertEqual(executor.executemany_calls, [])
 
-    async def test_durable_sink_prunes_event_statistics_entity_upserts_to_event_only(self) -> None:
+    async def test_durable_sink_prunes_event_statistics_entity_upserts_to_event_and_team(self) -> None:
+        """Fix E (2026-05-20): event_statistics allowlist is now
+        ``{event, team}``. Sport / country / category / season are
+        still dropped (no FK from event_statistic to them), but team
+        is forwarded so home / away meta lands in the parent pass
+        before a sibling snapshot (best_players, incidents) tries to
+        reference it."""
+
         repository = NormalizeRepository()
         executor = _FakeExecutor()
         executor.fetch_results = [
-            [{"id": 42}, {"id": 43}],
-            [{"id": 76986}],
+            # Team parent-pass: confirm-existence query for the FK
+            # check on team_id (no rows — they will be inserted by
+            # this call). Then category-existence check for the
+            # competition validation on event upsert.
+            [],  # _authoritative_existing_ids(category) for team
+            [],  # _authoritative_existing_ids(country) for team
+            [{"id": 76986}],  # season exists for event
         ]
         sink = DurableNormalizeSink(repository, executor)
         result = ParseResult(
@@ -1039,11 +1051,18 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await sink(result)
 
         statements = [sql for sql, _ in executor.executemany_calls]
+        # Pruned: schema for event_statistic has no FK to sport /
+        # country / category / season, so the sink keeps blocking
+        # them out of the parent pass.
         self.assertFalse(any("INSERT INTO sport" in sql for sql in statements))
         self.assertFalse(any("INSERT INTO country" in sql for sql in statements))
         self.assertFalse(any("INSERT INTO category" in sql for sql in statements))
         self.assertFalse(any("INSERT INTO season" in sql for sql in statements))
-        self.assertFalse(any("INSERT INTO team" in sql for sql in statements))
+        # Newly forwarded: team must reach the dependent pass — home /
+        # away team blocks live inside stats payloads and Fix E lets
+        # them through so the event FK has a fresh upsert in the same
+        # transaction.
+        self.assertTrue(any("INSERT INTO team" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event" in sql for sql in statements))
         self.assertTrue(any("INSERT INTO event_statistic" in sql for sql in statements))
 
@@ -1638,6 +1657,197 @@ class NormalizeRepositoryStubPlayerUpsertTests(unittest.IsolatedAsyncioTestCase)
                 "stub-upsert path must use ON CONFLICT (id) DO NOTHING — "
                 "otherwise we will overwrite real player rows with the "
                 "Unknown Player stub"
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix E (2026-05-20 architecture audit, anomaly E): DurableNormalizeSink
+# allowlist for event_incidents / event_statistics must let team and player
+# entities through. Before the fix the allowlist was {"event"} only —
+# extract_entities lifted player / team blocks out of the incidents payload
+# but the sink threw them on the floor before persist_parse_result could
+# stub them in. After the fix:
+#
+#   * event_incidents  -> {"event", "team", "player"}
+#   * event_statistics -> {"event", "team"}
+#
+# The team/player rows passed through are then protected by Fix D — even
+# if Sofascore delivers a partial nameless player stub ({"id": X}) inside
+# an incident block, the new stub-upsert track makes the FK target exist.
+# ---------------------------------------------------------------------------
+
+
+class _AsyncCapturingRepository:
+    """Captures every persist_parse_result call so we can assert what
+    the sink actually forwarded to the repository layer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[ParseResult, bool]] = []
+
+    async def persist_parse_result(
+        self, executor, result, *, skip_entity_upserts: bool = False
+    ) -> None:  # noqa: ARG002 — executor unused by the mock
+        self.calls.append((result, skip_entity_upserts))
+
+
+class SinkAllowlistForIncidentsAndStatisticsTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_allowlist_for_event_incidents_includes_team_and_player(self) -> None:
+        from schema_inspector.normalizers.sink import (
+            DEFAULT_ENTITY_KIND_ALLOWLIST_BY_PARSER_FAMILY,
+        )
+
+        allowlist = DEFAULT_ENTITY_KIND_ALLOWLIST_BY_PARSER_FAMILY["event_incidents"]
+        self.assertIn(
+            "team",
+            allowlist,
+            msg=(
+                "event_incidents allowlist must let team rows through — "
+                "otherwise the team-of-card / team-of-goal blocks the "
+                "incidents parser extracts are dropped before reaching "
+                "_upsert_dependent_pass"
+            ),
+        )
+        self.assertIn(
+            "player",
+            allowlist,
+            msg=(
+                "event_incidents allowlist must let player rows through — "
+                "incidents carry the scorer / assister / substituted-in "
+                "blocks, and Fix D stub-upsert can only protect FK targets "
+                "the sink actually forwards"
+            ),
+        )
+
+    def test_default_allowlist_for_event_statistics_includes_team(self) -> None:
+        from schema_inspector.normalizers.sink import (
+            DEFAULT_ENTITY_KIND_ALLOWLIST_BY_PARSER_FAMILY,
+        )
+
+        allowlist = DEFAULT_ENTITY_KIND_ALLOWLIST_BY_PARSER_FAMILY["event_statistics"]
+        self.assertIn(
+            "team",
+            allowlist,
+            msg=(
+                "event_statistics allowlist must let team rows through — "
+                "home/away team blocks should hit the parent pass so live "
+                "stats arriving before the /event root cannot trip the team "
+                "FK on event_player_statistics or event_team_heatmap rows "
+                "persisted in the same transaction"
+            ),
+        )
+
+    async def test_sink_forwards_team_and_player_for_incidents(self) -> None:
+        from schema_inspector.normalizers.sink import DurableNormalizeSink
+
+        repository = _AsyncCapturingRepository()
+        sink = DurableNormalizeSink(repository, sql_executor=object())
+        result = ParseResult(
+            snapshot_id=1001,
+            parser_family="event_incidents",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 555, "slug": "ev"},),
+                "team": ({"id": 200, "slug": "home", "name": "Home FC"},),
+                "player": ({"id": 7000, "slug": "scorer", "name": "Scorer"},),
+            },
+        )
+
+        await sink(result)
+
+        self.assertEqual(len(repository.calls), 1)
+        forwarded_result, _ = repository.calls[0]
+        forwarded_kinds = set(forwarded_result.entity_upserts.keys())
+        self.assertIn("team", forwarded_kinds)
+        self.assertIn("player", forwarded_kinds)
+        self.assertEqual(
+            forwarded_result.entity_upserts["player"],
+            ({"id": 7000, "slug": "scorer", "name": "Scorer"},),
+        )
+        self.assertEqual(
+            forwarded_result.entity_upserts["team"],
+            ({"id": 200, "slug": "home", "name": "Home FC"},),
+        )
+
+    async def test_sink_forwards_team_for_statistics(self) -> None:
+        from schema_inspector.normalizers.sink import DurableNormalizeSink
+
+        repository = _AsyncCapturingRepository()
+        sink = DurableNormalizeSink(repository, sql_executor=object())
+        result = ParseResult(
+            snapshot_id=1002,
+            parser_family="event_statistics",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 600},),
+                "team": ({"id": 301, "slug": "away", "name": "Away FC"},),
+                # event_statistics still drops player — only team/event flow
+                "player": ({"id": 8000, "name": "Should be dropped"},),
+            },
+        )
+
+        await sink(result)
+
+        forwarded_result, _ = repository.calls[0]
+        forwarded_kinds = set(forwarded_result.entity_upserts.keys())
+        self.assertIn("team", forwarded_kinds)
+        self.assertNotIn(
+            "player",
+            forwarded_kinds,
+            msg=(
+                "event_statistics should still drop player blocks — "
+                "team-side aggregate stats never reference individual "
+                "players in the schema"
+            ),
+        )
+
+    async def test_incidents_with_nameless_player_lands_as_stub_via_sink(self) -> None:
+        """End-to-end sanity: an incidents payload that produced a partial
+        ``{"id": X}`` stub must propagate through the sink AND be persisted
+        as a stub-row by the repository. Without Fix E the sink swallows
+        the player; without Fix D the repository swallows it. Both have
+        to cooperate for the FK target to actually appear in PostgreSQL."""
+
+        from schema_inspector.normalizers.sink import DurableNormalizeSink
+
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=1003,
+            parser_family="event_incidents",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 8888, "slug": "e"},),
+                "player": (
+                    {"id": 99999},  # nameless stub from incident.player
+                ),
+            },
+        )
+
+        await sink(result)
+
+        player_insert_sqls = [
+            " ".join(sql.split()).upper()
+            for sql, _ in executor.executemany_calls
+            if "INSERT INTO player" in sql
+        ]
+        self.assertTrue(
+            player_insert_sqls,
+            msg=(
+                "Sink + repository did not persist the nameless player "
+                "stub at all — either sink dropped it (Fix E regression) "
+                "or repository skipped it (Fix D regression)"
+            ),
+        )
+        self.assertTrue(
+            any("ON CONFLICT (ID) DO NOTHING" in sql for sql in player_insert_sqls),
+            msg=(
+                "Nameless player from incidents must land on the stub track "
+                "(ON CONFLICT (id) DO NOTHING), not the real DO UPDATE track"
             ),
         )
 
