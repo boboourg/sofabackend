@@ -41,8 +41,12 @@ class _FakePool:
     def __init__(self, connection: _FakeConnection) -> None:
         self.connection = connection
         self.release_calls = 0
+        self.acquire_calls: list[dict[str, object]] = []
 
-    async def acquire(self) -> _FakeConnection:
+    async def acquire(self, **kwargs) -> _FakeConnection:
+        # Stage 1.4 (2026-05-20): record acquire-time kwargs so tests
+        # can assert ``timeout`` is propagated from AsyncpgDatabase.
+        self.acquire_calls.append(kwargs)
         return self.connection
 
     async def release(self, connection: _FakeConnection) -> None:
@@ -120,6 +124,78 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(kwargs["dsn"], config.dsn)
         self.assertNotIn("host", kwargs)
         self.assertEqual(kwargs["server_settings"], {"application_name": "local_api"})
+
+
+# ---------------------------------------------------------------------------
+# Stage 1.4 (2026-05-20 stability re-audit): pool.acquire() must use an
+# explicit timeout. Without it a saturated pool turns workers into zombies
+# stuck on await pool.acquire() — SIGTERM cannot interrupt that await,
+# systemd waits 90s then SIGKILLs, the open transaction lingers until
+# TCP keepalive expires (~5min).
+#
+# Constraint #2a (Бобур, 2026-05-20): "падать по таймауту → уходить
+# в ретрай, а не висеть зомби-процессом".
+# ---------------------------------------------------------------------------
+
+
+class PoolAcquireTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_database_config_exposes_acquire_timeout(self) -> None:
+        config = DatabaseConfig(dsn="postgresql://example")
+        self.assertTrue(
+            hasattr(config, "acquire_timeout"),
+            msg="DatabaseConfig must expose acquire_timeout (default 30s)",
+        )
+        self.assertGreater(
+            getattr(config, "acquire_timeout"),
+            0,
+            msg="acquire_timeout default must be > 0",
+        )
+
+    async def test_connection_passes_timeout_to_pool_acquire(self) -> None:
+        connection = _FakeConnection()
+        database = AsyncpgDatabase(
+            DatabaseConfig(dsn="postgresql://example", acquire_timeout=12.5)
+        )
+        pool = _FakePool(connection)
+        database._pool = pool
+
+        async with database.connection() as conn:
+            self.assertIs(conn, connection)
+
+        self.assertEqual(len(pool.acquire_calls), 1)
+        self.assertEqual(pool.acquire_calls[0].get("timeout"), 12.5)
+
+    async def test_connection_raises_timeout_when_pool_hangs(self) -> None:
+        import asyncio
+
+        class _HangingPool:
+            async def acquire(self, *, timeout: float):
+                # Simulate asyncpg.Pool.acquire semantics: it wraps the
+                # internal acquire-wait with wait_for(timeout) and lets
+                # asyncio.TimeoutError bubble up. We mirror that here so
+                # the test guarantees AsyncpgDatabase.connection
+                # propagates the timeout, not silences it.
+                async def _wait_forever():
+                    await asyncio.sleep(timeout * 100)
+                await asyncio.wait_for(_wait_forever(), timeout=timeout)
+                raise AssertionError("unreachable — wait_for must raise")
+
+            async def release(self, connection):  # noqa: ARG002
+                pass
+
+        database = AsyncpgDatabase(
+            DatabaseConfig(dsn="postgresql://example", acquire_timeout=0.05)
+        )
+        database._pool = _HangingPool()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            async with database.connection():
+                self.fail("body should not be entered")
+
+
+# ---------------------------------------------------------------------------
+# End Stage 1.4 tests
+# ---------------------------------------------------------------------------
 
 
 class DatabaseFallbackTests(unittest.IsolatedAsyncioTestCase):

@@ -558,6 +558,12 @@ class NormalizeRepository:
                 and row.get("id") not in self._known_minimal_entities["manager"]
             )
         ]
+        # Stage 1.1 (2026-05-20 stability re-audit): same id-sort discipline
+        # as player upsert. manager is DO UPDATE (not DO NOTHING), so two
+        # concurrent transactions both holding row-locks on Guardiola /
+        # Ancelotti / Mourinho in reverse order would deadlock.
+        if manager_rows:
+            manager_rows.sort(key=lambda row: row[0])
         if manager_rows:
             await _executemany(
                 executor,
@@ -700,6 +706,13 @@ class NormalizeRepository:
             )
         team_rows.sort(key=lambda row: (row[11] is not None, row[11] or 0, row[0]))
         if team_rows:
+            # Stage 1.2 (2026-05-20 stability re-audit): WHERE
+            # IS DISTINCT FROM guard. For COALESCE-based SETs we
+            # compare against the COMPUTED post-update value (i.e.
+            # COALESCE(EXCLUDED.col, team.col)) — if EXCLUDED.col
+            # is NULL, the computed value equals the current value,
+            # IS DISTINCT FROM is false, and the row is left alone
+            # so no dead tuple is created.
             await _executemany(
                 executor,
                 """
@@ -723,6 +736,19 @@ class NormalizeRepository:
                         team.primary_unique_tournament_id
                     ),
                     parent_team_id = COALESCE(EXCLUDED.parent_team_id, team.parent_team_id)
+                WHERE
+                    team.slug IS DISTINCT FROM EXCLUDED.slug
+                    OR team.name IS DISTINCT FROM EXCLUDED.name
+                    OR team.short_name IS DISTINCT FROM COALESCE(EXCLUDED.short_name, team.short_name)
+                    OR team.sport_id IS DISTINCT FROM COALESCE(EXCLUDED.sport_id, team.sport_id)
+                    OR team.category_id IS DISTINCT FROM COALESCE(EXCLUDED.category_id, team.category_id)
+                    OR team.country_alpha2 IS DISTINCT FROM COALESCE(EXCLUDED.country_alpha2, team.country_alpha2)
+                    OR team.manager_id IS DISTINCT FROM COALESCE(EXCLUDED.manager_id, team.manager_id)
+                    OR team.venue_id IS DISTINCT FROM COALESCE(EXCLUDED.venue_id, team.venue_id)
+                    OR team.tournament_id IS DISTINCT FROM COALESCE(EXCLUDED.tournament_id, team.tournament_id)
+                    OR team.primary_unique_tournament_id IS DISTINCT FROM
+                        COALESCE(EXCLUDED.primary_unique_tournament_id, team.primary_unique_tournament_id)
+                    OR team.parent_team_id IS DISTINCT FROM COALESCE(EXCLUDED.parent_team_id, team.parent_team_id)
                 """,
                 team_rows,
             )
@@ -821,7 +847,22 @@ class NormalizeRepository:
             else:
                 stub_name = f"Unknown Player #{player_id}"
                 stub_player_rows.append((player_id, None, stub_name, None, team_id))
+        # Stage 1.1 (2026-05-20 stability re-audit): sort by id BEFORE
+        # executemany. Two parallel hydrate transactions touching the
+        # same star players (Ronaldo in Portugal-A vs Ronaldo in
+        # Al-Nassr-B simultaneously) must take row-locks in the SAME
+        # order in both transactions; otherwise Postgres raises
+        # 40P01 DeadlockDetected. Parser output order is payload-order
+        # — non-deterministic between snapshots — so we impose a
+        # canonical (ascending-by-id) order at the storage boundary.
         if real_player_rows:
+            real_player_rows.sort(key=lambda row: row[0])
+            # Stage 1.2 (2026-05-20 stability re-audit): WHERE
+            # IS DISTINCT FROM guard. No COALESCE here — the real
+            # branch overwrites with EXCLUDED.*, so the guard is
+            # the simple direct form. Identical lineup ticks
+            # (720x/hour for tier-1) on unchanged players now
+            # produce zero row-versions.
             await _executemany(
                 executor,
                 """
@@ -832,6 +873,11 @@ class NormalizeRepository:
                     name = EXCLUDED.name,
                     short_name = EXCLUDED.short_name,
                     team_id = EXCLUDED.team_id
+                WHERE
+                    player.slug IS DISTINCT FROM EXCLUDED.slug
+                    OR player.name IS DISTINCT FROM EXCLUDED.name
+                    OR player.short_name IS DISTINCT FROM EXCLUDED.short_name
+                    OR player.team_id IS DISTINCT FROM EXCLUDED.team_id
                 """,
                 real_player_rows,
             )
@@ -842,7 +888,11 @@ class NormalizeRepository:
             # Stub branch: DO NOTHING — never downgrade a real player to
             # ``Unknown Player #<id>``. If the row is genuinely new the
             # stub becomes the FK target; if it already exists the real
-            # name is preserved.
+            # name is preserved. Same id-sort discipline as the real
+            # branch: both branches take row-locks on the SAME tuples
+            # when an id appears in both lists across two concurrent
+            # transactions.
+            stub_player_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -989,6 +1039,39 @@ class NormalizeRepository:
                         ELSE COALESCE(EXCLUDED.status_code, event.status_code)
                     END,
                     start_timestamp = EXCLUDED.start_timestamp
+                WHERE
+                    -- Stage 1.2 + Constraint #1 (2026-05-20): WHERE guard
+                    -- evaluated by Postgres planner BEFORE the UPDATE.
+                    -- When false, the UPDATE is suppressed and the
+                    -- BEFORE UPDATE trigger ``set_event_updated_at``
+                    -- does not fire, so ``updated_at`` correctly
+                    -- preserves the value from the last meaningful
+                    -- change. For COALESCE columns we compare against
+                    -- the post-update computed value so NULL incoming
+                    -- payload does NOT trigger a no-op UPDATE.
+                    -- For ``status_code`` the CASE expression is the
+                    -- post-update value, mirrored here exactly.
+                    event.slug IS DISTINCT FROM COALESCE(EXCLUDED.slug, event.slug)
+                    OR event.tournament_id IS DISTINCT FROM COALESCE(EXCLUDED.tournament_id, event.tournament_id)
+                    OR event.unique_tournament_id IS DISTINCT FROM
+                        COALESCE(EXCLUDED.unique_tournament_id, event.unique_tournament_id)
+                    OR event.season_id IS DISTINCT FROM COALESCE(EXCLUDED.season_id, event.season_id)
+                    OR event.home_team_id IS DISTINCT FROM COALESCE(EXCLUDED.home_team_id, event.home_team_id)
+                    OR event.away_team_id IS DISTINCT FROM COALESCE(EXCLUDED.away_team_id, event.away_team_id)
+                    OR event.venue_id IS DISTINCT FROM COALESCE(EXCLUDED.venue_id, event.venue_id)
+                    OR event.status_code IS DISTINCT FROM CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM event_terminal_state ets
+                            WHERE ets.event_id = event.id
+                              AND ets.terminal_status IN (
+                                  'finished', 'afterextra', 'afterpen',
+                                  'cancelled', 'canceled', 'postponed'
+                              )
+                        )
+                        THEN COALESCE(event.status_code, EXCLUDED.status_code)
+                        ELSE COALESCE(EXCLUDED.status_code, event.status_code)
+                    END
+                    OR event.start_timestamp IS DISTINCT FROM EXCLUDED.start_timestamp
                 """,
                 event_rows,
             )
@@ -2017,6 +2100,20 @@ class NormalizeRepository:
                 statistics_type = EXCLUDED.statistics_type,
                 sport_slug = EXCLUDED.sport_slug,
                 extra_json = EXCLUDED.extra_json
+            WHERE
+                -- Stage 1.2 (2026-05-20 stability re-audit): direct
+                -- EXCLUDED comparison (no COALESCE in SET — overwrite
+                -- branch). Identical ticks on the same player keep
+                -- the row untouched, eliminating 15 840 dead tuples/h
+                -- per tier-1 match on the live-tick path.
+                event_player_statistics.team_id IS DISTINCT FROM EXCLUDED.team_id
+                OR event_player_statistics.position IS DISTINCT FROM EXCLUDED.position
+                OR event_player_statistics.rating IS DISTINCT FROM EXCLUDED.rating
+                OR event_player_statistics.rating_original IS DISTINCT FROM EXCLUDED.rating_original
+                OR event_player_statistics.rating_alternative IS DISTINCT FROM EXCLUDED.rating_alternative
+                OR event_player_statistics.statistics_type IS DISTINCT FROM EXCLUDED.statistics_type
+                OR event_player_statistics.sport_slug IS DISTINCT FROM EXCLUDED.sport_slug
+                OR event_player_statistics.extra_json IS DISTINCT FROM EXCLUDED.extra_json
             """,
             normalized_rows,
         )

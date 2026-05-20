@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 from curl_cffi.requests import RequestsError
 
 
@@ -52,6 +54,12 @@ def is_retryable_worker_error(exc: Exception) -> bool:
         return True
     if _is_retryable_upstream_error(exc):
         return True
+    # Stage 1.5 (2026-05-20 stability re-audit, Constraint #2b):
+    # ANY Redis error (ConnectionError, TimeoutError, BusyLoadingError,
+    # ReadOnlyError, …) is transient — Redis cluster recovers in
+    # seconds, the job must be retried, not crash the worker.
+    if _is_redis_error(exc):
+        return True
 
     sqlstate = str(getattr(exc, "sqlstate", "") or "").upper()
     if sqlstate in _RETRYABLE_SQLSTATES:
@@ -59,6 +67,16 @@ def is_retryable_worker_error(exc: Exception) -> bool:
 
     rendered = f"{exc.__class__.__name__} {exc}".lower()
     return any(marker in rendered for marker in _RETRYABLE_MARKERS)
+
+
+def _is_redis_error(exc: Exception) -> bool:
+    """Lazy import so retry_policy does not hard-depend on redis-py
+    at module import time (some test environments stub it out)."""
+    try:
+        from redis.exceptions import RedisError
+    except Exception:  # pragma: no cover — defensive
+        return False
+    return isinstance(exc, RedisError)
 
 
 def retry_audit_status(exc: Exception) -> str:
@@ -76,7 +94,11 @@ def retry_delay_ms(
     exc: Exception | None = None,
     base_ms: int = 5_000,
     cap_ms: int = 60_000,
+    jitter: bool = True,
 ) -> int:
+    # Explicit caller-supplied delay (AdmissionDeferred with delay_ms,
+    # 429 retry-after hint) bypasses both the exponential schedule AND
+    # the jitter — the caller is signalling a precise delay.
     custom_delay_ms = getattr(exc, "delay_ms", None)
     if custom_delay_ms is not None:
         return max(0, int(custom_delay_ms))
@@ -92,7 +114,18 @@ def retry_delay_ms(
             cap_ms = 180_000
     normalized_attempt = max(1, int(attempt))
     multiplier = 2 ** (normalized_attempt - 1)
-    return min(int(cap_ms), int(base_ms) * multiplier)
+    raw_delay = min(int(cap_ms), int(base_ms) * multiplier)
+    if not jitter:
+        return raw_delay
+    # Stage 1.3 (2026-05-20 stability re-audit): ±20% multiplicative
+    # jitter. Without it, 9 hydrate workers all hitting the same
+    # deadlock wake up at the exact same instant (5s, 10s, 20s, …)
+    # and re-collide in lock-step. With jitter their wake-up times
+    # spread across [0.8·delay, 1.2·delay], breaking the synchronous
+    # storm. Result is clamped to cap_ms so jitter cannot push above
+    # the schedule ceiling (and never below 0 for sanity).
+    jittered = int(raw_delay * random.uniform(0.8, 1.2))
+    return max(0, min(int(cap_ms), jittered))
 
 
 def _is_retryable_upstream_error(exc: Exception) -> bool:

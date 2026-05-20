@@ -181,7 +181,13 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.run_forever(install_signal_handlers=False)
 
-        self.assertEqual(retries, [("1-2", 10_000)])
+        # Stage 1.3 (2026-05-20): retry_delay_ms now applies ±20%
+        # jitter by default. Test expected 10_000 ms → allow
+        # [8_000, 12_000] window. msg_id stays exact.
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0][0], "1-2")
+        self.assertGreaterEqual(retries[0][1], 8_000)
+        self.assertLessEqual(retries[0][1], 12_000)
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-2",))])
 
     async def test_worker_runtime_records_successful_job_runs(self) -> None:
@@ -278,7 +284,11 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.run_forever(install_signal_handlers=False)
 
-        self.assertEqual(retries, [("1-5", 5_000)])
+        # Stage 1.3 (2026-05-20): jitter ±20% → window [4_000, 6_000].
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0][0], "1-5")
+        self.assertGreaterEqual(retries[0][1], 4_000)
+        self.assertLessEqual(retries[0][1], 6_000)
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5",))])
 
     async def test_worker_runtime_requeues_upstream_access_denied_errors_via_callback(self) -> None:
@@ -312,7 +322,11 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.run_forever(install_signal_handlers=False)
 
-        self.assertEqual(retries, [("1-5b", 30_000)])
+        # Stage 1.3 (2026-05-20): jitter ±20% → window [24_000, 36_000].
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0][0], "1-5b")
+        self.assertGreaterEqual(retries[0][1], 24_000)
+        self.assertLessEqual(retries[0][1], 36_000)
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5b",))])
 
     async def test_worker_runtime_requeues_transport_requests_errors_via_callback(self) -> None:
@@ -345,7 +359,11 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await runtime.run_forever(install_signal_handlers=False)
 
-        self.assertEqual(retries, [("1-5c", 20_000)])
+        # Stage 1.3 (2026-05-20): jitter ±20% → window [16_000, 24_000].
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0][0], "1-5c")
+        self.assertGreaterEqual(retries[0][1], 16_000)
+        self.assertLessEqual(retries[0][1], 24_000)
         self.assertEqual(queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("1-5c",))])
 
     async def test_worker_runtime_uses_custom_retry_delay_for_admission_deferrals(self) -> None:
@@ -606,12 +624,144 @@ class WorkerRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unknown handler failure", str(caught.exception))
 
 
+# ---------------------------------------------------------------------------
+# Stage 1.6 (2026-05-20 stability re-audit): cap on explicit retry
+# attempts. Without it, a permanently-retryable job (e.g. an upstream
+# endpoint returning a stuck lock_timeout for hours) cycles forever:
+# retry_handler → delayed_scheduler → re-publish (new message_id, attempt
+# incremented) → retry_handler → ... The maintenance_worker DLQ path only
+# triggers on RECLAIM-based delivery_count, not on explicit retry attempts.
+# So permanently-retryable jobs poison the delayed-payload store forever.
+# ---------------------------------------------------------------------------
+
+
+class WorkerRuntimeRetryAttemptCapTests(unittest.IsolatedAsyncioTestCase):
+    """Use direct _handle_entry() calls — run_forever() would loop until
+    request_shutdown, but in the cap-exceeded path the runtime doesn't
+    invoke retry_handler (where the existing tests trigger shutdown).
+    Single-entry _handle_entry() is the precise test point anyway."""
+
+    async def test_attempt_above_cap_routes_job_to_dlq_instead_of_retry(self) -> None:
+        from schema_inspector.queue.streams import STREAM_DLQ
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(entries=())
+        entry = StreamEntry(
+            stream=STREAM_HYDRATE,
+            message_id="cap-1",
+            values={"job_id": "job-cap-1", "attempt": "11"},
+        )
+        retries: list[tuple[str, int]] = []
+
+        async def handler(e: StreamEntry) -> str:
+            del e
+            raise RuntimeError("deadlock detected — would normally retry")
+
+        async def on_retry(e: StreamEntry, exc: Exception, *, delay_ms: int) -> None:
+            del exc
+            retries.append((e.message_id, delay_ms))
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            retry_handler=on_retry,
+            block_ms=0,
+        )
+
+        outcome = await runtime._handle_entry(entry)
+
+        # 1) retry_handler must NOT have been called.
+        self.assertEqual(
+            retries, [],
+            msg=(
+                "When attempt > MAX_RETRY_ATTEMPTS, the runtime must NOT "
+                "invoke retry_handler. Instead the job goes to DLQ."
+            ),
+        )
+        # 2) Outcome marker.
+        self.assertEqual(
+            outcome, "dlq_max_attempts",
+            msg="Outcome marker must be 'dlq_max_attempts' for ops audit",
+        )
+        # 3) Job published to STREAM_DLQ with dlq_reason.
+        dlq_publishes = [
+            (stream, values) for stream, values in queue.published
+            if stream == STREAM_DLQ
+        ]
+        self.assertEqual(
+            len(dlq_publishes), 1,
+            msg=(
+                "Job must be published to STREAM_DLQ exactly once when "
+                f"attempt cap exceeded. Published: {queue.published}"
+            ),
+        )
+        _, published_values = dlq_publishes[0]
+        self.assertEqual(
+            published_values.get("dlq_reason"),
+            "max_retry_attempts_exceeded",
+            msg="DLQ entry must carry explicit reason marker for ops triage",
+        )
+        # 4) Original message ack'd so it leaves the PEL.
+        self.assertEqual(
+            queue.acked, [(STREAM_HYDRATE, "cg:hydrate", ("cap-1",))],
+        )
+
+    async def test_attempt_below_cap_retries_normally(self) -> None:
+        """Sanity: attempt=5 (below default cap=10) still uses retry path."""
+        from schema_inspector.services.worker_runtime import WorkerRuntime
+
+        queue = _FakeQueue(entries=())
+        entry = StreamEntry(
+            stream=STREAM_HYDRATE,
+            message_id="cap-ok",
+            values={"job_id": "job-cap-ok", "attempt": "5"},
+        )
+        retries: list[tuple[str, int]] = []
+
+        async def handler(e: StreamEntry) -> str:
+            del e
+            raise RuntimeError("deadlock detected")
+
+        async def on_retry(e: StreamEntry, exc: Exception, *, delay_ms: int) -> None:
+            del exc
+            retries.append((e.message_id, delay_ms))
+
+        runtime = WorkerRuntime(
+            name="hydrate",
+            queue=queue,
+            stream=STREAM_HYDRATE,
+            group="cg:hydrate",
+            consumer="worker-a",
+            handler=handler,
+            retry_handler=on_retry,
+            block_ms=0,
+        )
+
+        outcome = await runtime._handle_entry(entry)
+
+        self.assertEqual(outcome, "requeued")
+        self.assertEqual(len(retries), 1, msg="Below-cap retries must go through retry_handler")
+        self.assertEqual(retries[0][0], "cap-ok")
+        # No DLQ publish below cap.
+        self.assertEqual(
+            queue.published, [],
+            msg="Below-cap attempts must NOT publish to DLQ",
+        )
+
+
 class _FakeQueue:
     def __init__(self, *, entries: tuple[StreamEntry, ...]) -> None:
         self._entries = list(entries)
         self.acked: list[tuple[str, str, tuple[str, ...]]] = []
         self.read_calls = 0
         self.read_counts: list[int] = []
+        # Stage 1.6 (2026-05-20 stability re-audit): capture publish
+        # calls so DLQ-cap tests can assert STREAM_DLQ was used.
+        self.published: list[tuple[str, dict[str, object]]] = []
 
     def read_group(
         self,
@@ -635,6 +785,11 @@ class _FakeQueue:
     def ack(self, stream: str, group: str, message_ids: tuple[str, ...]) -> int:
         self.acked.append((stream, group, message_ids))
         return len(message_ids)
+
+    def publish(self, stream: str, values: dict[str, object]) -> str:
+        # Stage 1.6: publish to DLQ. Returns a fake message_id.
+        self.published.append((stream, dict(values)))
+        return f"dlq-{len(self.published)}"
 
 
 class _FakeAuditLogger:

@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 _ENV_MAX_CONCURRENCY = "SOFASCORE_WORKER_MAX_CONCURRENCY"
 _ENV_COMPLETION_TTL_MS = "SOFASCORE_WORKER_COMPLETION_TTL_MS"
 _DEFAULT_COMPLETION_TTL_MS = 3_600_000  # 1 hour; was 24h — see Fix #3 (Apr 2026).
+# Stage 1.6 (2026-05-20 stability re-audit): cap on explicit retry
+# attempts. The MaintenanceWorker reclaim-path DLQ trigger only fires
+# on delivery_count (reclaim-of-stuck-PEL). Explicit retry through
+# delayed_scheduler re-publishes with a fresh message_id and resets
+# delivery_count, so a permanently-retryable job (stuck lock_timeout,
+# bad payload, dead upstream endpoint) would otherwise cycle forever.
+# Default cap = 10 attempts. Override via SOFASCORE_MAX_RETRY_ATTEMPTS.
+_ENV_MAX_RETRY_ATTEMPTS = "SOFASCORE_MAX_RETRY_ATTEMPTS"
+_DEFAULT_MAX_RETRY_ATTEMPTS = 10
 
 
 @dataclass(frozen=True)
@@ -295,7 +304,51 @@ class WorkerRuntime:
                 outcome = await _await_maybe(self.handler(entry))
             except Exception as exc:
                 if self.retry_handler is not None and is_retryable_worker_error(exc):
-                    delay_ms = retry_delay_ms(attempt=_entry_attempt(entry), exc=exc)
+                    # Stage 1.6 (2026-05-20 stability re-audit): hard cap
+                    # on explicit retry attempts. The retry-via-delayed
+                    # path resets delivery_count, so we have to check
+                    # the application-level ``attempt`` counter that
+                    # DelayedPayloadStore.save_entry increments.
+                    attempt = _entry_attempt(entry)
+                    max_attempts = _env_positive_int(
+                        _ENV_MAX_RETRY_ATTEMPTS, _DEFAULT_MAX_RETRY_ATTEMPTS
+                    )
+                    if attempt > max_attempts:
+                        # Publish to DLQ with explicit reason, ack the
+                        # original message so it leaves the PEL. The
+                        # exception itself is recorded as ``failed`` —
+                        # ops triages via /ops/jobs/runs + STREAM_DLQ.
+                        from ..queue.streams import STREAM_DLQ
+                        logger.warning(
+                            "Worker %s exhausted retry attempts (attempt=%d > cap=%d) — "
+                            "routing to DLQ: stream=%s message_id=%s exc_type=%s exc=%r",
+                            self.name, attempt, max_attempts,
+                            entry.stream, entry.message_id,
+                            type(exc).__name__, exc,
+                        )
+                        self.queue.publish(
+                            STREAM_DLQ,
+                            {
+                                **entry.values,
+                                "source_stream": entry.stream,
+                                "source_group": self.group,
+                                "source_message_id": entry.message_id,
+                                "dlq_reason": "max_retry_attempts_exceeded",
+                                "final_attempt": str(attempt),
+                            },
+                        )
+                        await self._record_job_run(
+                            entry,
+                            status="failed",
+                            started_at=started_at,
+                            duration_ms=_duration_ms(started_perf),
+                            error=exc,
+                            job_context=job_context,
+                        )
+                        self.queue.ack(entry.stream, self.group, (entry.message_id,))
+                        return "dlq_max_attempts"
+
+                    delay_ms = retry_delay_ms(attempt=attempt, exc=exc)
                     retry_status = retry_audit_status(exc)
                     # Structured retry diagnostics (2026-05-13 firebreak):
                     # raw `exc=%s` for empty-args exceptions (TimeoutError())

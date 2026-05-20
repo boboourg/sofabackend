@@ -450,7 +450,12 @@ class DiscoveryWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "requeued")
         self.assertEqual(payload_store.saved_message_ids, ["1-10"])
-        self.assertEqual(scheduler.calls, [("job-10", 1_800_000_030_000)])
+        # Stage 1.3 (2026-05-20): jitter ±20% on the 30_000 ms base
+        # delay → resume_at window [1_800_000_024_000, 1_800_000_036_000].
+        self.assertEqual(len(scheduler.calls), 1)
+        self.assertEqual(scheduler.calls[0][0], "job-10")
+        self.assertGreaterEqual(scheduler.calls[0][1], 1_800_000_024_000)
+        self.assertLessEqual(scheduler.calls[0][1], 1_800_000_036_000)
         self.assertEqual(queue.acked, [(STREAM_DISCOVERY, "cg:discovery", ("1-10",))])
 
 

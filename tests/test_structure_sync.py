@@ -238,7 +238,12 @@ class StructureWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "requeued")
         self.assertEqual(payload_store.saved_message_ids, ["1-1"])
-        self.assertEqual(scheduler.calls, [(str(entry.values["job_id"]), 1_800_000_030_000)])
+        # Stage 1.3 (2026-05-20): jitter ±20% on 30_000 ms → window
+        # [1_800_000_024_000, 1_800_000_036_000].
+        self.assertEqual(len(scheduler.calls), 1)
+        self.assertEqual(scheduler.calls[0][0], str(entry.values["job_id"]))
+        self.assertGreaterEqual(scheduler.calls[0][1], 1_800_000_024_000)
+        self.assertLessEqual(scheduler.calls[0][1], 1_800_000_036_000)
         self.assertEqual(queue.acked, [(STREAM_STRUCTURE_SYNC, GROUP_STRUCTURE_SYNC, ("1-1",))])
 
 

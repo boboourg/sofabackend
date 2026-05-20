@@ -1852,5 +1852,338 @@ class SinkAllowlistForIncidentsAndStatisticsTests(unittest.IsolatedAsyncioTestCa
         )
 
 
+# ---------------------------------------------------------------------------
+# Stage 1.1 (2026-05-20 stability re-audit): sort bulk-upsert rows by id
+# before executemany so two concurrent transactions ALWAYS take row-locks in
+# the SAME order. Without this, parser-output order is payload-order, which
+# differs between snapshots (lineups vs incidents vs best-players give the
+# same star players in different orders). Two workers processing different
+# events with overlapping star players → reverse lock-acquisition order →
+# Postgres 40P01 DeadlockDetected.
+#
+# Covers: _upsert_child_pass (real_player_rows + stub_player_rows) and
+# _upsert_parent_pass (manager_rows). team is already sorted by
+# (parent_team_id IS NOT NULL, parent_team_id, id) in _upsert_dependent_pass,
+# so it stays as is.
+# ---------------------------------------------------------------------------
+
+
+class BulkUpsertRowsSortedByIdTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_player_rows_sorted_by_id_before_executemany(self) -> None:
+        """Real-player branch of _upsert_child_pass must order rows by id
+        ascending so two parallel transactions take player row-locks in the
+        same order and cannot deadlock."""
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=7001,
+            parser_family="event_lineups",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 9001},),
+                # Intentionally REVERSED + interleaved: payload order from
+                # SofaScore is arbitrary; without sort the deadlock window
+                # is the size of any common subset.
+                "player": (
+                    {"id": 300, "name": "Charlie"},
+                    {"id": 100, "name": "Alice"},
+                    {"id": 200, "name": "Bob"},
+                ),
+            },
+        )
+
+        await sink(result)
+
+        player_real_inserts = [
+            rows
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO player" in sql and "DO UPDATE" in sql
+        ]
+        self.assertEqual(
+            len(player_real_inserts), 1,
+            msg="Expected exactly one DO UPDATE batch for real players",
+        )
+        emitted_ids = [row[0] for row in player_real_inserts[0]]
+        self.assertEqual(
+            emitted_ids, [100, 200, 300],
+            msg=(
+                "Real player rows must be sorted by id ascending before "
+                f"executemany to prevent deadlock. Got {emitted_ids}."
+            ),
+        )
+
+    async def test_stub_player_rows_sorted_by_id_before_executemany(self) -> None:
+        """Stub-player branch (Fix D, 2026-05-20) takes the same row-locks
+        as the real branch — it must use the same ordering discipline."""
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=7002,
+            parser_family="event_incidents",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 9002},),
+                # All nameless ⇒ all land on the stub track.
+                "player": (
+                    {"id": 700},
+                    {"id": 500},
+                    {"id": 600},
+                ),
+            },
+        )
+
+        await sink(result)
+
+        player_stub_inserts = [
+            rows
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO player" in sql and "DO NOTHING" in sql
+        ]
+        self.assertEqual(
+            len(player_stub_inserts), 1,
+            msg="Expected exactly one DO NOTHING batch for stub players",
+        )
+        emitted_ids = [row[0] for row in player_stub_inserts[0]]
+        self.assertEqual(
+            emitted_ids, [500, 600, 700],
+            msg=(
+                "Stub player rows must be sorted by id ascending before "
+                f"executemany. Got {emitted_ids}."
+            ),
+        )
+
+    async def test_manager_rows_sorted_by_id_before_executemany(self) -> None:
+        """manager upsert in _upsert_parent_pass is DO UPDATE (not DO
+        NOTHING), so two parallel transactions touching the same managers
+        (Pep at City + Pep mentioned as guest pundit in another match)
+        contend on row locks just like player. Sort by id."""
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=7003,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 9003},),
+                "manager": (
+                    {"id": 33, "name": "Pep Guardiola"},
+                    {"id": 11, "name": "Carlo Ancelotti"},
+                    {"id": 22, "name": "Jürgen Klopp"},
+                ),
+            },
+        )
+
+        await sink(result)
+
+        manager_inserts = [
+            rows
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO manager" in sql
+        ]
+        self.assertEqual(
+            len(manager_inserts), 1,
+            msg="Expected exactly one INSERT INTO manager batch",
+        )
+        emitted_ids = [row[0] for row in manager_inserts[0]]
+        self.assertEqual(
+            emitted_ids, [11, 22, 33],
+            msg=(
+                "Manager rows must be sorted by id ascending before "
+                f"executemany. Got {emitted_ids}."
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1.2 (2026-05-20 stability re-audit): idempotency guard via
+# WHERE ... IS DISTINCT FROM EXCLUDED.* on ON CONFLICT DO UPDATE.
+#
+# Without the guard, every live tick (every 5-90s) writes a new row-version
+# even when payload is identical to the previous tick. At fillfactor=100
+# (project default — verified empty `grep fillfactor postgres_schema.sql`)
+# this means each rewrite is a non-HOT update — every index page gets a
+# new entry. Observed bloat: player ~118k dead tuples/h on 1 tier-1 match,
+# event_player_statistics ~16k/h.
+#
+# Constraint #1 (Бобур, 2026-05-20): the guard must interact CORRECTLY with
+# the BEFORE UPDATE trigger `set_event_updated_at` on the event table.
+# Postgres semantics: `INSERT ... ON CONFLICT DO UPDATE ... WHERE pred`
+# evaluates the WHERE pred BEFORE the UPDATE is performed. If pred=false
+# the UPDATE is suppressed AT THE PLANNER LEVEL — the trigger does NOT
+# fire because no row update occurs. So when an identical payload is
+# upserted twice, the second pass MUST result in zero updates to `event`
+# AND the `updated_at` column MUST stay at the value from the first pass.
+#
+# These are SOURCE-LEVEL pinning tests (they assert the SQL the repository
+# emits contains the right guard tokens). Behavioural verification against
+# real PostgreSQL lives in test_storage_normalize_repository_integration.py.
+# ---------------------------------------------------------------------------
+
+
+class _GuardSourceFixture:
+    """Lazy file reader so we read normalize_repository.py once per file run."""
+
+    _text: str | None = None
+
+    @classmethod
+    def text(cls) -> str:
+        if cls._text is None:
+            cls._text = (
+                Path(__file__).resolve().parent.parent
+                / "schema_inspector"
+                / "storage"
+                / "normalize_repository.py"
+            ).read_text(encoding="utf-8")
+        return cls._text
+
+
+class IdempotencyGuardSourceTests(unittest.TestCase):
+    """Pin that each of the four hot entity upserts contains
+    `WHERE ... IS DISTINCT FROM` so identical payloads don't churn
+    new row versions and don't fire BEFORE UPDATE triggers."""
+
+    def test_team_upsert_has_is_distinct_from_guard(self) -> None:
+        import re
+        text = _GuardSourceFixture.text()
+        # Slice from 'INSERT INTO team (' to its first SQL terminator " """
+        match = re.search(
+            r"INSERT INTO team \(.*?\"\"\"",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match, msg="team upsert SQL not found")
+        block = match.group(0)
+        self.assertIn(
+            "IS DISTINCT FROM",
+            block,
+            msg=(
+                "team ON CONFLICT DO UPDATE must include WHERE "
+                "IS DISTINCT FROM guard. Without it every live tick "
+                "rewrites the same team row, generating dead tuples "
+                "and forcing every index to allocate a new entry "
+                "(fillfactor=100 default)."
+            ),
+        )
+
+    def test_real_player_upsert_has_is_distinct_from_guard(self) -> None:
+        import re
+        text = _GuardSourceFixture.text()
+        # The real-player INSERT has DO UPDATE; the stub one has DO NOTHING.
+        # We anchor on "team_id = EXCLUDED.team_id" which is unique to the
+        # real branch.
+        match = re.search(
+            r"INSERT INTO player \(id, slug, name, short_name, team_id\).*?"
+            r"team_id = EXCLUDED.team_id.*?\"\"\"",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match, msg="real-player upsert SQL not found")
+        block = match.group(0)
+        self.assertIn(
+            "IS DISTINCT FROM",
+            block,
+            msg=(
+                "real-player ON CONFLICT DO UPDATE must include WHERE "
+                "IS DISTINCT FROM guard. Identical lineup ticks 720x/hour "
+                "for a tier-1 match should produce ZERO row-versions "
+                "for unchanged players."
+            ),
+        )
+
+    def test_event_upsert_has_is_distinct_from_guard(self) -> None:
+        """Constraint #1: event upsert WHERE guard must interact
+        correctly with `set_event_updated_at` BEFORE UPDATE trigger.
+        When the guard evaluates false, Postgres suppresses the UPDATE
+        at the planner level and the trigger does not fire — so
+        `updated_at` stays at the value set on the previous tick."""
+        import re
+        text = _GuardSourceFixture.text()
+        match = re.search(
+            r"INSERT INTO event \(\s*id, slug,.*?\"\"\"",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match, msg="event upsert SQL not found")
+        block = match.group(0)
+        self.assertIn(
+            "IS DISTINCT FROM",
+            block,
+            msg=(
+                "event ON CONFLICT DO UPDATE must include WHERE "
+                "IS DISTINCT FROM guard. Without it the set_event_updated_at "
+                "trigger fires on every live tick even when payload is "
+                "identical, polluting updated_at noise and forcing "
+                "non-HOT updates across 7 indexes."
+            ),
+        )
+
+    def test_event_player_statistics_upsert_has_is_distinct_from_guard(self) -> None:
+        import re
+        text = _GuardSourceFixture.text()
+        match = re.search(
+            r"INSERT INTO event_player_statistics \(.*?\"\"\"",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(
+            match, msg="event_player_statistics upsert SQL not found"
+        )
+        block = match.group(0)
+        self.assertIn(
+            "IS DISTINCT FROM",
+            block,
+            msg=(
+                "event_player_statistics ON CONFLICT DO UPDATE must "
+                "include WHERE IS DISTINCT FROM guard. 22 players × "
+                "720 ticks/hour = 15 840 row-versions/h if every "
+                "identical tick rewrites every row."
+            ),
+        )
+
+
+class IdempotencyGuardBehaviouralTests(unittest.IsolatedAsyncioTestCase):
+    """First-time inserts must still succeed when the row does not yet
+    exist — guard must not break the INSERT path. _FakeExecutor cannot
+    simulate the WHERE-suppression branch but it can verify the SQL is
+    emitted at all (i.e. we did not gate the executemany call itself
+    behind the guard by accident)."""
+
+    async def test_first_insert_still_emits_executemany(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        sink = DurableNormalizeSink(repository, executor)
+        result = ParseResult(
+            snapshot_id=7100,
+            parser_family="event_lineups",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "event": ({"id": 71001},),
+                "player": ({"id": 4242, "name": "First-Time Player"},),
+            },
+        )
+
+        await sink(result)
+
+        player_inserts = [
+            sql
+            for sql, _ in executor.executemany_calls
+            if "INSERT INTO player" in sql and "DO UPDATE" in sql
+        ]
+        self.assertEqual(
+            len(player_inserts), 1,
+            msg=(
+                "First-time player insert must still emit executemany. "
+                "Guard belongs on the UPDATE side, not the INSERT call."
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

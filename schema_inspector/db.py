@@ -43,6 +43,16 @@ class DatabaseConfig:
     min_size: int = 20
     max_size: int = 50
     command_timeout: float = 60.0
+    # Stage 1.4 (2026-05-20 stability re-audit): explicit
+    # acquire-timeout. Without it asyncpg.Pool.acquire() defaults
+    # to ``timeout=None`` and blocks forever on a saturated pool.
+    # 9 hydrate workers × max_concurrency=2 = 18 in-flight jobs;
+    # under a burst they can exhaust pool=20 instantly. With
+    # acquire_timeout, the await fails fast → retry_policy
+    # classifies asyncio.TimeoutError as retryable → job goes
+    # into delayed scheduler instead of hanging the worker.
+    # Override via env ``SOFASCORE_PG_ACQUIRE_TIMEOUT`` (seconds).
+    acquire_timeout: float = 30.0
     application_name: str | None = None
     unix_socket_dir: str | None = None
 
@@ -111,7 +121,11 @@ class AsyncpgDatabase:
     async def connection(self) -> AsyncIterator[Any]:
         if self._pool is None:
             raise RuntimeError("Database pool is not connected.")
-        connection = await self._pool.acquire()
+        # Stage 1.4 (2026-05-20 stability re-audit): pass explicit
+        # ``timeout=`` so a saturated pool fails fast with
+        # asyncio.TimeoutError (retryable in retry_policy) instead
+        # of producing a zombie worker hung on the await.
+        connection = await self._pool.acquire(timeout=self.config.acquire_timeout)
         try:
             yield connection
         finally:
@@ -167,6 +181,8 @@ def load_database_config(
         min_size=min_size or _env_int(env, "SOFASCORE_PG_MIN_SIZE", 20),
         max_size=max_size or _env_int(env, "SOFASCORE_PG_MAX_SIZE", 50),
         command_timeout=command_timeout or _env_float(env, "SOFASCORE_PG_COMMAND_TIMEOUT", 60.0),
+        # Stage 1.4 (2026-05-20): env override for pool.acquire timeout.
+        acquire_timeout=_env_float(env, "SOFASCORE_PG_ACQUIRE_TIMEOUT", 30.0),
         application_name=application_name
         or env.get("SOFASCORE_PG_APPLICATION_NAME")
         or _default_application_name(),

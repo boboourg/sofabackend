@@ -2676,7 +2676,25 @@ def _load_redis_backend(redis_url: str | None, *, allow_memory_fallback: bool):
             logger.warning("Python package `redis` is not installed; falling back to in-memory backend because --allow-memory-redis is enabled.")
             return _MemoryRedisBackend()
         raise RuntimeError("Redis is required for production runs. Install python package `redis`.") from exc
-    backend = redis.Redis.from_url(resolved_url, decode_responses=True)
+    # Stage 1.5 (2026-05-20 stability re-audit, Constraint #2b):
+    # explicit socket-level timeouts + retry on packet-level timeout.
+    # Default redis-py: socket_timeout=None → a dead TCP socket keeps
+    # XREADGROUP blocked past its BLOCK budget because BLOCK governs
+    # only the Redis-side wait, not the client-side read. Without
+    # health_check_interval an idle connection that has been silently
+    # killed by a stateful firewall is only discovered on the next
+    # XREADGROUP. retry_on_timeout=True papers over a single packet
+    # glitch before the client gives up; combined with Fix #2b in
+    # retry_policy.py (RedisError → retryable), the worker survives
+    # transient Redis hiccups.
+    backend = redis.Redis.from_url(
+        resolved_url,
+        decode_responses=True,
+        socket_timeout=15.0,
+        socket_connect_timeout=10.0,
+        retry_on_timeout=True,
+        health_check_interval=30,
+    )
     backend.ping()
     return backend
 
