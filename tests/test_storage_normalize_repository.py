@@ -1432,5 +1432,215 @@ def _build_finished_event_snapshot(
     )
 
 
+# ---------------------------------------------------------------------------
+# Fix C (2026-05-20 architecture audit, anomaly C): ghost-cache cleanup on
+# rollback. ``NormalizeRepository._known_minimal_entities`` is an in-memory
+# advisory cache populated inside ``_upsert_parent_pass`` to skip duplicate
+# parent inserts. Without explicit cleanup the cache survives a transaction
+# rollback — the next retry assumes those parents are already in PostgreSQL
+# and silently skips the INSERT, which produces a permanent
+# ForeignKeyViolationError on the child (team / player / event) insert.
+#
+# Two angles are pinned here:
+#   * NormalizeRepository owns an explicit cache-clear API so the cleanup
+#     responsibility lives on the repository, not on the caller.
+#   * persist_parse_result invokes it whenever the underlying executor
+#     raises, so any caller that relies on transactional persistence is
+#     protected without having to remember the contract.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingExecutor:
+    """Executor that fails on a specific stage of persist_parse_result so we
+    can verify cache state after an in-flight exception."""
+
+    def __init__(self, *, fail_on_substring: str) -> None:
+        self._fail_on_substring = fail_on_substring
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.executemany_calls: list[tuple[str, list[tuple[object, ...]]]] = []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_results: list[list[dict[str, object]]] = []
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.execute_calls.append((query, args))
+        if self._fail_on_substring in query:
+            raise RuntimeError(f"simulated DB failure on: {self._fail_on_substring}")
+        return "OK"
+
+    async def executemany(self, query: str, rows: list[tuple[object, ...]]) -> str:
+        self.executemany_calls.append((query, rows))
+        if self._fail_on_substring in query:
+            raise RuntimeError(f"simulated DB failure on: {self._fail_on_substring}")
+        return "OK"
+
+    async def fetch(self, query: str, *args: object):
+        self.fetch_calls.append((query, args))
+        if self.fetch_results:
+            return self.fetch_results.pop(0)
+        return []
+
+
+class NormalizeRepositoryRollbackCacheCleanupTests(unittest.IsolatedAsyncioTestCase):
+    def test_clear_minimal_entity_cache_empties_all_cacheable_kinds(self) -> None:
+        from schema_inspector.storage.normalize_repository import _CACHEABLE_MINIMAL_ENTITY_KINDS
+
+        repository = NormalizeRepository()
+        for kind in _CACHEABLE_MINIMAL_ENTITY_KINDS:
+            repository._known_minimal_entities[kind].add(999)
+
+        repository.clear_minimal_entity_cache()
+
+        for kind in _CACHEABLE_MINIMAL_ENTITY_KINDS:
+            self.assertEqual(
+                repository._known_minimal_entities[kind],
+                set(),
+                msg=f"cache for {kind!r} was not cleared",
+            )
+
+    async def test_persist_parse_result_clears_cache_when_executor_raises(self) -> None:
+        """After a mid-transaction failure, the in-memory cache MUST be
+        empty — otherwise the retry of the same job will see stale parents
+        in the cache, skip their INSERTs, and crash on FK violation when
+        the child rows fire."""
+
+        repository = NormalizeRepository()
+        # Pre-load the cache to simulate "we already saw these parents on
+        # a previous tick". A rollback must invalidate this knowledge.
+        repository._known_minimal_entities["team"].add(8888)
+        repository._known_minimal_entities["category"].add(9999)
+
+        # Trigger the failure on the first INSERT INTO sport so the parent
+        # pass blows up mid-way through.
+        executor = _RaisingExecutor(fail_on_substring="INSERT INTO sport")
+        result = ParseResult(
+            snapshot_id=991,
+            parser_family="event_root",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "sport": ({"id": 1, "slug": "football", "name": "Football"},),
+            },
+        )
+
+        with self.assertRaises(RuntimeError):
+            await repository.persist_parse_result(executor, result)
+
+        from schema_inspector.storage.normalize_repository import _CACHEABLE_MINIMAL_ENTITY_KINDS
+
+        for kind in _CACHEABLE_MINIMAL_ENTITY_KINDS:
+            self.assertEqual(
+                repository._known_minimal_entities[kind],
+                set(),
+                msg=(
+                    f"cache for {kind!r} survived a transactional failure; "
+                    f"this triggers permanent FK violations on retry"
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Fix D (2026-05-20 architecture audit, anomaly D): stub-upsert for nameless
+# players. The previous behaviour of ``_upsert_child_pass`` dropped any
+# player row that came through without a ``name`` (Sofascore frequently
+# delivers partial stubs in incident / best-players / per-player-stat
+# payloads). Downstream tables — event_player_statistics,
+# event_player_rating_breakdown_action, event_best_player_entry — carry
+# RESTRICT FKs on player.id, so silently skipping the row creates a
+# ForeignKeyViolationError moments later in the same transaction.
+#
+# After the fix, every nameless player row must still produce an INSERT
+# in the player table, falling back to a deterministic stub name so the
+# FK target physically exists. The stub-INSERT must NOT overwrite an
+# existing real player row (use ON CONFLICT DO NOTHING).
+# ---------------------------------------------------------------------------
+
+
+class NormalizeRepositoryStubPlayerUpsertTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nameless_player_produces_stub_upsert_with_fallback_name(self) -> None:
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=992,
+            parser_family="event_player_statistics",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "player": (
+                    {"id": 7777},  # nameless stub from upstream
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        player_insert_calls = [
+            (sql, rows)
+            for sql, rows in executor.executemany_calls
+            if "INSERT INTO player" in sql
+        ]
+        self.assertTrue(
+            player_insert_calls,
+            msg=(
+                "Nameless player rows must still produce an INSERT INTO "
+                "player (stub-upsert), otherwise downstream FK targets "
+                "(event_player_statistics, breakdown, best_players) will "
+                "crash on missing player.id"
+            ),
+        )
+        # The stub row must be present in some INSERT call.
+        flattened_rows = [row for _, rows in player_insert_calls for row in rows]
+        stub_row = next(
+            (row for row in flattened_rows if row[0] == 7777),
+            None,
+        )
+        self.assertIsNotNone(
+            stub_row,
+            msg="player_id=7777 was filtered out before reaching INSERT INTO player",
+        )
+        # Position 2 in the row tuple is ``name`` (column order matches
+        # _upsert_child_pass: id, slug, name, short_name, team_id).
+        stub_name = stub_row[2]
+        self.assertIsNotNone(stub_name, msg="stub player must carry a non-null fallback name")
+        self.assertIn("7777", str(stub_name), msg="fallback name should reference the player id")
+
+    async def test_stub_upsert_uses_on_conflict_do_nothing_to_protect_real_rows(self) -> None:
+        """If we ever overwrite an already-present real player with a stub
+        ``Unknown Player`` row, subsequent reads will lose the name. The
+        stub-INSERT must be ON CONFLICT DO NOTHING, distinct from the real
+        DO UPDATE branch."""
+
+        repository = NormalizeRepository()
+        executor = _FakeExecutor()
+        result = ParseResult(
+            snapshot_id=993,
+            parser_family="event_lineups",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "player": (
+                    {"id": 4242},  # stub only
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(executor, result)
+
+        player_insert_calls = [
+            sql for sql, _ in executor.executemany_calls if "INSERT INTO player" in sql
+        ]
+        self.assertTrue(player_insert_calls, msg="No INSERT INTO player executed for stub-only row")
+        # At least one of the player INSERTs must be ON CONFLICT DO NOTHING
+        # so we never overwrite a previously persisted real player.
+        normalized = [" ".join(sql.split()).upper() for sql in player_insert_calls]
+        self.assertTrue(
+            any("ON CONFLICT (ID) DO NOTHING" in sql for sql in normalized),
+            msg=(
+                "stub-upsert path must use ON CONFLICT (id) DO NOTHING — "
+                "otherwise we will overwrite real player rows with the "
+                "Unknown Player stub"
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,7 +89,50 @@ class NormalizeRepository:
         self._event_status_cache = ExpiringValueCache[int, tuple[str | None, str | None]]()
         self.redis_backend = redis_backend
 
+    def clear_minimal_entity_cache(self) -> None:
+        """Drop every entry in the in-memory advisory parent cache.
+
+        Fix C (2026-05-20 architecture audit, anomaly C): the cache
+        populated inside ``_upsert_parent_pass`` survives the lifetime
+        of the repository instance, but the rows it remembers only
+        survive a COMMIT. After a transactional failure / rollback the
+        cache no longer reflects what is actually in PostgreSQL, and
+        the next retry would skip the (now-required) parent INSERTs
+        and crash on FK violation when the child rows fire. Callers
+        that observe an exception inside an open DB transaction must
+        invoke this method before the retry — ``persist_parse_result``
+        does it automatically for the executor it was handed, and
+        ``HybridApp._persist_prefetched_run`` does it for the
+        transaction-as-a-whole.
+        """
+
+        for kind in _CACHEABLE_MINIMAL_ENTITY_KINDS:
+            self._known_minimal_entities[kind].clear()
+
     async def persist_parse_result(
+        self,
+        executor: SqlExecutor,
+        result: ParseResult,
+        *,
+        skip_entity_upserts: bool = False,
+    ) -> None:
+        # Fix C (2026-05-20 architecture audit, anomaly C): any
+        # exception raised inside the persist pipeline means the
+        # enclosing transaction is being rolled back. Without
+        # invalidating the in-memory parent cache the next retry
+        # would silently skip the (no-longer-present) parents and
+        # crash on a permanent ForeignKeyViolationError downstream.
+        # Cleanup-on-failure must be the repository's responsibility
+        # so callers cannot forget the contract.
+        try:
+            await self._persist_parse_result_inner(
+                executor, result, skip_entity_upserts=skip_entity_upserts
+            )
+        except BaseException:
+            self.clear_minimal_entity_cache()
+            raise
+
+    async def _persist_parse_result_inner(
         self,
         executor: SqlExecutor,
         result: ParseResult,
@@ -747,17 +790,38 @@ class NormalizeRepository:
         inserted: dict[str, set[int]],
         parent_exists: dict[str, set[int]],
     ) -> None:
-        player_rows = []
+        # Fix D (2026-05-20 architecture audit, anomaly D): partial
+        # player stubs (id-only, no name) used to be filtered out
+        # here with a silent ``continue``. The downstream tables
+        # event_player_statistics, event_player_rating_breakdown_action
+        # and event_best_player_entry carry RESTRICT FKs on player.id —
+        # dropping the stub created a guaranteed FK violation moments
+        # later in the same transaction whenever Sofascore returned a
+        # partial nested ``player: {"id": X}`` (incidents, best-players,
+        # per-player statistics with stub roster). The fix is a
+        # two-track INSERT: real rows still go through DO UPDATE so the
+        # name/slug/team_id refresh on every snapshot, but nameless
+        # stubs go through a separate ON CONFLICT (id) DO NOTHING
+        # branch so they create the FK target without ever overwriting
+        # a previously-loaded real player.
+        real_player_rows: list[tuple[object, ...]] = []
+        stub_player_rows: list[tuple[object, ...]] = []
         for row in entity_upserts.get("player", ()):
             player_id = _as_int(row.get("id"))
-            if player_id is None or not row.get("name"):
+            if player_id is None:
                 continue
             team_id = _as_int(row.get("team_id"))
             if team_id not in parent_exists["team"]:
                 self._log_nullified_fk(event_id=None, fk_name="player.team_id", missing_parent_id=team_id)
                 team_id = None
-            player_rows.append((player_id, row.get("slug"), row.get("name"), row.get("short_name"), team_id))
-        if player_rows:
+            if row.get("name"):
+                real_player_rows.append(
+                    (player_id, row.get("slug"), row.get("name"), row.get("short_name"), team_id)
+                )
+            else:
+                stub_name = f"Unknown Player #{player_id}"
+                stub_player_rows.append((player_id, None, stub_name, None, team_id))
+        if real_player_rows:
             await _executemany(
                 executor,
                 """
@@ -769,9 +833,28 @@ class NormalizeRepository:
                     short_name = EXCLUDED.short_name,
                     team_id = EXCLUDED.team_id
                 """,
-                player_rows,
+                real_player_rows,
             )
-            inserted["player"].update(int(row[0]) for row in player_rows if row[0] is not None)
+            inserted["player"].update(
+                int(row[0]) for row in real_player_rows if row[0] is not None
+            )
+        if stub_player_rows:
+            # Stub branch: DO NOTHING — never downgrade a real player to
+            # ``Unknown Player #<id>``. If the row is genuinely new the
+            # stub becomes the FK target; if it already exists the real
+            # name is preserved.
+            await _executemany(
+                executor,
+                """
+                INSERT INTO player (id, slug, name, short_name, team_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                stub_player_rows,
+            )
+            inserted["player"].update(
+                int(row[0]) for row in stub_player_rows if row[0] is not None
+            )
 
         event_rows = []
         for row in entity_upserts.get("event", ()):
