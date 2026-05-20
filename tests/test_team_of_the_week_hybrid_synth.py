@@ -528,5 +528,143 @@ class FetchTeamOfTheWeekRichSqlContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(".name", q)
 
 
+class BuildTeamOfTheWeekEventNestedTests(unittest.TestCase):
+    """B3 (2026-05-20): synth now emits ``event`` nested per player.
+
+    Requires the migration adding team_of_the_week_player.event_id
+    and the parser update extracting item.event.id. SQL JOIN-s event
+    + event_status + event_score + team (for home/away). Builder
+    emits the event nested only when event_id is non-NULL.
+    """
+
+    def test_event_nested_emitted_when_event_id_present(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+        )
+
+        rows = [
+            {
+                "formation": "4-2-3-1", "entry_id": 1, "order_value": 1,
+                "rating": "8.7", "player_id": 100, "player_name": "X",
+                "player_slug": "x", "team_id": 200, "team_name": "T",
+                "team_slug": "t", "team_short_name": "T",
+                "team_name_code": "T", "team_gender": "M",
+                "event_id": 12345,
+                "event_slug": "psg-inter",
+                "event_custom_id": "abc",
+                "event_start_timestamp": 1748707200,
+                "event_has_xg": True,
+                "event_final_result_only": False,
+                "event_home_team_id": 1644,
+                "event_home_team_name": "Paris Saint-Germain",
+                "event_home_team_slug": "paris-saint-germain",
+                "event_home_team_short_name": "PSG",
+                "event_home_team_name_code": "PSG",
+                "event_away_team_id": 2697,
+                "event_away_team_name": "Inter",
+                "event_away_team_slug": "inter",
+                "event_away_team_short_name": "Inter",
+                "event_away_team_name_code": "INT",
+                "event_status_code": 100,
+                "event_status_type": "finished",
+                "event_status_description": "Ended",
+                "event_home_score_current": 5,
+                "event_home_score_display": 5,
+                "event_home_score_normaltime": 5,
+                "event_home_score_period1": 3,
+                "event_home_score_period2": 2,
+                "event_away_score_current": 0,
+                "event_away_score_display": 0,
+                "event_away_score_normaltime": 0,
+                "event_away_score_period1": 0,
+                "event_away_score_period2": 0,
+            },
+        ]
+        payload = build_team_of_the_week_payload(rows)
+        entry = payload["players"][0]
+        self.assertIn("event", entry)
+        ev = entry["event"]
+        self.assertEqual(ev["id"], 12345)
+        self.assertEqual(ev["slug"], "psg-inter")
+        self.assertEqual(ev["customId"], "abc")
+        self.assertEqual(ev["startTimestamp"], 1748707200)
+        self.assertEqual(ev["hasXg"], True)
+        self.assertEqual(ev["status"]["type"], "finished")
+        self.assertEqual(ev["status"]["description"], "Ended")
+        self.assertEqual(ev["homeTeam"]["name"], "Paris Saint-Germain")
+        self.assertEqual(ev["homeTeam"]["nameCode"], "PSG")
+        self.assertEqual(ev["awayTeam"]["name"], "Inter")
+        self.assertEqual(ev["homeScore"]["current"], 5)
+        self.assertEqual(ev["awayScore"]["current"], 0)
+        # eventState is an empty dict in upstream (live flags consolidated
+        # there but absent for finished events).
+        self.assertEqual(ev["eventState"], {})
+
+    def test_event_nested_omitted_when_event_id_null(self) -> None:
+        """Backward compat: legacy rows pre-migration have event_id=NULL.
+        Builder must NOT emit an empty ``event`` for those."""
+        from schema_inspector.scheduled_events_synthesizer import (
+            build_team_of_the_week_payload,
+        )
+
+        rows = [
+            {
+                "formation": "4-3-3", "entry_id": 1, "order_value": 1,
+                "rating": "8.5", "player_id": 1, "player_name": "A",
+                "player_slug": "a", "team_id": 2, "team_name": "T",
+                "team_slug": "t", "team_short_name": "T",
+                "team_name_code": "T", "team_gender": "M",
+                "event_id": None,
+            },
+        ]
+        payload = build_team_of_the_week_payload(rows)
+        self.assertNotIn("event", payload["players"][0])
+
+
+class FetchTeamOfTheWeekEventSqlContractTests(unittest.IsolatedAsyncioTestCase):
+    """SQL must JOIN event + event_status + event_score + team for
+    nested event hydration."""
+
+    async def test_query_joins_event_via_event_id(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            fetch_team_of_the_week_rows,
+        )
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_team_of_the_week_rows(_StubConn(), period_id=19131)
+        q = str(captured["query"])
+        # event + status + score + home/away team JOINs
+        self.assertRegex(q, r"event\s+ev\s+ON\s+ev\.id\s*=\s*totwp\.event_id")
+        self.assertIn("event_status", q)
+        self.assertIn("event_score", q)
+        self.assertIn("totwp.event_id", q)
+
+    async def test_query_selects_event_columns(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            fetch_team_of_the_week_rows,
+        )
+
+        captured: dict[str, object] = {}
+
+        class _StubConn:
+            async def fetch(self, query: str, *args: object):
+                captured["query"] = query
+                return []
+
+        await fetch_team_of_the_week_rows(_StubConn(), period_id=19131)
+        q = str(captured["query"])
+        self.assertIn("ev.slug", q)
+        self.assertIn("ev.custom_id", q)
+        self.assertIn("ev.start_timestamp", q)
+        self.assertIn("ev.home_team_id", q)
+        self.assertIn("ev.away_team_id", q)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,6 +128,12 @@ class TeamOfTheWeekPlayerRecord:
     team_id: int
     order_value: int
     rating: str
+    # B3 (2026-05-20): the upstream ToTW payload includes a nested
+    # ``event`` object identifying the match where the player earned
+    # the rating that landed them in the team of the week. Stored
+    # nullable so legacy rows pre-migration still upsert; new ingests
+    # populate it from ``item.event.id``.
+    event_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -874,6 +880,11 @@ class _LeaderboardsAccumulator:
             team_id = self.core.ingest_team(_as_mapping(item.get("team")))
             if None in {entry_id, order_value, rating, player_id, team_id}:
                 continue
+            # B3 (2026-05-20): also extract event.id when present so
+            # the synth path can hydrate the nested ``event`` object
+            # without snapshot dependency.
+            event_payload = _as_mapping(item.get("event"))
+            event_id = _as_int(event_payload.get("id")) if event_payload else None
             self.team_of_the_week_players[(period_id, entry_id)] = {
                 "period_id": period_id,
                 "entry_id": entry_id,
@@ -881,6 +892,7 @@ class _LeaderboardsAccumulator:
                 "team_id": team_id,
                 "order_value": order_value,
                 "rating": rating,
+                "event_id": event_id,
             }
 
     def ingest_venues(self, root: Mapping[str, Any]) -> None:

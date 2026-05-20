@@ -160,6 +160,7 @@ class LeaderboardsRepository(EventDetailRepository):
                 item.team_id,
                 item.order_value,
                 item.rating,
+                item.event_id,
             )
             for item in bundle.team_of_the_week_players
         ]
@@ -167,14 +168,18 @@ class LeaderboardsRepository(EventDetailRepository):
             executor,
             """
             INSERT INTO team_of_the_week_player (
-                period_id, entry_id, player_id, team_id, order_value, rating
+                period_id, entry_id, player_id, team_id, order_value, rating, event_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            -- B3 (2026-05-20): event_id added; NULL-resilient upsert
+            -- so an older ingest path lacking event_id cannot wipe
+            -- a previously stored value.
             ON CONFLICT (period_id, entry_id) DO UPDATE SET
                 player_id = EXCLUDED.player_id,
                 team_id = EXCLUDED.team_id,
                 order_value = EXCLUDED.order_value,
-                rating = EXCLUDED.rating
+                rating = EXCLUDED.rating,
+                event_id = COALESCE(EXCLUDED.event_id, team_of_the_week_player.event_id)
             """,
             rows,
         )

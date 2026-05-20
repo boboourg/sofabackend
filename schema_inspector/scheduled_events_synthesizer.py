@@ -621,12 +621,48 @@ _FETCH_QUERY_TEAM_OF_THE_WEEK = (
         -- sport for team (B2 2026-05-20)
         sp.id                      AS sport_id,
         sp.name                    AS sport_name,
-        sp.slug                    AS sport_slug
+        sp.slug                    AS sport_slug,
+        -- event nested (B3 2026-05-20)
+        totwp.event_id             AS event_id,
+        ev.slug                    AS event_slug,
+        ev.custom_id               AS event_custom_id,
+        ev.start_timestamp         AS event_start_timestamp,
+        ev.has_xg                  AS event_has_xg,
+        ev.final_result_only       AS event_final_result_only,
+        ev.home_team_id            AS event_home_team_id,
+        eht.name                   AS event_home_team_name,
+        eht.slug                   AS event_home_team_slug,
+        eht.short_name             AS event_home_team_short_name,
+        eht.name_code              AS event_home_team_name_code,
+        ev.away_team_id            AS event_away_team_id,
+        eat.name                   AS event_away_team_name,
+        eat.slug                   AS event_away_team_slug,
+        eat.short_name             AS event_away_team_short_name,
+        eat.name_code              AS event_away_team_name_code,
+        ev_status.type             AS event_status_type,
+        ev_status.description      AS event_status_description,
+        ev.status_code             AS event_status_code,
+        ehs.current                AS event_home_score_current,
+        ehs.display                AS event_home_score_display,
+        ehs.normaltime             AS event_home_score_normaltime,
+        ehs.period1                AS event_home_score_period1,
+        ehs.period2                AS event_home_score_period2,
+        eas.current                AS event_away_score_current,
+        eas.display                AS event_away_score_display,
+        eas.normaltime             AS event_away_score_normaltime,
+        eas.period1                AS event_away_score_period1,
+        eas.period2                AS event_away_score_period2
     FROM team_of_the_week totw
     LEFT JOIN team_of_the_week_player totwp ON totwp.period_id = totw.period_id
     LEFT JOIN player p ON p.id = totwp.player_id
     LEFT JOIN team t   ON t.id = totwp.team_id
     LEFT JOIN sport sp ON sp.id = t.sport_id
+    LEFT JOIN event ev ON ev.id = totwp.event_id
+    LEFT JOIN team eht ON eht.id = ev.home_team_id
+    LEFT JOIN team eat ON eat.id = ev.away_team_id
+    LEFT JOIN event_status ev_status ON ev_status.code = ev.status_code
+    LEFT JOIN event_score ehs ON ehs.event_id = ev.id AND ehs.side = 'home'
+    LEFT JOIN event_score eas ON eas.event_id = ev.id AND eas.side = 'away'
     WHERE totw.period_id = $1
     ORDER BY totwp.order_value NULLS LAST, totwp.entry_id
     """
@@ -1560,6 +1596,55 @@ def build_team_of_the_week_payload(rows: Sequence[Any]) -> dict[str, Any]:
                 "sport": sport_obj,
             },
         }
+        # event nested (B3 2026-05-20) — emitted only when event_id
+        # is linked. Mirrors the upstream nested event shape, minimal
+        # for synth-path; snapshot path serves the full editorial.
+        event_id_int = _maybe_int(_get(row, "event_id"))
+        if event_id_int is not None:
+            home_team_id_int = _maybe_int(_get(row, "event_home_team_id"))
+            away_team_id_int = _maybe_int(_get(row, "event_away_team_id"))
+            entry["event"] = {
+                "id": event_id_int,
+                "slug": _get(row, "event_slug"),
+                "customId": _get(row, "event_custom_id"),
+                "startTimestamp": _get(row, "event_start_timestamp"),
+                "hasXg": _get(row, "event_has_xg"),
+                "finalResultOnly": _get(row, "event_final_result_only"),
+                "eventState": {},
+                "status": {
+                    "code": _get(row, "event_status_code"),
+                    "type": _get(row, "event_status_type"),
+                    "description": _get(row, "event_status_description"),
+                },
+                "homeTeam": {
+                    "id": home_team_id_int,
+                    "name": _get(row, "event_home_team_name"),
+                    "slug": _get(row, "event_home_team_slug"),
+                    "shortName": _get(row, "event_home_team_short_name"),
+                    "nameCode": _get(row, "event_home_team_name_code"),
+                },
+                "awayTeam": {
+                    "id": away_team_id_int,
+                    "name": _get(row, "event_away_team_name"),
+                    "slug": _get(row, "event_away_team_slug"),
+                    "shortName": _get(row, "event_away_team_short_name"),
+                    "nameCode": _get(row, "event_away_team_name_code"),
+                },
+                "homeScore": {
+                    "current": _get(row, "event_home_score_current"),
+                    "display": _get(row, "event_home_score_display"),
+                    "normaltime": _get(row, "event_home_score_normaltime"),
+                    "period1": _get(row, "event_home_score_period1"),
+                    "period2": _get(row, "event_home_score_period2"),
+                },
+                "awayScore": {
+                    "current": _get(row, "event_away_score_current"),
+                    "display": _get(row, "event_away_score_display"),
+                    "normaltime": _get(row, "event_away_score_normaltime"),
+                    "period1": _get(row, "event_away_score_period1"),
+                    "period2": _get(row, "event_away_score_period2"),
+                },
+            }
         entries.append(entry)
 
     entries.sort(key=lambda e: e["_order"])
