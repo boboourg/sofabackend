@@ -414,7 +414,16 @@ class HybridApp:
         event_id: int,
         sport_slug: str | None,
         hydration_mode: str = "full",
+        scope: str | None = None,
     ):
+        # Task 2 Phase B (2026-05-20): the ``scope`` kwarg is propagated
+        # from the hydrate worker (set to ``"final_sync"`` by the
+        # FinalSyncPlannerDaemon) all the way down to the inner
+        # ``PilotOrchestrator.run_event`` where the success-path
+        # ``set_event_locked`` stamp lives. Adding it here was the
+        # missing wire that caused the 2026-05-20 hydrate worker
+        # crashloop ("TypeError: HybridApp.run_event() got an
+        # unexpected keyword argument 'scope'").
         resolved_sport_slug = sport_slug or await self.resolve_event_sport_slug(event_id)
         await self.ensure_endpoint_registry(str(resolved_sport_slug or "football"))
         requested_hydration_mode = str(hydration_mode or "full").strip().lower()
@@ -472,6 +481,7 @@ class HybridApp:
             result = await self._persist_prefetched_run(
                 committed_run,
                 hydration_mode=effective_hydration_mode,
+                scope=scope,
             )
             if requested_hydration_mode == "live_delta" and self.live_bootstrap_coordinator is not None:
                 async with self.database.transaction() as connection:
@@ -782,6 +792,7 @@ class HybridApp:
         prefetched_run: PrefetchedRun,
         *,
         hydration_mode: str,
+        scope: str | None = None,
     ):
         async with self.database.transaction() as connection:
             skip_entity_parser_families = {"event_root"} if hydration_mode == "core" else set()
@@ -813,6 +824,7 @@ class HybridApp:
                 event_id=prefetched_run.event_id,
                 sport_slug=prefetched_run.sport_slug,
                 hydration_mode=hydration_mode,
+                scope=scope,
             )
             if self.event_negative_cache_settings.enabled and prefetched_run.event_negative_cache_events:
                 await self.event_endpoint_negative_cache_repository.apply_events(

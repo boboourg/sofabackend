@@ -947,8 +947,8 @@ class HybridAppRootOnlyPropagationTests(unittest.IsolatedAsyncioTestCase):
         async def _commit_prefetched_run(prefetched_run):
             return prefetched_run
 
-        async def _persist_prefetched_run(prefetched_run, *, hydration_mode):
-            del prefetched_run
+        async def _persist_prefetched_run(prefetched_run, *, hydration_mode, scope=None):
+            del prefetched_run, scope
             persist_called_with.append(hydration_mode)
             from schema_inspector.pipeline.pilot_orchestrator import PilotRunReport
 

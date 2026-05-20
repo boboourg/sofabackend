@@ -1536,7 +1536,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             phase_calls.append(("commit", run))
             return committed_run
 
-        async def _fake_persist(run, *, hydration_mode: str):
+        async def _fake_persist(run, *, hydration_mode: str, scope: str | None = None):
             phase_calls.append(("persist", run, hydration_mode))
             return {"event_id": 11, "sport_slug": "football", "hydration_mode": hydration_mode}
 
@@ -1581,7 +1581,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, **kwargs) -> None:
                 captured_kwargs.append(kwargs)
 
-            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str):
+            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str, scope: str | None = None):
+                del scope
                 return types.SimpleNamespace(
                     event_id=event_id,
                     sport_slug=sport_slug,
@@ -1647,7 +1648,8 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, **kwargs) -> None:
                 captured_kwargs.append(kwargs)
 
-            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str):
+            async def run_event(self, *, event_id: int, sport_slug: str, hydration_mode: str, scope: str | None = None):
+                del scope
                 return types.SimpleNamespace(event_id=event_id, sport_slug=sport_slug, hydration_mode=hydration_mode)
 
         with mock.patch.dict("os.environ", {"SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT": "4"}):

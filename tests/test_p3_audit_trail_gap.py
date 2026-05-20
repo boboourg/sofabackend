@@ -379,8 +379,8 @@ class RunEventHappyPathRegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(prefetched_run, prefetched_run_obj)
             return committed_run_obj
 
-        async def _ok_persist(committed_run, *, hydration_mode):
-            del hydration_mode
+        async def _ok_persist(committed_run, *, hydration_mode, scope=None):
+            del hydration_mode, scope
             self.assertIs(committed_run, committed_run_obj)
             return final_result
 

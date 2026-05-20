@@ -298,5 +298,66 @@ class OrchestratorStampsLockAfterFinalSyncTests(unittest.TestCase):
         self.assertIn("set_event_locked", text)
 
 
+# ---------------------------------------------------------------------------
+# Phase B regression — HybridApp.run_event must forward ``scope`` to the
+# inner PilotOrchestrator. The 2026-05-20 production crashloop was a
+# silent TypeError because hydrate_worker passed ``scope="final_sync"`` to
+# HybridApp.run_event but the kwarg was never wired through. These
+# checks pin the wiring at the source level.
+# ---------------------------------------------------------------------------
+
+
+class HybridAppForwardsScopeTests(unittest.TestCase):
+    """``schema_inspector/cli.py:HybridApp`` is the orchestrator instance
+    the hydrate worker holds. It must accept ``scope`` on ``run_event``
+    AND propagate it through ``_persist_prefetched_run`` into the inner
+    ``PilotOrchestrator.run_event`` so the locked_at stamping logic
+    actually fires for final-sync jobs."""
+
+    def test_hybrid_app_run_event_signature_has_scope_kwarg(self) -> None:
+        import inspect
+        from schema_inspector.cli import HybridApp
+
+        sig = inspect.signature(HybridApp.run_event)
+        self.assertIn(
+            "scope",
+            sig.parameters,
+            msg=(
+                "HybridApp.run_event must accept scope kwarg; otherwise "
+                "hydrate_worker.handle() crashes with TypeError when the "
+                "final_sync planner enqueues a job."
+            ),
+        )
+
+    def test_hybrid_app_persist_prefetched_run_forwards_scope(self) -> None:
+        import re
+        from pathlib import Path
+
+        text = (
+            Path(__file__).resolve().parent.parent
+            / "schema_inspector"
+            / "cli.py"
+        ).read_text(encoding="utf-8")
+        # Locate _persist_prefetched_run and ensure the inner
+        # ``orchestrator.run_event(...)`` invocation passes scope=
+        match = re.search(
+            r"async def _persist_prefetched_run\(.*?return result",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(
+            match, msg="_persist_prefetched_run not found in cli.py"
+        )
+        body = match.group(0)
+        self.assertIn(
+            "scope=",
+            body,
+            msg=(
+                "_persist_prefetched_run must forward scope= to the inner "
+                "PilotOrchestrator.run_event call."
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
