@@ -1753,6 +1753,45 @@ async def _dispatch(args) -> int:
                     loop_interval_seconds=args.loop_interval_seconds,
                 )
                 return 0
+            if args.command == "db-migrate":
+                # Stage 3.5 (2026-05-20): migration runner CLI.
+                from .storage.migration_runner import (
+                    apply_pending_migrations,
+                    default_migrations_dir,
+                    list_applied_migrations,
+                    mark_migration_applied,
+                )
+                migrations_dir = default_migrations_dir()
+                async with app.database.connection() as connection:
+                    if args.action == "apply":
+                        applied = await apply_pending_migrations(connection, migrations_dir)
+                        if applied:
+                            print(f"Applied {len(applied)} migration(s):")
+                            for name in applied:
+                                print(f"  + {name}")
+                        else:
+                            print("No pending migrations.")
+                        return 0
+                    if args.action == "status":
+                        applied_set = await list_applied_migrations(connection)
+                        all_files = sorted(p.name for p in migrations_dir.glob("*.sql"))
+                        pending = [name for name in all_files if name not in applied_set]
+                        print(f"Applied: {len(applied_set)}")
+                        for name in sorted(applied_set):
+                            print(f"  ✓ {name}")
+                        print(f"Pending: {len(pending)}")
+                        for name in pending:
+                            print(f"  · {name}")
+                        return 0
+                    if args.action == "mark-applied":
+                        if not args.filename:
+                            print("--filename is required for mark-applied")
+                            return 2
+                        await mark_migration_applied(connection, args.filename)
+                        print(f"Marked applied (without running): {args.filename}")
+                        return 0
+                    print(f"Unknown db-migrate action: {args.action}")
+                    return 2
             if args.command == "historical-backfill":
                 # Stage 3.4 (2026-05-20): one-shot backfill of a single
                 # (UT, season). Delegate to the existing helper so we
@@ -2298,6 +2337,36 @@ def _build_parser() -> argparse.ArgumentParser:
     # operator-driven archive runs of named seasons (e.g. EPL 1999,
     # Champions League 2009/10). Uses the non-residential historical
     # proxy pool via _HISTORICAL_COMMANDS membership above.
+    # Stage 3.5 (2026-05-20): SQL migration runner. Avoids the manual
+    # ``psql -f migrations/<file>.sql`` ops step. Subactions:
+    #   apply         — apply every pending .sql in migrations/
+    #   status        — show applied + pending
+    #   mark-applied  — bootstrap helper, mark a file as applied
+    #                   without running it (used once on prod to seed
+    #                   the ledger with the back-catalog).
+    db_migrate = subparsers.add_parser(
+        "db-migrate",
+        help=(
+            "Apply or inspect SQL migrations from migrations/. "
+            "Uses schema_migrations ledger + Postgres advisory lock."
+        ),
+    )
+    db_migrate.add_argument(
+        "action",
+        choices=["apply", "status", "mark-applied"],
+        help=(
+            "apply: run all pending migrations. "
+            "status: show applied + pending. "
+            "mark-applied: record a file as applied without running it "
+            "(bootstrap helper)."
+        ),
+    )
+    db_migrate.add_argument(
+        "--filename",
+        default=None,
+        help="For mark-applied: the migration filename (e.g. 2026-04-16_initial.sql).",
+    )
+
     historical_backfill = subparsers.add_parser(
         "historical-backfill",
         help=(
