@@ -1477,6 +1477,14 @@ class LocalApiApplication:
                 int(path_params["season_id"]),
                 int(path_params["period_id"]),
             )
+        if template == (
+            "/api/v1/unique-tournament/{unique_tournament_id}"
+            "/season/{season_id}/cuptrees"
+        ):
+            return await self._fetch_cuptrees_payload(
+                int(path_params["unique_tournament_id"]),
+                int(path_params["season_id"]),
+            )
         if template == "/api/v1/player/{player_id}/attribute-overviews":
             return await self._fetch_player_attribute_overviews_payload(int(path_params["player_id"]))
         if template == "/api/v1/player/{player_id}/events/last/{page}":
@@ -3017,6 +3025,56 @@ class LocalApiApplication:
             return {"players": []}
         await connection.close()
         return build_team_players_payload(rows)
+
+    async def _fetch_cuptrees_payload(
+        self,
+        unique_tournament_id: int,
+        season_id: int,
+    ) -> dict[str, Any] | None:
+        """``/api/v1/unique-tournament/{ut}/season/{s}/cuptrees`` — hybrid.
+
+        Snapshot primary serves the upstream wire 1:1 (rich nested
+        editorial — tournament, teamColors, fieldTranslations, sport,
+        country, etc.). Synth fallback assembles the minimal bracket
+        structure from the 4 normalized tables (``season_cup_tree`` +
+        ``_round`` + ``_block`` + ``_participant``) via Item 4 (2026-05-19)
+        pre-fetch scope so archived / retention-purged seasons still
+        render bracket UI.
+
+        DB-down → ``{"cupTrees": []}`` (graceful 200 instead of 500).
+        """
+
+        snapshot = await self._fetch_latest_entity_passthrough(
+            endpoint_pattern=(
+                "/api/v1/unique-tournament/{unique_tournament_id}"
+                "/season/{season_id}/cuptrees"
+            ),
+            context_entity_type="season",
+            context_entity_id=season_id,
+        )
+        if snapshot is not None:
+            return snapshot
+
+        from .scheduled_events_synthesizer import (
+            build_cuptrees_payload,
+            fetch_cuptrees_rows,
+        )
+
+        try:
+            connection = await self._connect()
+        except Exception:  # noqa: BLE001
+            return {"cupTrees": []}
+        try:
+            rows = await fetch_cuptrees_rows(
+                connection,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+            )
+        except Exception:  # noqa: BLE001
+            await connection.close()
+            return {"cupTrees": []}
+        await connection.close()
+        return build_cuptrees_payload(rows)
 
     async def _fetch_team_of_the_week_payload(
         self,

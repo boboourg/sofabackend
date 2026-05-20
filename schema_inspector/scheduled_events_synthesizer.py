@@ -490,6 +490,69 @@ _FETCH_QUERY_TEAM_TRANSFERS = (
 
 
 # Hybrid synth for
+# ``/unique-tournament/{ut}/season/{s}/cuptrees``.
+#
+# Bracket structure (rounds → blocks → participants → team) for cup
+# competitions. Snapshot path serves the full upstream wire 1:1 with
+# editorial nesting (tournament, teamColors, fieldTranslations, sport,
+# country, etc.). This synth assembles the minimal wire shape from
+# the 4 normalized tables when no snapshot exists.
+#
+# Single flat query produces one row per participant (or one row per
+# block if block has no participants — via LEFT JOIN). Builder
+# groups by cup_tree_id → round_order → entry_id (block) → participant.
+# Ordered for stable adjacency so the builder can collect with a
+# linear pass.
+_FETCH_QUERY_CUPTREES = (
+    """
+    SELECT
+        sct.cup_tree_id                AS cup_tree_id,
+        sct.name                       AS cup_tree_name,
+        sct.current_round              AS current_round,
+        sctr.round_order               AS round_order,
+        sctr.round_type                AS round_type,
+        sctr.description               AS round_description,
+        sctb.entry_id                  AS entry_id,
+        sctb.block_id                  AS block_id,
+        sctb.block_order               AS block_order,
+        sctb.finished                  AS block_finished,
+        sctb.matches_in_round          AS matches_in_round,
+        sctb.result                    AS result,
+        sctb.home_team_score           AS home_team_score,
+        sctb.away_team_score           AS away_team_score,
+        sctb.has_next_round_link       AS has_next_round_link,
+        sctb.series_start_date_timestamp AS series_start_date_timestamp,
+        sctb.automatic_progression     AS automatic_progression,
+        sctb.event_ids_json            AS event_ids_json,
+        sctp.participant_id            AS participant_id,
+        sctp.order_value               AS participant_order,
+        sctp.winner                    AS winner,
+        t.id                           AS team_id,
+        t.name                         AS team_name,
+        t.slug                         AS team_slug,
+        t.short_name                   AS team_short_name,
+        t.name_code                    AS team_name_code,
+        t.gender                       AS team_gender
+    FROM season_cup_tree sct
+    LEFT JOIN season_cup_tree_round sctr ON sctr.cup_tree_id = sct.cup_tree_id
+    LEFT JOIN season_cup_tree_block sctb
+        ON sctb.cup_tree_id = sct.cup_tree_id
+       AND sctb.round_order = sctr.round_order
+    LEFT JOIN season_cup_tree_participant sctp ON sctp.entry_id = sctb.entry_id
+    LEFT JOIN team t ON t.id = sctp.team_id
+    WHERE sct.unique_tournament_id = $1
+      AND sct.season_id = $2
+    ORDER BY
+        sct.cup_tree_id,
+        sctr.round_order NULLS LAST,
+        sctb.block_order NULLS LAST,
+        sctb.entry_id NULLS LAST,
+        sctp.order_value NULLS LAST
+    """
+)
+
+
+# Hybrid synth for
 # ``/unique-tournament/{ut}/season/{s}/team-of-the-week/{period_id}``.
 #
 # Sofascore's wire shape is flat: ``{"formation": "...", "players":
@@ -971,6 +1034,25 @@ async def fetch_team_transfers_rows(
     return [dict(record) for record in records]
 
 
+async def fetch_cuptrees_rows(
+    connection: Any,
+    *,
+    unique_tournament_id: int,
+    season_id: int,
+) -> list[dict[str, Any]]:
+    """Pulls flat rows for ``/cuptrees`` synth.
+
+    Each row is one (cup_tree × round × block × participant) tuple,
+    LEFT JOIN-ed so blocks without participants still emit a row
+    (TBD pairings / bye blocks). Returns 0 rows if the (UT, season)
+    pair has no stored cup tree.
+    """
+    records = await connection.fetch(
+        _FETCH_QUERY_CUPTREES, unique_tournament_id, season_id
+    )
+    return [_decode_jsonb_fields(dict(record)) for record in records]
+
+
 async def fetch_team_of_the_week_rows(
     connection: Any,
     *,
@@ -1151,6 +1233,163 @@ def build_team_transfers_payload(
         else:
             transfers_out.append(entry)
     return {"transfersIn": transfers_in, "transfersOut": transfers_out}
+
+
+def build_cuptrees_payload(rows: Sequence[Any]) -> dict[str, Any]:
+    """Nest flat rows into Sofascore-shape ``{"cupTrees": [{...}]}``.
+
+    Single linear pass: rows are already sorted by (cup_tree_id,
+    round_order, block_order, entry_id, participant_order) so we can
+    detect transitions and emit nested children.
+
+    Rows with NULL ``cup_tree_id`` are dropped (defensive — shouldn't
+    happen given the SQL WHERE filter). Blocks without participants
+    (NULL ``participant_id``) still emit the block with an empty
+    ``participants`` array. Same for rounds without blocks (NULL
+    ``entry_id``) — empty ``blocks`` array.
+    """
+    if not rows:
+        return {"cupTrees": []}
+
+    def _get(row: Any, name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    trees: list[dict[str, Any]] = []
+    tree_index: dict[Any, dict[str, Any]] = {}
+    round_index: dict[tuple[Any, Any], dict[str, Any]] = {}
+    block_index: dict[Any, dict[str, Any]] = {}
+
+    for row in rows:
+        cup_tree_id = _get(row, "cup_tree_id")
+        if cup_tree_id is None:
+            continue
+        try:
+            ct_id = int(cup_tree_id)
+        except (TypeError, ValueError):
+            continue
+
+        tree = tree_index.get(ct_id)
+        if tree is None:
+            tree = {
+                "id": ct_id,
+                "name": _get(row, "cup_tree_name"),
+                "currentRound": _get(row, "current_round"),
+                "rounds": [],
+            }
+            tree_index[ct_id] = tree
+            trees.append(tree)
+
+        round_order = _get(row, "round_order")
+        if round_order is None:
+            continue  # no rounds yet for this tree
+        try:
+            ro = int(round_order)
+        except (TypeError, ValueError):
+            continue
+
+        round_key = (ct_id, ro)
+        round_obj = round_index.get(round_key)
+        if round_obj is None:
+            round_obj = {
+                "order": ro,
+                "type": _get(row, "round_type"),
+                "description": _get(row, "round_description"),
+                "blocks": [],
+            }
+            round_index[round_key] = round_obj
+            tree["rounds"].append(round_obj)
+
+        entry_id = _get(row, "entry_id")
+        if entry_id is None:
+            continue  # round without any blocks
+        try:
+            eid = int(entry_id)
+        except (TypeError, ValueError):
+            continue
+
+        block = block_index.get(eid)
+        if block is None:
+            event_ids_raw = _get(row, "event_ids_json") or []
+            events_list: list[dict[str, Any]] = []
+            if isinstance(event_ids_raw, list):
+                for raw_id in event_ids_raw:
+                    try:
+                        events_list.append({"id": int(raw_id)})
+                    except (TypeError, ValueError):
+                        continue
+            block_order_raw = _get(row, "block_order")
+            try:
+                block_order_int: Any = (
+                    int(block_order_raw) if block_order_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                block_order_int = None
+            block_id_raw = _get(row, "block_id")
+            try:
+                block_id_int: Any = (
+                    int(block_id_raw) if block_id_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                block_id_int = None
+            block = {
+                "id": eid,
+                "blockId": block_id_int,
+                "order": block_order_int,
+                "finished": _get(row, "block_finished"),
+                "matchesInRound": _get(row, "matches_in_round"),
+                "result": _get(row, "result"),
+                "homeTeamScore": _get(row, "home_team_score"),
+                "awayTeamScore": _get(row, "away_team_score"),
+                "hasNextRoundLink": _get(row, "has_next_round_link"),
+                "seriesStartDateTimestamp": _get(row, "series_start_date_timestamp"),
+                "automaticProgression": _get(row, "automatic_progression"),
+                "events": events_list,
+                "participants": [],
+            }
+            block_index[eid] = block
+            round_obj["blocks"].append(block)
+
+        participant_id = _get(row, "participant_id")
+        if participant_id is None:
+            continue  # block without participants (TBD/bye)
+        try:
+            pid = int(participant_id)
+        except (TypeError, ValueError):
+            continue
+
+        team_id_raw = _get(row, "team_id")
+        try:
+            team_id_int = int(team_id_raw) if team_id_raw is not None else None
+        except (TypeError, ValueError):
+            team_id_int = None
+        participant_order_raw = _get(row, "participant_order")
+        try:
+            participant_order_int: Any = (
+                int(participant_order_raw)
+                if participant_order_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            participant_order_int = None
+        block["participants"].append(
+            {
+                "id": pid,
+                "order": participant_order_int,
+                "winner": _get(row, "winner"),
+                "team": {
+                    "id": team_id_int,
+                    "name": _get(row, "team_name"),
+                    "slug": _get(row, "team_slug"),
+                    "shortName": _get(row, "team_short_name"),
+                    "nameCode": _get(row, "team_name_code"),
+                    "gender": _get(row, "team_gender"),
+                },
+            }
+        )
+
+    return {"cupTrees": trees}
 
 
 def build_team_of_the_week_payload(rows: Sequence[Any]) -> dict[str, Any]:
