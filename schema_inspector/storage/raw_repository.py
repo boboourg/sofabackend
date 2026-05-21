@@ -504,7 +504,15 @@ class RawRepository:
             resolved_url=str(row["resolved_url"] or row["source_url"]),
             envelope_key=str(row["envelope_key"] or "payload"),
             http_status=int(row["http_status"]) if row["http_status"] is not None else None,
-            payload=row["payload"],
+            # Stage 4.4 (2026-05-21): asyncpg's default jsonb codec
+            # returns the column as a JSON *string*. Every family
+            # parser gates on ``isinstance(payload, Mapping)`` and
+            # silently emits ``parsed_empty`` for a string — so every
+            # replay / post-commit re-hydrate from this loader was
+            # producing 0 rows in event_incident / event_statistic
+            # despite the raw snapshot containing the data. Decode
+            # here so RawSnapshot.payload is always dict-shaped.
+            payload=_decode_jsonb_payload(row["payload"]),
             fetched_at=str(row["fetched_at"] or ""),
             context_entity_type=row["context_entity_type"],
             context_entity_id=_maybe_int(row["context_entity_id"]),
@@ -518,6 +526,35 @@ def _jsonb(value: object) -> str | None:
     if value is None:
         return None
     return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+
+
+def _decode_jsonb_payload(value: object) -> object:
+    """Normalise a jsonb column value back into a Python container.
+
+    asyncpg's default jsonb codec returns the column as a JSON
+    ``str``; some installs return ``bytes``. Either way, downstream
+    parsers gate on ``isinstance(payload, Mapping)`` and would
+    silently emit ``parsed_empty`` for a non-dict.  This helper
+    keeps the contract: payload is whatever ``json.loads`` would
+    produce, falling back to ``{}`` for a NULL column so callers
+    never have to defend against ``None``.
+
+    Pre-decoded dicts / lists pass through unchanged so the helper
+    stays a no-op for tests and any future codec change.
+    """
+
+    if value is None:
+        return {}
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (str, bytes, bytearray, memoryview)):
+        try:
+            return orjson.loads(value)
+        except orjson.JSONDecodeError:
+            # Unparseable payload — keep the original so the caller
+            # can at least surface the corruption rather than crash.
+            return value
+    return value
 
 
 _REGISTRY_CONTRACT_ROW_CACHE = ExpiringValueCache[
