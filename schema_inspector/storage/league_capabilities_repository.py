@@ -236,6 +236,71 @@ class LeagueCapabilitiesRepository:
             )
         return [_row_to_capability(row) for row in rows]
 
+    async def set_manual_override(
+        self,
+        executor: SqlExecutor,
+        *,
+        unique_tournament_id: int,
+        season_id: int | None,
+        status_type: str,
+        endpoint_pattern: str,
+        state: str,
+        note: str | None,
+    ) -> None:
+        """Operator-driven UPSERT with source='manual_override' and a
+        far-future ``expires_at`` so the refresh daemon never
+        re-probes this row. Used by /ops/league-capabilities/set and
+        the ``cli league-capability set`` subcommand.
+
+        State must be one of allowed/disabled/unknown (the same set
+        the probe service uses) — invalid state raises ValueError
+        before any SQL is emitted."""
+
+        if state not in _KNOWN_STATES:
+            raise ValueError(
+                f"state must be one of {_KNOWN_STATES}, got {state!r}"
+            )
+
+        # Far-future expiry — manual override stays until operator
+        # changes it (refresh daemon's list_expired filters out
+        # source='manual_override' as a second safety net).
+        far_future = datetime.now(timezone.utc).replace(year=2099)
+
+        await executor.execute(
+            """
+            INSERT INTO league_endpoint_capability (
+                unique_tournament_id, season_id, status_type, endpoint_pattern,
+                state, probed_at,
+                probe_samples_total, probe_samples_ok,
+                probe_samples_http_404, probe_samples_empty, probe_samples_error,
+                confidence_score, expires_at, source, notes,
+                created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, now(),
+                0, 0,
+                0, 0, 0,
+                NULL, $6, 'manual_override', $7,
+                now(), now()
+            )
+            ON CONFLICT (unique_tournament_id, season_id, status_type, endpoint_pattern)
+            DO UPDATE SET
+                state = EXCLUDED.state,
+                probed_at = now(),
+                expires_at = EXCLUDED.expires_at,
+                source = 'manual_override',
+                notes = EXCLUDED.notes,
+                updated_at = now()
+            """,
+            int(unique_tournament_id),
+            season_id if season_id is None else int(season_id),
+            str(status_type),
+            str(endpoint_pattern),
+            str(state),
+            far_future,
+            note,
+        )
+
     async def list_expired(
         self,
         executor: SqlFetchExecutor,

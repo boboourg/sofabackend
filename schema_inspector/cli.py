@@ -1682,6 +1682,158 @@ async def _dispatch(args) -> int:
 
                 print(f"Unknown action: {action}")
                 return 2
+            if args.command == "league-capability":
+                from .storage.league_capabilities_repository import (
+                    LeagueCapabilitiesRepository,
+                )
+                import json as _json
+
+                repo = LeagueCapabilitiesRepository()
+                action = args.action
+
+                if action == "list":
+                    async with app.database.connection() as conn:
+                        rows = await repo.list_capabilities_for_ut(
+                            conn,
+                            unique_tournament_id=args.unique_tournament_id,
+                            season_id=args.season_id,
+                        )
+                    payload = [
+                        {
+                            "unique_tournament_id": r.unique_tournament_id,
+                            "season_id": r.season_id,
+                            "status_type": r.status_type,
+                            "endpoint_pattern": r.endpoint_pattern,
+                            "state": r.state,
+                            "confidence_score": r.confidence_score,
+                            "probe_samples_ok": r.probe_samples_ok,
+                            "probe_samples_total": r.probe_samples_total,
+                            "source": r.source,
+                            "probed_at": r.probed_at.isoformat() if r.probed_at else None,
+                            "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                            "notes": r.notes,
+                        }
+                        for r in rows
+                    ]
+                    print(_json.dumps(payload, indent=2, default=str))
+                    return 0
+
+                if action == "show":
+                    if not args.status_type or not args.endpoint_pattern:
+                        print("show requires --status-type and --endpoint-pattern")
+                        return 2
+                    async with app.database.connection() as conn:
+                        row = await repo.fetch_capability(
+                            conn,
+                            unique_tournament_id=args.unique_tournament_id,
+                            season_id=args.season_id,
+                            status_type=args.status_type,
+                            endpoint_pattern=args.endpoint_pattern,
+                        )
+                    if row is None:
+                        print("(no row)")
+                        return 0
+                    print(_json.dumps(
+                        {
+                            "unique_tournament_id": row.unique_tournament_id,
+                            "season_id": row.season_id,
+                            "status_type": row.status_type,
+                            "endpoint_pattern": row.endpoint_pattern,
+                            "state": row.state,
+                            "confidence_score": row.confidence_score,
+                            "source": row.source,
+                            "probed_at": row.probed_at.isoformat() if row.probed_at else None,
+                            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                            "notes": row.notes,
+                        }, indent=2, default=str,
+                    ))
+                    return 0
+
+                if action == "set":
+                    if not args.status_type or not args.endpoint_pattern or not args.state:
+                        print("set requires --status-type, --endpoint-pattern, --state")
+                        return 2
+                    async with app.database.transaction() as conn:
+                        await repo.set_manual_override(
+                            conn,
+                            unique_tournament_id=args.unique_tournament_id,
+                            season_id=args.season_id,
+                            status_type=args.status_type,
+                            endpoint_pattern=args.endpoint_pattern,
+                            state=args.state,
+                            note=args.note,
+                        )
+                    print(
+                        f"manual_override set: ut={args.unique_tournament_id} "
+                        f"season={args.season_id} status={args.status_type} "
+                        f"endpoint={args.endpoint_pattern} -> {args.state}"
+                    )
+                    return 0
+
+                if action == "probe":
+                    if not args.status_type:
+                        print("probe requires --status-type")
+                        return 2
+                    from .services.league_capabilities_probe import (
+                        ProbeExecutor, PROBE_ENDPOINTS_BY_STATUS,
+                    )
+                    from .services.league_capabilities_registry import (
+                        LeagueCapabilitiesRegistry,
+                    )
+                    from .sofascore_client import SofascoreClient
+
+                    # Adapt SofascoreClient to ProbeExecutor.client interface.
+                    raw_client = SofascoreClient(app.runtime_config)
+
+                    class _Adapter:
+                        async def get_json(self, *, event_id, endpoint_pattern):
+                            from .endpoints import SOFASCORE_BASE_URL
+                            from .sofascore_client import SofascoreHttpError
+                            url = f"{SOFASCORE_BASE_URL}{endpoint_pattern.replace('{event_id}', str(event_id))}"
+                            try:
+                                resp = await raw_client.get_json(url, timeout=20.0)
+                            except SofascoreHttpError as exc:
+                                tr = exc.transport_result
+                                status = int(tr.status_code) if tr and tr.status_code else 0
+                                return {"status": status, "payload": None}
+                            return {"status": int(resp.status_code), "payload": resp.payload}
+
+                    registry = LeagueCapabilitiesRegistry(
+                        redis_backend=app.redis_backend if app.redis_backend is not None else _MemoryRedisBackend(),
+                        database=app.database,
+                        repository=repo,
+                    )
+                    executor = ProbeExecutor(
+                        database=app.database,
+                        client=_Adapter(),
+                        repository=repo,
+                        registry=registry,
+                        samples_per_endpoint=args.samples,
+                    )
+                    endpoint_patterns = PROBE_ENDPOINTS_BY_STATUS.get(args.status_type, ())
+                    report = await executor.probe(
+                        unique_tournament_id=args.unique_tournament_id,
+                        season_id=args.season_id,
+                        status_type=args.status_type,
+                        endpoint_patterns=endpoint_patterns,
+                        samples_per_endpoint=args.samples,
+                    )
+                    print(_json.dumps(
+                        {
+                            "ut": report.unique_tournament_id,
+                            "season": report.season_id,
+                            "status": report.status_type,
+                            "samples_used": report.samples_used,
+                            "upserts": report.upserts_count,
+                            "elapsed_seconds": round(report.elapsed_seconds, 1),
+                            "by_endpoint": dict(report.by_endpoint),
+                            "errors_count": len(report.errors),
+                        }, indent=2, default=str,
+                    ))
+                    return 0
+
+                print(f"Unknown action: {action}")
+                return 2
             if args.command == "backfill-priorities":
                 from .services.backfill_priority_config import (
                     BackfillPriorityConfig,
@@ -2317,6 +2469,52 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backfill_cursor.add_argument(
         "--sport-slug", default=None, help="Optional sport filter for ``show``.",
+    )
+
+    # Phase 4.6 (2026-05-23): League Capabilities Registry ops surface.
+    league_capability = subparsers.add_parser(
+        "league-capability",
+        help=(
+            "Inspect / override the league_endpoint_capability registry. "
+            "``list`` shows all rows for a UT; ``show`` reads one quad; "
+            "``set`` writes a manual override (refresh daemon never "
+            "re-probes manual rows); ``probe`` triggers a fresh probe."
+        ),
+    )
+    league_capability.add_argument(
+        "action",
+        choices=["list", "show", "set", "probe"],
+        help="Subcommand action.",
+    )
+    league_capability.add_argument(
+        "--unique-tournament-id", type=int, required=True,
+        help="UT id to inspect / mutate.",
+    )
+    league_capability.add_argument(
+        "--season-id", type=int, default=None,
+        help="Season id. Omit for UT-level row (season_id IS NULL).",
+    )
+    league_capability.add_argument(
+        "--status-type", default=None,
+        choices=["inprogress", "finished", "notstarted"],
+        help="Match status_type. Required for show/set/probe.",
+    )
+    league_capability.add_argument(
+        "--endpoint-pattern", default=None,
+        help="Endpoint path template. Required for show/set.",
+    )
+    league_capability.add_argument(
+        "--state", default=None,
+        choices=["allowed", "disabled", "unknown"],
+        help="Verdict state. Required for set.",
+    )
+    league_capability.add_argument(
+        "--note", default=None,
+        help="Free-text note attached to manual override.",
+    )
+    league_capability.add_argument(
+        "--samples", type=int, default=5,
+        help="Number of sample events per endpoint (probe action).",
     )
 
     backfill_priorities = subparsers.add_parser(
