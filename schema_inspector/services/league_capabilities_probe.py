@@ -393,15 +393,20 @@ class ProbeExecutor:
         """Return list of event_ids for the (UT, season, status_type)
         cohort, newest first. Caller decides what to do if empty."""
 
+        # event table stores status_code (int), not status_type (text).
+        # JOIN event_status to translate status_type='finished' etc.
+        # into the matching code set (Sofascore has multiple codes
+        # per type: finished=100/110, afterextra/afterpen/etc).
         async with self.database.connection() as connection:
             rows = await connection.fetch(
                 """
-                SELECT id
-                FROM event
-                WHERE unique_tournament_id = $1
-                  AND (season_id = $2 OR $2 IS NULL)
-                  AND status_type = $3
-                ORDER BY start_timestamp DESC NULLS LAST
+                SELECT e.id
+                FROM event e
+                JOIN event_status es ON es.code = e.status_code
+                WHERE e.unique_tournament_id = $1
+                  AND (e.season_id = $2 OR $2 IS NULL)
+                  AND es.type = $3
+                ORDER BY e.start_timestamp DESC NULLS LAST
                 LIMIT $4
                 """,
                 int(unique_tournament_id),
