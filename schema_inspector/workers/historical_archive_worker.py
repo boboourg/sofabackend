@@ -224,19 +224,32 @@ class HistoricalTournamentWorker:
                         target_season_id,
                     )
 
-        for child_job_type in (
-            JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
-            JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
-        ):
-            enrich_job = job.spawn_child(
-                job_type=child_job_type,
-                entity_type="unique_tournament",
-                entity_id=ut_id,
-                scope="historical",
-                params={"season_ids": list(season_ids)},
-                priority=job.priority,
-            )
-            self.queue.publish(self.enrichment_stream, encode_stream_job(enrich_job))
+        # Phase 3.7(a) (2026-05-22): bootstrap-mode jobs SKIP the
+        # enrichment fan-out. Bootstrap only landed event-list rows
+        # (no event_detail, no entities, no statistics/standings), so
+        # publishing JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH would
+        # immediately push enrichment workers to fetch /lineups,
+        # /incidents, /statistics, /player-stats for every event we
+        # just discovered — the exact opposite of "lightweight". When
+        # the catalog row transitions to ``events_loaded`` the next
+        # cursor advance picks the season up in FULL mode and the
+        # full match-center fan-out happens via the enrichment stream
+        # then. Skipping here keeps enrichment lag flat under
+        # bootstrap surge.
+        if not bootstrap_mode:
+            for child_job_type in (
+                JOB_ENRICH_TOURNAMENT_EVENT_DETAIL_BATCH,
+                JOB_ENRICH_TOURNAMENT_ENTITIES_BATCH,
+            ):
+                enrich_job = job.spawn_child(
+                    job_type=child_job_type,
+                    entity_type="unique_tournament",
+                    entity_id=ut_id,
+                    scope="historical",
+                    params={"season_ids": list(season_ids)},
+                    priority=job.priority,
+                )
+                self.queue.publish(self.enrichment_stream, encode_stream_job(enrich_job))
         return "completed"
 
     async def retry_later(self, entry: StreamEntry, exc: Exception, *, delay_ms: int) -> str:
