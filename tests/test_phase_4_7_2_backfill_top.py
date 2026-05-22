@@ -102,16 +102,43 @@ class FetchTopUtsWithSeasonsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$1", _TOP_UT_QUERY)
         self.assertIn("LIMIT $1", _TOP_UT_QUERY)
 
-    async def test_query_filters_by_catalog_bootstrap_state(self) -> None:
-        """We only want seasons whose upstream catalog row has actual events
-        — bootstrap_state='pending' rows mean no events table data yet, so
-        ProbeExecutor._select_sample_events would return nothing and we'd
-        burn HTTP budget for free."""
+    async def test_query_picks_season_from_event_table_not_catalog(self) -> None:
+        """Initial design used ``tournament_season_upstream_catalog`` ranked
+        by ``events_loaded_at DESC``. That backfired hard on prod: the most
+        recently *bootstrapped* season is the *oldest historical* one (the
+        backfill walks deep-time first), so e.g. LaLiga top-pick resolved
+        to season 1969/1970 instead of 25/26. ProbeExecutor would then
+        return ``disabled`` for half the endpoints simply because upstream
+        doesn't carry rich payloads that deep — useless verdicts.
+
+        The fix: pick the season with the most-recent *finished* event in
+        the actual ``event`` table. That tracks reality, not backfill order.
+        """
         from scripts.backfill_league_capabilities_top import _TOP_UT_QUERY
 
-        self.assertIn("bootstrap_state", _TOP_UT_QUERY)
-        self.assertIn("events_loaded", _TOP_UT_QUERY)
-        self.assertIn("fully_processed", _TOP_UT_QUERY)
+        # Must touch event + event_status — not the upstream catalog — to
+        # find the season with real recent finished matches.
+        self.assertIn("event_status", _TOP_UT_QUERY)
+        self.assertIn("finished", _TOP_UT_QUERY)
+        self.assertIn("MAX(", _TOP_UT_QUERY)
+        # We rank seasons by recency of their latest finished event.
+        self.assertIn("start_timestamp", _TOP_UT_QUERY)
+        # Must NOT depend on the upstream catalog any more (the backfill
+        # order trap above is the whole reason we rewrote this).
+        self.assertNotIn(
+            "tournament_season_upstream_catalog", _TOP_UT_QUERY,
+            "regression: catalog-based season pick is the bug we just fixed",
+        )
+
+    async def test_query_filters_by_recent_window(self) -> None:
+        """A 2-year window keeps the pick anchored to current/previous
+        season. Without it a UT whose last finished match was years ago
+        (e.g. a defunct cup) would still surface a stale season."""
+        from scripts.backfill_league_capabilities_top import _TOP_UT_QUERY
+
+        # 730 days = ~2 years. Concrete value comes from inline INTERVAL.
+        self.assertIn("INTERVAL", _TOP_UT_QUERY)
+        self.assertIn("730 days", _TOP_UT_QUERY)
 
     async def test_query_orders_by_user_count_desc(self) -> None:
         from scripts.backfill_league_capabilities_top import _TOP_UT_QUERY

@@ -49,6 +49,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # fmt: off
+# NOTE — earlier draft of this query ranked seasons by the upstream catalog's
+# ``events_loaded_at DESC``. That backfired on prod: backfill walks deep-time
+# first, so e.g. LaLiga's most-recently-bootstrapped season was 1969/1970,
+# not 25/26. Probing that season returns ``disabled`` for half the endpoints
+# simply because Sofascore doesn't carry rich payloads that deep — useless
+# verdicts polluting the registry. The current query picks the season whose
+# *latest finished event* (in our own ``event`` table) is most recent, with
+# a 730-day window so a defunct cup can't surface a stale season.
 _TOP_UT_QUERY = """
 WITH top_uts AS (
     SELECT
@@ -60,30 +68,39 @@ WITH top_uts AS (
     ORDER BY ut.user_count DESC NULLS LAST
     LIMIT $1
 ),
+events_by_ut_season AS (
+    SELECT
+        e.unique_tournament_id,
+        e.season_id,
+        MAX(e.start_timestamp) AS max_event_ts
+    FROM event e
+    JOIN event_status es ON es.code = e.status_code
+    WHERE es.type = 'finished'
+      AND e.start_timestamp >= EXTRACT(EPOCH FROM (now() - INTERVAL '730 days'))::bigint
+    GROUP BY e.unique_tournament_id, e.season_id
+),
 ranked_seasons AS (
     SELECT
-        c.unique_tournament_id,
-        c.season_id,
-        c.season_year,
-        c.events_loaded_at,
+        ebs.unique_tournament_id,
+        ebs.season_id,
+        ebs.max_event_ts,
         ROW_NUMBER() OVER (
-            PARTITION BY c.unique_tournament_id
-            ORDER BY COALESCE(c.events_loaded_at, '1970-01-01'::timestamptz) DESC,
-                     c.season_id DESC
+            PARTITION BY ebs.unique_tournament_id
+            ORDER BY ebs.max_event_ts DESC
         ) AS rn
-    FROM tournament_season_upstream_catalog c
-    WHERE c.bootstrap_state IN ('events_loaded', 'fully_processed')
+    FROM events_by_ut_season ebs
 )
 SELECT
     t.unique_tournament_id,
     t.name,
     t.user_count,
     rs.season_id,
-    rs.season_year
+    s.year AS season_year
 FROM top_uts t
 LEFT JOIN ranked_seasons rs
     ON rs.unique_tournament_id = t.unique_tournament_id
    AND rs.rn = 1
+LEFT JOIN season s ON s.id = rs.season_id
 ORDER BY t.user_count DESC NULLS LAST
 """
 # fmt: on
