@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 from typing import Any
 
 from ..storage.league_capabilities_repository import (
@@ -75,6 +76,23 @@ _DEFAULT_CACHE_TTL_SECONDS = 3600
 # the fallback row from any real season_id=0 row (none exist — season
 # IDs start at 1 in Sofascore).
 _NULL_SEASON_SENTINEL = 0
+
+
+_FEATURE_FLAG_ENV = "SOFASCORE_LEAGUE_CAPABILITIES_ENABLED"
+_TRUTHY = frozenset({"1", "true", "yes", "on", "y", "t"})
+
+
+def is_league_capabilities_enabled() -> bool:
+    """Phase 4.7 (2026-05-23): operator dial controlling whether the
+    orchestrator consults the registry before policy gating. Default
+    OFF — toggling ON in .env + rolling restart enables the feature.
+
+    Accepts truthy variants: 1/true/yes/on/y/t (case-insensitive).
+    Anything else (empty, missing, false, 0, no) is OFF.
+    """
+
+    raw = os.environ.get(_FEATURE_FLAG_ENV, "").strip().lower()
+    return raw in _TRUTHY
 
 
 class LeagueCapabilitiesRegistry:

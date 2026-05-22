@@ -128,6 +128,13 @@ def football_edge_allowed(
     status_type: str | None,
     has_xg: bool | None,
     is_editor: bool | None = None,
+    # Phase 4.7 (2026-05-23): League Capabilities Registry verdict for
+    # this (UT, season, status, endpoint_pattern). None / 'unknown' →
+    # caller did not consult the registry, or registry has no entry —
+    # we fall back to the legacy tier-based logic below. 'allowed' /
+    # 'disabled' SHORT-CIRCUIT the legacy gating (subject to the
+    # is_editor HARD BAN which always wins).
+    capability_verdict: str | None = None,
 ) -> bool:
     """Return whether a planned core edge should be fetched for football.
 
@@ -164,6 +171,16 @@ def football_edge_allowed(
     # ROOT. Must precede every gate decision so even bypass paths honour it.
     if is_editor is True:
         return False
+
+    # Phase 4.7: League Capabilities Registry verdict (when present)
+    # is authoritative — it's measured per-UT data instead of guesses
+    # off detailId. Stays AFTER is_editor (the HARD BAN must precede
+    # every other gate per X'' policy).
+    if capability_verdict == "allowed":
+        return True
+    if capability_verdict == "disabled":
+        return False
+    # 'unknown' or None → fall through to legacy tier-based gating.
 
     normalized_status = _normalize_status(status_type)
     tier = football_detail_tier(detail_id)
@@ -258,6 +275,9 @@ def football_detail_endpoint_allowed(
     start_timestamp: int | None,
     now_timestamp: int | None,
     is_editor: bool | None = None,
+    # Phase 4.7 (2026-05-23): League Capabilities Registry verdict
+    # (same semantics as football_edge_allowed.capability_verdict).
+    capability_verdict: str | None = None,
 ) -> bool:
     """Return whether a non-core event detail endpoint should be fetched.
 
@@ -272,6 +292,15 @@ def football_detail_endpoint_allowed(
     # X'' HARD BAN.
     if is_editor is True:
         return False
+
+    # Phase 4.7: League Capabilities Registry verdict short-circuits
+    # the legacy detail-endpoint gating when present (always after
+    # is_editor HARD BAN).
+    if capability_verdict == "allowed":
+        return True
+    if capability_verdict == "disabled":
+        return False
+    # 'unknown' or None → fall through to legacy logic.
 
     normalized_pattern = str(endpoint_pattern or "").strip()
     normalized_status = _normalize_status(status_type)
