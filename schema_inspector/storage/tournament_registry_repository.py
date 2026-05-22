@@ -677,6 +677,56 @@ class TournamentRegistryRepository:
         )
         return [dict(row) for row in rows]
 
+    async def list_pending_bootstrap_seasons(
+        self,
+        executor: SqlFetchExecutor,
+        *,
+        sport_slug: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Phase 3.7(a) (2026-05-22): return top-N pending catalog rows
+        for a sport, ordered by tournament priority then upstream
+        position (newest-first).
+
+        Used by ``HistoricalTournamentPlannerDaemon`` to publish a
+        throttled batch of bootstrap jobs alongside the cursor walk.
+        Workers see these jobs, look up the catalog state, and
+        dispatch ``run_historical_tournament_archive(bootstrap_mode=True)``
+        — lightweight event-list-only path.
+
+        The category barrier from
+        ``select_pending_cursors_by_top_category`` is NOT applied
+        here on purpose. Bootstrap is the long-tail drain, not the
+        priority frontline; it should make steady progress across
+        every active tournament in the sport, not stall behind a
+        single top-cat bucket.
+        """
+
+        normalized_sport = (sport_slug or "").strip().lower()
+        rows = await executor.fetch(
+            """
+            SELECT
+                tsuc.unique_tournament_id,
+                tsuc.season_id,
+                tsuc.upstream_position,
+                tr.priority_rank
+            FROM tournament_season_upstream_catalog tsuc
+            JOIN tournament_registry tr
+                ON tr.unique_tournament_id = tsuc.unique_tournament_id
+            WHERE tsuc.bootstrap_state = 'pending'
+              AND tr.sport_slug = $1
+              AND tr.is_active = TRUE
+              AND tr.historical_enabled = TRUE
+            ORDER BY tr.priority_rank ASC,
+                     tsuc.upstream_position ASC NULLS LAST,
+                     tsuc.season_id DESC
+            LIMIT $2
+            """,
+            normalized_sport,
+            int(limit),
+        )
+        return [dict(row) for row in rows]
+
     async def list_historical_planning_policies(
         self,
         executor: SqlFetchExecutor,

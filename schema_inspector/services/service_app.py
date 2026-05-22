@@ -735,8 +735,34 @@ class ServiceApp:
                     return []
 
             backfill_cursor_selector = _backfill_cursor_selector
+
+            # Phase 3.7(a) (2026-05-22): bootstrap pending selector.
+            # Returns top-N catalog rows where bootstrap_state='pending'
+            # so the planner can publish them as lightweight bootstrap
+            # jobs in parallel with the cursor walk. Throttle controlled
+            # by env SOFASCORE_MAX_BOOTSTRAP_JOBS_PER_TICK (default 20).
+            async def _bootstrap_pending_selector(*, sport_slug: str, limit: int):
+                try:
+                    async with connection_factory() as connection:
+                        return await cursor_repository.list_pending_bootstrap_seasons(
+                            connection, sport_slug=sport_slug, limit=limit
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "historical tournament planner: bootstrap selector "
+                        "failed, skipping bootstrap publishes this tick: %s",
+                        exc,
+                    )
+                    return []
+
+            bootstrap_pending_selector = _bootstrap_pending_selector
         else:
             backfill_cursor_selector = None
+            bootstrap_pending_selector = None
+
+        max_bootstrap_jobs_per_tick = _env_int_local(
+            "SOFASCORE_MAX_BOOTSTRAP_JOBS_PER_TICK", 20
+        )
 
         return HistoricalTournamentPlannerDaemon(
             queue=self.stream_queue,
@@ -747,6 +773,8 @@ class ServiceApp:
             loop_interval_s=loop_interval_seconds,
             target_loader=target_loader,
             backfill_cursor_selector=backfill_cursor_selector,
+            bootstrap_pending_selector=bootstrap_pending_selector,
+            max_bootstrap_jobs_per_tick=max_bootstrap_jobs_per_tick,
             priority_config=_load_backfill_priority_config_or_warn(),
             # Task 5 (2026-05-15): live-side governor on top of stream
             # backpressure — see build_historical_planner_daemon comment.

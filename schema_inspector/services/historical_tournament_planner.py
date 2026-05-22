@@ -68,6 +68,17 @@ class HistoricalTournamentPlannerDaemon:
         target_loader=None,
         backfill_cursor_selector: Callable[..., Awaitable[list[dict]]] | None = None,
         priority_config: BackfillPriorityConfig | None = None,
+        # Phase 3.7(a) (2026-05-22): bootstrap surface for the
+        # pending catalog rows. When provided, the planner publishes
+        # an extra throttled batch of (UT, season) jobs taken from
+        # the upstream-seasons catalog where bootstrap_state='pending'.
+        # Workers see these jobs, look up the catalog state, and
+        # dispatch in bootstrap_mode=True (lightweight event-list
+        # only). Without this surface the catalog long-tail would
+        # only drain via cursor advance — one UT at a time, days
+        # to drain 19k pending rows.
+        bootstrap_pending_selector: Callable[..., Awaitable[list[dict]]] | None = None,
+        max_bootstrap_jobs_per_tick: int = 20,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -89,6 +100,9 @@ class HistoricalTournamentPlannerDaemon:
         # ``None`` keeps the pre-config behaviour (uniform target rotation).
         # See docs/BACKFILL_PRIORITIES.md.
         self.priority_config = priority_config
+        # Phase 3.7(a) (2026-05-22): bootstrap surface (see __init__ doc).
+        self.bootstrap_pending_selector = bootstrap_pending_selector
+        self.max_bootstrap_jobs_per_tick = max(0, int(max_bootstrap_jobs_per_tick))
         self.shutdown_requested = False
 
     def request_shutdown(self) -> None:
@@ -237,6 +251,11 @@ class HistoricalTournamentPlannerDaemon:
                         )
                         self.queue.publish(self.stream, encode_stream_job(job))
                         published += 1
+                    # Phase 3.7(a): bootstrap publishes alongside the
+                    # cursor jobs. Both happen on the same tick — cursor
+                    # advances current heads, bootstrap drains the
+                    # long-tail pending catalog rows in parallel.
+                    published += await self._publish_bootstrap_batch(target)
                     continue
 
             # Legacy path — no cursor data yet, fall back to UT-only walk.
@@ -254,6 +273,10 @@ class HistoricalTournamentPlannerDaemon:
                 self.selector(**selector_kwargs)
             )
             if not selected_ids:
+                # Phase 3.7(a): legacy selector empty — still try
+                # bootstrap (catalog may have pending rows even
+                # when tournament_registry walk is exhausted).
+                published += await self._publish_bootstrap_batch(target)
                 continue
             for unique_tournament_id in selected_ids:
                 job = JobEnvelope.create(
@@ -269,6 +292,52 @@ class HistoricalTournamentPlannerDaemon:
                 self.queue.publish(self.stream, encode_stream_job(job))
                 published += 1
             self.cursor_store.save_last_unique_tournament_id(target.sport_slug, int(selected_ids[-1]))
+            # Phase 3.7(a): bootstrap publishes also run on the legacy
+            # path so the catalog long tail drains even when cursor
+            # rows are empty (e.g. registry not yet seeded).
+            published += await self._publish_bootstrap_batch(target)
+        return published
+
+    async def _publish_bootstrap_batch(self, target) -> int:
+        """Phase 3.7(a) (2026-05-22): publish a throttled batch of
+        bootstrap jobs for ``pending`` catalog rows. Returns the
+        number of jobs actually published.
+
+        No-op when:
+          * ``bootstrap_pending_selector`` was not configured
+            (backwards-compatible default).
+          * ``max_bootstrap_jobs_per_tick == 0`` (operator dial-down).
+          * Selector returns no rows (catalog drained for this sport).
+        """
+
+        if self.bootstrap_pending_selector is None:
+            return 0
+        limit = int(self.max_bootstrap_jobs_per_tick)
+        if limit <= 0:
+            return 0
+        rows = await _await_maybe(
+            self.bootstrap_pending_selector(
+                sport_slug=target.sport_slug, limit=limit
+            )
+        )
+        if not rows:
+            return 0
+        published = 0
+        for row in rows[:limit]:
+            ut_id = int(row["unique_tournament_id"])
+            season_id = int(row["season_id"])
+            job = JobEnvelope.create(
+                job_type=JOB_SYNC_TOURNAMENT_ARCHIVE,
+                sport_slug=target.sport_slug,
+                entity_type="unique_tournament",
+                entity_id=ut_id,
+                scope="historical",
+                params={"target_season_id": season_id},
+                priority=target.priority,
+                trace_id=None,
+            )
+            self.queue.publish(self.stream, encode_stream_job(job))
+            published += 1
         return published
 
 
