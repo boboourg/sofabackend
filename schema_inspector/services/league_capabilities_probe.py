@@ -195,4 +195,272 @@ __all__ = [
     "VerdictResult",
     "aggregate_verdict",
     "build_capability_upserts",
+    "ProbeExecutor",
+    "ProbeReport",
+    "PROBE_ENDPOINTS_BY_STATUS",
 ]
+
+
+# Endpoint sets per status_type. Each value is a tuple of endpoint
+# patterns the probe service issues GETs against. These sets pin the
+# scope of probing so it never grows uncontrolled — operator-tunable
+# via env override (planned ops surface).
+PROBE_ENDPOINTS_BY_STATUS: dict[str, tuple[str, ...]] = {
+    "inprogress": (
+        "/api/v1/event/{event_id}",
+        "/api/v1/event/{event_id}/incidents",
+        "/api/v1/event/{event_id}/statistics",
+        "/api/v1/event/{event_id}/lineups",
+        "/api/v1/event/{event_id}/best-players/summary",
+        "/api/v1/event/{event_id}/comments",
+        "/api/v1/event/{event_id}/graph",
+        "/api/v1/event/{event_id}/votes",
+        "/api/v1/event/{event_id}/shotmap",
+        "/api/v1/event/{event_id}/h2h",
+        "/api/v1/event/{event_id}/managers",
+        "/api/v1/event/{event_id}/pregame-form",
+    ),
+    "finished": (
+        # All inprogress endpoints continue to make sense post-match
+        # PLUS post-match-only surfaces.
+        "/api/v1/event/{event_id}",
+        "/api/v1/event/{event_id}/incidents",
+        "/api/v1/event/{event_id}/statistics",
+        "/api/v1/event/{event_id}/lineups",
+        "/api/v1/event/{event_id}/best-players/summary",
+        "/api/v1/event/{event_id}/comments",
+        "/api/v1/event/{event_id}/graph",
+        "/api/v1/event/{event_id}/shotmap",
+        "/api/v1/event/{event_id}/h2h",
+        "/api/v1/event/{event_id}/managers",
+        "/api/v1/event/{event_id}/pregame-form",
+        "/api/v1/event/{event_id}/highlights",
+    ),
+    "notstarted": (
+        "/api/v1/event/{event_id}",
+        "/api/v1/event/{event_id}/h2h",
+        "/api/v1/event/{event_id}/managers",
+        "/api/v1/event/{event_id}/pregame-form",
+        "/api/v1/event/{event_id}/votes",
+        "/api/v1/event/{event_id}/team-streaks",
+        "/api/v1/event/{event_id}/lineups",  # warmup probable lineups
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ProbeReport:
+    """Summary of one probe pass for (UT, season, status)."""
+
+    unique_tournament_id: int
+    season_id: int | None
+    status_type: str
+    samples_used: int
+    upserts_count: int
+    by_endpoint: dict[str, str]  # endpoint_pattern → state
+    elapsed_seconds: float
+    errors: list[str]
+
+
+class ProbeExecutor:
+    """Phase 4.4 (2026-05-23): orchestrate one probe pass.
+
+      1. SELECT last N events for (UT, season, status) from DB.
+      2. For each endpoint × event: GET, classify outcome.
+      3. Aggregate verdicts and persist upserts via repository.
+      4. Invalidate Redis cache so new verdicts become visible
+         immediately to the orchestrator.
+
+    The HTTP client interface is minimal — ``get_json(event_id,
+    endpoint_pattern)`` returns ``{'status': int, 'payload': dict|None}``
+    or raises on transient failure. Production wires
+    ``SofascoreClient`` here; tests use a fake.
+    """
+
+    def __init__(
+        self,
+        *,
+        database,
+        client,
+        repository,
+        registry,
+        samples_per_endpoint: int = 5,
+    ) -> None:
+        self.database = database
+        self.client = client
+        self.repository = repository
+        self.registry = registry
+        self.samples_per_endpoint = max(1, int(samples_per_endpoint))
+
+    async def probe(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int | None,
+        status_type: str,
+        endpoint_patterns: tuple[str, ...],
+        samples_per_endpoint: int | None = None,
+    ) -> ProbeReport:
+        import time
+        started = time.perf_counter()
+        n_samples = int(samples_per_endpoint or self.samples_per_endpoint)
+        errors: list[str] = []
+
+        # Step 1: sample selection.
+        event_ids = await self._select_sample_events(
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            status_type=status_type,
+            limit=n_samples,
+        )
+
+        # Step 2: probe (event × endpoint).
+        sample_outcomes_by_endpoint: dict[str, list[ProbeSampleOutcome]] = {
+            ep: [] for ep in endpoint_patterns
+        }
+        for endpoint_pattern in endpoint_patterns:
+            for event_id in event_ids:
+                outcome = await self._probe_one(event_id, endpoint_pattern, errors)
+                sample_outcomes_by_endpoint[endpoint_pattern].append(outcome)
+
+        # Step 3: aggregate + upsert.
+        upserts = build_capability_upserts(
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            status_type=status_type,
+            sample_outcomes_by_endpoint=sample_outcomes_by_endpoint,
+        )
+        # Cover endpoints whose sample list was empty (no events
+        # selected at all) so they still get a row in DB.
+        if not event_ids:
+            from datetime import datetime, timezone, timedelta
+            upserts = [
+                CapabilityUpsert(
+                    unique_tournament_id=int(unique_tournament_id),
+                    season_id=season_id if season_id is None else int(season_id),
+                    status_type=str(status_type),
+                    endpoint_pattern=ep,
+                    state=STATE_UNKNOWN,
+                    probe_samples_total=0,
+                    probe_samples_ok=0,
+                    probe_samples_http_404=0,
+                    probe_samples_empty=0,
+                    probe_samples_error=0,
+                    confidence_score=None,
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=14),
+                    source=SOURCE_PROBE,
+                    notes="no sample events available",
+                )
+                for ep in endpoint_patterns
+            ]
+
+        async with self.database.connection() as connection:
+            for row in upserts:
+                await self.repository.upsert_capability(connection, row=row)
+
+        # Step 4: invalidate Redis cache so the new verdicts win on
+        # the next orchestrator read.
+        try:
+            await self.registry.invalidate_quad(
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                status_type=status_type,
+                endpoint_patterns=endpoint_patterns,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            errors.append(f"invalidate_quad failed: {exc}")
+
+        elapsed = time.perf_counter() - started
+        return ProbeReport(
+            unique_tournament_id=int(unique_tournament_id),
+            season_id=season_id,
+            status_type=str(status_type),
+            samples_used=len(event_ids),
+            upserts_count=len(upserts),
+            by_endpoint={u.endpoint_pattern: u.state for u in upserts},
+            elapsed_seconds=elapsed,
+            errors=errors,
+        )
+
+    async def _select_sample_events(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int | None,
+        status_type: str,
+        limit: int,
+    ) -> list[int]:
+        """Return list of event_ids for the (UT, season, status_type)
+        cohort, newest first. Caller decides what to do if empty."""
+
+        async with self.database.connection() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT id
+                FROM event
+                WHERE unique_tournament_id = $1
+                  AND (season_id = $2 OR $2 IS NULL)
+                  AND status_type = $3
+                ORDER BY start_timestamp DESC NULLS LAST
+                LIMIT $4
+                """,
+                int(unique_tournament_id),
+                None if season_id is None else int(season_id),
+                str(status_type),
+                int(limit),
+            )
+        return [int(row["id"]) for row in rows]
+
+    async def _probe_one(
+        self,
+        event_id: int,
+        endpoint_pattern: str,
+        errors: list,
+    ) -> ProbeSampleOutcome:
+        """One HTTP probe. Wraps client.get_json with classification
+        of status / empty payload / transient exceptions."""
+
+        try:
+            outcome = await self.client.get_json(
+                event_id=event_id, endpoint_pattern=endpoint_pattern
+            )
+        except Exception as exc:  # transient — TLS, 5xx, proxy, etc.
+            errors.append(f"event={event_id} ep={endpoint_pattern}: {exc}")
+            return ProbeSampleOutcome(
+                event_id=event_id, status=0, payload_empty=False, is_error=True,
+            )
+        status = int(outcome.get("status") or 0)
+        payload = outcome.get("payload")
+        payload_empty = _is_payload_empty(payload)
+        return ProbeSampleOutcome(
+            event_id=event_id,
+            status=status,
+            payload_empty=payload_empty,
+            is_error=False,
+        )
+
+
+def _is_payload_empty(payload) -> bool:
+    """Heuristic: payload is considered empty when:
+      * None
+      * dict where every value is empty list / dict / None
+      * dict with an explicit ``error`` envelope (Sofascore soft-error)
+    Anything else counts as non-empty (parser will figure out shape)."""
+
+    if payload is None:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    if "error" in payload and isinstance(payload.get("error"), dict):
+        return True
+    if not payload:
+        return True
+    for value in payload.values():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)) and len(value) == 0:
+            continue
+        if isinstance(value, dict) and not value:
+            continue
+        return False
+    return True
