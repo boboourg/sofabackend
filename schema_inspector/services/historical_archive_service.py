@@ -39,6 +39,15 @@ async def run_historical_tournament_archive(
     # statistics/player-stats for archive matches.
     skip_event_detail: bool = True,
     skip_entities: bool = True,
+    # Phase 3 (2026-05-22): when True, skip every macro stage AND
+    # event_detail / entities — only the event-list pass runs. This
+    # is the bootstrap path for ``pending`` catalog rows: cheap walk
+    # that materializes event rows so the next cursor walk picks the
+    # season up in full-archive mode (state → events_loaded after).
+    # 10x faster per (UT, season) than the full path, sufficient to
+    # transition state and let downstream fan-out fill match-center
+    # incrementally.
+    bootstrap_mode: bool = False,
 ) -> dict[str, object]:
     adapter = build_source_adapter(
         app.runtime_config.source_slug,
@@ -53,6 +62,15 @@ async def run_historical_tournament_archive(
     leaderboards_job = adapter.build_leaderboards_job(app.database)
     event_detail_job = adapter.build_event_detail_job(app.database)
     entities_job = adapter.build_entities_job(app.database)
+    # Bootstrap mode overrides every optional stage. Only round-events
+    # fetch stays enabled because that is what creates ``event`` rows
+    # (the precondition for catalog state→events_loaded transition).
+    effective_skip_featured = True if bootstrap_mode else False
+    effective_skip_statistics = True if bootstrap_mode else False
+    effective_skip_standings = True if bootstrap_mode else False
+    effective_skip_leaderboards = True if bootstrap_mode else False
+    effective_skip_event_detail = True if bootstrap_mode else skip_event_detail
+    effective_skip_entities = True if bootstrap_mode else skip_entities
     result = await _run_tournament_worker(
         app.database,
         competition_job=competition_job,
@@ -78,13 +96,13 @@ async def run_historical_tournament_archive(
         ),
         seasons_per_tournament=seasons_per_tournament,
         event_concurrency=max(1, int(event_concurrency)),
-        skip_featured_events=False,
+        skip_featured_events=effective_skip_featured,
         skip_round_events=False,
-        skip_event_detail=skip_event_detail,
-        skip_entities=skip_entities,
-        skip_statistics=False,
-        skip_standings=False,
-        skip_leaderboards=False,
+        skip_event_detail=effective_skip_event_detail,
+        skip_entities=effective_skip_entities,
+        skip_statistics=effective_skip_statistics,
+        skip_standings=effective_skip_standings,
+        skip_leaderboards=effective_skip_leaderboards,
         timeout=timeout,
         target_season_id=target_season_id,
     )

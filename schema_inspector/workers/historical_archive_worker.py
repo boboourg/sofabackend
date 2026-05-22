@@ -37,6 +37,58 @@ def _coerce_optional_int(value: object) -> int | None:
         return None
 
 
+def _resolve_bootstrap_mode_from_catalog_state(state: str | None) -> bool:
+    """Phase 3 (2026-05-22): two-phase archive backfill dispatch.
+
+    ``pending``         → bootstrap mode (lightweight event-list-only walk;
+                           after success the state transitions to
+                           ``events_loaded`` and the next cursor pass
+                           picks the season up in full mode).
+    ``events_loaded``   → full archive mode (match-center + entities).
+    ``fully_processed`` → full mode (defensive — already-processed
+                           seasons that get re-published should NOT
+                           regress to bootstrap; the re-pass is
+                           idempotent in full mode).
+    ``None`` / missing  → full mode (legacy seasons that pre-date the
+                           catalog table; default to non-bootstrap
+                           behaviour so nothing is silently downgraded).
+    """
+
+    normalized = (state or "").strip().lower()
+    return normalized == "pending"
+
+
+async def _fetch_catalog_state(
+    orchestrator, *, unique_tournament_id: int, season_id: int | None
+) -> str | None:
+    """Best-effort lookup of catalog bootstrap_state for (UT, season).
+    Returns None for missing rows / DB errors so the worker falls back
+    to the safe full-archive path (rather than bootstrap-mode-by-mistake
+    on a legacy season)."""
+
+    if season_id is None:
+        return None
+    database = getattr(orchestrator, "database", None)
+    if database is None:
+        return None
+    try:
+        async with database.connection() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT bootstrap_state
+                FROM tournament_season_upstream_catalog
+                WHERE unique_tournament_id = $1 AND season_id = $2
+                """,
+                int(unique_tournament_id),
+                int(season_id),
+            )
+            if row is None:
+                return None
+            return str(row["bootstrap_state"]) if row["bootstrap_state"] else None
+    except Exception:  # noqa: BLE001 — defensive: any DB hiccup → full mode
+        return None
+
+
 class HistoricalTournamentWorker:
     def __init__(
         self,
@@ -90,10 +142,25 @@ class HistoricalTournamentWorker:
         # Legacy "process every season" jobs leave the param absent and
         # we fall back to the historical multi-season walk.
         target_season_id = _coerce_optional_int(job.params.get("target_season_id"))
+        # Phase 3 (2026-05-22): two-phase dispatch.
+        # Lookup catalog row for (UT, season) — if 'pending' → bootstrap.
+        # Bootstrap path skips macro stages + event-detail + entities;
+        # only fetches event-list. After success the
+        # ``_run_tournament_worker`` events_loaded transition (Phase 2.A.4)
+        # flips the catalog state, so the next cursor walk picks the
+        # season up in full mode automatically. Missing row / DB error
+        # → defensive full mode (no silent downgrade).
+        catalog_state = await _fetch_catalog_state(
+            self.orchestrator,
+            unique_tournament_id=ut_id,
+            season_id=target_season_id,
+        )
+        bootstrap_mode = _resolve_bootstrap_mode_from_catalog_state(catalog_state)
         result = await self.orchestrator.run_historical_tournament_archive(
             unique_tournament_id=ut_id,
             sport_slug=sport_slug,
             target_season_id=target_season_id,
+            bootstrap_mode=bootstrap_mode,
         )
         season_ids = tuple(int(item) for item in result.get("season_ids", ()) or ())
 

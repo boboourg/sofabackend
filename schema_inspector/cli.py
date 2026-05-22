@@ -961,12 +961,19 @@ class HybridApp:
         unique_tournament_id: int,
         sport_slug: str,
         target_season_id: int | None = None,
+        bootstrap_mode: bool = False,
     ):
+        # Phase 3 (2026-05-22): forward bootstrap_mode kwarg to the
+        # service so the lightweight-event-list-only path can be
+        # selected per-job by the worker dispatcher. Without this
+        # wire, the worker's catalog-state-driven dispatch silently
+        # falls back to the full archive path.
         return await run_historical_tournament_archive_service(
             self,
             unique_tournament_id=unique_tournament_id,
             sport_slug=sport_slug,
             target_season_id=target_season_id,
+            bootstrap_mode=bootstrap_mode,
         )
 
     async def advance_backfill_cursor(

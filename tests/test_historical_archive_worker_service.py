@@ -381,7 +381,7 @@ class HistoricalTournamentWorkerTests(unittest.IsolatedAsyncioTestCase):
         # via a monkey method that returns a dict without the key.
         original = orchestrator.run_historical_tournament_archive
 
-        async def _legacy_result(*, unique_tournament_id, sport_slug, target_season_id=None):
+        async def _legacy_result(*, unique_tournament_id, sport_slug, target_season_id=None, bootstrap_mode=False):
             await original(
                 unique_tournament_id=unique_tournament_id,
                 sport_slug=sport_slug,
@@ -907,9 +907,12 @@ class _FakeArchiveOrchestrator:
         unique_tournament_id: int,
         sport_slug: str,
         target_season_id: int | None = None,
+        bootstrap_mode: bool = False,  # Phase 3: forwarded by worker dispatch
     ):
         self.archive_calls.append((unique_tournament_id, sport_slug))
         self.archive_target_seasons.append(target_season_id)
+        self.archive_bootstrap_modes = getattr(self, "archive_bootstrap_modes", [])
+        self.archive_bootstrap_modes.append(bootstrap_mode)
         if target_season_id is not None:
             return {
                 "season_ids": (int(target_season_id),),
