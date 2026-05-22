@@ -144,7 +144,77 @@ class PlannerBootstrapPublishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured_limits, [5], "Selector must be called with the throttle limit.")
         self.assertEqual(published, 5)
 
-    async def test_tick_skips_bootstrap_on_backpressure(self) -> None:
+    async def test_tick_publishes_bootstrap_during_cursor_backpressure(self) -> None:
+        """Selective backpressure: cursor publishes paused due to
+        enrichment lag, but bootstrap publishes continue (they
+        skip enrichment fan-out so they generate zero downstream
+        load — no deadlock risk)."""
+        from schema_inspector.services.backpressure import (
+            BackpressureLimit,
+            QueueBackpressure,
+        )
+        from schema_inspector.services.historical_tournament_planner import (
+            HistoricalTournamentCursorStore,
+            HistoricalTournamentPlannerDaemon,
+            HistoricalTournamentPlanningTarget,
+        )
+
+        backend = _FakeRedisBackend()
+        # Enrichment lag above threshold — cursor publishes must pause.
+        queue = _FakeQueue(
+            group_info_by_stream={
+                ("stream:etl:historical_enrichment", "cg:historical_enrichment"): _FakeGroupInfo(lag=99999)
+            }
+        )
+
+        async def cursor_selector(*, sport_slug: str, limit: int):
+            # Even if called would return 2 rows — but it should NOT
+            # be called when cursor is backpressure-paused.
+            return [{"unique_tournament_id": 99, "next_season_backfill_id": 999}]
+
+        async def bootstrap_pending_selector(*, sport_slug: str, limit: int):
+            return [{"unique_tournament_id": 16, "season_id": 1151, "priority_rank": 1}]
+
+        async def selector(**kwargs):
+            return ()
+
+        daemon = HistoricalTournamentPlannerDaemon(
+            queue=queue,
+            cursor_store=HistoricalTournamentCursorStore(backend),
+            selector=selector,
+            targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
+            backfill_cursor_selector=cursor_selector,
+            bootstrap_pending_selector=bootstrap_pending_selector,
+            max_bootstrap_jobs_per_tick=10,
+            backpressure=QueueBackpressure(
+                queue=queue,
+                limits=(
+                    BackpressureLimit(
+                        stream="stream:etl:historical_enrichment",
+                        group="cg:historical_enrichment",
+                        max_lag=10000,
+                    ),
+                ),
+            ),
+        )
+
+        published = await daemon.tick()
+
+        self.assertEqual(published, 1, "Bootstrap publish must run even when cursor is paused.")
+        # Verify it was the BOOTSTRAP row (UT=16, season=1151), not
+        # the cursor row (UT=99, season=999).
+        import json
+        _stream, values = queue.published[0]
+        self.assertEqual(int(values["entity_id"]), 16)
+        params = json.loads(values["params_json"])
+        self.assertEqual(params["target_season_id"], 1151)
+
+    async def test_tick_backpressure_with_no_bootstrap_selector_publishes_nothing(self) -> None:
+        """When backpressure is active AND no bootstrap selector
+        configured, the planner publishes nothing (cursor paused,
+        bootstrap path absent). This pins the backwards-compat
+        behaviour for deployments that don't yet wire the bootstrap
+        surface."""
         from schema_inspector.services.backpressure import (
             BackpressureLimit,
             QueueBackpressure,
@@ -162,23 +232,15 @@ class PlannerBootstrapPublishTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        bootstrap_call_count = 0
-
-        async def bootstrap_pending_selector(*, sport_slug: str, limit: int):
-            nonlocal bootstrap_call_count
-            bootstrap_call_count += 1
-            return [{"unique_tournament_id": 16, "season_id": 1151, "priority_rank": 1}]
-
         async def selector(**kwargs):
-            return ()
+            return (1, 2, 3)  # would-publish but cursor is paused
 
         daemon = HistoricalTournamentPlannerDaemon(
             queue=queue,
             cursor_store=HistoricalTournamentCursorStore(backend),
             selector=selector,
             targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
-            bootstrap_pending_selector=bootstrap_pending_selector,
-            max_bootstrap_jobs_per_tick=20,
+            # No bootstrap_pending_selector — backwards-compat path.
             backpressure=QueueBackpressure(
                 queue=queue,
                 limits=(
@@ -193,8 +255,7 @@ class PlannerBootstrapPublishTests(unittest.IsolatedAsyncioTestCase):
 
         published = await daemon.tick()
 
-        self.assertEqual(published, 0, "Backpressure must block bootstrap too.")
-        self.assertEqual(bootstrap_call_count, 0, "Selector must not be called under backpressure.")
+        self.assertEqual(published, 0)
         self.assertEqual(queue.published, [])
 
     async def test_tick_no_bootstrap_selector_keeps_legacy_behavior(self) -> None:

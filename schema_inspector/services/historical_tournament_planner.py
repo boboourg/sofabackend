@@ -188,11 +188,23 @@ class HistoricalTournamentPlannerDaemon:
         return result
 
     async def tick(self) -> int:
+        # Phase 3.7(a) (2026-05-22): selective backpressure — cursor
+        # publishes pause when enrichment lag is high (they generate
+        # match-center fan-out + entities), but bootstrap publishes
+        # keep going (bootstrap-mode workers skip enrichment children,
+        # so they add zero downstream load). Without this split the
+        # planner self-deadlocks on enrichment lag: cursor paused →
+        # no advance → no events_loaded → no catalog drain → cursor
+        # stays paused.
+        cursor_paused_reason: str | None = None
         if self.backpressure is not None:
-            reason = self.backpressure.blocking_reason()
-            if reason:
-                logger.info("Historical tournament planner paused by backpressure: %s", reason)
-                return 0
+            cursor_paused_reason = self.backpressure.blocking_reason()
+            if cursor_paused_reason:
+                logger.info(
+                    "Cursor publishes paused by backpressure: %s "
+                    "(bootstrap publishes continue)",
+                    cursor_paused_reason,
+                )
         targets = await _await_maybe(self._target_loader()) if self._target_loader else self._static_targets
         # C.3: per-target slice of tournaments_per_tick when a
         # priority config is active. Targets with sport_weight=0 (or
@@ -204,6 +216,15 @@ class HistoricalTournamentPlannerDaemon:
             targets = tuple(t for t in targets if per_target_limit.get(t.sport_slug, 0) > 0)
         published = 0
         for target in targets:
+            # When cursor publishes are backpressure-paused, skip
+            # the cursor + legacy walks but still try bootstrap
+            # (it generates zero enrichment load — see Phase 3.7(a)
+            # worker fix that skips JOB_ENRICH_TOURNAMENT_* children
+            # for bootstrap_mode jobs).
+            if cursor_paused_reason is not None:
+                published += await self._publish_bootstrap_batch(target)
+                continue
+
             # Phase 1 (2026-05-16): cursor-aware path first. The selector
             # returns rows like {unique_tournament_id, next_season_backfill_id,
             # priority_rank} ordered by priority. When it yields anything we
