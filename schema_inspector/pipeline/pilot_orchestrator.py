@@ -53,6 +53,10 @@ from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_FINALIZE_EVENT, JOB_HYDRATE_EVENT_ROOT, JOB_TRACK_LIVE_EVENT
 from ..planner.live import TERMINAL_STATUS_TYPES
 from ..match_center_policy import football_edge_allowed, football_special_allowed
+from ..services.league_capabilities_registry import (
+    is_league_capabilities_enabled,
+    resolve_capability_verdict,
+)
 from ..parsers.sports import resolve_sport_adapter
 from ..services.retry_policy import RetryableJobError
 from ..storage.capability_repository import CapabilityObservationRecord, CapabilityRollupRecord
@@ -270,6 +274,15 @@ class PilotOrchestrator:
         freshness_store=None,
         player_profile_freshness_ttl_seconds: int = PLAYER_PROFILE_FRESHNESS_TTL_SECONDS,
         fanout_max_inflight: int = 1,
+        # Phase 4.7 wire (2026-05-23): League Capabilities Registry.
+        # ``None`` = pre-Phase-4.7 behaviour (orchestrator never
+        # consults registry, gates fall back to legacy tier-based
+        # logic). When non-None AND
+        # ``is_league_capabilities_enabled()`` returns True, the
+        # orchestrator looks up each endpoint pattern in the registry
+        # before calling the gate function — measured verdicts win
+        # over legacy policy.
+        league_capabilities=None,
     ) -> None:
         self.fetch_executor = fetch_executor
         self.snapshot_store = snapshot_store
@@ -301,6 +314,8 @@ class PilotOrchestrator:
         self.freshness_store = freshness_store
         self.player_profile_freshness_ttl_seconds = int(player_profile_freshness_ttl_seconds)
         self._fanout_max_inflight = max(1, int(fanout_max_inflight or 1))
+        # Phase 4.7 wire: registry instance (may be None).
+        self.league_capabilities = league_capabilities
         self._event_endpoint_gate_decision_lock = asyncio.Lock()
         self._rollups: dict[tuple[str, str], CapabilityRollupAccumulator] = {}
         self._pending_capability_records: list[DeferredCapabilityRecord] = []
@@ -311,6 +326,41 @@ class PilotOrchestrator:
         # in its ``finally`` block regardless of run_event outcome.
         self._pending_hydrate_lock_event_id: int | None = None
         self._freshness_skip_keys: set[str] = set()
+
+    async def _resolve_edge_capability_verdict(
+        self,
+        *,
+        unique_tournament_id,
+        season_id,
+        status_type,
+        edge_kind,
+    ) -> str | None:
+        """Phase 4.7 wire (2026-05-23): resolve capability verdict
+        for one core edge.
+
+        Maps ``edge_kind`` → endpoint pattern via
+        ``_endpoint_for_edge_kind`` and asks the registry. Returns
+        None when:
+          * feature flag OFF
+          * no registry instance attached to this orchestrator
+          * edge_kind doesn't map to a known endpoint
+          * registry has no row for the quad
+          * registry raised (Redis / DB failure)
+        Caller passes result to ``football_edge_allowed.capability_verdict``;
+        None means fall back to legacy tier-based logic.
+        """
+
+        endpoint = _endpoint_for_edge_kind(str(edge_kind or ""))
+        if endpoint is None:
+            return None
+        return await resolve_capability_verdict(
+            registry=self.league_capabilities,
+            enabled=is_league_capabilities_enabled(),
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            status_type=status_type,
+            endpoint_pattern=endpoint.pattern,
+        )
 
     @property
     def freshness_skip_keys(self) -> frozenset[str]:
@@ -579,6 +629,13 @@ class PilotOrchestrator:
             edge_specs: list[_EventEndpointFetchSpec] = []
             for edge_job in planned_jobs:
                 edge_kind = str(edge_job.params.get("edge_kind") or "")
+                # Phase 4.7 wire: registry verdict short-circuits legacy.
+                capability_verdict = await self._resolve_edge_capability_verdict(
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                    status_type=status_type,
+                    edge_kind=edge_kind,
+                )
                 if not football_edge_allowed(
                     sport_slug=sport_slug,
                     edge_kind=edge_kind,
@@ -586,6 +643,7 @@ class PilotOrchestrator:
                     status_type=status_type,
                     has_xg=has_xg,
                     is_editor=is_editor,  # X'' matchcenter ban
+                    capability_verdict=capability_verdict,
                 ):
                     continue
                 endpoint = _endpoint_for_edge_kind(edge_kind)
@@ -612,6 +670,13 @@ class PilotOrchestrator:
         else:
             for edge_job in planned_jobs:
                 edge_kind = str(edge_job.params.get("edge_kind") or "")
+                # Phase 4.7 wire.
+                capability_verdict = await self._resolve_edge_capability_verdict(
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                    status_type=status_type,
+                    edge_kind=edge_kind,
+                )
                 if not football_edge_allowed(
                     sport_slug=sport_slug,
                     edge_kind=edge_kind,
@@ -619,6 +684,7 @@ class PilotOrchestrator:
                     status_type=status_type,
                     has_xg=has_xg,
                     is_editor=is_editor,  # X'' matchcenter ban
+                    capability_verdict=capability_verdict,
                 ):
                     continue
                 endpoint = _endpoint_for_edge_kind(edge_kind)
@@ -1481,6 +1547,12 @@ class PilotOrchestrator:
             return outcomes, parses
         adapter = resolve_sport_adapter(sport_slug)
         # Phase 1: core edges, gated by football_edge_allowed (existing behaviour).
+        # Phase 4.7 NOT wired here — _run_final_sweep doesn't carry
+        # unique_tournament_id / season_id through its signature. The
+        # other two football_edge_allowed call sites (live_delta /
+        # full hydration paths) DO consult the registry; final sweep
+        # falls back to legacy policy. Cost is bounded — final sweep
+        # runs at most once per event after finalize.
         for edge_kind in adapter.core_event_edges:
             if not football_edge_allowed(
                 sport_slug=sport_slug,

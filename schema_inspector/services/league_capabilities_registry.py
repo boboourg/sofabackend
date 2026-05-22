@@ -82,6 +82,53 @@ _FEATURE_FLAG_ENV = "SOFASCORE_LEAGUE_CAPABILITIES_ENABLED"
 _TRUTHY = frozenset({"1", "true", "yes", "on", "y", "t"})
 
 
+async def resolve_capability_verdict(
+    *,
+    registry: "LeagueCapabilitiesRegistry | None",
+    enabled: bool,
+    unique_tournament_id: int | None,
+    season_id: int | None,
+    status_type: str | None,
+    endpoint_pattern: str,
+) -> str | None:
+    """Phase 4.7 wire (2026-05-23): orchestrator-side resolver.
+
+    Returns the capability_verdict string ('allowed' / 'disabled' /
+    'unknown') for the gate functions, or None when:
+      * Feature flag is OFF.
+      * No registry instance configured.
+      * unique_tournament_id or status_type missing (can't lookup).
+      * Registry raises (Redis down, DB timeout) — fail-safe.
+
+    A None return tells the gate functions to fall back to legacy
+    tier-based logic. This helper is the single integration point
+    so orchestrator code stays clean:
+
+        verdict = await resolve_capability_verdict(...)
+        if not football_edge_allowed(..., capability_verdict=verdict):
+            continue
+    """
+
+    if not enabled or registry is None:
+        return None
+    if unique_tournament_id is None or status_type is None:
+        return None
+    try:
+        verdict = await registry.get_verdict(
+            unique_tournament_id=int(unique_tournament_id),
+            season_id=None if season_id is None else int(season_id),
+            status_type=str(status_type),
+            endpoint_pattern=str(endpoint_pattern),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "resolve_capability_verdict swallowed registry error: %s",
+            exc,
+        )
+        return None
+    return verdict.cache_value
+
+
 def is_league_capabilities_enabled() -> bool:
     """Phase 4.7 (2026-05-23): operator dial controlling whether the
     orchestrator consults the registry before policy gating. Default
