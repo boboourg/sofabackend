@@ -754,6 +754,33 @@ async def _run_tournament_worker(
             # leaderboards / round_events 404'd, because their event
             # list landed via the /events/last/{p} fallback above.
             capabilities.add(EVENTS)
+            # Phase 2.A (2026-05-22): mark the upstream-catalog row
+            # ``events_loaded`` so the next advance can promote it to
+            # ``fully_processed``. Best-effort — missing catalog row
+            # (cursor seeded before catalog populated) is silently
+            # treated as no-op; the next /seasons fetch will catalog
+            # this row and the next walk picks it up.
+            try:
+                async with database.connection() as connection:
+                    await connection.execute(
+                        """
+                        UPDATE tournament_season_upstream_catalog
+                        SET bootstrap_state = 'events_loaded',
+                            events_loaded_at = COALESCE(events_loaded_at, now()),
+                            last_observed_at = now()
+                        WHERE unique_tournament_id = $1
+                          AND season_id = $2
+                          AND bootstrap_state = 'pending'
+                        """,
+                        int(unique_tournament_id),
+                        int(season_id),
+                    )
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "Catalog state transition events_loaded skipped: "
+                    "ut=%s season=%s: %s",
+                    unique_tournament_id, season_id, exc,
+                )
         if season_event_ids:
             event_ids.extend(season_event_ids)
 

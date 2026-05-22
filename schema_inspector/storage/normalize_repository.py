@@ -161,6 +161,16 @@ class NormalizeRepository:
             executor,
             rows=result.metric_rows.get("unique_tournament_season_champion", ()),
         )
+        # Phase 2.A (2026-05-22): upstream-seasons catalog landing.
+        # Emitted by ``UpstreamSeasonCatalogParser`` from
+        # ``/unique-tournament/{ut}/seasons`` snapshots. UPSERT-only —
+        # the persist NEVER mutates ``bootstrap_state`` on conflict
+        # (state transitions are owned by event-list-job and
+        # ``advance_backfill_cursor``).
+        await self._persist_tournament_season_upstream_catalog(
+            executor,
+            rows=result.metric_rows.get("tournament_season_upstream_catalog", ()),
+        )
         await self._confirm_lineup_team_refs(executor, result, inserted)
         await self._persist_lineups(executor, result, inserted)
         await self._persist_event_statistics(executor, result.metric_rows.get("event_statistic", ()))
@@ -1897,6 +1907,68 @@ class NormalizeRepository:
                 unique_tournament_season_champion.team_id IS DISTINCT FROM EXCLUDED.team_id
                 OR unique_tournament_season_champion.ordinal IS DISTINCT FROM EXCLUDED.ordinal
                 OR unique_tournament_season_champion.source IS DISTINCT FROM EXCLUDED.source
+            """,
+            normalized,
+        )
+
+    async def _persist_tournament_season_upstream_catalog(
+        self,
+        executor: SqlExecutor,
+        *,
+        rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        """Phase 2.A (2026-05-22): UPSERT upstream-seasons catalog rows.
+
+        Critical invariants:
+
+        * ``bootstrap_state`` is **NEVER** modified on conflict. State
+          transitions belong to the event-list job
+          (``events_loaded``) and the cursor advance
+          (``fully_processed``). Re-ingest of the /seasons snapshot
+          must NOT regress a row that has already been processed.
+        * ``last_observed_at`` is bumped every UPSERT — useful to
+          detect stale catalog entries (a season Sofascore stopped
+          publishing).
+        * Stage 1 patterns: sort by (ut, season) before executemany
+          to keep row-lock acquisition order canonical (anti-deadlock)
+          and ``IS DISTINCT FROM`` guard so identical re-ingests
+          produce zero dead tuples (anti-bloat).
+        """
+        normalized: list[tuple[object, ...]] = []
+        for row in rows:
+            ut_id = _as_int(row.get("unique_tournament_id"))
+            season_id = _as_int(row.get("season_id"))
+            if ut_id is None or season_id is None:
+                continue
+            normalized.append(
+                (
+                    ut_id,
+                    season_id,
+                    _as_scalar_text(row.get("season_name")),
+                    _as_scalar_text(row.get("season_year")),
+                    _as_int(row.get("upstream_position")),
+                )
+            )
+        if not normalized:
+            return
+        normalized.sort(key=lambda row: (row[0], row[1]))
+        await _executemany(
+            executor,
+            """
+            INSERT INTO tournament_season_upstream_catalog (
+                unique_tournament_id, season_id, season_name,
+                season_year, upstream_position
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (unique_tournament_id, season_id) DO UPDATE SET
+                season_name = EXCLUDED.season_name,
+                season_year = EXCLUDED.season_year,
+                upstream_position = EXCLUDED.upstream_position,
+                last_observed_at = now()
+            WHERE
+                tournament_season_upstream_catalog.season_name IS DISTINCT FROM EXCLUDED.season_name
+                OR tournament_season_upstream_catalog.season_year IS DISTINCT FROM EXCLUDED.season_year
+                OR tournament_season_upstream_catalog.upstream_position IS DISTINCT FROM EXCLUDED.upstream_position
             """,
             normalized,
         )

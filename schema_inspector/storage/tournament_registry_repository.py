@@ -21,6 +21,45 @@ class SqlFetchExecutor(SqlExecutor, Protocol):
     async def fetch(self, query: str, *args: object) -> list[object]: ...
 
 
+# Phase 2.A (2026-05-22): cursor advance now walks the upstream-seasons
+# catalog (Stage 1 / 2026-05-19 walked the ``event`` table; that path
+# silently jumped over upstream seasons we hadn't yet ingested events
+# for, producing false ``backfill_completed_at`` stamps for cup-style
+# tournaments with archive gaps — see commit message for full
+# write-up).
+#
+# Exported as a module-level constant so the Phase 2.A unit test
+# (test_phase_2a_upstream_catalog.py) can assert the predicate shape
+# without spinning up Postgres — a single source of truth.
+_ADVANCE_BACKFILL_CURSOR_SQL = """
+    WITH next_season AS (
+        SELECT tsuc.season_id
+        FROM tournament_season_upstream_catalog tsuc
+        WHERE tsuc.unique_tournament_id = $2
+          AND tsuc.bootstrap_state <> 'fully_processed'
+          AND tsuc.season_id <> $3
+        ORDER BY tsuc.upstream_position ASC NULLS LAST,
+                 tsuc.season_id DESC
+        LIMIT 1
+    )
+    UPDATE tournament_registry tr
+    SET next_season_backfill_id = COALESCE(
+            (SELECT season_id FROM next_season),
+            0
+        ),
+        backfill_last_advance_at = now(),
+        backfill_completed_at = CASE
+            WHEN (SELECT season_id FROM next_season) IS NULL
+                THEN now()
+            ELSE tr.backfill_completed_at
+        END,
+        updated_at = now()
+    WHERE tr.sport_slug = $1
+      AND tr.unique_tournament_id = $2
+    RETURNING tr.next_season_backfill_id
+"""
+
+
 def _rows_affected(execute_result: Any) -> int:
     """asyncpg.execute() returns a CommandTag string like ``UPDATE 12``.
     Parse the trailing integer when possible — used by the bootstrap CLI
@@ -460,50 +499,45 @@ class TournamentRegistryRepository:
     ) -> int | None:
         """Move the cursor past ``completed_season_id``.
 
-        Walks to the next-most-recent season by ``MAX(event.start_timestamp)``
-        — same rationale as ``seed_backfill_cursors`` (see its docstring on
-        why ``season_id`` ordering is unreliable). If no older season has
-        events yet, set the cursor to 0 and stamp ``backfill_completed_at``.
+        Phase 2.A (2026-05-22): walks the
+        ``tournament_season_upstream_catalog`` table (the
+        authoritative list of Sofascore-published seasons for this
+        UT) rather than scanning the ``event`` table. This fixes the
+        ghost-completion bug where cup-style competitions with gaps
+        in event coverage would skip past missing seasons and stamp
+        ``backfill_completed_at`` even though Sofascore still
+        publishes those seasons.
+
+        Behaviour:
+          * The just-completed season is marked
+            ``bootstrap_state = 'fully_processed'`` and
+            ``processed_at = now()``.
+          * The next cursor candidate is the lowest
+            ``upstream_position`` row whose state is not
+            ``fully_processed``. ``upstream_position`` matches
+            Sofascore's newest-first ordering, so the walk stays
+            current → past.
+          * ``backfill_completed_at`` is stamped ONLY when every
+            catalog row is ``fully_processed`` — no more false
+            positives from gaps in ``event``.
 
         Returns the new cursor value (or ``None`` if the row is missing).
         """
-        query = """
-            WITH completed_anchor AS (
-                SELECT MAX(start_timestamp) AS ts
-                FROM event
-                WHERE unique_tournament_id = $2
-                  AND season_id = $3
-            ),
-            next_season AS (
-                SELECT
-                    e.season_id,
-                    MAX(e.start_timestamp) AS max_ts
-                FROM event e, completed_anchor ca
-                WHERE e.unique_tournament_id = $2
-                  AND e.season_id IS NOT NULL
-                  AND e.season_id <> $3
-                  AND e.start_timestamp IS NOT NULL
-                  AND (ca.ts IS NULL OR e.start_timestamp < ca.ts)
-                GROUP BY e.season_id
-                ORDER BY MAX(e.start_timestamp) DESC, e.season_id DESC
-                LIMIT 1
-            )
-            UPDATE tournament_registry tr
-            SET next_season_backfill_id = COALESCE(
-                    (SELECT season_id FROM next_season),
-                    0
-                ),
-                backfill_last_advance_at = now(),
-                backfill_completed_at = CASE
-                    WHEN (SELECT season_id FROM next_season) IS NULL
-                        THEN now()
-                    ELSE tr.backfill_completed_at
-                END,
-                updated_at = now()
-            WHERE tr.sport_slug = $1
-              AND tr.unique_tournament_id = $2
-            RETURNING tr.next_season_backfill_id
-        """
+        # Step 1: stamp the just-completed season as fully_processed.
+        # Done unconditionally so the next CTE never re-selects it.
+        await executor.execute(
+            """
+            UPDATE tournament_season_upstream_catalog
+            SET bootstrap_state = 'fully_processed',
+                processed_at = now(),
+                last_observed_at = now()
+            WHERE unique_tournament_id = $1 AND season_id = $2
+            """,
+            int(unique_tournament_id),
+            int(completed_season_id),
+        )
+
+        query = _ADVANCE_BACKFILL_CURSOR_SQL
         # asyncpg returns rows via fetch only; some executors expose execute
         # with a RETURNING-aware return value (string CommandTag). To keep
         # the contract simple we go through fetch when available.

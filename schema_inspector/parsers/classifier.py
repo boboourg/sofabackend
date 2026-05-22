@@ -78,6 +78,11 @@ def classify_snapshot(snapshot: RawSnapshot) -> str:
         return "tennis_point_by_point"
     if pattern == "/api/v1/event/{event_id}/tennis-power":
         return "tennis_power"
+    # Phase 2.A: upstream seasons catalog (drives historical-backfill
+    # cursor walk). Match the UT-level /seasons endpoint specifically
+    # so the catalog walks UT-by-UT.
+    if pattern == "/api/v1/unique-tournament/{unique_tournament_id}/seasons":
+        return "tournament_season_upstream_catalog"
     if pattern.endswith("/season/{season_id}/rounds"):
         return "season_rounds"
     if pattern.endswith("/season/{season_id}/cuptrees"):

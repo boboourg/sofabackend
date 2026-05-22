@@ -137,4 +137,41 @@ __all__ = [
     "STATISTICS",
     "known_capabilities",
     "required_capabilities_for_cursor_advance",
+    "CATALOG_STATE_PENDING",
+    "CATALOG_STATE_EVENTS_LOADED",
+    "CATALOG_STATE_FULLY_PROCESSED",
+    "next_catalog_state",
 ]
+
+
+# Phase 2.A: tri-state machine for the upstream-seasons catalog. The
+# strings here must match the CHECK constraint in
+# ``migrations/2026-05-22_tournament_season_upstream_catalog.sql`` —
+# don't translate or rename them without updating both sides + the
+# advance SQL.
+CATALOG_STATE_PENDING: Final[str] = "pending"
+CATALOG_STATE_EVENTS_LOADED: Final[str] = "events_loaded"
+CATALOG_STATE_FULLY_PROCESSED: Final[str] = "fully_processed"
+
+
+def next_catalog_state(
+    current: str, *, events_loaded: bool, advance_succeeded: bool
+) -> str:
+    """Pure transition rule for ``bootstrap_state``.
+
+    Monotonic — once a season hits ``fully_processed`` it stays there.
+    ``events_loaded`` means the event-list job landed at least one
+    ``event`` row for the (UT, season) pair (the season is no longer
+    a blind upstream entry). ``fully_processed`` means
+    ``advance_backfill_cursor`` has walked past this row — the season
+    is included in the "completed" tally and the cursor will not
+    revisit it on the next walk.
+    """
+
+    if current == CATALOG_STATE_FULLY_PROCESSED:
+        return CATALOG_STATE_FULLY_PROCESSED
+    if advance_succeeded:
+        return CATALOG_STATE_FULLY_PROCESSED
+    if events_loaded:
+        return CATALOG_STATE_EVENTS_LOADED
+    return current or CATALOG_STATE_PENDING
