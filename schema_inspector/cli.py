@@ -68,6 +68,10 @@ from .services.structure_sync_service import (
     run_structure_sync_for_tournament as run_structure_sync_service,
 )
 from .services.service_app import ServiceApp
+from .services.league_capabilities_registry import (
+    LeagueCapabilitiesRegistry,
+    is_league_capabilities_enabled,
+)
 from .sofascore_client import SofascoreClient
 from .sources import build_source_adapter
 from .storage.capability_repository import CapabilityRepository
@@ -345,6 +349,23 @@ class HybridApp:
         # startup), which keeps unit tests and synchronous one-shot CLIs
         # free of DB roundtrips when the override layer is unused.
         self.tier_override_registry = None
+        # Phase 4.7.1 (2026-05-23): wire LeagueCapabilitiesRegistry into
+        # the hot path. Constructed only when
+        # SOFASCORE_LEAGUE_CAPABILITIES_ENABLED is truthy AND a real Redis
+        # backend is configured — the registry's read-API is a Redis-first
+        # cache with Postgres fallback, so without Redis it would degrade
+        # to a DB roundtrip on every gate check, defeating the point of
+        # adding it. Stays ``None`` otherwise; PilotOrchestrator is
+        # None-tolerant (see ``resolve_capability_verdict`` short-circuit),
+        # so flag-OFF runs are byte-identical to pre-Phase-4.7 behaviour.
+        # The registry itself does zero I/O on construction — the first
+        # ``get_verdict`` call lazily hits Redis (and Postgres on miss).
+        self.league_capabilities: LeagueCapabilitiesRegistry | None = None
+        if redis_backend is not None and is_league_capabilities_enabled():
+            self.league_capabilities = LeagueCapabilitiesRegistry(
+                redis_backend=redis_backend,
+                database=database,
+            )
         # Structural sync contour uses a separate non-residential proxy pool.
         # Both are lazily initialised (so unrelated CLI flows don't require
         # SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS to be set).
@@ -602,6 +623,7 @@ class HybridApp:
                 freshness_store=self.freshness_store,
                 fanout_max_inflight=_live_fanout_max_inflight_from_env("live_delta"),
                 tier_override_registry=self.tier_override_registry,
+                league_capabilities=self.league_capabilities,
             )
             result = await orchestrator.run_event_details(
                 event_id=event_id,
@@ -676,6 +698,7 @@ class HybridApp:
                 freshness_store=self.freshness_store,
                 fanout_max_inflight=_live_fanout_max_inflight_from_env(hydration_mode),
                 tier_override_registry=self.tier_override_registry,
+                league_capabilities=self.league_capabilities,
             )
             try:
                 await orchestrator.run_event(
@@ -819,6 +842,7 @@ class HybridApp:
                 freshness_store=_ReplayFreshnessStore(prefetched_run.freshness_skip_keys),
                 fanout_max_inflight=1,
                 tier_override_registry=self.tier_override_registry,
+                league_capabilities=self.league_capabilities,
             )
             result = await orchestrator.run_event(
                 event_id=prefetched_run.event_id,
