@@ -185,5 +185,60 @@ class _FakeLiveStateBackend:
         return 0
 
 
+def _build_service_app_for_test() -> ServiceApp:
+    """Minimal ServiceApp wired against shared fakes (no new fakes invented).
+
+    Matches the pattern used by existing tests in this file:
+    ``SimpleNamespace`` covers the attributes ServiceApp accesses at
+    construction time and during ``ensure_historical_consumer_groups``.
+    ``select_unique_tournament_ids_after_cursor`` is needed by
+    ``build_historical_tournament_planner_daemon``.
+    ``redis_backend`` is needed by the cursor-store and backfill-governor.
+    """
+    app = SimpleNamespace(
+        redis_backend=_FakeRedisBackend(),
+        stream_queue=_FakeStreamQueue(),
+        live_state_store=None,
+        database=None,
+        select_unique_tournament_ids_after_cursor=lambda *a, **kw: [],
+    )
+    return ServiceApp(app)
+
+
+class HistoricalBootstrapWiringTests(unittest.IsolatedAsyncioTestCase):
+    def _build_app(self) -> ServiceApp:
+        return _build_service_app_for_test()
+
+    def test_service_app_builds_historical_bootstrap_worker(self) -> None:
+        from schema_inspector.queue.streams import (
+            GROUP_HISTORICAL_BOOTSTRAP,
+            STREAM_HISTORICAL_BOOTSTRAP,
+        )
+
+        app = self._build_app()
+        worker = app.build_historical_bootstrap_worker(
+            consumer_name="historical-bootstrap-1",
+        )
+
+        self.assertEqual(worker.stream, STREAM_HISTORICAL_BOOTSTRAP)
+        self.assertEqual(worker.group, GROUP_HISTORICAL_BOOTSTRAP)
+        self.assertEqual(worker.consumer, "historical-bootstrap-1")
+
+    def test_service_app_exposes_run_historical_bootstrap_worker(self) -> None:
+        app = self._build_app()
+        self.assertTrue(
+            callable(getattr(app, "run_historical_bootstrap_worker", None)),
+            msg="ServiceApp must expose async run_historical_bootstrap_worker for CLI dispatch",
+        )
+
+    def test_planner_factory_passes_bootstrap_stream(self) -> None:
+        from schema_inspector.queue.streams import STREAM_HISTORICAL_BOOTSTRAP
+
+        app = self._build_app()
+        planner = app.build_historical_tournament_planner_daemon()
+
+        self.assertEqual(planner.bootstrap_stream, STREAM_HISTORICAL_BOOTSTRAP)
+
+
 if __name__ == "__main__":
     unittest.main()

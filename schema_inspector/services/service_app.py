@@ -51,6 +51,7 @@ from ..queue.streams import (
     OPERATIONAL_CONSUMER_GROUPS,
     RESOURCE_REFRESH_CONSUMER_GROUPS,
     STREAM_DISCOVERY,
+    STREAM_HISTORICAL_BOOTSTRAP,
     STREAM_HISTORICAL_DISCOVERY,
     STREAM_HISTORICAL_ENRICHMENT,
     STREAM_HISTORICAL_HYDRATE,
@@ -775,6 +776,7 @@ class ServiceApp:
             backfill_cursor_selector=backfill_cursor_selector,
             bootstrap_pending_selector=bootstrap_pending_selector,
             max_bootstrap_jobs_per_tick=max_bootstrap_jobs_per_tick,
+            bootstrap_stream=STREAM_HISTORICAL_BOOTSTRAP,
             priority_config=_load_backfill_priority_config_or_warn(),
             # Task 5 (2026-05-15): live-side governor on top of stream
             # backpressure — see build_historical_planner_daemon comment.
@@ -1383,6 +1385,33 @@ class ServiceApp:
             job_audit_logger=self.job_audit_logger,
         )
 
+    def build_historical_bootstrap_worker(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int = 5_000,
+    ) -> HistoricalTournamentWorker:
+        """Build a worker dedicated to the bootstrap historical-archive
+        lane. Mirrors build_historical_tournament_worker but pins the
+        consumer to stream:etl:historical_bootstrap / cg:historical_bootstrap
+        and wraps handle() with structured per-job logging (see
+        schema_inspector/workers/historical_bootstrap_worker.py)."""
+        from ..workers.historical_bootstrap_worker import (
+            make_historical_bootstrap_worker,
+        )
+
+        self.ensure_historical_consumer_groups()
+        return make_historical_bootstrap_worker(
+            orchestrator=self.app,
+            queue=self.stream_queue,
+            consumer=consumer_name,
+            delayed_scheduler=self.delayed_scheduler,
+            delayed_payload_store=self.delayed_envelope_store,
+            completion_store=self.completion_store,
+            block_ms=block_ms,
+            job_audit_logger=self.job_audit_logger,
+        )
+
     def build_historical_enrichment_worker(
         self,
         *,
@@ -1679,6 +1708,10 @@ class ServiceApp:
 
     async def run_historical_tournament_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_historical_tournament_worker(consumer_name=consumer_name, block_ms=block_ms)
+        await worker.run_forever()
+
+    async def run_historical_bootstrap_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
+        worker = self.build_historical_bootstrap_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()
 
     async def run_structure_planner_daemon(
