@@ -86,16 +86,16 @@ class FromEnvOverridesTests(unittest.TestCase):
 
     def test_queue_thresholds_overridable(self) -> None:
         env = {
-            "SOFASCORE_MONITORING_HYDRATE_XLEN_WARN": "2500",
-            "SOFASCORE_MONITORING_HYDRATE_XLEN_CRIT": "10000",
-            "SOFASCORE_MONITORING_LIVE_HOT_XLEN_WARN": "750",
-            "SOFASCORE_MONITORING_LIVE_HOT_XLEN_CRIT": "3000",
+            "SOFASCORE_MONITORING_HYDRATE_LAG_WARN": "2500",
+            "SOFASCORE_MONITORING_HYDRATE_LAG_CRIT": "10000",
+            "SOFASCORE_MONITORING_LIVE_HOT_LAG_WARN": "750",
+            "SOFASCORE_MONITORING_LIVE_HOT_LAG_CRIT": "3000",
         }
         config = MonitoringConfig.from_env(env=env)
-        self.assertEqual(config.hydrate_xlen_warn, 2500)
-        self.assertEqual(config.hydrate_xlen_crit, 10000)
-        self.assertEqual(config.live_hot_xlen_warn, 750)
-        self.assertEqual(config.live_hot_xlen_crit, 3000)
+        self.assertEqual(config.hydrate_lag_warn, 2500)
+        self.assertEqual(config.hydrate_lag_crit, 10000)
+        self.assertEqual(config.live_hot_lag_warn, 750)
+        self.assertEqual(config.live_hot_lag_crit, 3000)
 
     def test_invalid_int_falls_back_to_default(self) -> None:
         config = MonitoringConfig.from_env(

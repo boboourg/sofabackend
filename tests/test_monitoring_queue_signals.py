@@ -1,9 +1,10 @@
 """Tests for monitoring queue signals (Phase 2).
 
 Pins the contract:
-- fetch_queue_signals_from_api emits 5 snapshots — one per known stream
+- fetch_queue_signals_from_api emits 5 lag snapshots — one per known stream
 - Streams not in our watchlist are ignored
-- length=0 for missing stream → snapshot value=None → severity=OK
+- missing stream or missing lag → snapshot value=None → severity=OK
+- length/XLEN is diagnostic extra only and must not drive severity
 - Overrides apply to thresholds, keyed by SignalDefinition.name
 - fetch_all_signals_from_api returns SLO + queue snapshots concatenated
 - Either branch failing yields the other still working
@@ -48,11 +49,11 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
     async def test_emits_five_queue_snapshots(self) -> None:
         payload = {
             "streams": [
-                {"stream": "stream:etl:hydrate", "length": 800},
-                {"stream": "stream:etl:live_hot", "length": 100},
-                {"stream": "stream:etl:live_warm", "length": 50},
-                {"stream": "stream:etl:live_discovery", "length": 10},
-                {"stream": "stream:etl:discovery", "length": 0},
+                {"stream": "stream:etl:hydrate", "length": 800, "lag": 25},
+                {"stream": "stream:etl:live_hot", "length": 100, "lag": 0},
+                {"stream": "stream:etl:live_warm", "length": 50, "lag": 12},
+                {"stream": "stream:etl:live_discovery", "length": 10, "lag": 3},
+                {"stream": "stream:etl:discovery", "length": 0, "lag": 0},
             ]
         }
         client = _StubHttpClient(
@@ -67,20 +68,21 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             names,
             {
-                "hydrate_xlen",
-                "live_hot_xlen",
-                "live_warm_xlen",
-                "live_discovery_xlen",
-                "discovery_xlen",
+                "hydrate_lag",
+                "live_hot_lag",
+                "live_warm_lag",
+                "live_discovery_lag",
+                "discovery_lag",
             },
         )
-        hydrate = next(s for s in snapshots if s.name == "hydrate_xlen")
-        self.assertEqual(hydrate.value, 800)
-        self.assertEqual(hydrate.severity, "OK")  # 800 < warn=1000
+        hydrate = next(s for s in snapshots if s.name == "hydrate_lag")
+        self.assertEqual(hydrate.value, 25)
+        self.assertEqual(hydrate.extra.get("length"), 800)
+        self.assertEqual(hydrate.severity, "OK")  # 25 < warn=800
 
     async def test_warn_threshold_for_hydrate(self) -> None:
         payload = {
-            "streams": [{"stream": "stream:etl:hydrate", "length": 2500}],
+            "streams": [{"stream": "stream:etl:hydrate", "length": 2500, "lag": 900}],
         }
         client = _StubHttpClient(
             {"/ops/queues/summary": _StubResponse(200, payload)}
@@ -90,14 +92,14 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
             http_client=client,
             timeout_seconds=2.0,
         )
-        hydrate = next(s for s in snapshots if s.name == "hydrate_xlen")
-        self.assertEqual(hydrate.value, 2500)
-        # default crit=5000, warn=1000 → WARN.
+        hydrate = next(s for s in snapshots if s.name == "hydrate_lag")
+        self.assertEqual(hydrate.value, 900)
+        # default crit=1500, warn=800 → WARN.
         self.assertEqual(hydrate.severity, "WARN")
 
     async def test_crit_threshold_for_live_hot(self) -> None:
         payload = {
-            "streams": [{"stream": "stream:etl:live_hot", "length": 3000}],
+            "streams": [{"stream": "stream:etl:live_hot", "length": 3000, "lag": 700}],
         }
         client = _StubHttpClient(
             {"/ops/queues/summary": _StubResponse(200, payload)}
@@ -107,9 +109,9 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
             http_client=client,
             timeout_seconds=2.0,
         )
-        hot = next(s for s in snapshots if s.name == "live_hot_xlen")
-        self.assertEqual(hot.value, 3000)
-        self.assertEqual(hot.severity, "CRIT")  # > crit=2000
+        hot = next(s for s in snapshots if s.name == "live_hot_lag")
+        self.assertEqual(hot.value, 700)
+        self.assertEqual(hot.severity, "CRIT")  # > crit=500
 
     async def test_missing_stream_yields_none_value_ok(self) -> None:
         payload = {"streams": []}
@@ -126,11 +128,37 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(s.value is None for s in snapshots))
         self.assertTrue(all(s.severity == "OK" for s in snapshots))
 
+    async def test_large_xlen_with_zero_lag_is_ok(self) -> None:
+        payload = {
+            "streams": [
+                {
+                    "stream": "stream:etl:hydrate",
+                    "length": 5_883_965,
+                    "lag": 0,
+                    "pending_total": 0,
+                }
+            ],
+        }
+        client = _StubHttpClient(
+            {"/ops/queues/summary": _StubResponse(200, payload)}
+        )
+        snapshots = await fetch_queue_signals_from_api(
+            base_url="http://example",
+            http_client=client,
+            timeout_seconds=2.0,
+        )
+        hydrate = next(s for s in snapshots if s.name == "hydrate_lag")
+
+        self.assertEqual(hydrate.value, 0)
+        self.assertEqual(hydrate.severity, "OK")
+        self.assertEqual(hydrate.extra.get("length"), 5_883_965)
+        self.assertEqual(hydrate.extra.get("pending_total"), 0)
+
     async def test_unknown_streams_ignored(self) -> None:
         payload = {
             "streams": [
-                {"stream": "stream:etl:hydrate", "length": 10},
-                {"stream": "stream:etl:never_heard_of", "length": 9999},
+                {"stream": "stream:etl:hydrate", "length": 10, "lag": 1},
+                {"stream": "stream:etl:never_heard_of", "length": 9999, "lag": 9999},
             ]
         }
         client = _StubHttpClient(
@@ -143,7 +171,7 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
         )
         names = {s.name for s in snapshots}
         self.assertNotIn("never_heard_of", names)
-        self.assertNotIn("never_heard_of_xlen", names)
+        self.assertNotIn("never_heard_of_lag", names)
 
     async def test_returns_empty_on_non_200(self) -> None:
         client = _StubHttpClient(
@@ -158,7 +186,7 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_overrides_apply_to_queue_thresholds(self) -> None:
         payload = {
-            "streams": [{"stream": "stream:etl:hydrate", "length": 2500}],
+            "streams": [{"stream": "stream:etl:hydrate", "length": 2500, "lag": 900}],
         }
         client = _StubHttpClient(
             {"/ops/queues/summary": _StubResponse(200, payload)}
@@ -167,16 +195,16 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
             base_url="http://example",
             http_client=client,
             timeout_seconds=2.0,
-            overrides={"hydrate_xlen": {"warn": 5000, "crit": 10000}},
+            overrides={"hydrate_lag": {"warn": 5000, "crit": 10000}},
         )
-        hydrate = next(s for s in snapshots if s.name == "hydrate_xlen")
+        hydrate = next(s for s in snapshots if s.name == "hydrate_lag")
         # 2500 < 5000 (overridden warn) → OK.
         self.assertEqual(hydrate.severity, "OK")
         self.assertEqual(hydrate.threshold_warn, 5000)
 
     async def test_extra_includes_stream_name(self) -> None:
         payload = {
-            "streams": [{"stream": "stream:etl:hydrate", "length": 0}],
+            "streams": [{"stream": "stream:etl:hydrate", "length": 42, "lag": 0}],
         }
         client = _StubHttpClient(
             {"/ops/queues/summary": _StubResponse(200, payload)}
@@ -186,8 +214,9 @@ class FetchQueueSignalsTests(unittest.IsolatedAsyncioTestCase):
             http_client=client,
             timeout_seconds=2.0,
         )
-        hydrate = next(s for s in snapshots if s.name == "hydrate_xlen")
+        hydrate = next(s for s in snapshots if s.name == "hydrate_lag")
         self.assertEqual(hydrate.extra.get("stream"), "stream:etl:hydrate")
+        self.assertEqual(hydrate.extra.get("length"), 42)
 
 
 class FetchAllSignalsTests(unittest.IsolatedAsyncioTestCase):
@@ -201,7 +230,7 @@ class FetchAllSignalsTests(unittest.IsolatedAsyncioTestCase):
         }
         queue_summary = {
             "streams": [
-                {"stream": "stream:etl:hydrate", "length": 100},
+                {"stream": "stream:etl:hydrate", "length": 100, "lag": 1},
             ]
         }
         client = _StubHttpClient(
@@ -220,11 +249,11 @@ class FetchAllSignalsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshots), 9)
         self.assertIn("oldest_hot_score_age_seconds", names)
         self.assertIn("tier_1_quarantined_events", names)
-        self.assertIn("hydrate_xlen", names)
+        self.assertIn("hydrate_lag", names)
 
     async def test_slo_fail_yields_queue_only(self) -> None:
         queue_summary = {
-            "streams": [{"stream": "stream:etl:hydrate", "length": 100}]
+            "streams": [{"stream": "stream:etl:hydrate", "length": 100, "lag": 1}]
         }
         client = _StubHttpClient(
             {
@@ -239,7 +268,7 @@ class FetchAllSignalsTests(unittest.IsolatedAsyncioTestCase):
         )
         # SLO fetch failed → only the 5 queue snapshots returned.
         self.assertEqual(len(snapshots), 5)
-        self.assertTrue(all(s.name.endswith("_xlen") for s in snapshots))
+        self.assertTrue(all(s.name.endswith("_lag") for s in snapshots))
 
 
 if __name__ == "__main__":
