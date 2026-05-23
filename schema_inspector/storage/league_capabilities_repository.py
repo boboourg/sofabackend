@@ -201,6 +201,39 @@ class LeagueCapabilitiesRepository:
             return None
         return _row_to_capability(row)
 
+    async def fetch_capabilities_for_quad(
+        self,
+        executor: SqlFetchExecutor,
+        *,
+        unique_tournament_id: int,
+        season_id: int | None,
+        status_type: str,
+    ) -> list[CapabilityRow]:
+        """Phase 4.7.4 (2026-05-23): batch fetch for the whole
+        ``(unique_tournament_id, season_id, status_type)`` triple in one
+        SQL roundtrip. Replaces the 12 sequential
+        ``fetch_capability`` calls that triggered asyncpg pool
+        starvation under the Phase 4.8 production flip.
+
+        No ``endpoint_pattern`` filter on purpose — a quad realistically
+        has ≤12 rows (one per detail endpoint), so an unbounded fetch is
+        cheaper than building an ``IN`` list with a dozen parameters.
+        Caller picks the rows it cares about from the returned list."""
+
+        rows = await executor.fetch(
+            """
+            SELECT *
+            FROM league_endpoint_capability
+            WHERE unique_tournament_id = $1
+              AND season_id IS NOT DISTINCT FROM $2
+              AND status_type = $3
+            """,
+            int(unique_tournament_id),
+            season_id if season_id is None else int(season_id),
+            str(status_type),
+        )
+        return [_row_to_capability(row) for row in rows]
+
     async def list_capabilities_for_ut(
         self,
         executor: SqlFetchExecutor,

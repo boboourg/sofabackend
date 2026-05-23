@@ -293,19 +293,26 @@ class PilotOrchestratorResolveDetailCapabilityVerdictsTests(
     async def test_populates_dict_from_registry_when_flag_on(self) -> None:
         """When the flag is on AND a registry is wired, every detail
         pattern allowed at the current status gets resolved via the
-        registry. Patterns where the registry reports 'unknown' are
-        excluded (legacy fall-through stays None in the dict)."""
+        registry. Phase 4.7.4 moved this from a per-pattern loop to a
+        single ``get_verdicts_batch`` call — the registry contract for
+        this test now mocks the batch API."""
         from unittest.mock import patch
         from schema_inspector.services.league_capabilities_registry import (
             EndpointVerdict,
         )
 
+        async def _fake_batch(**kw):
+            return {
+                pattern: (
+                    EndpointVerdict.DISABLED
+                    if "comments" in pattern
+                    else EndpointVerdict.ALLOWED
+                )
+                for pattern in kw["endpoint_patterns"]
+            }
+
         fake_registry = SimpleNamespace(
-            get_verdict=AsyncMock(side_effect=lambda **kw: (
-                EndpointVerdict.DISABLED
-                if "comments" in kw["endpoint_pattern"]
-                else EndpointVerdict.ALLOWED
-            )),
+            get_verdicts_batch=AsyncMock(side_effect=_fake_batch),
         )
 
         orch = self._make_orchestrator(registry=fake_registry)

@@ -406,19 +406,33 @@ class PilotOrchestrator:
         if not patterns:
             return {}
 
-        verdicts: dict[str, str] = {}
-        for pattern in patterns:
-            result = await resolve_capability_verdict(
-                registry=self.league_capabilities,
-                enabled=True,
-                unique_tournament_id=unique_tournament_id,
-                season_id=season_id,
-                status_type=status_type,
-                endpoint_pattern=pattern,
+        # Phase 4.7.4 (2026-05-23): single batched registry call replaces
+        # the previous per-pattern loop. The earlier code issued 12
+        # sequential ``await resolve_capability_verdict(...)`` calls per
+        # match-center fetch; under the Phase 4.8 production flip that
+        # exhausted the asyncpg connection pool with 70+ concurrent
+        # workers, every job hit the 30 s statement-timeout, and live
+        # throughput cratered 17-20×. The batch helper resolves the
+        # whole quad in at most two DB roundtrips (season-specific +
+        # UT-level fallback) and primes Redis along the way.
+        try:
+            batch = await self.league_capabilities.get_verdicts_batch(
+                unique_tournament_id=int(unique_tournament_id),
+                season_id=None if season_id is None else int(season_id),
+                status_type=str(status_type),
+                endpoint_patterns=tuple(str(p) for p in patterns),
             )
-            if result is not None:
-                verdicts[str(pattern)] = result
-        return verdicts
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "PilotOrchestrator detail verdicts batch failed "
+                "ut=%s season=%s status=%s err=%r",
+                unique_tournament_id, season_id, status_type, exc,
+            )
+            return {}
+        return {
+            str(pattern): verdict.cache_value
+            for pattern, verdict in batch.items()
+        }
 
     @property
     def freshness_skip_keys(self) -> frozenset[str]:

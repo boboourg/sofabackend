@@ -250,6 +250,159 @@ class LeagueCapabilitiesRegistry:
         # 4) Fail-safe — orchestrator will consult legacy policy.
         return EndpointVerdict.UNKNOWN
 
+    async def get_verdicts_batch(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int | None,
+        status_type: str,
+        endpoint_patterns: tuple[str, ...],
+    ) -> dict[str, EndpointVerdict]:
+        """Phase 4.7.4 (2026-05-23): bulk verdict resolve in at most two
+        Postgres roundtrips instead of one per pattern.
+
+        Replaces the 12 sequential ``get_verdict`` calls that the detail-
+        spec fanout was making per match-center fetch — those caused
+        asyncpg pool starvation under the Phase 4.8 production flip
+        (workers hit the 30 s statement-timeout, throughput dropped 17-
+        20×). The batch version:
+
+          * Reads all requested patterns from Redis first (sync, cheap).
+          * On any miss, opens ONE connection and runs a single
+            ``fetch_capabilities_for_quad`` SELECT for the season-
+            specific quad. Hits are written back to Redis and added to
+            the result dict.
+          * Patterns still missing after that fall through to a second
+            single-SELECT UT-level fallback (season_id=NULL).
+          * Patterns absent from both DB queries are *omitted* from the
+            returned dict — the caller (orchestrator detail filter)
+            treats absence as "fall back to legacy", which is the
+            correct semantics (UNKNOWN would short-circuit the gate to
+            'no info' instead of letting legacy tier logic decide).
+
+        Fail-safe: any infrastructure failure (Redis down, DB timeout)
+        returns whatever was already resolved without raising. Empty
+        ``endpoint_patterns`` → ``{}``.
+        """
+
+        if not endpoint_patterns:
+            return {}
+
+        # Stage 1: pull everything Redis already has. _read_cache is
+        # already fail-safe so a Redis blip just returns None for that
+        # pattern.
+        result: dict[str, EndpointVerdict] = {}
+        remaining: list[str] = []
+        for pattern in endpoint_patterns:
+            cached = self._read_cache(
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                status_type=status_type,
+                endpoint_pattern=pattern,
+            )
+            if cached is not None:
+                result[str(pattern)] = cached
+            else:
+                remaining.append(str(pattern))
+
+        if not remaining:
+            return result
+
+        # Stage 2: one DB call for the season-specific quad.
+        season_rows = await self._read_quad_db(
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            status_type=status_type,
+        )
+        if season_rows:
+            self._absorb_rows(
+                rows=season_rows,
+                result=result,
+                remaining=remaining,
+                cache_season_id=season_id,
+                status_type=status_type,
+                unique_tournament_id=unique_tournament_id,
+            )
+
+        if not remaining or season_id is None:
+            return result
+
+        # Stage 3: UT-level fallback — single DB call for (UT, NULL,
+        # status). Only fires if caller asked for a specific season AND
+        # some patterns are still unresolved.
+        ut_rows = await self._read_quad_db(
+            unique_tournament_id=unique_tournament_id,
+            season_id=None,
+            status_type=status_type,
+        )
+        if ut_rows:
+            self._absorb_rows(
+                rows=ut_rows,
+                result=result,
+                remaining=remaining,
+                cache_season_id=None,
+                status_type=status_type,
+                unique_tournament_id=unique_tournament_id,
+            )
+
+        return result
+
+    async def _read_quad_db(
+        self,
+        *,
+        unique_tournament_id: int,
+        season_id: int | None,
+        status_type: str,
+    ) -> list:
+        """Single SELECT for a (UT, season, status) triple. Returns ``[]``
+        on any infra failure — never raises."""
+        try:
+            async with self.database.connection() as connection:
+                rows = await self.repository.fetch_capabilities_for_quad(
+                    connection,
+                    unique_tournament_id=unique_tournament_id,
+                    season_id=season_id,
+                    status_type=status_type,
+                )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "LeagueCapabilitiesRegistry batch db.fetch failed "
+                "ut=%s season=%s err=%s",
+                unique_tournament_id, season_id, exc,
+            )
+            return []
+        return rows or []
+
+    def _absorb_rows(
+        self,
+        *,
+        rows,
+        result: dict[str, EndpointVerdict],
+        remaining: list[str],
+        cache_season_id: int | None,
+        status_type: str,
+        unique_tournament_id: int,
+    ) -> None:
+        """Promote DB rows into the result dict, prime Redis for each
+        hit, and shrink the ``remaining`` list in place."""
+        rows_by_pattern = {str(row.endpoint_pattern): row for row in rows}
+        still_remaining: list[str] = []
+        for pattern in remaining:
+            row = rows_by_pattern.get(pattern)
+            if row is None:
+                still_remaining.append(pattern)
+                continue
+            verdict = EndpointVerdict.from_str(row.state)
+            result[pattern] = verdict
+            self._write_cache(
+                unique_tournament_id=unique_tournament_id,
+                season_id=cache_season_id,
+                status_type=status_type,
+                endpoint_pattern=pattern,
+                verdict=verdict,
+            )
+        remaining[:] = still_remaining
+
     async def invalidate_quad(
         self,
         *,
