@@ -40,8 +40,19 @@ class DatabaseConfig:
     """Connection settings for PostgreSQL."""
 
     dsn: str
-    min_size: int = 20
-    max_size: int = 50
+    # Phase 4.7.6 (2026-05-23): per-process pool defaults dropped from
+    # min=20/max=50 down to min=3/max=10. The previous defaults
+    # multiplied by 73 worker processes overwhelmed PostgreSQL's
+    # cluster-wide max_connections (~100) — three Phase 4.8 production
+    # flips all hit pool starvation. With pgbouncer in front (Track 2)
+    # and a Redis-only worker hot path (Track 1 Step 2), workers only
+    # need enough connections for their own writes (snapshot persist,
+    # job_run insert, event_terminal_state upsert), not the registry
+    # reads we used to do here.
+    # Operator can still pin a larger pool via SOFASCORE_PG_MIN_SIZE /
+    # SOFASCORE_PG_MAX_SIZE env if a specific deployment needs it.
+    min_size: int = 3
+    max_size: int = 10
     command_timeout: float = 60.0
     # Stage 1.4 (2026-05-20 stability re-audit): explicit
     # acquire-timeout. Without it asyncpg.Pool.acquire() defaults
@@ -178,8 +189,8 @@ def load_database_config(
 
     return DatabaseConfig(
         dsn=resolved_dsn,
-        min_size=min_size or _env_int(env, "SOFASCORE_PG_MIN_SIZE", 20),
-        max_size=max_size or _env_int(env, "SOFASCORE_PG_MAX_SIZE", 50),
+        min_size=min_size or _env_int(env, "SOFASCORE_PG_MIN_SIZE", 3),
+        max_size=max_size or _env_int(env, "SOFASCORE_PG_MAX_SIZE", 10),
         command_timeout=command_timeout or _env_float(env, "SOFASCORE_PG_COMMAND_TIMEOUT", 60.0),
         # Stage 1.4 (2026-05-20): env override for pool.acquire timeout.
         acquire_timeout=_env_float(env, "SOFASCORE_PG_ACQUIRE_TIMEOUT", 30.0),

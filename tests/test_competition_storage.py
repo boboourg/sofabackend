@@ -314,15 +314,20 @@ class CompetitionStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(season_statements), 2)
         self.assertEqual(len(registered_hooks), 2)
 
-    def test_load_database_config_uses_higher_pool_defaults(self) -> None:
+    def test_load_database_config_uses_conservative_pool_defaults(self) -> None:
+        """Phase 4.7.6 (2026-05-23): default pool min=3 / max=10. Was 20/50;
+        three Phase 4.8 production flips proved that the higher defaults
+        x 73 worker processes overran Postgres max_connections. The new,
+        smaller defaults work in tandem with pgbouncer (Track 2) and the
+        Redis-only hot path (Track 1 Step 2)."""
         config = load_database_config(
             env={
                 "SOFASCORE_DATABASE_URL": "postgresql://user:pass@localhost:5432/sofascore",
             }
         )
 
-        self.assertEqual(config.min_size, 20)
-        self.assertEqual(config.max_size, 50)
+        self.assertEqual(config.min_size, 3)
+        self.assertEqual(config.max_size, 10)
 
     def test_load_database_config_reads_env(self) -> None:
         config = load_database_config(
