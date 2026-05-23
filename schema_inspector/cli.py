@@ -89,6 +89,82 @@ logger = logging.getLogger(__name__)
 DEFAULT_EVENT_COVERAGE_SURFACES = ("event_core", "statistics", "incidents", "lineups")
 
 
+async def prime_redis_from_repository(
+    *,
+    database,
+    redis_backend,
+    repository,
+) -> int:
+    """Phase 4.7.6 Track 1 Step 3 (2026-05-23): out-of-band cache prime.
+
+    Runs in its own process (invoked via ``cli league-capability prime-
+    redis`` from a systemd timer / cron). Opens its own asyncpg
+    connection, fetches every active row from
+    ``league_endpoint_capability`` in ONE SELECT, and writes each into
+    Redis under the standard ``LeagueCapabilitiesRegistry._cache_key``
+    namespace with a 24h TTL — matching the
+    ``_WARM_TTL_SECONDS`` constant the registry expects.
+
+    Workers running concurrently don't see this — they only read Redis.
+    That's the entire point: zero DB pressure from the worker fleet.
+
+    Raises if no Redis backend is provided (priming an in-memory backend
+    would be a useless write — workers would still see empty cache).
+    Returns the number of Redis keys written.
+    """
+
+    if redis_backend is None:
+        raise RuntimeError(
+            "prime_redis_from_repository requires a real Redis backend. "
+            "Without it the priming is in-memory only and workers would "
+            "still hit empty cache. Set SOFASCORE_REDIS_URL and rerun."
+        )
+
+    # Import here to avoid a circular: cli.py is imported by tests that
+    # may not have the registry module fully initialised yet.
+    from .services.league_capabilities_registry import (
+        LeagueCapabilitiesRegistry,
+        _WARM_TTL_SECONDS,
+    )
+
+    async with database.connection() as connection:
+        rows = await repository.list_active_capabilities(connection)
+
+    if not rows:
+        return 0
+
+    # We use the registry's static _cache_key formatter (no Redis I/O
+    # here — purely string formatting) so the keys exactly match what
+    # ``get_verdicts_batch`` looks for in workers.
+    registry_for_keys = LeagueCapabilitiesRegistry(
+        redis_backend=redis_backend,
+        database=database,
+        repository=repository,
+    )
+
+    primed = 0
+    for row in rows:
+        key = registry_for_keys._cache_key(
+            unique_tournament_id=row.unique_tournament_id,
+            season_id=row.season_id,
+            status_type=row.status_type,
+            endpoint_pattern=row.endpoint_pattern,
+        )
+        try:
+            redis_backend.set(key, row.state, ex=_WARM_TTL_SECONDS)
+            primed += 1
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "prime_redis_from_repository set failed key=%s err=%s",
+                key, exc,
+            )
+    logger.info(
+        "prime_redis_from_repository complete: primed %d / %d rows",
+        primed, len(rows),
+    )
+    return primed
+
+
 def _live_fanout_max_inflight_from_env(hydration_mode: str) -> int:
     # live_delta uses SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT (existing knob,
     # default 1). Historical/regular hydration uses
@@ -1715,6 +1791,26 @@ async def _dispatch(args) -> int:
                 repo = LeagueCapabilitiesRepository()
                 action = args.action
 
+                # Phase 4.7.6 (2026-05-23): list/show/set/probe still
+                # need a UT — argparse no longer requires it because
+                # prime-redis is fleet-wide. Validate explicitly here so
+                # the operator gets a clean error message.
+                if (
+                    action in ("list", "show", "set", "probe")
+                    and args.unique_tournament_id is None
+                ):
+                    print(f"{action} requires --unique-tournament-id")
+                    return 2
+
+                if action == "prime-redis":
+                    primed = await prime_redis_from_repository(
+                        database=app.database,
+                        redis_backend=app.redis_backend,
+                        repository=repo,
+                    )
+                    print(f"primed {primed} registry rows in Redis")
+                    return 0
+
                 if action == "list":
                     async with app.database.connection() as conn:
                         rows = await repo.list_capabilities_for_ut(
@@ -2507,12 +2603,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     league_capability.add_argument(
         "action",
-        choices=["list", "show", "set", "probe"],
-        help="Subcommand action.",
+        choices=["list", "show", "set", "probe", "prime-redis"],
+        help=(
+            "Subcommand action. ``prime-redis`` (Phase 4.7.6) runs in "
+            "its own process to populate the Redis registry cache from "
+            "the league_endpoint_capability table — workers no longer "
+            "do this themselves."
+        ),
     )
     league_capability.add_argument(
-        "--unique-tournament-id", type=int, required=True,
-        help="UT id to inspect / mutate.",
+        # Phase 4.7.6 (2026-05-23): no longer required at argparse level
+        # because ``prime-redis`` is fleet-wide and doesn't take a UT
+        # filter. Handlers for list/show/set/probe validate it manually
+        # below so the operator still gets a clear "missing arg" message
+        # for those actions.
+        "--unique-tournament-id", type=int, default=None,
+        help="UT id (required for list/show/set/probe; ignored by prime-redis).",
     )
     league_capability.add_argument(
         "--season-id", type=int, default=None,

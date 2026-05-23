@@ -178,67 +178,16 @@ class WarmCacheFromDbTests(unittest.IsolatedAsyncioTestCase):
             "Phase 4.7.5 introduces warm_cache_from_db",
         )
 
-    async def test_writes_one_redis_key_per_row(self) -> None:
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry,
-        )
-        rows = [
-            _row(ut=17, season=76986, status="finished",
-                 endpoint="/api/v1/event/{event_id}/comments", state="allowed"),
-            _row(ut=17, season=76986, status="finished",
-                 endpoint="/api/v1/event/{event_id}/highlights", state="disabled"),
-            _row(ut=7, season=76953, status="finished",
-                 endpoint="/api/v1/event/{event_id}/comments", state="allowed"),
-        ]
-        backend = _FakeRedisBackend()
-        repo = _FakeBulkRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        primed = await registry.warm_cache_from_db()
-
-        self.assertEqual(primed, 3, "one Redis set per row")
-        self.assertEqual(repo.list_active_calls, 1, "exactly one DB roundtrip")
-        # Verify cache keys match _cache_key contract.
-        for row in rows:
-            key = registry._cache_key(
-                unique_tournament_id=row.unique_tournament_id,
-                season_id=row.season_id,
-                status_type=row.status_type,
-                endpoint_pattern=row.endpoint_pattern,
-            )
-            self.assertIn(key, backend.values)
-            self.assertEqual(backend.values[key], row.state)
-
-    async def test_writes_with_24h_ttl(self) -> None:
-        """The default 1h Redis TTL is too short — if no one calls warm
-        for an hour the hot path falls back to DB. 24h means even a
-        forgotten refresh daemon doesn't lapse mid-day."""
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry,
-        )
-        rows = [_row(endpoint="/api/v1/event/{event_id}/comments")]
-        backend = _FakeRedisBackend()
-        repo = _FakeBulkRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        await registry.warm_cache_from_db()
-
-        self.assertEqual(len(backend.set_calls), 1)
-        _key, _value, ex = backend.set_calls[0]
-        self.assertEqual(
-            ex, 24 * 3600,
-            "Phase 4.7.5: warmed entries get a 24h TTL, not the 1h "
-            "default — the hot path must not lapse to DB between worker "
-            "startups",
-        )
+    # Phase 4.7.6 Track 1 Step 2 (2026-05-23) removed worker-side warm
+    # SELECTs entirely — warm_cache_from_db is now a no-op that only
+    # marks self._warmed = True. The two tests deleted here
+    # (test_writes_one_redis_key_per_row, test_writes_with_24h_ttl)
+    # both asserted that warm wrote rows into Redis, which is exactly
+    # the cold-start storm that crashed Phase 4.8 retry #2. Cache
+    # priming now happens out-of-band in
+    # ``cli league-capability prime-redis``; those assertions moved to
+    # ``test_phase_4_7_6_redis_only_workers.py`` against the new
+    # ``prime_redis_from_repository`` helper.
 
     async def test_empty_rows_short_circuits(self) -> None:
         """No rows in DB → no Redis writes, primed count zero, no error."""
@@ -280,117 +229,28 @@ class WarmCacheFromDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.set_calls, [])
 
 
-# ----- 3. get_verdicts_batch is Redis-only after warm ----------------------
+# ----- 3. Hot path is Redis-only --------------------------------------------
+#
+# Phase 4.7.6 Track 1 Step 2 (2026-05-23) deleted three tests that lived
+# here previously because their setup depended on warm_cache_from_db
+# actually writing to Redis from worker code:
+#
+#   * test_lazy_warm_on_first_batch_call — asserted lazy warm wrote the
+#     row into Redis on the first batch call. Workers no longer do
+#     that; the prime-redis CLI does.
+#   * test_second_batch_call_uses_redis_only — depended on the lazy
+#     warm priming the cache on call #1 so call #2 was Redis-only.
+#   * test_explicit_warm_skips_lazy_re_warm — same dependency.
+#
+# The "Redis-only after external prime" invariant is now covered by
+# test_phase_4_7_6_redis_only_workers.py
+# (WorkerReadsPreprimedCacheTests + PrimeRedisCLIHandlerTests). The
+# remaining test below (test_warm_failure_does_not_block_batch) is
+# still valid: even when warm is a no-op it must not block subsequent
+# batch lookups.
 
 
 class HotPathRedisOnlyTests(unittest.IsolatedAsyncioTestCase):
-    """The critical invariant: once the cache is warm, the hot path
-    never touches Postgres. If this regresses we're back to Phase 4.8
-    pool-starvation territory."""
-
-    async def test_lazy_warm_on_first_batch_call(self) -> None:
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry, EndpointVerdict,
-        )
-        rows = [
-            _row(endpoint="/api/v1/event/{event_id}/comments", state="allowed"),
-        ]
-        backend = _FakeRedisBackend()
-        repo = _FakeBulkRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        result = await registry.get_verdicts_batch(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="finished",
-            endpoint_patterns=("/api/v1/event/{event_id}/comments",),
-        )
-
-        # Warm fired (the row got into Redis under the correct key) so
-        # the lookup succeeds without a per-quad DB call.
-        self.assertEqual(result.get("/api/v1/event/{event_id}/comments"),
-                         EndpointVerdict.ALLOWED)
-        self.assertEqual(
-            repo.list_active_calls, 1,
-            "first batch must trigger warm (one bulk SELECT)",
-        )
-        self.assertEqual(
-            repo.fetch_quad_calls, 0,
-            "Phase 4.7.5 regression: hot path must NOT issue per-quad "
-            "DB queries — that defeats the Redis-only invariant",
-        )
-
-    async def test_second_batch_call_uses_redis_only(self) -> None:
-        """After the lazy warm fires once, subsequent batches must serve
-        purely from Redis. This is the property that fixes Phase 4.8
-        pool starvation."""
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry,
-        )
-        rows = [
-            _row(endpoint="/api/v1/event/{event_id}/comments", state="allowed"),
-        ]
-        backend = _FakeRedisBackend()
-        repo = _FakeBulkRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        # First call — warm fires.
-        await registry.get_verdicts_batch(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="finished",
-            endpoint_patterns=("/api/v1/event/{event_id}/comments",),
-        )
-        # Second call — every byte must come from Redis.
-        await registry.get_verdicts_batch(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="finished",
-            endpoint_patterns=("/api/v1/event/{event_id}/comments",),
-        )
-
-        self.assertEqual(repo.list_active_calls, 1,
-                         "warm must NOT re-fire on second call")
-        self.assertEqual(repo.fetch_quad_calls, 0,
-                         "no per-quad fallback after warm")
-
-    async def test_explicit_warm_skips_lazy_re_warm(self) -> None:
-        """If the orchestrator pre-warms at HybridApp startup, the
-        first batch must NOT re-warm — that would double the DB hit."""
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry,
-        )
-        rows = [
-            _row(endpoint="/api/v1/event/{event_id}/comments", state="allowed"),
-        ]
-        backend = _FakeRedisBackend()
-        repo = _FakeBulkRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        await registry.warm_cache_from_db()
-        await registry.get_verdicts_batch(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="finished",
-            endpoint_patterns=("/api/v1/event/{event_id}/comments",),
-        )
-
-        self.assertEqual(
-            repo.list_active_calls, 1,
-            "explicit warm fires once; lazy-warm must not duplicate",
-        )
 
     async def test_warm_failure_does_not_block_batch(self) -> None:
         """warm fails (DB outage at startup) → batch still runs, just

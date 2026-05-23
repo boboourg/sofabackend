@@ -265,67 +265,28 @@ class LeagueCapabilitiesRegistry:
         return EndpointVerdict.UNKNOWN
 
     async def warm_cache_from_db(self) -> int:
-        """Phase 4.7.5 (2026-05-23): bulk-load every active row from
-        ``league_endpoint_capability`` into Redis with a 24h TTL.
+        """Phase 4.7.6 Track 1 Step 2 (2026-05-23): worker-side no-op.
 
-        Idempotent — second call is a no-op (returns 0). Set the
-        ``_warmed`` flag in both the success and failure branches so a
-        cold-start DB outage doesn't trigger retry loops on every
-        match-center fetch.
+        Phase 4.7.5 had this method run one bulk SELECT to populate
+        Redis at worker startup. That race was the root cause of the
+        third Phase 4.8 rollback — 73 workers × bulk SELECT × asyncpg
+        pool not yet ready at restart = mass TimeoutError, ~42% of
+        workers stranded with empty caches.
 
-        After this call the entire registry is in Redis under the
-        existing ``_cache_key`` namespace. ``get_verdicts_batch`` then
-        becomes a Redis-only lookup — the hot path never touches
-        Postgres again, which is what fixes the Phase 4.8 pool
-        starvation (73 workers × per-process pool min_size=20 was
-        overwhelming the cluster-wide ``max_connections``).
+        The new design: workers NEVER read the registry table. Cache
+        priming is done out-of-band by a separate process running
+        ``cli league-capability prime-redis`` (Phase 4.7.6 Step 3) —
+        once at deploy time and again from a systemd timer / cron
+        every N hours.
 
-        Returns the number of Redis keys primed (best-effort)."""
+        This method stays so the lazy ``if not self._warmed: await
+        self.warm_cache_from_db()`` hook in ``get_verdicts_batch``
+        keeps working — it just flips the flag and returns. No DB
+        connection, no SELECT, no Redis writes.
+        """
 
-        if self._warmed:
-            return 0
-
-        try:
-            async with self.database.connection() as connection:
-                rows = await self.repository.list_active_capabilities(
-                    connection,
-                )
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning(
-                "LeagueCapabilitiesRegistry.warm_cache_from_db failed: %s",
-                exc,
-            )
-            # One-shot policy: mark warmed even on failure so the lazy
-            # path doesn't retry on every match-center fetch and turn
-            # one DB blip into a sustained outage.
-            self._warmed = True
-            return 0
-
-        primed = 0
-        for row in rows or ():
-            try:
-                key = self._cache_key(
-                    unique_tournament_id=row.unique_tournament_id,
-                    season_id=row.season_id,
-                    status_type=row.status_type,
-                    endpoint_pattern=row.endpoint_pattern,
-                )
-                self.redis_backend.set(
-                    key, row.state, ex=_WARM_TTL_SECONDS,
-                )
-                primed += 1
-            except Exception as exc:  # pragma: no cover — defensive
-                logger.warning(
-                    "LeagueCapabilitiesRegistry warm set failed "
-                    "key_ut=%s key_season=%s err=%s",
-                    row.unique_tournament_id, row.season_id, exc,
-                )
         self._warmed = True
-        logger.info(
-            "LeagueCapabilitiesRegistry warm complete: primed %d / %d rows",
-            primed, len(rows or ()),
-        )
-        return primed
+        return 0
 
     async def get_verdicts_batch(
         self,
