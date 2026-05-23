@@ -3344,26 +3344,28 @@ async def _run_monitoring_daemon(args) -> int:
             "warn": config.tier_1_quarantined_warn,
             "crit": config.tier_1_quarantined_crit,
         },
-        # Phase 2 — queue XLEN thresholds.
-        "hydrate_xlen": {
-            "warn": config.hydrate_xlen_warn,
-            "crit": config.hydrate_xlen_crit,
+        # Phase 2 — queue consumer lag thresholds. XLEN remains alert
+        # context only because stream length can stay high when consumers
+        # are fully caught up and XTRIM is intentionally conservative.
+        "hydrate_lag": {
+            "warn": config.hydrate_lag_warn,
+            "crit": config.hydrate_lag_crit,
         },
-        "live_hot_xlen": {
-            "warn": config.live_hot_xlen_warn,
-            "crit": config.live_hot_xlen_crit,
+        "live_hot_lag": {
+            "warn": config.live_hot_lag_warn,
+            "crit": config.live_hot_lag_crit,
         },
-        "live_warm_xlen": {
-            "warn": config.live_warm_xlen_warn,
-            "crit": config.live_warm_xlen_crit,
+        "live_warm_lag": {
+            "warn": config.live_warm_lag_warn,
+            "crit": config.live_warm_lag_crit,
         },
-        "live_discovery_xlen": {
-            "warn": config.live_discovery_xlen_warn,
-            "crit": config.live_discovery_xlen_crit,
+        "live_discovery_lag": {
+            "warn": config.live_discovery_lag_warn,
+            "crit": config.live_discovery_lag_crit,
         },
-        "discovery_xlen": {
-            "warn": config.discovery_xlen_warn,
-            "crit": config.discovery_xlen_crit,
+        "discovery_lag": {
+            "warn": config.discovery_lag_warn,
+            "crit": config.discovery_lag_crit,
         },
         # Phase 3 — job signal thresholds.
         "failed_jobs_15min": {

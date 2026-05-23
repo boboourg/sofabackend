@@ -287,13 +287,14 @@ class SignalDefinitionsRegistryTests(unittest.TestCase):
         self.assertTrue(slo_names.issubset(set(SIGNAL_DEFINITIONS)))
 
     def test_registry_contains_phase_2_queue_signals(self) -> None:
-        # Phase 2 queue signals (XLEN per stream).
+        # Phase 2 queue signals (consumer lag per stream; XLEN is
+        # diagnostic context only).
         queue_names = {
-            "hydrate_xlen",
-            "live_hot_xlen",
-            "live_warm_xlen",
-            "live_discovery_xlen",
-            "discovery_xlen",
+            "hydrate_lag",
+            "live_hot_lag",
+            "live_warm_lag",
+            "live_discovery_lag",
+            "discovery_lag",
         }
         self.assertTrue(queue_names.issubset(set(SIGNAL_DEFINITIONS)))
 

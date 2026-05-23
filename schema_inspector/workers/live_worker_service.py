@@ -12,6 +12,7 @@ from ..jobs.types import JOB_REFRESH_LIVE_EVENT, JOB_REFRESH_LIVE_EVENT_DETAILS
 from ..live_hydration_mode import resolve_live_hydration_mode
 from ..queue.streams import (
     GROUP_LIVE_HOT,
+    GROUP_LIVE_DETAILS,
     GROUP_LIVE_TIER_1,
     GROUP_LIVE_TIER_2,
     GROUP_LIVE_TIER_3,
@@ -395,7 +396,7 @@ class LiveWorkerService:
         #   - report missing (test/early-return paths) or details_pending=False
         #   - event finalized this tick (final sweep already covered details)
         #   - throttle says we just enqueued for this event (rate-limit window)
-        #   - details stream length > backpressure cap
+        #   - details stream consumer lag > backpressure cap
         # Enqueue failure is logged at WARNING but the parent
         # refresh_live_event job still returns "completed" — the details
         # path must not feed back into root retry budget.
@@ -426,18 +427,20 @@ class LiveWorkerService:
                 return
         if self.details_backpressure_limit is not None:
             try:
-                stream_len = self._stream_length(STREAM_LIVE_DETAILS)
+                stream_lag = self._stream_backpressure_value(
+                    STREAM_LIVE_DETAILS, GROUP_LIVE_DETAILS
+                )
             except Exception as exc:
                 logger.warning(
-                    "Details backpressure XLEN check failed: %s — skipping (fail-closed)",
+                    "Details backpressure lag check failed: %s — skipping (fail-closed)",
                     exc,
                 )
                 return
-            if stream_len is not None and stream_len >= self.details_backpressure_limit:
+            if stream_lag is not None and stream_lag >= self.details_backpressure_limit:
                 logger.info(
-                    "details_backpressure_skip: event_id=%s stream_len=%s limit=%s",
+                    "details_backpressure_skip: event_id=%s stream_lag=%s limit=%s",
                     event_id,
-                    stream_len,
+                    stream_lag,
                     self.details_backpressure_limit,
                 )
                 return
@@ -468,7 +471,7 @@ class LiveWorkerService:
     def _maybe_enqueue_edges(self, *, event_id: int, sport_slug: str, job) -> None:
         """Publish a follow-up ``refresh_live_event`` (full hydration) to
         ``stream:etl:live_warm`` after a tier_1 root-only run completed
-        cleanly. Throttled per-event and bounded by warm-stream length.
+        cleanly. Throttled per-event and bounded by warm-stream consumer lag.
 
         The follow-up has ``hydration_mode`` UNSET in params (defaults to
         ``live_delta``) so the live_warm consumer runs the legacy ROOT +
@@ -495,18 +498,20 @@ class LiveWorkerService:
                 return
         if self.edges_backpressure_limit is not None:
             try:
-                stream_len = self._stream_length(STREAM_LIVE_WARM)
+                stream_lag = self._stream_backpressure_value(
+                    STREAM_LIVE_WARM, GROUP_LIVE_WARM
+                )
             except Exception as exc:
                 logger.warning(
-                    "Edges backpressure XLEN check failed: %s — skipping (fail-closed)",
+                    "Edges backpressure lag check failed: %s — skipping (fail-closed)",
                     exc,
                 )
                 return
-            if stream_len is not None and stream_len >= self.edges_backpressure_limit:
+            if stream_lag is not None and stream_lag >= self.edges_backpressure_limit:
                 logger.info(
-                    "edges_backpressure_skip: event_id=%s stream_len=%s limit=%s",
+                    "edges_backpressure_skip: event_id=%s stream_lag=%s limit=%s",
                     event_id,
-                    stream_len,
+                    stream_lag,
                     self.edges_backpressure_limit,
                 )
                 return
@@ -532,6 +537,47 @@ class LiveWorkerService:
                 event_id,
                 exc,
             )
+
+    def _stream_backpressure_value(self, stream_name: str, group_name: str) -> int | None:
+        """Return consumer lag for backpressure, with XLEN fallback.
+
+        Redis Streams keep acknowledged entries until XTRIM/MAXLEN, so XLEN
+        can be huge while consumers are fully caught up. Using XLEN here
+        blocks live_warm/live_details fanout indefinitely after a high-volume
+        day. Prefer XINFO GROUPS lag; fall back to XLEN only for old fakes or
+        backends that cannot report group lag.
+        """
+
+        group_info = getattr(self.queue, "group_info", None)
+        if callable(group_info):
+            try:
+                info = group_info(stream_name, group_name)
+            except Exception:
+                info = None
+            lag = getattr(info, "lag", None) if info is not None else None
+            if lag is not None:
+                try:
+                    return int(lag)
+                except (TypeError, ValueError):
+                    return None
+
+        backend = getattr(self.queue, "backend", None) or getattr(self.queue, "_backend", None)
+        if backend is not None:
+            xinfo_groups = getattr(backend, "xinfo_groups", None)
+            if callable(xinfo_groups):
+                try:
+                    for row in xinfo_groups(stream_name) or ():
+                        name = row.get("name") if isinstance(row, dict) else None
+                        if str(name or "") != str(group_name):
+                            continue
+                        lag = row.get("lag") if isinstance(row, dict) else None
+                        if lag is None:
+                            break
+                        return int(lag)
+                except Exception:
+                    return None
+
+        return self._stream_length(stream_name)
 
     def _stream_length(self, stream_name: str) -> int | None:
         backend = getattr(self.queue, "backend", None) or getattr(self.queue, "_backend", None)

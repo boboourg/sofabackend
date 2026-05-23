@@ -36,18 +36,9 @@ This repository is no longer a small "inspect one JSON URL and print Markdown" t
 
 ### Local Workspace
 
-Primary local project path:
+Ensure you are working in the correct root directory of the repository before running scripts or commands:
 
 ```powershell
-D:\sofascore
-```
-
-The Codex desktop working directory can sometimes point at a non-repository mirror such as
-`C:\Users\bobur\Desktop\sofascore`. Before editing or committing, verify that you are in the
-real git repository:
-
-```powershell
-cd D:\sofascore
 git rev-parse --show-toplevel
 git status
 ```
@@ -88,7 +79,6 @@ unless explicitly requested.
 Expected local flow:
 
 ```powershell
-cd D:\sofascore
 git status
 git add <files>
 git commit -m "<short scope>: <summary>"

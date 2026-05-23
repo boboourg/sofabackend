@@ -37,6 +37,14 @@ _LIVE_EVENT_UPDATE_PARSER_FAMILIES = frozenset(
         "tennis_power",
         "baseball_innings",
         "esports_games",
+        "event_best_players",
+        "event_comments",
+        "event_managers",
+        "event_votes",
+        "event_odds",
+        "event_winning_odds",
+        "event_player_statistics",
+        "event_player_rating_breakdown",
     }
 )
 

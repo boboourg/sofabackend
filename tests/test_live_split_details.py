@@ -59,6 +59,7 @@ class _FakeRedisBackend:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
         self.streams: dict[str, list[tuple[str, dict]]] = {}
+        self.group_lags: dict[tuple[str, str], int] = {}
 
     def set(self, key, value, *, nx=False, px=None, ex=None):
         if nx and key in self.values:
@@ -82,6 +83,12 @@ class _FakeRedisBackend:
 
     def xlen(self, stream):
         return len(self.streams.get(stream, []))
+
+    def xinfo_groups(self, stream):
+        from schema_inspector.queue.streams import GROUP_LIVE_DETAILS
+
+        lag = self.group_lags.get((stream, GROUP_LIVE_DETAILS), len(self.streams.get(stream, [])))
+        return [{"name": GROUP_LIVE_DETAILS, "lag": lag, "consumers": 1, "pending": 0}]
 
 
 class _RecordingQueue:
@@ -277,6 +284,35 @@ class LiveTierWorkerSplitTests(unittest.IsolatedAsyncioTestCase):
         # records publishes that went through the queue facade.
         details_publishes = [s for s, _ in queue.published if s == STREAM_LIVE_DETAILS]
         self.assertEqual(len(details_publishes), 0)
+
+    async def test_details_backpressure_uses_lag_not_xlen(self) -> None:
+        from schema_inspector.queue.live_details_throttle import LiveDetailsThrottle
+        from schema_inspector.queue.streams import GROUP_LIVE_DETAILS
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        backend = _FakeRedisBackend()
+        for i in range(1_000):
+            backend.xadd(STREAM_LIVE_DETAILS, {"k": str(i)})
+        backend.group_lags[(STREAM_LIVE_DETAILS, GROUP_LIVE_DETAILS)] = 0
+        queue = _RecordingQueue(backend=backend)
+
+        with _patched_env(LIVE_SPLIT_DETAILS_FANOUT="1"):
+            worker = LiveWorkerService(
+                orchestrator=_OrchestratorReturningDetailsPending(),
+                delayed_scheduler=_NoopDelayedScheduler(),
+                queue=queue,
+                lane="tier_1",
+                consumer="worker-live-tier-1-1",
+                in_flight_store=None,
+                details_throttle=LiveDetailsThrottle(backend, interval_seconds=30),
+                details_backpressure_limit=5,
+            )
+
+            result = await worker.handle(_live_tier_1_entry())
+
+        self.assertEqual(result, "completed")
+        details_publishes = [s for s, _ in queue.published if s == STREAM_LIVE_DETAILS]
+        self.assertEqual(len(details_publishes), 1)
 
     async def test_split_disabled_keeps_legacy_inline_path_no_details_publish(self) -> None:
         from schema_inspector.queue.live_inflight import LiveEventInFlightStore
