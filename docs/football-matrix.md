@@ -141,10 +141,10 @@ Per-event lower bound (event level):
 | `/event/{eid}/graph` | n/a | 60s | 1×24h | |
 | **`/event/{eid}/comments`** | n/a | **60s** | **1×24h** | Бобур: live раз в минуту, finished раз в день |
 | **`/event/{eid}/official-tweets`** | n/a | **20×60s** | **1×24h** | Бобур: live раз в 20 минут, finished раз в день |
-| `/event/{eid}/shotmap` | n/a | ? | ? | (Бобур: указать) |
-| `/event/{eid}/heatmap/{team_id}` | n/a | ? | ? | (Бобур: указать) |
-| `/event/{eid}/best-players/summary` | n/a | ? | ? | (Бобур: указать) |
-| `/event/{eid}/average-positions` | n/a | ? | ? | (Бобур: указать) |
+| `/event/{eid}/shotmap` | n/a | 60s | 1×24h | |
+| `/event/{eid}/heatmap/{team_id}` | n/a | 60s | 1×24h | |
+| `/event/{eid}/best-players/summary` | n/a | 60s | 1×24h | |
+| `/event/{eid}/average-positions` | n/a | 60s | 1×24h | |
 | `/event/{eid}/managers` | 1h | 60s | 1×24h | |
 | `/event/{eid}/h2h` | 1h | n/a | 1×24h | meta stable |
 | `/event/{eid}/h2h/events` | 1h | n/a | 1×24h | meta stable |
