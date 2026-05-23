@@ -79,6 +79,7 @@ class HistoricalTournamentPlannerDaemon:
         # to drain 19k pending rows.
         bootstrap_pending_selector: Callable[..., Awaitable[list[dict]]] | None = None,
         max_bootstrap_jobs_per_tick: int = 20,
+        bootstrap_stream: str = STREAM_HISTORICAL_TOURNAMENT,
     ) -> None:
         self.queue = queue
         self.cursor_store = cursor_store
@@ -86,6 +87,7 @@ class HistoricalTournamentPlannerDaemon:
         self._static_targets = tuple(targets)
         self.targets = self._static_targets
         self.stream = stream
+        self.bootstrap_stream = bootstrap_stream
         self.tournaments_per_tick = max(1, int(tournaments_per_tick))
         self.loop_interval_s = float(loop_interval_s)
         self.backpressure = backpressure
@@ -222,7 +224,15 @@ class HistoricalTournamentPlannerDaemon:
             # worker fix that skips JOB_ENRICH_TOURNAMENT_* children
             # for bootstrap_mode jobs).
             if cursor_paused_reason is not None:
-                published += await self._publish_bootstrap_batch(target)
+                bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
+                published += bootstrap_published
+                logger.info(
+                    "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
+                    target.sport_slug,
+                    bootstrap_published,
+                    bootstrap_selector_returned,
+                    cursor_paused_reason is not None,
+                )
                 continue
 
             # Phase 1 (2026-05-16): cursor-aware path first. The selector
@@ -276,7 +286,15 @@ class HistoricalTournamentPlannerDaemon:
                     # cursor jobs. Both happen on the same tick — cursor
                     # advances current heads, bootstrap drains the
                     # long-tail pending catalog rows in parallel.
-                    published += await self._publish_bootstrap_batch(target)
+                    bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
+                    published += bootstrap_published
+                    logger.info(
+                        "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
+                        target.sport_slug,
+                        bootstrap_published,
+                        bootstrap_selector_returned,
+                        cursor_paused_reason is not None,
+                    )
                     continue
 
             # Legacy path — no cursor data yet, fall back to UT-only walk.
@@ -297,7 +315,15 @@ class HistoricalTournamentPlannerDaemon:
                 # Phase 3.7(a): legacy selector empty — still try
                 # bootstrap (catalog may have pending rows even
                 # when tournament_registry walk is exhausted).
-                published += await self._publish_bootstrap_batch(target)
+                bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
+                published += bootstrap_published
+                logger.info(
+                    "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
+                    target.sport_slug,
+                    bootstrap_published,
+                    bootstrap_selector_returned,
+                    cursor_paused_reason is not None,
+                )
                 continue
             for unique_tournament_id in selected_ids:
                 job = JobEnvelope.create(
@@ -316,13 +342,23 @@ class HistoricalTournamentPlannerDaemon:
             # Phase 3.7(a): bootstrap publishes also run on the legacy
             # path so the catalog long tail drains even when cursor
             # rows are empty (e.g. registry not yet seeded).
-            published += await self._publish_bootstrap_batch(target)
+            bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
+            published += bootstrap_published
+            logger.info(
+                "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
+                target.sport_slug,
+                bootstrap_published,
+                bootstrap_selector_returned,
+                cursor_paused_reason is not None,
+            )
         return published
 
-    async def _publish_bootstrap_batch(self, target) -> int:
+    async def _publish_bootstrap_batch(self, target) -> tuple[int, int]:
         """Phase 3.7(a) (2026-05-22): publish a throttled batch of
-        bootstrap jobs for ``pending`` catalog rows. Returns the
-        number of jobs actually published.
+        bootstrap jobs for ``pending`` catalog rows.
+
+        Returns (published_count, selector_returned_count) so the caller
+        can emit a structured per-tick log.
 
         No-op when:
           * ``bootstrap_pending_selector`` was not configured
@@ -332,17 +368,17 @@ class HistoricalTournamentPlannerDaemon:
         """
 
         if self.bootstrap_pending_selector is None:
-            return 0
+            return 0, 0
         limit = int(self.max_bootstrap_jobs_per_tick)
         if limit <= 0:
-            return 0
+            return 0, 0
         rows = await _await_maybe(
             self.bootstrap_pending_selector(
                 sport_slug=target.sport_slug, limit=limit
             )
         )
         if not rows:
-            return 0
+            return 0, 0
         published = 0
         for row in rows[:limit]:
             ut_id = int(row["unique_tournament_id"])
@@ -357,9 +393,13 @@ class HistoricalTournamentPlannerDaemon:
                 priority=target.priority,
                 trace_id=None,
             )
-            self.queue.publish(self.stream, encode_stream_job(job))
+            self.queue.publish(self.bootstrap_stream, encode_stream_job(job))
+            logger.debug(
+                "bootstrap_publish: sport=%s ut=%s season=%s stream=%s",
+                target.sport_slug, ut_id, season_id, self.bootstrap_stream,
+            )
             published += 1
-        return published
+        return published, len(rows)
 
 
 async def _await_maybe(value: object) -> object:

@@ -228,6 +228,138 @@ class HistoricalTournamentPlannerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(cursor_store.load_last_unique_tournament_id("football"), 99)
 
+    async def test_planner_routes_bootstrap_publishes_to_bootstrap_stream(self) -> None:
+        from schema_inspector.queue.streams import (
+            STREAM_HISTORICAL_BOOTSTRAP,
+            STREAM_HISTORICAL_TOURNAMENT,
+        )
+        from schema_inspector.services.historical_tournament_planner import (
+            HistoricalTournamentCursorStore,
+            HistoricalTournamentPlannerDaemon,
+            HistoricalTournamentPlanningTarget,
+        )
+
+        backend = _FakeRedisBackend()
+        queue = _FakeQueue()
+
+        async def selector(*, sport_slug, after_unique_tournament_id, limit):
+            return ()
+
+        async def bootstrap_selector(*, sport_slug, limit):
+            return [
+                {"unique_tournament_id": 17, "season_id": 701},
+                {"unique_tournament_id": 19, "season_id": 702},
+            ]
+
+        cursor_store = HistoricalTournamentCursorStore(backend)
+        daemon = HistoricalTournamentPlannerDaemon(
+            queue=queue,
+            cursor_store=cursor_store,
+            selector=selector,
+            targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
+            tournaments_per_tick=2,
+            bootstrap_pending_selector=bootstrap_selector,
+            max_bootstrap_jobs_per_tick=5,
+            bootstrap_stream=STREAM_HISTORICAL_BOOTSTRAP,
+        )
+
+        published = await daemon.tick()
+
+        self.assertEqual(published, 2)
+        self.assertEqual(
+            [stream for stream, _ in queue.published],
+            [STREAM_HISTORICAL_BOOTSTRAP, STREAM_HISTORICAL_BOOTSTRAP],
+        )
+        # Legacy stream untouched — no cursor walks selected by the empty
+        # legacy selector and bootstrap_stream is distinct from stream.
+        for stream, _ in queue.published:
+            self.assertNotEqual(stream, STREAM_HISTORICAL_TOURNAMENT)
+
+    async def test_planner_bootstrap_stream_defaults_to_legacy_stream(self) -> None:
+        """Backwards-compat: if bootstrap_stream not provided, bootstrap
+        publishes still go to STREAM_HISTORICAL_TOURNAMENT so pre-Phase-4.7.7
+        tests and operators see the same behaviour."""
+        from schema_inspector.queue.streams import STREAM_HISTORICAL_TOURNAMENT
+        from schema_inspector.services.historical_tournament_planner import (
+            HistoricalTournamentCursorStore,
+            HistoricalTournamentPlannerDaemon,
+            HistoricalTournamentPlanningTarget,
+        )
+
+        backend = _FakeRedisBackend()
+        queue = _FakeQueue()
+
+        async def selector(*, sport_slug, after_unique_tournament_id, limit):
+            return ()
+
+        async def bootstrap_selector(*, sport_slug, limit):
+            return [{"unique_tournament_id": 17, "season_id": 701}]
+
+        cursor_store = HistoricalTournamentCursorStore(backend)
+        daemon = HistoricalTournamentPlannerDaemon(
+            queue=queue,
+            cursor_store=cursor_store,
+            selector=selector,
+            targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
+            tournaments_per_tick=2,
+            bootstrap_pending_selector=bootstrap_selector,
+            max_bootstrap_jobs_per_tick=5,
+        )
+
+        await daemon.tick()
+
+        self.assertEqual(
+            [stream for stream, _ in queue.published],
+            [STREAM_HISTORICAL_TOURNAMENT],
+        )
+
+    async def test_planner_logs_bootstrap_tick_per_target(self) -> None:
+        """Per-tick INFO log: bootstrap_tick: sport=X published=N selector_returned=M cursor_paused=bool"""
+        import logging
+        from schema_inspector.queue.streams import STREAM_HISTORICAL_BOOTSTRAP
+        from schema_inspector.services.historical_tournament_planner import (
+            HistoricalTournamentCursorStore,
+            HistoricalTournamentPlannerDaemon,
+            HistoricalTournamentPlanningTarget,
+        )
+
+        backend = _FakeRedisBackend()
+        queue = _FakeQueue()
+
+        async def selector(*, sport_slug, after_unique_tournament_id, limit):
+            return ()
+
+        async def bootstrap_selector(*, sport_slug, limit):
+            return [
+                {"unique_tournament_id": 17, "season_id": 701},
+                {"unique_tournament_id": 19, "season_id": 702},
+            ]
+
+        cursor_store = HistoricalTournamentCursorStore(backend)
+        daemon = HistoricalTournamentPlannerDaemon(
+            queue=queue,
+            cursor_store=cursor_store,
+            selector=selector,
+            targets=(HistoricalTournamentPlanningTarget(sport_slug="football"),),
+            tournaments_per_tick=2,
+            bootstrap_pending_selector=bootstrap_selector,
+            max_bootstrap_jobs_per_tick=5,
+            bootstrap_stream=STREAM_HISTORICAL_BOOTSTRAP,
+        )
+
+        with self.assertLogs(
+            "schema_inspector.services.historical_tournament_planner",
+            level="INFO",
+        ) as captured:
+            await daemon.tick()
+
+        tick_lines = [r for r in captured.records if "bootstrap_tick" in r.getMessage()]
+        self.assertEqual(len(tick_lines), 1)
+        msg = tick_lines[0].getMessage()
+        self.assertIn("sport=football", msg)
+        self.assertIn("published=2", msg)
+        self.assertIn("selector_returned=2", msg)
+
 
 class HistoricalTournamentServiceAppAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_service_app_builds_registry_backed_historical_targets_when_database_available(self) -> None:
