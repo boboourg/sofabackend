@@ -362,6 +362,64 @@ class PilotOrchestrator:
             endpoint_pattern=endpoint.pattern,
         )
 
+    async def _resolve_detail_capability_verdicts(
+        self,
+        *,
+        unique_tournament_id,
+        season_id,
+        status_type,
+    ) -> dict[str, str]:
+        """Phase 4.7.3 wire (2026-05-23): resolve per-endpoint capability
+        verdicts for the football detail-spec fanout.
+
+        Queries the registry for every endpoint pattern in the status-
+        specific allow set (managers, h2h, comments, shotmap, heatmap, …)
+        and returns a ``{pattern: 'allowed'|'disabled'|'unknown'}`` dict
+        that the caller passes to ``build_event_detail_request_specs(...,
+        capability_verdicts=...)``. Patterns absent from the dict fall
+        back to legacy tier-based gating inside
+        ``football_detail_endpoint_allowed``.
+        Returns ``{}`` (and skips all registry traffic) when:
+          * feature flag OFF,
+          * no registry instance attached to this orchestrator,
+          * unique_tournament_id or status_type is None,
+          * the status doesn't resolve to a known detail-pattern set.
+
+        Each individual ``resolve_capability_verdict`` call is fail-safe;
+        Redis / Postgres failures bubble up as ``None`` for that pattern,
+        which the caller treats as "fall through to legacy" — never blocks
+        the hot path.
+        """
+
+        if not is_league_capabilities_enabled() or self.league_capabilities is None:
+            return {}
+        if unique_tournament_id is None or status_type is None:
+            return {}
+
+        # Import is lazy to avoid pulling match_center_policy into the
+        # orchestrator's import graph eagerly (it's already imported via
+        # other paths but keeping this local mirrors _resolve_edge above).
+        from ..match_center_policy import _allowed_detail_patterns_for_status
+
+        normalized_status = str(status_type or "").strip().lower()
+        patterns = _allowed_detail_patterns_for_status(normalized_status)
+        if not patterns:
+            return {}
+
+        verdicts: dict[str, str] = {}
+        for pattern in patterns:
+            result = await resolve_capability_verdict(
+                registry=self.league_capabilities,
+                enabled=True,
+                unique_tournament_id=unique_tournament_id,
+                season_id=season_id,
+                status_type=status_type,
+                endpoint_pattern=pattern,
+            )
+            if result is not None:
+                verdicts[str(pattern)] = result
+        return verdicts
+
     @property
     def freshness_skip_keys(self) -> frozenset[str]:
         return frozenset(self._freshness_skip_keys)
@@ -978,6 +1036,12 @@ class PilotOrchestrator:
                 "has_xg": has_xg,
                 "effective_hydration_mode": effective_hydration_mode,
                 "core_only": core_only,
+                # Phase 4.7.3 (2026-05-23): forward UT/season so the
+                # split-details worker can re-resolve capability verdicts
+                # for the second build_event_detail_request_specs call
+                # site inside run_event_details.
+                "unique_tournament_id": unique_tournament_id,
+                "season_id": season_id,
             }
             if should_mark_live_bootstrap and root_outcome.classification in {"success_json", "success_empty_json"}:
                 await self.live_bootstrap_coordinator.mark_bootstrapped(self.sql_executor, event_id=event_id)
@@ -995,6 +1059,14 @@ class PilotOrchestrator:
                 details_context=details_context,
             )
 
+        # Phase 4.7.3 wire (2026-05-23): resolve per-endpoint capability
+        # verdicts before fanout. Empty dict when flag OFF / no registry,
+        # so legacy gating stays in effect by default.
+        detail_capability_verdicts = await self._resolve_detail_capability_verdicts(
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            status_type=status_type,
+        )
         event_detail_request_specs = build_event_detail_request_specs(
             sport_slug=sport_slug,
             status_type=status_type,
@@ -1011,6 +1083,7 @@ class PilotOrchestrator:
             core_only=core_only,
             hydration_mode=effective_hydration_mode,
             is_editor=is_editor,  # X'' matchcenter ban
+            capability_verdicts=detail_capability_verdicts,
         )
         if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
             detail_specs: list[tuple[SofascoreEndpoint, _EventEndpointFetchSpec]] = []
@@ -1204,6 +1277,14 @@ class PilotOrchestrator:
         effective_hydration_mode = str(context.get("effective_hydration_mode") or "live_delta").strip().lower()
         core_only = bool(context.get("core_only", False))
 
+        # Phase 4.7.3 wire (2026-05-23): resolve per-endpoint capability
+        # verdicts before fanout in the split-details worker path. Empty
+        # dict when flag OFF / no registry / UT not forwarded in context.
+        detail_capability_verdicts = await self._resolve_detail_capability_verdicts(
+            unique_tournament_id=context.get("unique_tournament_id"),
+            season_id=context.get("season_id"),
+            status_type=status_type,
+        )
         event_detail_request_specs = build_event_detail_request_specs(
             sport_slug=sport_slug,
             status_type=status_type,
@@ -1219,6 +1300,7 @@ class PilotOrchestrator:
             now_timestamp=int(self.now_ms_factory()) // 1000,
             core_only=core_only,
             hydration_mode=effective_hydration_mode,
+            capability_verdicts=detail_capability_verdicts,
         )
         if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
             detail_specs: list[tuple[Any, _EventEndpointFetchSpec]] = []

@@ -411,6 +411,13 @@ def filter_football_detail_specs(
     start_timestamp: int | None,
     now_timestamp: int | None,
     is_editor: bool | None = None,
+    # Phase 4.7.3 (2026-05-23): per-endpoint League Capabilities Registry
+    # verdicts. The dict maps ``endpoint_pattern -> 'allowed'/'disabled'/
+    # 'unknown'``; entries absent from the dict (or a None map) fall back
+    # to legacy tier-based gating in ``football_detail_endpoint_allowed``.
+    # Resolved by the orchestrator from the registry before calling
+    # ``build_event_detail_request_specs``.
+    capability_verdicts: dict[str, str] | None = None,
 ) -> tuple[T, ...]:
     """Filter EventDetailRequestSpec-like objects by endpoint.pattern.
 
@@ -432,9 +439,15 @@ def filter_football_detail_specs(
         endpoint_pattern = getattr(endpoint, "pattern", None)
         if endpoint_pattern is None:
             continue
+        pattern_str = str(endpoint_pattern)
+        verdict_for_pattern = (
+            capability_verdicts.get(pattern_str)
+            if capability_verdicts
+            else None
+        )
         if football_detail_endpoint_allowed(
             sport_slug=sport_slug,
-            endpoint_pattern=str(endpoint_pattern),
+            endpoint_pattern=pattern_str,
             detail_id=detail_id,
             status_type=status_type,
             has_xg=has_xg,
@@ -444,6 +457,7 @@ def filter_football_detail_specs(
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
             is_editor=is_editor,
+            capability_verdict=verdict_for_pattern,
         ):
             filtered.append(spec)
     return tuple(filtered)

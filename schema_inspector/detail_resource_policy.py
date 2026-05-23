@@ -75,6 +75,12 @@ def build_event_detail_request_specs(
     core_only: bool = False,
     hydration_mode: str = "full",
     is_editor: bool | None = None,
+    # Phase 4.7.3 (2026-05-23): per-endpoint capability verdicts resolved
+    # from the League Capabilities Registry by the orchestrator. Maps
+    # ``endpoint_pattern -> 'allowed'/'disabled'/'unknown'``. Patterns
+    # absent from the dict (or a None map) fall through to legacy tier-
+    # based gating — backwards-compatible by default.
+    capability_verdicts: dict[str, str] | None = None,
 ) -> tuple[EventDetailRequestSpec, ...]:
     """Build the event-detail request specs for a given event.
 
@@ -137,6 +143,7 @@ def build_event_detail_request_specs(
                 start_timestamp=start_timestamp,
                 now_timestamp=now_timestamp,
                 is_editor=is_editor,
+                capability_verdicts=capability_verdicts,
             )
 
     if not core_only:
@@ -191,6 +198,7 @@ def build_event_detail_request_specs(
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
             is_editor=is_editor,
+            capability_verdicts=capability_verdicts,
         )
 
     if normalized_sport_slug != "tennis":
@@ -227,6 +235,7 @@ def build_event_detail_request_specs(
             start_timestamp=start_timestamp,
             now_timestamp=now_timestamp,
             is_editor=is_editor,
+            capability_verdicts=capability_verdicts,
         )
 
     add(EVENT_GRAPH_ENDPOINT)
@@ -252,6 +261,7 @@ def build_event_detail_request_specs(
         start_timestamp=start_timestamp,
         now_timestamp=now_timestamp,
         is_editor=is_editor,
+        capability_verdicts=capability_verdicts,
     )
 
 
@@ -277,6 +287,7 @@ def _filter_specs(
     start_timestamp: int | None,
     now_timestamp: int | None,
     is_editor: bool | None = None,
+    capability_verdicts: dict[str, str] | None = None,
 ) -> tuple[EventDetailRequestSpec, ...]:
     return filter_football_detail_specs(
         specs,
@@ -287,6 +298,7 @@ def _filter_specs(
         has_event_player_heat_map=has_event_player_heat_map,
         has_event_player_statistics=has_event_player_statistics,
         has_global_highlights=has_global_highlights,
+        capability_verdicts=capability_verdicts,
         start_timestamp=start_timestamp,
         now_timestamp=now_timestamp,
         is_editor=is_editor,
