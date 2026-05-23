@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 import unittest
+import importlib.util
+
+HAS_ASYNCPG = importlib.util.find_spec("asyncpg") is not None
 
 from schema_inspector.db import (
     AsyncpgDatabase,
@@ -198,6 +201,7 @@ class PoolAcquireTimeoutTests(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipIf(not HAS_ASYNCPG, "asyncpg not installed")
 class DatabaseFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_pool_falls_back_to_tcp_when_socket_auth_fails(self) -> None:
         class InvalidAuthorizationSpecificationError(Exception):

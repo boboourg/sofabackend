@@ -16,12 +16,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .signals import (
-    SIGNAL_DISCOVERY_XLEN,
+    SIGNAL_DISCOVERY_LAG,
     SIGNAL_FAILED_JOBS_15MIN,
-    SIGNAL_HYDRATE_XLEN,
-    SIGNAL_LIVE_DISCOVERY_XLEN,
-    SIGNAL_LIVE_HOT_XLEN,
-    SIGNAL_LIVE_WARM_XLEN,
+    SIGNAL_HYDRATE_LAG,
+    SIGNAL_LIVE_DISCOVERY_LAG,
+    SIGNAL_LIVE_HOT_LAG,
+    SIGNAL_LIVE_WARM_LAG,
     SIGNAL_NO_RECENT_JOBS_AGE,
     SIGNAL_OLDEST_HOT_AGE,
     SIGNAL_REFRESH_SUCCESS,
@@ -184,11 +184,11 @@ def _pick_slo_note(payload: dict[str, Any], slo_name: str) -> str | None:
 # already encoded in SignalDefinition). When the caller passes overrides
 # they keyed by SignalDefinition.name.
 _QUEUE_STREAM_TO_DEFINITION: dict[str, SignalDefinition] = {
-    "stream:etl:hydrate": SIGNAL_HYDRATE_XLEN,
-    "stream:etl:live_hot": SIGNAL_LIVE_HOT_XLEN,
-    "stream:etl:live_warm": SIGNAL_LIVE_WARM_XLEN,
-    "stream:etl:live_discovery": SIGNAL_LIVE_DISCOVERY_XLEN,
-    "stream:etl:discovery": SIGNAL_DISCOVERY_XLEN,
+    "stream:etl:hydrate": SIGNAL_HYDRATE_LAG,
+    "stream:etl:live_hot": SIGNAL_LIVE_HOT_LAG,
+    "stream:etl:live_warm": SIGNAL_LIVE_WARM_LAG,
+    "stream:etl:live_discovery": SIGNAL_LIVE_DISCOVERY_LAG,
+    "stream:etl:discovery": SIGNAL_DISCOVERY_LAG,
 }
 
 
@@ -200,13 +200,15 @@ async def fetch_queue_signals_from_api(
     now: datetime | None = None,
     overrides: dict[str, dict[str, float | int]] | None = None,
 ) -> list[SignalSnapshot]:
-    """Fetch /ops/queues/summary and emit queue XLEN snapshots.
+    """Fetch /ops/queues/summary and emit queue consumer-lag snapshots.
 
     The endpoint returns ``{"streams": [{"stream": "...", "length": N,
-    "pending_total": M, ...}, ...]}``. For each stream we care about
-    (see ``_QUEUE_STREAM_TO_DEFINITION``) we emit a snapshot of its
-    length. Other streams are ignored — they don't have configured
-    thresholds and would generate noise without action.
+    "pending_total": M, "lag": L, ...}, ...]}``. For each stream we
+    care about (see ``_QUEUE_STREAM_TO_DEFINITION``) we emit a snapshot
+    of its consumer-group ``lag``. ``length``/XLEN is included as an
+    extra diagnostic only: a stream can have huge length because it is
+    not trimmed while consumers are fully caught up, so alerting on XLEN
+    creates noisy false incidents.
 
     Best-effort: any HTTP / parse error returns an empty list. The
     daemon's tick loop treats empty as "no data this tick".
@@ -234,10 +236,12 @@ async def fetch_queue_signals_from_api(
     if not isinstance(streams, list):
         return []
 
-    # Sum streams that share a stream name (e.g. two consumer groups on
-    # the same stream produce two entries). length is a property of the
-    # stream itself, not the group, so duplicates are normal — take max.
+    # Multiple consumer groups on the same stream can produce duplicate
+    # entries. Alert on the worst lag, and keep max length/pending as
+    # context for the Telegram message.
+    lag_by_stream: dict[str, int] = {}
     length_by_stream: dict[str, int] = {}
+    pending_by_stream: dict[str, int] = {}
     for entry in streams:
         if not isinstance(entry, dict):
             continue
@@ -247,23 +251,42 @@ async def fetch_queue_signals_from_api(
         try:
             length = int(entry.get("length") or 0)
         except (TypeError, ValueError):
+            length = 0
+        try:
+            pending = int(entry.get("pending_total") or 0)
+        except (TypeError, ValueError):
+            pending = 0
+        raw_lag = entry.get("lag")
+        if raw_lag is None:
             continue
+        try:
+            lag = int(raw_lag)
+        except (TypeError, ValueError):
+            continue
+        lag_by_stream[stream_name] = max(lag_by_stream.get(stream_name, 0), lag)
         length_by_stream[stream_name] = max(
             length_by_stream.get(stream_name, 0), length
+        )
+        pending_by_stream[stream_name] = max(
+            pending_by_stream.get(stream_name, 0), pending
         )
 
     snapshots: list[SignalSnapshot] = []
     for stream_name, definition in _QUEUE_STREAM_TO_DEFINITION.items():
-        length = length_by_stream.get(stream_name)
+        lag = lag_by_stream.get(stream_name)
         ov = overrides.get(definition.name, {})
         snapshots.append(
             make_snapshot(
                 definition=definition,
-                value=length,
+                value=lag,
                 timestamp=timestamp,
                 threshold_warn=ov.get("warn"),
                 threshold_crit=ov.get("crit"),
-                extra={"stream": stream_name},
+                extra={
+                    "stream": stream_name,
+                    "length": length_by_stream.get(stream_name),
+                    "pending_total": pending_by_stream.get(stream_name),
+                },
             )
         )
     return snapshots

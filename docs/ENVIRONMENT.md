@@ -146,6 +146,31 @@ Per-worker overrides (structure/historical):
 
 ---
 
+## Monitoring queue lag thresholds
+
+`sofascore-monitoring.service` alerts on Redis Stream **consumer lag** from
+`/ops/queues/summary`, not on raw `XLEN`. `XLEN` is still included in alert
+context as `length`, but it is not a severity input because acknowledged
+stream entries remain until trimming.
+
+| Variable | Default | Signal | Эффект | Restart |
+|---|---:|---|---|---|
+| `SOFASCORE_MONITORING_HYDRATE_LAG_WARN` | `800` | `hydrate_lag` | WARN if `cg:hydrate` lag is above threshold | yes |
+| `SOFASCORE_MONITORING_HYDRATE_LAG_CRIT` | `1500` | `hydrate_lag` | CRIT if `cg:hydrate` lag is above threshold | yes |
+| `SOFASCORE_MONITORING_LIVE_HOT_LAG_WARN` | `200` | `live_hot_lag` | WARN if live-hot lag is above threshold | yes |
+| `SOFASCORE_MONITORING_LIVE_HOT_LAG_CRIT` | `500` | `live_hot_lag` | CRIT if live-hot lag is above threshold | yes |
+| `SOFASCORE_MONITORING_LIVE_WARM_LAG_WARN` | `5000` | `live_warm_lag` | WARN if live-warm lag is above threshold | yes |
+| `SOFASCORE_MONITORING_LIVE_WARM_LAG_CRIT` | `20000` | `live_warm_lag` | CRIT if live-warm lag is above threshold | yes |
+| `SOFASCORE_MONITORING_LIVE_DISCOVERY_LAG_WARN` | `50` | `live_discovery_lag` | WARN if live-discovery lag is above threshold | yes |
+| `SOFASCORE_MONITORING_LIVE_DISCOVERY_LAG_CRIT` | `200` | `live_discovery_lag` | CRIT if live-discovery lag is above threshold | yes |
+| `SOFASCORE_MONITORING_DISCOVERY_LAG_WARN` | `200` | `discovery_lag` | WARN if scheduled discovery lag is above threshold | yes |
+| `SOFASCORE_MONITORING_DISCOVERY_LAG_CRIT` | `1000` | `discovery_lag` | CRIT if scheduled discovery lag is above threshold | yes |
+
+Deprecated: `SOFASCORE_MONITORING_*_XLEN_*` variables were used by the old
+queue signal implementation and are ignored by current code.
+
+---
+
 ## Feature flags
 
 | Variable | Default | Где | Эффект | Restart |

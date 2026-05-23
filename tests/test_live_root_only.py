@@ -83,6 +83,7 @@ class _FakeRedisBackend:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
         self.streams: dict[str, list[tuple[str, dict]]] = {}
+        self.group_lags: dict[tuple[str, str], int] = {}
 
     def set(self, key, value, *, nx=False, px=None, ex=None):
         if nx and key in self.values:
@@ -107,6 +108,12 @@ class _FakeRedisBackend:
 
     def xlen(self, stream):
         return len(self.streams.get(stream, []))
+
+    def xinfo_groups(self, stream):
+        from schema_inspector.queue.streams import GROUP_LIVE_WARM
+
+        lag = self.group_lags.get((stream, GROUP_LIVE_WARM), len(self.streams.get(stream, [])))
+        return [{"name": GROUP_LIVE_WARM, "lag": lag, "consumers": 1, "pending": 0}]
 
 
 class _RecordingQueue:
@@ -433,7 +440,7 @@ class LiveTier1RootOnlyWorkerTests(unittest.IsolatedAsyncioTestCase):
                 lane="tier_1",
                 consumer="worker-live-tier-1-1",
                 in_flight_store=None,
-                root_in_flight_store=None,
+                root_in_flight_store=LiveEventRootInFlightStore(backend, ttl_ms=60_000),
                 edges_throttle=LiveEdgesThrottle(backend, interval_seconds=60),
                 edges_backpressure_limit=10,
             )
@@ -443,6 +450,39 @@ class LiveTier1RootOnlyWorkerTests(unittest.IsolatedAsyncioTestCase):
         # No edges-followup despite edges_pending=True — backpressure rejected.
         warm_publishes = [p for p in queue.published if p[0] == STREAM_LIVE_WARM]
         self.assertEqual(len(warm_publishes), 0)
+
+    async def test_edges_backpressure_uses_lag_not_xlen(self) -> None:
+        from schema_inspector.queue.live_edges_throttle import LiveEdgesThrottle
+        from schema_inspector.queue.live_inflight import LiveEventRootInFlightStore
+        from schema_inspector.queue.streams import GROUP_LIVE_WARM
+        from schema_inspector.workers.live_worker_service import LiveWorkerService
+
+        backend = _FakeRedisBackend()
+        for i in range(1_000):
+            backend.xadd(STREAM_LIVE_WARM, {"k": str(i)})
+        backend.group_lags[(STREAM_LIVE_WARM, GROUP_LIVE_WARM)] = 0
+        queue = _RecordingQueue(backend=backend)
+        spy = _SpyOrchestrator(
+            report=_FakeReport(fetch_outcomes=(), edges_pending=True, finalized=False)
+        )
+
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = LiveWorkerService(
+                orchestrator=spy,
+                delayed_scheduler=_NoopDelayedScheduler(),
+                queue=queue,
+                lane="tier_1",
+                consumer="worker-live-tier-1-1",
+                in_flight_store=None,
+                root_in_flight_store=LiveEventRootInFlightStore(backend, ttl_ms=60_000),
+                edges_throttle=LiveEdgesThrottle(backend, interval_seconds=60),
+                edges_backpressure_limit=10,
+            )
+            result = await worker.handle(_live_entry(lane_stream=STREAM_LIVE_TIER_1))
+
+        self.assertEqual(result, "completed")
+        warm_publishes = [p for p in queue.published if p[0] == STREAM_LIVE_WARM]
+        self.assertEqual(len(warm_publishes), 1)
 
     async def test_terminal_finalized_skips_edges_enqueue(self) -> None:
         from schema_inspector.queue.live_edges_throttle import LiveEdgesThrottle

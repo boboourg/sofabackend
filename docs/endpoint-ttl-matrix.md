@@ -1,6 +1,6 @@
 # Endpoint TTL Matrix — единый source of truth
 
-Last refreshed from code: **2026-05-16**.
+Last refreshed from code: **2026-05-23**.
 
 Этот документ — **единая таблица всех endpoint'ов** проекта с их текущими и **желаемыми** TTL.
 Цель: Бобур руками задаёт желаемый TTL для каждого endpoint × состояние, после чего код
@@ -61,28 +61,28 @@ Football-only TTL'ы сейчас в `endpoint_ttl_policy._FOOTBALL_TTL_MATRIX`.
 
 | Endpoint pattern | Parser | Target table | Current Live | Current NotStarted | Current Finished | Bobur Live | Bobur NotStarted | Bobur Finished |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| `/event/{eid}` (root) | event_root | event, event_score, event_status, event_time, event_round_info | tier-poll (5/15/30s) | tier-poll | 24h | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/lineups` | event_lineups | event_lineup, event_lineup_player | **60s** | **5min** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/incidents` | event_incidents | event_incident | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/statistics` | event_statistics | event_statistic | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/graph` | event_graph | event_graph, event_graph_point | **60s** | — | **24h** | ⬜ | — | ⬜ |
+| `/event/{eid}` (root) | event_root | event, event_score, event_status, event_time, event_round_info | tier-poll (5/15/30s) | tier-poll | 24h | tier-poll ✅ | 5min ✅ | 24h ✅ |
+| `/event/{eid}/lineups` | event_lineups | event_lineup, event_lineup_player | **60s** | **5min** | **24h** | 60s ✅ | 5min ✅ | 24h ✅ |
+| `/event/{eid}/incidents` | event_incidents | event_incident | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/statistics` | event_statistics | event_statistic | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/graph` | event_graph | event_graph, event_graph_point | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
 | `/event/{eid}/comments` | event_comments | event_comment | **60s** | — | **24h** | **60s** ✅ | — | **24h** ✅ |
 | `/event/{eid}/official-tweets` | (raw) | api_payload_snapshot | **20min** | — | **24h** | **20min** ✅ | — | **24h** ✅ |
-| `/event/{eid}/shotmap` | shotmap | shotmap_point | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/heatmap/{tid}` | event_team_heatmap | event_team_heatmap, event_team_heatmap_point | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/best-players/summary` | event_best_players | event_best_player_entry | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/average-positions` | (raw) | api_payload_snapshot | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/managers` | event_managers | event_manager_assignment | **60s** | **1h** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/h2h` | event_h2h | event_duel | — | **1h** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{custom_id}/h2h/events` | (raw, B1 entry) | api_payload_snapshot | — | **1h** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/pregame-form` | event_pregame_form | event_pregame_form* | — | **1h** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/votes` | event_votes | event_vote_option | **5min** | **5min** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/odds/{prov}/all` | event_odds | event_market, event_market_choice | **5min** | **5min** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/odds/{prov}/featured` | event_odds | event_market, event_market_choice | **5min** | **5min** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/provider/{prov}/winning-odds` | event_winning_odds | event_winning_odds | **5min** | **5min** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/team-streaks` | (raw) | api_payload_snapshot | **5min** | **1h** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/team-streaks/betting-odds/{prov}` | (raw) | api_payload_snapshot | **5min** | **1h** | **24h** | ⬜ | ⬜ | ⬜ |
-| `/event/{eid}/highlights` | (raw) | api_payload_snapshot | — | — | **24h** | — | — | ⬜ |
+| `/event/{eid}/shotmap` | shotmap | shotmap_point | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/heatmap/{tid}` | event_team_heatmap | event_team_heatmap, event_team_heatmap_point | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/best-players/summary` | event_best_players | event_best_player_entry | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/average-positions` | (raw) | api_payload_snapshot | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/managers` | event_managers | event_manager_assignment | **60s** | **1h** | **24h** | 60s ✅ | 1h ✅ | 24h ✅ |
+| `/event/{eid}/h2h` | event_h2h | event_duel | — | **1h** | **24h** | — | 1h ✅ | 24h ✅ |
+| `/event/{custom_id}/h2h/events` | (raw, B1 entry) | api_payload_snapshot | — | **1h** | **24h** | — | 1h ✅ | 24h ✅ |
+| `/event/{eid}/pregame-form` | event_pregame_form | event_pregame_form* | — | **1h** | **24h** | — | 1h ✅ | 24h ✅ |
+| `/event/{eid}/votes` | event_votes | event_vote_option | **5min** | **5min** | **24h** | 5min ✅ | 5min ✅ | 24h ✅ |
+| `/event/{eid}/odds/{prov}/all` | event_odds | event_market, event_market_choice | **5min** | **5min** | **24h** | 5min ✅ | 5min ✅ | 24h ✅ |
+| `/event/{eid}/odds/{prov}/featured` | event_odds | event_market, event_market_choice | **5min** | **5min** | **24h** | 5min ✅ | 5min ✅ | 24h ✅ |
+| `/event/{eid}/provider/{prov}/winning-odds` | event_winning_odds | event_winning_odds | **5min** | **5min** | **24h** | 5min ✅ | 5min ✅ | 24h ✅ |
+| `/event/{eid}/team-streaks` | (raw) | api_payload_snapshot | **5min** | **1h** | **24h** | 5min ✅ | 1h ✅ | 24h ✅ |
+| `/event/{eid}/team-streaks/betting-odds/{prov}` | (raw) | api_payload_snapshot | **5min** | **1h** | **24h** | 5min ✅ | 1h ✅ | 24h ✅ |
+| `/event/{eid}/highlights` | (raw) | api_payload_snapshot | — | — | **24h** | — | — | 24h ✅ |
 | `/event/{eid}/weather` | (raw) | api_payload_snapshot | not in B1 | not in B1 | not in B1 | ⬜ | ⬜ | ⬜ |
 
 > **Примечание про `/highlights`:** Бобур уточнил — `hasGlobalHighlights=true` означает что
@@ -93,11 +93,11 @@ Football-only TTL'ы сейчас в `endpoint_ttl_policy._FOOTBALL_TTL_MATRIX`.
 
 | Endpoint pattern | Parser | Target table | Current Live | Current NotStarted | Current Finished | Bobur Live | Bobur NotStarted | Bobur Finished |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| `/event/{eid}/player/{pid}/statistics` | event_player_statistics | event_player_statistics, event_player_stat_value | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/player/{pid}/rating-breakdown` | event_player_rating_breakdown | event_player_rating_breakdown_action | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/player/{pid}/heatmap` | (raw) | api_payload_snapshot | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/shotmap/player/{pid}` | (raw) | api_payload_snapshot | **60s** | — | **24h** | ⬜ | — | ⬜ |
-| `/event/{eid}/goalkeeper-shotmap/player/{pid}` | (raw) | api_payload_snapshot | **60s** | — | **24h** | ⬜ | — | ⬜ |
+| `/event/{eid}/player/{pid}/statistics` | event_player_statistics | event_player_statistics, event_player_stat_value | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/player/{pid}/rating-breakdown` | event_player_rating_breakdown | event_player_rating_breakdown_action | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/player/{pid}/heatmap` | (raw) | api_payload_snapshot | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/shotmap/player/{pid}` | (raw) | api_payload_snapshot | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
+| `/event/{eid}/goalkeeper-shotmap/player/{pid}` | (raw) | api_payload_snapshot | **60s** | — | **24h** | 60s ✅ | — | 24h ✅ |
 
 ### A.3 Sport-specific event endpoints (non-football)
 

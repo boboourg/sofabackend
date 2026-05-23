@@ -154,45 +154,45 @@ SIGNAL_TIER_1_QUARANTINED = SignalDefinition(
 # larger queues = workers falling behind. Defaults match
 # docs/N1_MONITORING_PLAN.md and are env-overridable via MonitoringConfig.
 
-SIGNAL_HYDRATE_XLEN = SignalDefinition(
-    name="hydrate_xlen",
+SIGNAL_HYDRATE_LAG = SignalDefinition(
+    name="hydrate_lag",
     direction="max",
-    threshold_warn=1000,
-    threshold_crit=5000,
+    threshold_warn=800,
+    threshold_crit=1500,
     unit="",
-    help="XLEN(stream:etl:hydrate). Bigger = hydrate workers can't keep up.",
+    help="Consumer lag for stream:etl:hydrate/cg:hydrate. Bigger = hydrate workers can't keep up.",
 )
-SIGNAL_LIVE_HOT_XLEN = SignalDefinition(
-    name="live_hot_xlen",
+SIGNAL_LIVE_HOT_LAG = SignalDefinition(
+    name="live_hot_lag",
     direction="max",
-    threshold_warn=500,
-    threshold_crit=2000,
+    threshold_warn=200,
+    threshold_crit=500,
     unit="",
-    help="XLEN(stream:etl:live_hot). Bigger = live-hot workers can't keep up.",
+    help="Consumer lag for stream:etl:live_hot. Bigger = live-hot workers can't keep up.",
 )
-SIGNAL_LIVE_WARM_XLEN = SignalDefinition(
-    name="live_warm_xlen",
+SIGNAL_LIVE_WARM_LAG = SignalDefinition(
+    name="live_warm_lag",
     direction="max",
-    threshold_warn=500,
-    threshold_crit=2000,
+    threshold_warn=5000,
+    threshold_crit=20000,
     unit="",
-    help="XLEN(stream:etl:live_warm). Bigger = live-warm workers can't keep up.",
+    help="Consumer lag for stream:etl:live_warm. Bigger = live-warm workers can't keep up.",
 )
-SIGNAL_LIVE_DISCOVERY_XLEN = SignalDefinition(
-    name="live_discovery_xlen",
+SIGNAL_LIVE_DISCOVERY_LAG = SignalDefinition(
+    name="live_discovery_lag",
+    direction="max",
+    threshold_warn=50,
+    threshold_crit=200,
+    unit="",
+    help="Consumer lag for stream:etl:live_discovery. Bigger = planner outpaces discovery.",
+)
+SIGNAL_DISCOVERY_LAG = SignalDefinition(
+    name="discovery_lag",
     direction="max",
     threshold_warn=200,
     threshold_crit=1000,
     unit="",
-    help="XLEN(stream:etl:live_discovery). Bigger = planner outpaces discovery.",
-)
-SIGNAL_DISCOVERY_XLEN = SignalDefinition(
-    name="discovery_xlen",
-    direction="max",
-    threshold_warn=200,
-    threshold_crit=1000,
-    unit="",
-    help="XLEN(stream:etl:discovery). Bigger = scheduled-planner outpaces discovery.",
+    help="Consumer lag for stream:etl:discovery. Bigger = scheduled-planner outpaces discovery.",
 )
 
 
@@ -241,11 +241,11 @@ SIGNAL_DEFINITIONS = {
     SIGNAL_TIER_1_BLOCKED.name: SIGNAL_TIER_1_BLOCKED,
     SIGNAL_REFRESH_SUCCESS.name: SIGNAL_REFRESH_SUCCESS,
     SIGNAL_TIER_1_QUARANTINED.name: SIGNAL_TIER_1_QUARANTINED,
-    SIGNAL_HYDRATE_XLEN.name: SIGNAL_HYDRATE_XLEN,
-    SIGNAL_LIVE_HOT_XLEN.name: SIGNAL_LIVE_HOT_XLEN,
-    SIGNAL_LIVE_WARM_XLEN.name: SIGNAL_LIVE_WARM_XLEN,
-    SIGNAL_LIVE_DISCOVERY_XLEN.name: SIGNAL_LIVE_DISCOVERY_XLEN,
-    SIGNAL_DISCOVERY_XLEN.name: SIGNAL_DISCOVERY_XLEN,
+    SIGNAL_HYDRATE_LAG.name: SIGNAL_HYDRATE_LAG,
+    SIGNAL_LIVE_HOT_LAG.name: SIGNAL_LIVE_HOT_LAG,
+    SIGNAL_LIVE_WARM_LAG.name: SIGNAL_LIVE_WARM_LAG,
+    SIGNAL_LIVE_DISCOVERY_LAG.name: SIGNAL_LIVE_DISCOVERY_LAG,
+    SIGNAL_DISCOVERY_LAG.name: SIGNAL_DISCOVERY_LAG,
     SIGNAL_FAILED_JOBS_15MIN.name: SIGNAL_FAILED_JOBS_15MIN,
     SIGNAL_RETRY_RATE_15MIN.name: SIGNAL_RETRY_RATE_15MIN,
     SIGNAL_NO_RECENT_JOBS_AGE.name: SIGNAL_NO_RECENT_JOBS_AGE,

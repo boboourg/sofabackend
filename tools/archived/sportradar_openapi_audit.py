@@ -691,11 +691,11 @@ def render_report(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--openapi", default=r"C:\Users\bobur\Downloads\openapi.yaml")
-    parser.add_argument("--xlsx", default=r"C:\Users\bobur\Downloads\footballmatrix.xlsx")
+    parser.add_argument("--openapi", default="openapi.yaml")
+    parser.add_argument("--xlsx", default="footballmatrix.xlsx")
     parser.add_argument(
         "--output",
-        default=r"D:\sofascore\.cache\sportradar_endpoint_audit.md",
+        default="sportradar_endpoint_audit.md",
     )
     parser.add_argument("--skip-prod", action="store_true", help="Skip SSH to prod (use empty registry)")
     args = parser.parse_args()

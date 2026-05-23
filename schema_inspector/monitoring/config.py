@@ -73,18 +73,19 @@ class MonitoringConfig:
     # Baseline on prod 0-3 events; >5 worth a WARN, >10 worth CRIT.
     tier_1_quarantined_warn: int = 5
     tier_1_quarantined_crit: int = 10
-    # Phase 2 (queue signals) thresholds — read by Phase 2 code but kept
-    # here so config stays one file.
-    hydrate_xlen_warn: int = 1000
-    hydrate_xlen_crit: int = 5000
-    live_hot_xlen_warn: int = 500
-    live_hot_xlen_crit: int = 2000
-    live_warm_xlen_warn: int = 500
-    live_warm_xlen_crit: int = 2000
-    live_discovery_xlen_warn: int = 200
-    live_discovery_xlen_crit: int = 1000
-    discovery_xlen_warn: int = 200
-    discovery_xlen_crit: int = 1000
+    # Phase 2 (queue signals): alert on consumer lag, not XLEN. XLEN is
+    # stream memory/trim pressure and can be huge even when consumers are
+    # caught up, so it is carried only as alert context.
+    hydrate_lag_warn: int = 800
+    hydrate_lag_crit: int = 1500
+    live_hot_lag_warn: int = 200
+    live_hot_lag_crit: int = 500
+    live_warm_lag_warn: int = 5000
+    live_warm_lag_crit: int = 20000
+    live_discovery_lag_warn: int = 50
+    live_discovery_lag_crit: int = 200
+    discovery_lag_warn: int = 200
+    discovery_lag_crit: int = 1000
     # Phase 3 — job signals (default OFF until BRIN index lands on prod;
     # see migrations/2026-05-14_etl_job_run_started_at_index.sql).
     job_signals_enabled: bool = False
@@ -153,35 +154,35 @@ class MonitoringConfig:
             tier_1_quarantined_crit=_env_int(
                 resolved, "SOFASCORE_MONITORING_TIER_1_QUARANTINED_CRIT", 10
             ),
-            hydrate_xlen_warn=_env_int(
-                resolved, "SOFASCORE_MONITORING_HYDRATE_XLEN_WARN", 1000
+            hydrate_lag_warn=_env_int(
+                resolved, "SOFASCORE_MONITORING_HYDRATE_LAG_WARN", 800
             ),
-            hydrate_xlen_crit=_env_int(
-                resolved, "SOFASCORE_MONITORING_HYDRATE_XLEN_CRIT", 5000
+            hydrate_lag_crit=_env_int(
+                resolved, "SOFASCORE_MONITORING_HYDRATE_LAG_CRIT", 1500
             ),
-            live_hot_xlen_warn=_env_int(
-                resolved, "SOFASCORE_MONITORING_LIVE_HOT_XLEN_WARN", 500
+            live_hot_lag_warn=_env_int(
+                resolved, "SOFASCORE_MONITORING_LIVE_HOT_LAG_WARN", 200
             ),
-            live_hot_xlen_crit=_env_int(
-                resolved, "SOFASCORE_MONITORING_LIVE_HOT_XLEN_CRIT", 2000
+            live_hot_lag_crit=_env_int(
+                resolved, "SOFASCORE_MONITORING_LIVE_HOT_LAG_CRIT", 500
             ),
-            live_warm_xlen_warn=_env_int(
-                resolved, "SOFASCORE_MONITORING_LIVE_WARM_XLEN_WARN", 500
+            live_warm_lag_warn=_env_int(
+                resolved, "SOFASCORE_MONITORING_LIVE_WARM_LAG_WARN", 5000
             ),
-            live_warm_xlen_crit=_env_int(
-                resolved, "SOFASCORE_MONITORING_LIVE_WARM_XLEN_CRIT", 2000
+            live_warm_lag_crit=_env_int(
+                resolved, "SOFASCORE_MONITORING_LIVE_WARM_LAG_CRIT", 20000
             ),
-            live_discovery_xlen_warn=_env_int(
-                resolved, "SOFASCORE_MONITORING_LIVE_DISCOVERY_XLEN_WARN", 200
+            live_discovery_lag_warn=_env_int(
+                resolved, "SOFASCORE_MONITORING_LIVE_DISCOVERY_LAG_WARN", 50
             ),
-            live_discovery_xlen_crit=_env_int(
-                resolved, "SOFASCORE_MONITORING_LIVE_DISCOVERY_XLEN_CRIT", 1000
+            live_discovery_lag_crit=_env_int(
+                resolved, "SOFASCORE_MONITORING_LIVE_DISCOVERY_LAG_CRIT", 200
             ),
-            discovery_xlen_warn=_env_int(
-                resolved, "SOFASCORE_MONITORING_DISCOVERY_XLEN_WARN", 200
+            discovery_lag_warn=_env_int(
+                resolved, "SOFASCORE_MONITORING_DISCOVERY_LAG_WARN", 200
             ),
-            discovery_xlen_crit=_env_int(
-                resolved, "SOFASCORE_MONITORING_DISCOVERY_XLEN_CRIT", 1000
+            discovery_lag_crit=_env_int(
+                resolved, "SOFASCORE_MONITORING_DISCOVERY_LAG_CRIT", 1000
             ),
             job_signals_enabled=_env_bool(
                 resolved, "SOFASCORE_MONITORING_JOB_SIGNALS_ENABLED", False

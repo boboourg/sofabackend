@@ -4,3 +4,20 @@ reports/
 tests/_output/*.md
 .venv311/
 .env
+
+# Project specific
+.cache/
+archived_logs/
+latest_logs/
+local_swagger/
+sports_data.db
+*.db
+pa_pattenr.txt
+unique_api_map.txt
+check.py
+check_issues.py
+
+# IDEs and environments
+.vscode/
+.idea/
+.python-version
