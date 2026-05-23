@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from schema_inspector.normalizers.sink import DurableNormalizeSink
@@ -475,10 +476,10 @@ class NormalizeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         executor = _FakeExecutor()
         result = ParseResult(
             snapshot_id=957,
-            parser_family="event_odds",
+            parser_family="season_standings",
             parser_version="v1",
             status="parsed",
-            metric_rows={"event_market": ({"event_id": 14083191, "market_id": 1, "name": "1X2"},)},
+            metric_rows={"season_standing": ({"season_id": 100, "team_id": 42, "points": 10},)},
         )
 
         await repository.persist_parse_result(executor, result)
