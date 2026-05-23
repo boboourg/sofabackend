@@ -234,6 +234,35 @@ class LeagueCapabilitiesRepository:
         )
         return [_row_to_capability(row) for row in rows]
 
+    async def list_active_capabilities(
+        self,
+        executor: SqlFetchExecutor,
+    ) -> list[CapabilityRow]:
+        """Phase 4.7.5 (2026-05-23): bulk fetch of every capability row
+        still considered "active" — either ``expires_at`` is in the
+        future OR ``source = 'manual_override'`` (which gets a far-
+        future expires_at by construction, but we belt-and-suspender it
+        in the WHERE).
+
+        Used by ``Registry.warm_cache_from_db`` at worker startup to
+        pre-populate Redis. After warm the hot path is Redis-only — no
+        per-quad DB lookups during match-center fetches, which is what
+        kept blowing up the asyncpg pool in Phase 4.8.
+
+        One unfiltered SELECT — ~600 rows today, can scale to tens of
+        thousands without changing the design (Postgres index scan +
+        single network roundtrip)."""
+
+        rows = await executor.fetch(
+            """
+            SELECT *
+            FROM league_endpoint_capability
+            WHERE expires_at >= now()
+               OR source = 'manual_override'
+            """
+        )
+        return [_row_to_capability(row) for row in rows]
+
     async def list_capabilities_for_ut(
         self,
         executor: SqlFetchExecutor,

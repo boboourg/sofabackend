@@ -72,6 +72,13 @@ class EndpointVerdict(enum.Enum):
 # from /ops/league-capabilities/set within an hour.
 _DEFAULT_CACHE_TTL_SECONDS = 3600
 
+# Phase 4.7.5 (2026-05-23): warmed entries get a 24h TTL instead of
+# the 1h default — the Redis-only hot path must not lapse to DB
+# between worker startups. 24h is long enough that even a forgotten
+# refresh daemon doesn't strand the cache mid-day; short enough that
+# a stale registry self-heals the next time the worker restarts.
+_WARM_TTL_SECONDS = 24 * 3600
+
 # Sentinel for UT-level (season_id IS NULL) cache keys. Distinguishes
 # the fallback row from any real season_id=0 row (none exist — season
 # IDs start at 1 in Sofascore).
@@ -155,6 +162,13 @@ class LeagueCapabilitiesRegistry:
     ) -> None:
         self.redis_backend = redis_backend
         self.database = database
+        # Phase 4.7.5 (2026-05-23): one-shot warm flag. Set to True after
+        # the first warm_cache_from_db call (successful or not) so the
+        # lazy-warm in get_verdicts_batch never duplicates the work and
+        # never retries a failed warm — a failed warm degrades gracefully
+        # to empty-result + legacy fallback, identical to flag-off
+        # behaviour.
+        self._warmed: bool = False
         self.repository = repository or LeagueCapabilitiesRepository()
         self.cache_ttl_seconds = int(cache_ttl_seconds)
 
@@ -250,6 +264,69 @@ class LeagueCapabilitiesRegistry:
         # 4) Fail-safe — orchestrator will consult legacy policy.
         return EndpointVerdict.UNKNOWN
 
+    async def warm_cache_from_db(self) -> int:
+        """Phase 4.7.5 (2026-05-23): bulk-load every active row from
+        ``league_endpoint_capability`` into Redis with a 24h TTL.
+
+        Idempotent — second call is a no-op (returns 0). Set the
+        ``_warmed`` flag in both the success and failure branches so a
+        cold-start DB outage doesn't trigger retry loops on every
+        match-center fetch.
+
+        After this call the entire registry is in Redis under the
+        existing ``_cache_key`` namespace. ``get_verdicts_batch`` then
+        becomes a Redis-only lookup — the hot path never touches
+        Postgres again, which is what fixes the Phase 4.8 pool
+        starvation (73 workers × per-process pool min_size=20 was
+        overwhelming the cluster-wide ``max_connections``).
+
+        Returns the number of Redis keys primed (best-effort)."""
+
+        if self._warmed:
+            return 0
+
+        try:
+            async with self.database.connection() as connection:
+                rows = await self.repository.list_active_capabilities(
+                    connection,
+                )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "LeagueCapabilitiesRegistry.warm_cache_from_db failed: %s",
+                exc,
+            )
+            # One-shot policy: mark warmed even on failure so the lazy
+            # path doesn't retry on every match-center fetch and turn
+            # one DB blip into a sustained outage.
+            self._warmed = True
+            return 0
+
+        primed = 0
+        for row in rows or ():
+            try:
+                key = self._cache_key(
+                    unique_tournament_id=row.unique_tournament_id,
+                    season_id=row.season_id,
+                    status_type=row.status_type,
+                    endpoint_pattern=row.endpoint_pattern,
+                )
+                self.redis_backend.set(
+                    key, row.state, ex=_WARM_TTL_SECONDS,
+                )
+                primed += 1
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "LeagueCapabilitiesRegistry warm set failed "
+                    "key_ut=%s key_season=%s err=%s",
+                    row.unique_tournament_id, row.season_id, exc,
+                )
+        self._warmed = True
+        logger.info(
+            "LeagueCapabilitiesRegistry warm complete: primed %d / %d rows",
+            primed, len(rows or ()),
+        )
+        return primed
+
     async def get_verdicts_batch(
         self,
         *,
@@ -288,11 +365,16 @@ class LeagueCapabilitiesRegistry:
         if not endpoint_patterns:
             return {}
 
-        # Stage 1: pull everything Redis already has. _read_cache is
-        # already fail-safe so a Redis blip just returns None for that
-        # pattern.
+        # Phase 4.7.5 (2026-05-23): lazy startup warm. The first call
+        # primes Redis from one bulk SELECT; every call after that —
+        # including subsequent calls from the same worker — serves
+        # purely from Redis. ``warm_cache_from_db`` is idempotent and
+        # sets the ``_warmed`` flag in both the success and failure
+        # branches so we never retry on the hot path.
+        if not self._warmed:
+            await self.warm_cache_from_db()
+
         result: dict[str, EndpointVerdict] = {}
-        remaining: list[str] = []
         for pattern in endpoint_patterns:
             cached = self._read_cache(
                 unique_tournament_id=unique_tournament_id,
@@ -302,49 +384,14 @@ class LeagueCapabilitiesRegistry:
             )
             if cached is not None:
                 result[str(pattern)] = cached
-            else:
-                remaining.append(str(pattern))
-
-        if not remaining:
-            return result
-
-        # Stage 2: one DB call for the season-specific quad.
-        season_rows = await self._read_quad_db(
-            unique_tournament_id=unique_tournament_id,
-            season_id=season_id,
-            status_type=status_type,
-        )
-        if season_rows:
-            self._absorb_rows(
-                rows=season_rows,
-                result=result,
-                remaining=remaining,
-                cache_season_id=season_id,
-                status_type=status_type,
-                unique_tournament_id=unique_tournament_id,
-            )
-
-        if not remaining or season_id is None:
-            return result
-
-        # Stage 3: UT-level fallback — single DB call for (UT, NULL,
-        # status). Only fires if caller asked for a specific season AND
-        # some patterns are still unresolved.
-        ut_rows = await self._read_quad_db(
-            unique_tournament_id=unique_tournament_id,
-            season_id=None,
-            status_type=status_type,
-        )
-        if ut_rows:
-            self._absorb_rows(
-                rows=ut_rows,
-                result=result,
-                remaining=remaining,
-                cache_season_id=None,
-                status_type=status_type,
-                unique_tournament_id=unique_tournament_id,
-            )
-
+        # Phase 4.7.5: no per-quad DB fallback. After warm every active
+        # row is already in Redis (24h TTL). Patterns absent from the
+        # warmed cache are absent from the registry — the caller treats
+        # them as "fall back to legacy", which is the correct
+        # semantics. The earlier per-quad fallback was the second-tier
+        # DB hit that, combined with concurrent worker pressure, still
+        # triggered Phase 4.8 pool starvation despite the Phase 4.7.4
+        # batch fix.
         return result
 
     async def _read_quad_db(

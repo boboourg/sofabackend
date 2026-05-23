@@ -247,78 +247,17 @@ class GetVerdictsBatchCacheTests(unittest.IsolatedAsyncioTestCase):
             "all-Redis-hit path must not query Postgres",
         )
 
-    async def test_cache_miss_makes_single_batch_db_call(self) -> None:
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry, EndpointVerdict,
-        )
-        rows = [
-            _row(endpoint="/api/v1/event/{event_id}/managers", state="allowed"),
-            _row(endpoint="/api/v1/event/{event_id}/comments", state="disabled"),
-        ]
-        backend = _FakeRedisBackend()
-        repo = _FakeBatchRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        result = await registry.get_verdicts_batch(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="inprogress",
-            endpoint_patterns=(
-                "/api/v1/event/{event_id}/managers",
-                "/api/v1/event/{event_id}/comments",
-            ),
-        )
-
-        self.assertEqual(len(repo.fetch_quad_calls), 1)
-        self.assertEqual(
-            repo.fetch_quad_calls[0],
-            (17, 61643, "inprogress"),
-        )
-        self.assertEqual(
-            result,
-            {
-                "/api/v1/event/{event_id}/managers": EndpointVerdict.ALLOWED,
-                "/api/v1/event/{event_id}/comments": EndpointVerdict.DISABLED,
-            },
-        )
-
-    async def test_batch_db_results_prime_redis_cache(self) -> None:
-        """Subsequent get_verdict calls for the same quad/pattern should
-        hit Redis directly. Without priming, the next match-center fetch
-        would still pay the DB roundtrip."""
-        from schema_inspector.services.league_capabilities_registry import (
-            LeagueCapabilitiesRegistry,
-        )
-        rows = [
-            _row(endpoint="/api/v1/event/{event_id}/managers", state="allowed"),
-        ]
-        backend = _FakeRedisBackend()
-        repo = _FakeBatchRepository(rows=rows)
-        registry = LeagueCapabilitiesRegistry(
-            redis_backend=backend,
-            database=_FakeDatabase(),
-            repository=repo,
-        )
-
-        await registry.get_verdicts_batch(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="inprogress",
-            endpoint_patterns=("/api/v1/event/{event_id}/managers",),
-        )
-
-        expected_key = registry._cache_key(
-            unique_tournament_id=17,
-            season_id=61643,
-            status_type="inprogress",
-            endpoint_pattern="/api/v1/event/{event_id}/managers",
-        )
-        self.assertIn(expected_key, backend.values)
-        self.assertEqual(backend.values[expected_key], "allowed")
+    # Phase 4.7.5 (2026-05-23): test_cache_miss_makes_single_batch_db_call,
+    # test_batch_db_results_prime_redis_cache, and
+    # test_ut_level_fallback_done_in_second_batch_call were deleted here
+    # because Phase 4.7.5 removed the per-quad and UT-level DB fallback
+    # paths from ``get_verdicts_batch``. The new contract is Redis-only:
+    # ``warm_cache_from_db`` primes everything at startup, and
+    # ``get_verdicts_batch`` only reads Redis. The deleted assertions
+    # would force the removed fallback back into the hot path — exactly
+    # the architecture that caused the Phase 4.8 production rollback.
+    # The Redis-only contract is now covered in
+    # ``test_phase_4_7_5_prewarm.py::HotPathRedisOnlyTests``.
 
     async def test_patterns_with_no_row_omitted_from_dict(self) -> None:
         """Patterns with neither Redis cache entry nor DB row don't go
@@ -344,10 +283,15 @@ class GetVerdictsBatchCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result, {})
 
-    async def test_ut_level_fallback_done_in_second_batch_call(self) -> None:
-        """If season-specific quad has no rows for a pattern, UT-level
-        (season_id=NULL) is the second-tier fallback — and it must be a
-        single batch call, not 12 per-pattern lookups."""
+    async def _deleted_in_phase_4_7_5_ut_level_fallback(self) -> None:
+        """Phase 4.7.5 removed UT-level DB fallback from
+        get_verdicts_batch. Kept as a stub (the _deleted_ prefix
+        prevents unittest discovery) so the test file remains a faithful
+        history of the contract evolution.
+
+        Original assertion: second batch DB call fires when season-
+        specific quad misses. New contract: no DB calls on the hot path
+        at all; ``warm_cache_from_db`` loads everything at startup."""
         from schema_inspector.services.league_capabilities_registry import (
             LeagueCapabilitiesRegistry, EndpointVerdict,
         )
