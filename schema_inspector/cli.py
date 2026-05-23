@@ -1430,6 +1430,7 @@ _HISTORICAL_COMMANDS = frozenset({
     "worker-historical-hydrate",
     "worker-historical-discovery",
     "worker-historical-tournament",
+    "worker-historical-bootstrap",
     "worker-historical-enrichment",
     "worker-historical-maintenance",
     "historical-planner-daemon",
@@ -2158,6 +2159,13 @@ async def _dispatch(args) -> int:
                     block_ms=args.block_ms,
                 )
                 return 0
+            if args.command == "worker-historical-bootstrap":
+                service_app = ServiceApp(app)
+                await service_app.run_historical_bootstrap_worker(
+                    consumer_name=args.consumer_name,
+                    block_ms=args.block_ms,
+                )
+                return 0
             if args.command == "worker-structure-sync":
                 service_app = ServiceApp(app)
                 await service_app.run_structure_worker(
@@ -2809,6 +2817,10 @@ def _build_parser() -> argparse.ArgumentParser:
     worker_historical_tournament = subparsers.add_parser("worker-historical-tournament", help="Run the archival tournament/season consumer group loop.")
     worker_historical_tournament.add_argument("--consumer-name", default="worker-historical-tournament-1", help="Redis consumer name for the archival tournament worker.")
     worker_historical_tournament.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
+
+    worker_historical_bootstrap = subparsers.add_parser("worker-historical-bootstrap", help="Run the archival bootstrap consumer group loop (cg:historical_bootstrap on stream:etl:historical_bootstrap).")
+    worker_historical_bootstrap.add_argument("--consumer-name", default="worker-historical-bootstrap-1", help="Redis consumer name for the archival bootstrap worker.")
+    worker_historical_bootstrap.add_argument("--block-ms", type=int, default=5000, help="XREADGROUP block timeout in milliseconds.")
 
     worker_structure_sync = subparsers.add_parser(
         "worker-structure-sync",
