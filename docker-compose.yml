@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: sofascore_user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: sofascore_schema_inspector
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SOFASCORE_DATABASE_URL=postgresql://sofascore_user:password@db:5432/sofascore_schema_inspector
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+
+  # Example of running a continuous worker via Docker
+  # discovery_worker:
+  #   build: .
+  #   environment:
+  #     - SOFASCORE_DATABASE_URL=postgresql://sofascore_user:password@db:5432/sofascore_schema_inspector
+  #     - REDIS_URL=redis://redis:6379/0
+  #   command: ["python", "-m", "schema_inspector.cli", "worker-discovery", "--consumer-name", "discovery-1"]
+  #   depends_on:
+  #     - db
+  #     - redis
+
+volumes:
+  postgres_data:
+  redis_data:
