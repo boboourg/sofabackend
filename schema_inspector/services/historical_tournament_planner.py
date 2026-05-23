@@ -224,14 +224,8 @@ class HistoricalTournamentPlannerDaemon:
             # worker fix that skips JOB_ENRICH_TOURNAMENT_* children
             # for bootstrap_mode jobs).
             if cursor_paused_reason is not None:
-                bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
-                published += bootstrap_published
-                logger.info(
-                    "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
-                    target.sport_slug,
-                    bootstrap_published,
-                    bootstrap_selector_returned,
-                    cursor_paused_reason is not None,
+                published += await self._publish_bootstrap_and_log(
+                    target, cursor_paused=cursor_paused_reason is not None,
                 )
                 continue
 
@@ -286,14 +280,8 @@ class HistoricalTournamentPlannerDaemon:
                     # cursor jobs. Both happen on the same tick — cursor
                     # advances current heads, bootstrap drains the
                     # long-tail pending catalog rows in parallel.
-                    bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
-                    published += bootstrap_published
-                    logger.info(
-                        "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
-                        target.sport_slug,
-                        bootstrap_published,
-                        bootstrap_selector_returned,
-                        cursor_paused_reason is not None,
+                    published += await self._publish_bootstrap_and_log(
+                        target, cursor_paused=cursor_paused_reason is not None,
                     )
                     continue
 
@@ -315,14 +303,8 @@ class HistoricalTournamentPlannerDaemon:
                 # Phase 3.7(a): legacy selector empty — still try
                 # bootstrap (catalog may have pending rows even
                 # when tournament_registry walk is exhausted).
-                bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
-                published += bootstrap_published
-                logger.info(
-                    "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
-                    target.sport_slug,
-                    bootstrap_published,
-                    bootstrap_selector_returned,
-                    cursor_paused_reason is not None,
+                published += await self._publish_bootstrap_and_log(
+                    target, cursor_paused=cursor_paused_reason is not None,
                 )
                 continue
             for unique_tournament_id in selected_ids:
@@ -342,15 +324,20 @@ class HistoricalTournamentPlannerDaemon:
             # Phase 3.7(a): bootstrap publishes also run on the legacy
             # path so the catalog long tail drains even when cursor
             # rows are empty (e.g. registry not yet seeded).
-            bootstrap_published, bootstrap_selector_returned = await self._publish_bootstrap_batch(target)
-            published += bootstrap_published
-            logger.info(
-                "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
-                target.sport_slug,
-                bootstrap_published,
-                bootstrap_selector_returned,
-                cursor_paused_reason is not None,
+            published += await self._publish_bootstrap_and_log(
+                target, cursor_paused=cursor_paused_reason is not None,
             )
+        return published
+
+    async def _publish_bootstrap_and_log(self, target, *, cursor_paused: bool) -> int:
+        """Publish a bootstrap batch for ``target`` and emit the per-tick
+        INFO log. Returns the number of jobs published so the caller can
+        accumulate into the tick total."""
+        published, selector_returned = await self._publish_bootstrap_batch(target)
+        logger.info(
+            "bootstrap_tick: sport=%s published=%d selector_returned=%d cursor_paused=%s",
+            target.sport_slug, published, selector_returned, cursor_paused,
+        )
         return published
 
     async def _publish_bootstrap_batch(self, target) -> tuple[int, int]:

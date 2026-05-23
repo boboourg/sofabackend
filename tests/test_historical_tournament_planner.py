@@ -359,6 +359,7 @@ class HistoricalTournamentPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sport=football", msg)
         self.assertIn("published=2", msg)
         self.assertIn("selector_returned=2", msg)
+        self.assertIn("cursor_paused=False", msg)
 
 
 class HistoricalTournamentServiceAppAsyncTests(unittest.IsolatedAsyncioTestCase):
