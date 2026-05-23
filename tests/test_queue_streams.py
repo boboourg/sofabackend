@@ -381,5 +381,29 @@ class QueueStreamsTests(unittest.TestCase):
         self.assertEqual([item.run_at_epoch_ms for item in due], [1000, 2000])
 
 
+class HistoricalBootstrapConstantsTests(unittest.TestCase):
+    def test_bootstrap_stream_constant_exists(self) -> None:
+        from schema_inspector.queue import STREAM_HISTORICAL_BOOTSTRAP
+
+        self.assertEqual(STREAM_HISTORICAL_BOOTSTRAP, "stream:etl:historical_bootstrap")
+
+    def test_bootstrap_group_constant_exists(self) -> None:
+        from schema_inspector.queue.streams import GROUP_HISTORICAL_BOOTSTRAP
+
+        self.assertEqual(GROUP_HISTORICAL_BOOTSTRAP, "cg:historical_bootstrap")
+
+    def test_bootstrap_pair_in_historical_consumer_groups(self) -> None:
+        from schema_inspector.queue.streams import (
+            GROUP_HISTORICAL_BOOTSTRAP,
+            HISTORICAL_CONSUMER_GROUPS,
+            STREAM_HISTORICAL_BOOTSTRAP,
+        )
+
+        self.assertIn(
+            (STREAM_HISTORICAL_BOOTSTRAP, GROUP_HISTORICAL_BOOTSTRAP),
+            HISTORICAL_CONSUMER_GROUPS,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
