@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from .db import AsyncpgDatabase
+from .endpoints import EVENT_INCIDENTS_ENDPOINT, EVENT_STATISTICS_ENDPOINT
 from .event_detail_job import EventDetailIngestJob, EventDetailIngestResult
 from .limit_utils import normalize_limit
 
@@ -287,19 +288,35 @@ class EventDetailBackfillJob:
     async def _load_existing_event_detail_ids(self, connection, event_ids: tuple[int, ...]) -> frozenset[int]:
         if not event_ids:
             return frozenset()
-        scope_key_to_event_id = {_event_detail_scope_key(event_id): event_id for event_id in event_ids}
+        # Stage B2 fix (2026-05-22): previously checked api_snapshot_head for
+        # the root scope key only. Two problems:
+        # (A) api_snapshot_head is written by RawRepository (live path) only —
+        #     EventDetailRepository.upsert_bundle never writes there, so
+        #     backfill-originated events were never found and always re-fetched.
+        # (B) Even for live-path events (head IS populated), checking the root
+        #     key marked events as "complete" even when /incidents and
+        #     /statistics were never fetched (e.g. tier_5 in live blocks stats).
+        # Fix: query api_payload_snapshot for the presence of both the
+        # /incidents and /statistics snapshots per event. An event is complete
+        # only when both endpoint patterns are already recorded there.
         rows = await connection.fetch(
             """
-            SELECT scope_key
-            FROM api_snapshot_head
-            WHERE scope_key = ANY($1::text[])
+            SELECT context_entity_id
+            FROM api_payload_snapshot
+            WHERE context_entity_type = 'event'
+              AND context_entity_id = ANY($1::bigint[])
+              AND endpoint_pattern IN ($2, $3)
+            GROUP BY context_entity_id
+            HAVING COUNT(DISTINCT endpoint_pattern) = 2
             """,
-            list(scope_key_to_event_id),
+            list(event_ids),
+            EVENT_INCIDENTS_ENDPOINT.pattern,
+            EVENT_STATISTICS_ENDPOINT.pattern,
         )
         return frozenset(
-            scope_key_to_event_id[str(row["scope_key"])]
+            int(row["context_entity_id"])
             for row in rows
-            if row["scope_key"] is not None and str(row["scope_key"]) in scope_key_to_event_id
+            if row["context_entity_id"] is not None
         )
 
 
@@ -337,5 +354,3 @@ def _candidate_page_size(limit: int | None) -> int:
     return min(max(int(limit) * 4, 1000), 5000)
 
 
-def _event_detail_scope_key(event_id: int) -> str:
-    return f"event:{int(event_id)}:/api/v1/event/{{event_id}}"

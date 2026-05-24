@@ -30,8 +30,7 @@ CREATE TABLE IF NOT EXISTS live_tier_override (
 );
 
 COMMENT ON TABLE live_tier_override IS
-    'Operator-controlled per-UT live-tier override. See ' ||
-    'schema_inspector/live_dispatch_policy.py:resolve_live_dispatch_tier.';
+    'Operator-controlled per-UT live-tier override. See schema_inspector/live_dispatch_policy.py:resolve_live_dispatch_tier.';
 COMMENT ON COLUMN live_tier_override.override_tier IS
     'tier_1 = top priority (5s poll), tier_2 = mid (15s), tier_3 = low (30s).';
 COMMENT ON COLUMN live_tier_override.reason IS

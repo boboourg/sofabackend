@@ -14,10 +14,8 @@
 -- is performed by this migration.
 --
 -- IMPORTANT: CREATE INDEX CONCURRENTLY cannot run inside a transaction
--- block. Do not wrap this file with BEGIN / COMMIT. Apply with:
---   sudo -u postgres psql -p 5432 -d sofascore_schema_inspector \
---       -v ON_ERROR_STOP=1 \
---       -f migrations/2026-04-20_api_payload_snapshot_scope_hash_uniq.sql
+-- block. db_setup_cli handles this by issuing COMMIT before executing
+-- any migration that contains CONCURRENTLY.
 --
 -- Expected build time: 10-30 minutes on the 15GB, 2.1M-row production
 -- table. The build does not block concurrent readers or writers.

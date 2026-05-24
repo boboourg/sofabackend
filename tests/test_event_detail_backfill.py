@@ -116,10 +116,12 @@ class _FakeDetailJob:
 
 class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
     async def test_backfill_job_loads_missing_event_ids_and_collects_results(self) -> None:
+        # fetch_results[1]: event 14083192 already has both incidents+statistics
+        # snapshots → treated as complete → skipped by only_missing.
         connection = _FakeConnection(
             fetch_results=[
                 [{"id": 14083191}, {"id": 14083192}],
-                [{"scope_key": "event:14083192:/api/v1/event/{event_id}"}],
+                [{"context_entity_id": 14083192}],
             ]
         )
         database = _FakeDatabase(connection)
@@ -134,13 +136,17 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(connection.fetch_calls), 2)
         candidate_sql, candidate_args = connection.fetch_calls[0]
         self.assertIn("FROM event AS e", candidate_sql)
-        self.assertNotIn("api_payload_snapshot", candidate_sql)
+        self.assertNotIn("api_snapshot_head", candidate_sql)
         self.assertEqual(candidate_args, (None, None, None, expected_from, expected_to, 5, 1000))
-        head_sql, head_args = connection.fetch_calls[1]
-        self.assertIn("FROM api_snapshot_head", head_sql)
+        existing_sql, existing_args = connection.fetch_calls[1]
+        self.assertIn("FROM api_payload_snapshot", existing_sql)
         self.assertEqual(
-            head_args,
-            (["event:14083191:/api/v1/event/{event_id}", "event:14083192:/api/v1/event/{event_id}"],),
+            existing_args,
+            (
+                [14083191, 14083192],
+                "/api/v1/event/{event_id}/incidents",
+                "/api/v1/event/{event_id}/statistics",
+            ),
         )
         self.assertEqual(detail_job.calls, [(14083191, (1, 2), 12.5)])
         self.assertEqual(result.total_candidates, 1)
@@ -215,19 +221,22 @@ class EventDetailBackfillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.fetch_calls[0][1], (None, None, None, expected_from, expected_to, 0, 1000))
         self.assertEqual(
             connection.fetch_calls[1][1],
-            (["event:14083191:/api/v1/event/{event_id}"],),
+            (
+                [14083191],
+                "/api/v1/event/{event_id}/incidents",
+                "/api/v1/event/{event_id}/statistics",
+            ),
         )
 
     async def test_backfill_job_loads_additional_candidate_pages_when_first_page_is_already_hydrated(self) -> None:
         connection = _FakeConnection(
             fetch_results=[
                 [{"id": 14083191}, {"id": 14083192}],
-                [
-                    {"scope_key": "event:14083191:/api/v1/event/{event_id}"},
-                    {"scope_key": "event:14083192:/api/v1/event/{event_id}"},
-                ],
+                # Both events on page 1 already have incidents+statistics → skipped.
+                [{"context_entity_id": 14083191}, {"context_entity_id": 14083192}],
                 [{"id": 14083193}, {"id": 14083194}],
-                [{"scope_key": "event:14083194:/api/v1/event/{event_id}"}],
+                # Event 14083194 already complete on page 2 → only 14083193 runs.
+                [{"context_entity_id": 14083194}],
             ]
         )
         database = _FakeDatabase(connection)

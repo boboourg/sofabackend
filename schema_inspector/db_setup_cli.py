@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,6 +229,11 @@ async def _apply_sql_file(connection, path: Path) -> None:
     sql = path.read_text(encoding="utf-8")
     if not sql.strip():
         return
+    # Strip CONCURRENTLY so index migrations run inside asyncpg's implicit
+    # transaction context. CREATE INDEX (without CONCURRENTLY) is allowed inside
+    # a transaction block; only CONCURRENTLY is not. The migration files are read
+    # verbatim for checksum purposes — only the in-memory string is modified here.
+    sql = re.sub(r"\bCONCURRENTLY\b", "", sql, flags=re.IGNORECASE)
     await connection.execute(sql)
 
 

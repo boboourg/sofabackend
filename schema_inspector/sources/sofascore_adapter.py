@@ -31,6 +31,7 @@ from ..standings_repository import StandingsRepository
 from ..statistics_job import StatisticsIngestJob
 from ..statistics_parser import StatisticsParser
 from ..statistics_repository import StatisticsRepository
+from ..parsers.registry import ParserRegistry
 from ..storage.normalize_repository import NormalizeRepository
 from ..transport import InspectorTransport
 from .base import SourceAdapter, SourceFetchRequest, SourceFetchResponse
@@ -108,17 +109,16 @@ class SofascoreSourceAdapter(SourceAdapter):
         )
 
     def build_event_detail_job(self, database):
-        # Stage 4.4 (2026-05-21): wire NormalizeRepository so the
-        # /incidents and /statistics snapshots captured by Stage 4.2
-        # land in ``event_incident`` / ``event_statistic`` through the
-        # standard ``ParserRegistry`` — without this the
-        # historical-backfill path writes the raw snapshots but leaves
-        # both normalized tables empty for archive matches.
+        # Stage 4.4 (2026-05-21): wire NormalizeRepository + ParserRegistry
+        # so /incidents and /statistics snapshots land in event_incident /
+        # event_statistic. ParserRegistry is built once here rather than
+        # lazily per-event inside _normalize_match_center_snapshots.
         return EventDetailIngestJob(
             EventDetailParser(self.client),
             EventDetailRepository(),
             database,
             normalize_repository=NormalizeRepository(),
+            parser_registry=ParserRegistry.default(),
         )
 
     def build_entities_job(self, database):
