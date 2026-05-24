@@ -125,6 +125,49 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertNotIn("host", kwargs)
         self.assertEqual(kwargs["server_settings"], {"application_name": "local_api"})
 
+    # 2026-05-24 incident: DuplicatePreparedStatementError after deploy.
+    # statement_cache_size=0 disables asyncpg's per-connection prepared
+    # statement cache so consecutive worker processes never collide on
+    # the same auto-generated statement name. These three tests pin the
+    # default + ENV override + propagation into both connect/pool kwargs.
+
+    def test_statement_cache_size_defaults_to_zero(self) -> None:
+        config = DatabaseConfig(dsn="postgresql://localhost/example")
+        self.assertEqual(config.statement_cache_size, 0)
+
+    def test_statement_cache_size_forwarded_to_connect_kwargs(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/x",
+            statement_cache_size=0,
+        )
+        kwargs = config.connect_kwargs(platform="linux", socket_dir="/var/run/postgresql")
+        self.assertEqual(kwargs["statement_cache_size"], 0)
+
+    def test_statement_cache_size_forwarded_to_pool_kwargs(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/x",
+            statement_cache_size=0,
+        )
+        kwargs = config.pool_kwargs(platform="linux", socket_dir="/var/run/postgresql")
+        self.assertEqual(kwargs["statement_cache_size"], 0)
+
+    def test_load_database_config_reads_statement_cache_size_env(self) -> None:
+        # Default (env var absent) → 0
+        config_default = load_database_config(
+            env={"SOFASCORE_DATABASE_URL": "postgresql://localhost/x"},
+        )
+        self.assertEqual(config_default.statement_cache_size, 0)
+
+        # Override: operator can re-enable the cache if profiling proves
+        # it pays off (e.g. constant-shape queries on a steady fleet).
+        config_override = load_database_config(
+            env={
+                "SOFASCORE_DATABASE_URL": "postgresql://localhost/x",
+                "SOFASCORE_PG_STATEMENT_CACHE_SIZE": "100",
+            },
+        )
+        self.assertEqual(config_override.statement_cache_size, 100)
+
 
 # ---------------------------------------------------------------------------
 # Stage 1.4 (2026-05-20 stability re-audit): pool.acquire() must use an

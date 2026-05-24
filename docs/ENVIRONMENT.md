@@ -120,6 +120,7 @@ Most-touched knobs (по diff между бэкапами):
 | `SOFASCORE_PG_MIN_SIZE` | `20` | `db.py:167` | asyncpg pool min size | yes |
 | `SOFASCORE_PG_MAX_SIZE` | `50` | `db.py:168` | asyncpg pool max size | yes |
 | `SOFASCORE_PG_COMMAND_TIMEOUT` | `60.0` | `db.py:169` | Query timeout (sec) | yes |
+| `SOFASCORE_PG_STATEMENT_CACHE_SIZE` | `0` | `db.py` (DatabaseConfig) | asyncpg prepared-statement cache size per connection. **Default 0 = disabled** — prevents `DuplicatePreparedStatementError` after deploy when systemd restart reuses backend connections still holding statement names from the old process (incident 2026-05-23 18:33–18:50, 482 failed jobs in 16 min). Set >0 only if profiling proves the cache pays off (~0.5 ms/query saved). | yes |
 | `SOFASCORE_PG_APPLICATION_NAME` | `schema-inspector` | `db.py:171` | PG `application_name` (видно в pg_stat_activity) | yes |
 | `SOFASCORE_PG_SOCKET_DIR` | `/var/run/postgresql` | `db.py:173` | Unix socket path | yes |
 | `REDIS_URL` | — | `transport.py:717` | Redis connection string | yes (для workers) |

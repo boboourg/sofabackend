@@ -66,6 +66,28 @@ class DatabaseConfig:
     acquire_timeout: float = 30.0
     application_name: str | None = None
     unix_socket_dir: str | None = None
+    # 2026-05-24 prod incident fix: disable asyncpg's prepared-statement
+    # cache to prevent ``DuplicatePreparedStatementError`` after deploy.
+    #
+    # Background: by default asyncpg caches prepared statements per
+    # connection under sequential names (``__asyncpg_stmt_1__`` etc).
+    # When systemd restarts a worker, the new process can grab the same
+    # Postgres backend connection (TCP keepalive holds the FD ~30s after
+    # old process exit). The new process then runs ``PREPARE
+    # __asyncpg_stmt_1__ AS ...`` and Postgres rejects: the statement
+    # name already exists from the prior process.
+    #
+    # Observed 23.05.2026 18:33-18:50 (16 minutes): 482 failed jobs in
+    # the hot lane (311 hydrate_event_root + 171 refresh_live_event),
+    # all with the same DuplicatePreparedStatementError. Live tier_1
+    # was unusable for that window.
+    #
+    # ``statement_cache_size=0`` tells asyncpg to never reuse a prepared
+    # name — every query parses fresh. The overhead is ~0.5ms/query;
+    # acceptable trade for deploy stability. Operators can override via
+    # ``SOFASCORE_PG_STATEMENT_CACHE_SIZE`` if a future workload proves
+    # the cache pays off.
+    statement_cache_size: int = 0
 
     def connect_kwargs(
         self,
@@ -77,6 +99,10 @@ class DatabaseConfig:
         kwargs: dict[str, Any] = {
             "dsn": self.dsn,
             "command_timeout": self.command_timeout,
+            # 2026-05-24 prod incident fix: see DatabaseConfig docstring.
+            # Always forward statement_cache_size so single-shot connects
+            # (e.g. CLI ``connect_with_fallback``) get the same guard.
+            "statement_cache_size": self.statement_cache_size,
         }
         if prefer_unix_socket:
             resolved_socket_dir = socket_dir if socket_dir is not None else self.unix_socket_dir
@@ -194,6 +220,11 @@ def load_database_config(
         command_timeout=command_timeout or _env_float(env, "SOFASCORE_PG_COMMAND_TIMEOUT", 60.0),
         # Stage 1.4 (2026-05-20): env override for pool.acquire timeout.
         acquire_timeout=_env_float(env, "SOFASCORE_PG_ACQUIRE_TIMEOUT", 30.0),
+        # 2026-05-24: see DatabaseConfig.statement_cache_size for rationale.
+        # Default 0 disables the cache and prevents
+        # DuplicatePreparedStatementError on rolling restarts. Override
+        # only if profiling proves the cache earns its ~0.5ms back.
+        statement_cache_size=_env_int(env, "SOFASCORE_PG_STATEMENT_CACHE_SIZE", 0),
         application_name=application_name
         or env.get("SOFASCORE_PG_APPLICATION_NAME")
         or _default_application_name(),
