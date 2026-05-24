@@ -1,6 +1,48 @@
 __pycache__/
 *.pyc
-reports/
-tests/_output/*.md
-.venv311/
+*.pyo
+*.pyd
+
+# Virtualenvs
+.venv*/
+venv/
+
+# Environment
 .env
+.env.local
+.env.*.local
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local databases / dumps
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+
+# Reports / audit artifacts (one-off output)
+reports/
+audit/
+*.tsv
+event_endpoint_matrix_*.tsv
+event_matrix_*.sql
+audit_*.csv
+audit_*.txt
+
+# Local scratch files
+pa_*.txt
+unique_api_map.txt
+
+# Tests output
+tests/_output/*.md
+tests/_output/*.json
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,10 +1,112 @@
 # Environment variables
 
-Каталог всех `.env` / `os.getenv` переменных, прочитанных проектом. Все defaults — из исходного кода, **не из прода**.
+Каталог всех `.env` / `os.getenv` переменных, прочитанных проектом. Все defaults — из исходного кода. **Production values задокументированы в §0 (drift с docs).**
 
-Конфиг-loader: проект использует `_load_project_env()` (определена в `cli.py`, `db.py`, `runtime.py`, `local_api_server.py`) — читает `D:\sofascore\.env`, merges с `os.environ` (приоритет environment). Helpers: `_env_int`, `_env_float`, `_env_bool` (типичные в `services/backpressure_config.py`, `live_dispatch_policy.py`).
+Конфиг-loader: `_load_project_env()` (определена в `cli.py`, `db.py`, `runtime.py`, `local_api_server.py`) — читает `/opt/sofascore/.env`, merges с `os.environ` (приоритет environment). Helpers: `_env_int`, `_env_float`, `_env_bool` (типичные в `services/backpressure_config.py`, `live_dispatch_policy.py`).
 
 Колонка "Restart required" — нужно ли рестартить процесс после изменения. `Yes` = читается только при старте. `No` = читается каждый tick / runtime.
+
+---
+
+## 0. Production reality (drift с docs) — 2026-05-24
+
+**Источник:** прямая проверка `ssh sofascore-prod` 2026-05-24 (см. [docs/PROD_AUDIT_2026-05-24.md](PROD_AUDIT_2026-05-24.md)).
+
+### 0.1 Feature flags в systemd drop-ins, НЕ в `.env`
+
+На проде включены 3 P0(b)/P5b feature flag'а через `/etc/systemd/system/sofascore-*@.service.d/*.conf` — оператор, читающий только `/opt/sofascore/.env`, **не увидит** их.
+
+| Flag | Prod | Code default | Drop-in файл |
+|---|---|---|---|
+| `LIVE_TIER_1_ROOT_ONLY` | **`1`** | `0` | `sofascore-live-tier-1@.service.d/root-only.conf` |
+| `LIVE_TIER_1_QUARANTINE_ENABLED` | **`1`** | `0` | `sofascore-live-tier-1@.service.d/quarantine.conf` |
+| `HYDRATE_EVENT_CIRCUIT_BREAKER_ENABLED` | **`1`** | `0` | `sofascore-hydrate@.service.d/circuit-breaker.conf` |
+| `SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT` (tier_1 only) | **`4`** | `1` | `sofascore-live-tier-1@.service.d/parallel-and-stop-timeout.conf` |
+| `SCHEMA_INSPECTOR_HYDRATE_PROXY_MAX_IN_USE_PER_ENDPOINT` | `4` | UNKNOWN | `sofascore-hydrate@.service.d/proxy-max-in-use.conf` |
+
+**Чтобы посмотреть все drop-ins:**
+```bash
+ssh sofascore-prod 'find /etc/systemd/system -name "*.conf" -path "*sofascore*.d*" -exec head -20 {} \;'
+```
+
+### 0.2 ENV в проде, отсутствуют в этом каталоге (drift)
+
+Эти переменные читаются кодом и установлены на проде, но не описаны ниже.
+
+**A2 Live Rescue daemon (2026-05-16):**
+- `SOFASCORE_LIVE_RESCUE_ENABLED=true`
+- `SOFASCORE_LIVE_RESCUE_INTERVAL_S=60`
+- `SOFASCORE_LIVE_RESCUE_STALE_MINUTES=5`
+- `SOFASCORE_LIVE_RESCUE_COOLDOWN_SECONDS=300`
+- `SOFASCORE_LIVE_RESCUE_SPORT_SLUGS=football,tennis,...`
+- `SOFASCORE_LIVE_RESCUE_MAX_PER_TICK=50`
+
+**Burst tolerance knobs (2026-05-18, помечены "revert after drain"):**
+- `SOFASCORE_BACKFILL_OLDEST_HOT_AGE_MAX=7200`
+- `SOFASCORE_BACKFILL_OLDEST_HOT_AGE_WARN=5400`
+- `SOFASCORE_BACKFILL_TIER_1_QUARANTINED_MAX=50`
+
+**N4 API response cache (Redis):**
+- `SOFASCORE_API_RESPONSE_CACHE_BACKEND=redis`
+- 6 TTL knobs: `_TTL_LIVE`, `_TTL_SCHEDULED`, `_TTL_INPROGRESS`, `_TTL_FINALIZED`, `_TTL_NOTSTARTED`, `_TTL_DEFAULT` (см. [api_cache.py](../schema_inspector/api_cache.py))
+
+**N1 monitoring tuned thresholds:**
+- `SOFASCORE_MONITORING_OLDEST_HOT_AGE_WARN`, `_CRIT`
+- `SOFASCORE_MONITORING_HYDRATE_XLEN_WARN`, `_CRIT`
+- `SOFASCORE_MONITORING_LIVE_WARM_XLEN_WARN`, `_CRIT`
+- `SOFASCORE_MONITORING_LIVE_DISCOVERY_XLEN_WARN`, `_CRIT`
+- `SOFASCORE_MONITORING_DISCOVERY_XLEN_WARN`, `_CRIT`
+- `SOFASCORE_MONITORING_TIER_1_BLOCKED_WARN`, `_CRIT`
+- `SOFASCORE_MONITORING_JOB_SIGNALS_ENABLED=1`
+
+**Misc:**
+- `SCHEMA_INSPECTOR_FALLBACK_HOSTS`
+- `HISTORICAL_ENRICHMENT_GO_LIVE_MAX_LAG`
+- `SOFASCORE_MOBILE_PROXY_ROTATE_URL`
+- `SCHEMA_INSPECTOR_FORCE_TOP_FOOTBALL_LEAGUES`
+
+### 0.3 Connection pool drift (важно)
+
+Phase 4.7.6 Track 1 (2026-05-22) сократил пул `20/50 → 3/10`. На проде `.env`:
+
+```bash
+SOFASCORE_PG_MIN_SIZE=  # не установлен → код default 20 → но реальный обычно из per-service ENV
+SOFASCORE_PG_MAX_SIZE=5  # снижено для pgbouncer transaction pool
+SOFASCORE_HYDRATE_FANOUT_MAX_INFLIGHT=3  # bumped с 1 (drift с docs)
+SOFASCORE_LIVE_FANOUT_MAX_INFLIGHT=4 (tier_1 only, via drop-in)  # bumped с 1
+LIVE_DISPATCH_LEASE_TIER_1_MS=12000  # F-7 canary
+LIVE_DISPATCH_LEASE_TIER_2_MS=15000
+LIVE_DISPATCH_LEASE_TIER_3_MS=60000
+```
+
+### 0.4 pgbouncer — полуподключён
+
+На проде запущен pgbouncer на `127.0.0.1:6432` (transaction pool, default_pool_size=25, max_client_conn=2000), но:
+- `SOFASCORE_DATABASE_URL` всё ещё указывает на **прямой Postgres :5432**
+- ⇒ приложение bypass-ит pgbouncer, `PG_MAX_SIZE=5` неадекватен для direct mode
+
+**Решение требует выбора:** либо переключить URL на `:6432`, либо вернуть `PG_MAX_SIZE` на ~20.
+
+### 0.5 21 `.env.bak.*` файлов
+
+Audit trail последних месячных изменений. Pattern в именах кодирует change:
+`pgpool` (snapshot до миграции к большему пулу), `concurrency`, `apicache`, `zombieage`, `proxy`, `maxlag`, `A2sports`, `pre-pgbouncer`.
+
+Most-touched knobs (по diff между бэкапами):
+- `SOFASCORE_PG_MAX_SIZE`: 100 → 5 после pgbouncer
+- `SOFASCORE_HISTORICAL_HYDRATE_WORKER_MAX_CONCURRENCY`: 8 → 16
+- `SOFASCORE_HOUSEKEEPING_ZOMBIE_MAX_AGE_MINUTES`: 120 → 30
+- `HISTORICAL_TOURNAMENT_MAX_LAG`: 50 000 → 200 000
+- `SOFASCORE_FETCH_TIMEOUT_SECONDS`: 10 → 5
+
+### 0.6 Что обновлять при следующем prod-аудите
+
+1. Скопировать все настройки из drop-ins в этот документ как первоисточник
+2. Сверить с кодом — какие из ENV доходят до runtime, какие игнорируются
+3. Удалить из docs UNKNOWN там где можно verify
+4. Если drift между прод и docs > 5 переменных — нужен autoconfig validator (например `schema_inspector/config_schema.py` с pydantic BaseSettings)
+
+---
 
 ---
 

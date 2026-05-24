@@ -1673,6 +1673,9 @@ async def _dispatch(args) -> int:
                 )
                 _print_db_audit_report(report)
                 return 0
+            if args.command == "diagnose-event":
+                from .diagnose_event_cli import dispatch_diagnose_event
+                return await dispatch_diagnose_event(args, app=app)
             if args.command == "recover-live-state":
                 report = await app.recover_live_state()
                 print(
@@ -2479,6 +2482,13 @@ def _build_parser() -> argparse.ArgumentParser:
     audit = subparsers.add_parser("audit-db", help="Print a compact durable/raw database audit for event ids.")
     audit.add_argument("--sport-slug", required=True, help="Sport slug for special-table routing.")
     audit.add_argument("--event-id", type=int, action="append", required=True, help="Repeatable hydrated event id.")
+
+    # diagnose-event: single-event end-to-end coverage audit (read-only).
+    # Compares EXPECTED endpoints (from detail_resource_policy) against
+    # ACTUAL snapshot+normalized state. Use as pre-flight before historical
+    # backfill: catches silent drops, missing parsers, unfetched endpoints.
+    from .diagnose_event_cli import add_diagnose_event_parser
+    add_diagnose_event_parser(subparsers)
 
     subparsers.add_parser("health", help="Print a compact hybrid health summary.")
     subparsers.add_parser("proxy-health-monitor", help="Continuously mark unhealthy proxy endpoints from api_request_log traffic.")
