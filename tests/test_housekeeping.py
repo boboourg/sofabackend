@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import unittest
@@ -744,6 +745,56 @@ def _live_state(*, event_id: int, last_ingested_at: int) -> LiveEventState:
         version_hint=None,
         is_finalized=False,
     )
+
+
+class LegacySnapshotTimeoutResolverTests(unittest.TestCase):
+    """Cover the env-driven per-statement timeout resolver.
+
+    The resolver lives in ``schema_inspector.storage.retention_repository`` and
+    governs ``SET LOCAL statement_timeout`` inside ``delete_legacy_snapshot_batch``.
+    Tested in isolation (no Postgres) — we only assert it never returns a value
+    outside ``[60, 3600]`` regardless of input.
+    """
+
+    def _resolve(self, raw_value: str | None) -> int:
+        # Late import so the test exercises the same code path production uses
+        # (env read happens inside the helper, not at module-import time).
+        from schema_inspector.storage.retention_repository import (
+            _resolve_legacy_snapshot_timeout_seconds,
+        )
+
+        env_name = "SOFASCORE_RETENTION_LEGACY_SNAPSHOT_TIMEOUT_SECONDS"
+        prev = os.environ.pop(env_name, None)
+        try:
+            if raw_value is not None:
+                os.environ[env_name] = raw_value
+            return _resolve_legacy_snapshot_timeout_seconds()
+        finally:
+            os.environ.pop(env_name, None)
+            if prev is not None:
+                os.environ[env_name] = prev
+
+    def test_missing_env_returns_default_600(self) -> None:
+        self.assertEqual(self._resolve(None), 600)
+
+    def test_blank_env_returns_default(self) -> None:
+        self.assertEqual(self._resolve("   "), 600)
+
+    def test_valid_override(self) -> None:
+        self.assertEqual(self._resolve("900"), 900)
+
+    def test_clamp_to_lower_bound(self) -> None:
+        # Operator typed a too-aggressive value — clamp prevents a 5-second
+        # ceiling that would deterministically fail every tick.
+        self.assertEqual(self._resolve("5"), 60)
+
+    def test_clamp_to_upper_bound(self) -> None:
+        # Anything above an hour is treated as a misconfiguration — we never
+        # let one DELETE statement hold the lock for more than 3600 s.
+        self.assertEqual(self._resolve("999999"), 3600)
+
+    def test_garbage_returns_default(self) -> None:
+        self.assertEqual(self._resolve("abc"), 600)
 
 
 if __name__ == "__main__":

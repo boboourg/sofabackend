@@ -14,9 +14,43 @@ affected before enabling real deletes).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
+
+
+# 2026-05-25 incident follow-up — see delete_legacy_snapshot_batch comment.
+# The legacy snapshot DELETE on the multi-hundred-GB TOAST table cannot
+# finish inside the old hard-coded 120 s ceiling once the table is
+# heavily fragmented. We let the operator extend the per-statement
+# timeout via env. Bounded to [60, 3600] so a misconfigured value can't
+# turn one tick into a multi-hour transaction.
+_LEGACY_SNAPSHOT_TIMEOUT_ENV = "SOFASCORE_RETENTION_LEGACY_SNAPSHOT_TIMEOUT_SECONDS"
+_LEGACY_SNAPSHOT_TIMEOUT_DEFAULT_SECONDS = 600
+_LEGACY_SNAPSHOT_TIMEOUT_MIN_SECONDS = 60
+_LEGACY_SNAPSHOT_TIMEOUT_MAX_SECONDS = 3600
+
+
+def _resolve_legacy_snapshot_timeout_seconds() -> int:
+    """Resolve per-statement timeout (seconds) for legacy-snapshot DELETE.
+
+    Reads ``SOFASCORE_RETENTION_LEGACY_SNAPSHOT_TIMEOUT_SECONDS`` and clamps
+    to ``[60, 3600]``. Falls back to ``600`` on missing/invalid values so a
+    typo never disables retention or stretches the lock past an hour.
+    """
+    raw = os.environ.get(_LEGACY_SNAPSHOT_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return _LEGACY_SNAPSHOT_TIMEOUT_DEFAULT_SECONDS
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return _LEGACY_SNAPSHOT_TIMEOUT_DEFAULT_SECONDS
+    if value < _LEGACY_SNAPSHOT_TIMEOUT_MIN_SECONDS:
+        return _LEGACY_SNAPSHOT_TIMEOUT_MIN_SECONDS
+    if value > _LEGACY_SNAPSHOT_TIMEOUT_MAX_SECONDS:
+        return _LEGACY_SNAPSHOT_TIMEOUT_MAX_SECONDS
+    return value
 
 
 class SqlExecutor(Protocol):
@@ -121,8 +155,20 @@ class RetentionRepository:
         # CASCADE / SET NULL FK fan-out). The global P0 fix sets
         # sofascore_user.statement_timeout = 30s — without escaping it
         # inside the txn, retention will fail mid-batch.
+        #
+        # 2026-05-25 incident follow-up: the 120 s ceiling proved too
+        # tight once api_payload_snapshot grew past ~140 GB TOAST — every
+        # tick hit TimeoutError and deleted 0 rows, letting the 5.37M-
+        # row backlog snowball until /dev/md2 reached 100 %. Default
+        # bumped to 600 s (operator-tunable via env). Lowering batch_size
+        # via SOFASCORE_HOUSEKEEPING_BATCH_SIZE (e.g. 20000 → 2000) keeps
+        # each statement well under the new ceiling while still draining
+        # backlog at acceptable throughput.
+        timeout_seconds = _resolve_legacy_snapshot_timeout_seconds()
         async with executor.transaction():
-            await executor.execute("SET LOCAL statement_timeout = '120s'")
+            await executor.execute(
+                f"SET LOCAL statement_timeout = '{timeout_seconds}s'"
+            )
             command_tag = await executor.execute(
                 """
                 WITH victims AS (
