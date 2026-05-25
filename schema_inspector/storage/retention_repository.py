@@ -190,7 +190,15 @@ class RetentionRepository:
                           WHERE ets.final_snapshot_id = p.id
                             AND ets.locked_at IS NOT NULL
                       )
-                    ORDER BY p.id
+                    -- 2026-05-25 perf fix: ORDER BY fetched_at lets the
+                    -- planner use the partial index ``idx_aps_legacy_retention
+                    -- btree (fetched_at) WHERE scope_key IS NULL`` instead of
+                    -- walking the PK btree (which Filtered scope_key/fetched_at
+                    -- post-scan — cost 25M for 1.5M matching rows ⇒ batch never
+                    -- completed under the 600 s ceiling). The secondary
+                    -- ``p.id`` keeps the order deterministic for concurrent
+                    -- maintenance workers and stable across batches.
+                    ORDER BY p.fetched_at, p.id
                     LIMIT $2
                 )
                 DELETE FROM api_payload_snapshot
