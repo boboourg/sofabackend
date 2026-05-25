@@ -21,36 +21,59 @@ from typing import Any, Protocol
 
 
 # 2026-05-25 incident follow-up — see delete_legacy_snapshot_batch comment.
-# The legacy snapshot DELETE on the multi-hundred-GB TOAST table cannot
-# finish inside the old hard-coded 120 s ceiling once the table is
-# heavily fragmented. We let the operator extend the per-statement
-# timeout via env. Bounded to [60, 3600] so a misconfigured value can't
-# turn one tick into a multi-hour transaction.
-_LEGACY_SNAPSHOT_TIMEOUT_ENV = "SOFASCORE_RETENTION_LEGACY_SNAPSHOT_TIMEOUT_SECONDS"
-_LEGACY_SNAPSHOT_TIMEOUT_DEFAULT_SECONDS = 600
-_LEGACY_SNAPSHOT_TIMEOUT_MIN_SECONDS = 60
-_LEGACY_SNAPSHOT_TIMEOUT_MAX_SECONDS = 3600
+# The retention DELETE statements on multi-hundred-GB tables cannot finish
+# inside the old hard-coded 120 s ceiling once tables are heavily
+# fragmented (large TOAST + NOT EXISTS anti-joins + CASCADE fan-out).
+# Operators can extend the per-statement timeout via env. Bounded to
+# ``[60, 3600]`` so a misconfigured value can't disable retention or
+# stretch one DELETE lock past an hour.
+#
+# Per-DELETE env keys allow different ceilings per table:
+#   * api_payload_snapshot legacy  (164 GB TOAST, slow)         → LEGACY
+#   * api_payload_snapshot scoped  (live versions, same table)  → LIVE_VERSIONS
+#   * event_live_state_history     (50 MB but no observed_at idx) → STATE_HISTORY
+#   * endpoint_capability_observation (13 GB, has observed_at idx) → CAPABILITY
+# All fall back to the same generic default ``600`` when their specific
+# env is absent.
+_RETENTION_TIMEOUT_DEFAULT_SECONDS = 600
+_RETENTION_TIMEOUT_MIN_SECONDS = 60
+_RETENTION_TIMEOUT_MAX_SECONDS = 3600
+
+_RETENTION_TIMEOUT_ENV_KEYS: dict[str, str] = {
+    "legacy_snapshot": "SOFASCORE_RETENTION_LEGACY_SNAPSHOT_TIMEOUT_SECONDS",
+    "live_snapshot_versions": "SOFASCORE_RETENTION_LIVE_VERSIONS_TIMEOUT_SECONDS",
+    "live_state_history": "SOFASCORE_RETENTION_STATE_HISTORY_TIMEOUT_SECONDS",
+    "capability_observation": "SOFASCORE_RETENTION_CAPABILITY_TIMEOUT_SECONDS",
+}
 
 
-def _resolve_legacy_snapshot_timeout_seconds() -> int:
-    """Resolve per-statement timeout (seconds) for legacy-snapshot DELETE.
+def _resolve_retention_timeout_seconds(kind: str) -> int:
+    """Resolve per-statement timeout (seconds) for one retention DELETE kind.
 
-    Reads ``SOFASCORE_RETENTION_LEGACY_SNAPSHOT_TIMEOUT_SECONDS`` and clamps
-    to ``[60, 3600]``. Falls back to ``600`` on missing/invalid values so a
-    typo never disables retention or stretches the lock past an hour.
+    Reads the kind-specific env var (see ``_RETENTION_TIMEOUT_ENV_KEYS``) and
+    clamps to ``[60, 3600]``. Falls back to ``600`` on missing/invalid value
+    so a typo never disables retention or stretches the lock past an hour.
     """
-    raw = os.environ.get(_LEGACY_SNAPSHOT_TIMEOUT_ENV)
+    env_key = _RETENTION_TIMEOUT_ENV_KEYS.get(kind)
+    if env_key is None:
+        return _RETENTION_TIMEOUT_DEFAULT_SECONDS
+    raw = os.environ.get(env_key)
     if raw is None or not raw.strip():
-        return _LEGACY_SNAPSHOT_TIMEOUT_DEFAULT_SECONDS
+        return _RETENTION_TIMEOUT_DEFAULT_SECONDS
     try:
         value = int(raw.strip())
     except ValueError:
-        return _LEGACY_SNAPSHOT_TIMEOUT_DEFAULT_SECONDS
-    if value < _LEGACY_SNAPSHOT_TIMEOUT_MIN_SECONDS:
-        return _LEGACY_SNAPSHOT_TIMEOUT_MIN_SECONDS
-    if value > _LEGACY_SNAPSHOT_TIMEOUT_MAX_SECONDS:
-        return _LEGACY_SNAPSHOT_TIMEOUT_MAX_SECONDS
+        return _RETENTION_TIMEOUT_DEFAULT_SECONDS
+    if value < _RETENTION_TIMEOUT_MIN_SECONDS:
+        return _RETENTION_TIMEOUT_MIN_SECONDS
+    if value > _RETENTION_TIMEOUT_MAX_SECONDS:
+        return _RETENTION_TIMEOUT_MAX_SECONDS
     return value
+
+
+def _resolve_legacy_snapshot_timeout_seconds() -> int:
+    """Backwards-compatible wrapper used by existing tests."""
+    return _resolve_retention_timeout_seconds("legacy_snapshot")
 
 
 class SqlExecutor(Protocol):
@@ -164,7 +187,7 @@ class RetentionRepository:
         # via SOFASCORE_HOUSEKEEPING_BATCH_SIZE (e.g. 20000 → 2000) keeps
         # each statement well under the new ceiling while still draining
         # backlog at acceptable throughput.
-        timeout_seconds = _resolve_legacy_snapshot_timeout_seconds()
+        timeout_seconds = _resolve_retention_timeout_seconds("legacy_snapshot")
         async with executor.transaction():
             await executor.execute(
                 f"SET LOCAL statement_timeout = '{timeout_seconds}s'"
@@ -251,31 +274,44 @@ class RetentionRepository:
         cutoff: datetime,
         batch_size: int,
     ) -> int:
-        command_tag = await executor.execute(
-            """
-            WITH victims AS (
-                SELECT p.id
-                FROM api_payload_snapshot p
-                WHERE p.scope_key IS NOT NULL
-                  AND p.fetched_at < $1
-                  AND (
-                      p.endpoint_pattern LIKE '/api/v1/event/%'
-                      OR p.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM api_snapshot_head h
-                      WHERE h.latest_snapshot_id = p.id
-                  )
-                ORDER BY p.id
-                LIMIT $2
+        # 2026-05-25 incident follow-up: wrap DELETE in its own transaction
+        # so ``SET LOCAL statement_timeout`` overrides the per-user 30 s
+        # default that was killing this step mid-batch. See
+        # ``delete_legacy_snapshot_batch`` for the full background.
+        # Ordering is unchanged (``ORDER BY p.id``) — no partial index
+        # currently targets ``scope_key IS NOT NULL`` so switching to
+        # ``fetched_at`` would force a Seq Scan + Sort (worse than the
+        # current PK Index Scan + filter early-terminating at LIMIT).
+        timeout_seconds = _resolve_retention_timeout_seconds("live_snapshot_versions")
+        async with executor.transaction():
+            await executor.execute(
+                f"SET LOCAL statement_timeout = '{timeout_seconds}s'"
             )
-            DELETE FROM api_payload_snapshot
-            USING victims
-            WHERE api_payload_snapshot.id = victims.id
-            """,
-            cutoff,
-            int(batch_size),
-        )
+            command_tag = await executor.execute(
+                """
+                WITH victims AS (
+                    SELECT p.id
+                    FROM api_payload_snapshot p
+                    WHERE p.scope_key IS NOT NULL
+                      AND p.fetched_at < $1
+                      AND (
+                          p.endpoint_pattern LIKE '/api/v1/event/%'
+                          OR p.endpoint_pattern LIKE '/api/v1/sport/%/events/live'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM api_snapshot_head h
+                          WHERE h.latest_snapshot_id = p.id
+                      )
+                    ORDER BY p.id
+                    LIMIT $2
+                )
+                DELETE FROM api_payload_snapshot
+                USING victims
+                WHERE api_payload_snapshot.id = victims.id
+                """,
+                cutoff,
+                int(batch_size),
+            )
         return _parse_delete_tag(command_tag)
 
     # ------------------------------------------------------------------
@@ -304,21 +340,30 @@ class RetentionRepository:
         cutoff: datetime,
         batch_size: int,
     ) -> int:
-        command_tag = await executor.execute(
-            """
-            WITH victims AS (
-                SELECT id FROM endpoint_capability_observation
-                WHERE observed_at < $1
-                ORDER BY id
-                LIMIT $2
+        # 2026-05-25: wrap in SET LOCAL statement_timeout for consistency
+        # with the other retention steps. ORDER BY observed_at uses the
+        # existing btree (observed_at) index so the inner SELECT is a
+        # cheap ranged scan instead of a PK walk with filter.
+        timeout_seconds = _resolve_retention_timeout_seconds("capability_observation")
+        async with executor.transaction():
+            await executor.execute(
+                f"SET LOCAL statement_timeout = '{timeout_seconds}s'"
             )
-            DELETE FROM endpoint_capability_observation
-            USING victims
-            WHERE endpoint_capability_observation.id = victims.id
-            """,
-            cutoff,
-            int(batch_size),
-        )
+            command_tag = await executor.execute(
+                """
+                WITH victims AS (
+                    SELECT id FROM endpoint_capability_observation
+                    WHERE observed_at < $1
+                    ORDER BY observed_at, id
+                    LIMIT $2
+                )
+                DELETE FROM endpoint_capability_observation
+                USING victims
+                WHERE endpoint_capability_observation.id = victims.id
+                """,
+                cutoff,
+                int(batch_size),
+            )
         return _parse_delete_tag(command_tag)
 
     # ------------------------------------------------------------------
@@ -344,21 +389,33 @@ class RetentionRepository:
         cutoff: datetime,
         batch_size: int,
     ) -> int:
-        command_tag = await executor.execute(
-            """
-            WITH victims AS (
-                SELECT id FROM event_live_state_history
-                WHERE observed_at < $1
-                ORDER BY id
-                LIMIT $2
+        # 2026-05-25: wrap in SET LOCAL statement_timeout for the same
+        # reasons as legacy snapshots. The table currently has only a
+        # PK btree index — no index on observed_at — so the inner SELECT
+        # is a PK Index Scan with post-scan filter (cost ~577K for the
+        # 30-day cutoff). That fits comfortably in a 600 s timeout, but
+        # the per-user 30 s cap was killing it. Keep ``ORDER BY id`` to
+        # match the only available index.
+        timeout_seconds = _resolve_retention_timeout_seconds("live_state_history")
+        async with executor.transaction():
+            await executor.execute(
+                f"SET LOCAL statement_timeout = '{timeout_seconds}s'"
             )
-            DELETE FROM event_live_state_history
-            USING victims
-            WHERE event_live_state_history.id = victims.id
-            """,
-            cutoff,
-            int(batch_size),
-        )
+            command_tag = await executor.execute(
+                """
+                WITH victims AS (
+                    SELECT id FROM event_live_state_history
+                    WHERE observed_at < $1
+                    ORDER BY id
+                    LIMIT $2
+                )
+                DELETE FROM event_live_state_history
+                USING victims
+                WHERE event_live_state_history.id = victims.id
+                """,
+                cutoff,
+                int(batch_size),
+            )
         return _parse_delete_tag(command_tag)
 
 
