@@ -313,3 +313,7 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"  fail round={round_number}: {err}")
             return 2
         return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
