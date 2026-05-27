@@ -1131,5 +1131,90 @@ class FetchLiveRowsContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["home_team_team_colors"], {"primary": "#1c5b9f"})
 
 
+class PlayerEventsLastSqlShapeTests(unittest.TestCase):
+    """Pin the shape of ``_FETCH_QUERY_PLAYER_EVENTS_LAST``.
+
+    Performance regression guard (2026-05-27): a previous version of
+    this query produced an 8–30 s Parallel Hash Seq Scan over the 4.5M-
+    row ``event`` table for any player without a cached ``events/last``
+    snapshot.  The fix uses a MATERIALIZED CTE that pre-selects ≤page
+    event ids cheaply, then drives the hydrate fanout off that small
+    set.  These tests guard the SQL pattern so the fix can't be
+    accidentally reverted.
+    """
+
+    def test_query_uses_materialized_cte(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+        # ``MATERIALIZED`` is critical: without it Postgres 12+ inlines
+        # the CTE and goes back to Hash-joining the full event table.
+        self.assertIn(
+            "WITH selected_events AS MATERIALIZED",
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+    def test_query_drives_fanout_from_cte_not_event(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+        # The outer SELECT must start ``FROM selected_events`` so the
+        # planner does a nested loop event_pkey lookup, not a Seq Scan
+        # over event(4.5M rows).
+        self.assertIn("FROM selected_events sel", _FETCH_QUERY_PLAYER_EVENTS_LAST)
+        self.assertIn(
+            "JOIN event e ON e.id = sel.id", _FETCH_QUERY_PLAYER_EVENTS_LAST
+        )
+
+    def test_query_uses_lineup_index(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+        # The CTE seeks via event_lineup_player, which has the composite
+        # idx_event_lineup_player_player_id_event_id index.
+        self.assertIn("event_lineup_player elp", _FETCH_QUERY_PLAYER_EVENTS_LAST)
+        self.assertIn("elp.player_id = $1", _FETCH_QUERY_PLAYER_EVENTS_LAST)
+
+    def test_query_filters_finished_only(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+        # Same status filter as the rest of the "/events/last" surface.
+        for keyword in ("'finished'", "'afterextra'", "'cancelled'", "'postponed'"):
+            self.assertIn(keyword, _FETCH_QUERY_PLAYER_EVENTS_LAST)
+
+    def test_query_carries_full_hydrate_join_tail(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            _FETCH_JOINS_AFTER_EVENT,
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+        # The query reuses the same downstream JOIN tail as the rest of
+        # the family — same SELECT column shape, same hydrate of team /
+        # tournament / scores / round / time / changes.  If this drifts
+        # the synthesizer's ``build_payload`` would crash on missing
+        # keys, so pin the tail end is included.
+        self.assertIn(_FETCH_JOINS_AFTER_EVENT, _FETCH_QUERY_PLAYER_EVENTS_LAST)
+        self.assertIn("eci_agg.payload", _FETCH_QUERY_PLAYER_EVENTS_LAST)
+        self.assertIn("LEFT JOIN event_time et", _FETCH_QUERY_PLAYER_EVENTS_LAST)
+
+    def test_query_orders_most_recent_first(self) -> None:
+        from schema_inspector.scheduled_events_synthesizer import (
+            _FETCH_QUERY_PLAYER_EVENTS_LAST,
+        )
+
+        # ORDER BY must appear twice: once inside the CTE (drives the
+        # OFFSET/LIMIT seek) and once outside (re-sorts after JOINs).
+        sql = _FETCH_QUERY_PLAYER_EVENTS_LAST
+        self.assertEqual(
+            sql.count("ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC"),
+            2,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

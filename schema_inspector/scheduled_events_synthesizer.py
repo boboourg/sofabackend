@@ -216,6 +216,23 @@ LEFT JOIN LATERAL (
 ) eci_agg ON TRUE
 """
 
+
+# Split ``_FETCH_SELECT_AND_JOINS`` at the ``FROM event e`` boundary so
+# queries that need a *different* driving table can reuse the same
+# SELECT column list + downstream JOIN tail.  Example: the player-events
+# query below starts FROM the MATERIALIZED CTE, then nested-loops into
+# ``event`` via PK — this avoids the 4.5M-row Seq Scan that Postgres
+# otherwise picks when ``event`` is the outermost FROM.
+#
+# ``_FETCH_SELECT_CLAUSE`` ends right before ``FROM event e`` (no
+# trailing whitespace beyond the column list).
+# ``_FETCH_JOINS_AFTER_EVENT`` starts with ``JOIN tournament t`` and
+# contains every join up to (and including) the LATERAL aggregate.
+_FETCH_SELECT_CLAUSE, _FETCH_JOINS_AFTER_EVENT = _FETCH_SELECT_AND_JOINS.split(
+    "FROM event e", 1
+)
+
+
 # Scheduled-events fetcher: filter by start_timestamp date range.
 _FETCH_QUERY_SCHEDULED = (
     _FETCH_SELECT_AND_JOINS
@@ -288,20 +305,56 @@ LIMIT 12
 
 
 # Player events last — events the player participated in (via lineup).
-# Joins event_lineup_player → event, filters by player_id, returns most
-# recent first. The composite index
-# idx_event_lineup_player_player_id_event_id powers the seek.
+#
+# Two-stage CTE pattern (2026-05-27 perf fix):
+#
+# Stage 1 (``selected_events``) does the cheap work: walk the index
+# ``idx_event_lineup_player_player_id_event_id`` for the player's lineup
+# rows, join to ``event`` for ORDER/filter, apply OFFSET/LIMIT.  Output
+# is at most ``page_size+1`` event IDs.
+#
+# Stage 2 runs the full ``_FETCH_SELECT_AND_JOINS`` hydrate (15+ joins
+# + LATERAL aggregation) but **constrained to those IDs only**.  This
+# prevents the planner from choosing a Parallel Hash Seq Scan over the
+# 90k-row ``team`` table.  Previous single-statement form was hitting
+# 4–30s+ per call for players with 100+ lineup rows whenever stats
+# were stale; CTE form is bounded by ``page_size`` × per-event lookups
+# (≈12 events × index seeks → tens of ms).
+#
+# ORDER BY is repeated in stage 2 — CTE does not preserve row order
+# once we JOIN through the hydrate tree, so the final sort runs on at
+# most ``page_size+1`` rows (free).
+#
+# CTE is marked ``AS MATERIALIZED`` — without this, Postgres 12+ inlines
+# the CTE into the outer query and goes back to choosing Seq Scan on the
+# 4.5M-row event table + Hash Join.  ``MATERIALIZED`` forces the planner
+# to actually execute the CTE first into a small (≤``page_size+1`` rows)
+# temp set, then nested-loop the rest via PK lookups.  Verified on prod
+# 2026-05-27: with MATERIALIZED → ~50 ms; without → 8–10 s.
 _FETCH_QUERY_PLAYER_EVENTS_LAST = (
-    _FETCH_SELECT_AND_JOINS
+    """
+WITH selected_events AS MATERIALIZED (
+    SELECT e.id, e.start_timestamp
+    FROM event e
+    JOIN event_lineup_player elp ON elp.event_id = e.id
+    LEFT JOIN event_status st ON st.code = e.status_code
+    WHERE elp.player_id = $1
+      AND st.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
+      AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
+      AND e.is_editor IS NOT TRUE
+    ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
+    OFFSET $2
+    LIMIT $3
+)
+"""
+    + _FETCH_SELECT_CLAUSE
     + """
-JOIN event_lineup_player elp ON elp.event_id = e.id
-WHERE elp.player_id = $1
-  AND st.type IN ('finished', 'afterextra', 'afterpen', 'cancelled', 'postponed')
-  AND e.start_timestamp <= EXTRACT(EPOCH FROM NOW())::bigint
-  AND e.is_editor IS NOT TRUE
+FROM selected_events sel
+JOIN event e ON e.id = sel.id
+"""
+    + _FETCH_JOINS_AFTER_EVENT
+    + """
 ORDER BY e.start_timestamp DESC NULLS LAST, e.id DESC
-OFFSET $2
-LIMIT $3
 """
 )
 
