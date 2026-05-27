@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from ..base import PARSE_STATUS_PARSED, PARSE_STATUS_UNSUPPORTED, ParseResult, RawSnapshot
 from ..entities import extract_entities
+
+
+# Fallback: when payload's ``player.id`` is missing or non-numeric, parse
+# player_id from the URL (``/event/{event_id}/player/{player_id}/statistics``).
+# Historical force_d10 backfill stamped ``context_entity_id`` with event_id
+# instead of player_id, so context is unreliable for replays of those rows.
+_PLAYER_URL_PATTERN = re.compile(r"/player/(?P<player_id>\d+)")
 
 
 class EventPlayerStatisticsParser:
@@ -26,7 +34,11 @@ class EventPlayerStatisticsParser:
             )
 
         event_id = snapshot.context_event_id
-        player_id = _as_int(player.get("id")) or snapshot.context_entity_id
+        player_id = (
+            _as_int(player.get("id"))
+            or _player_id_from_url(snapshot)
+            or snapshot.context_entity_id
+        )
         team = _as_mapping(payload.get("team"))
         team_id = _as_int(team.get("id")) if team is not None else None
         rating_versions = _as_mapping(statistics.get("ratingVersions"))
@@ -77,6 +89,23 @@ class EventPlayerStatisticsParser:
             },
             observed_root_keys=snapshot.observed_root_keys,
         )
+
+
+def _player_id_from_url(snapshot: RawSnapshot) -> int | None:
+    """Return the integer player_id from the URL path, or None.
+
+    URL is authoritative for this endpoint shape.  Tries ``resolved_url``
+    first (the URL we actually hit), then ``source_url`` (the canonical
+    Sofascore URL).
+    """
+    for url in (snapshot.resolved_url, snapshot.source_url):
+        if not isinstance(url, str):
+            continue
+        match = _PLAYER_URL_PATTERN.search(url)
+        if match is None:
+            continue
+        return _as_int(match.group("player_id"))
+    return None
 
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:

@@ -133,6 +133,108 @@ class EventPlayerAnalyticsParserTests(unittest.TestCase):
         self.assertEqual(row["action_group"], "passes")
         self.assertEqual(row["event_action_type"], "pass")
         self.assertEqual(row["end_x"], 96.9)
+        # URL is authoritative for player_id — even when context_entity_id is right
+        self.assertEqual(row["player_id"], 804508)
+
+    def test_rating_breakdown_prefers_url_player_id_over_bad_context(self) -> None:
+        """Regression: force_d10 backfill stored ``context_entity_id`` as
+        event_id by mistake.  Parser must derive player_id from the URL,
+        not blindly trust context, otherwise FK violations on player(id).
+        """
+        parser = EventPlayerRatingBreakdownParser()
+        snapshot = RawSnapshot(
+            snapshot_id=804,
+            endpoint_pattern="/api/v1/event/{event_id}/player/{player_id}/rating-breakdown",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14025197/player/1394089/rating-breakdown",
+            resolved_url="https://www.sofascore.com/api/v1/event/14025197/player/1394089/rating-breakdown",
+            envelope_key="passes",
+            http_status=200,
+            payload={
+                "passes": [
+                    {
+                        "eventActionType": "pass",
+                        "isHome": True,
+                        "outcome": True,
+                        "playerCoordinates": {"x": 1.0, "y": 2.0},
+                        "passEndCoordinates": {"x": 3.0, "y": 4.0},
+                    }
+                ],
+            },
+            fetched_at="2026-04-17T10:00:00+00:00",
+            context_entity_type="event",          # ← wrong but historical
+            context_entity_id=14025197,           # ← event_id, not player_id
+            context_event_id=14025197,
+        )
+
+        result = parser.parse(snapshot)
+
+        rows = result.metric_rows["event_player_rating_breakdown_action"]
+        self.assertEqual(len(rows), 1)
+        # Must come from URL (/player/1394089/), NOT context_entity_id (14025197)
+        self.assertEqual(rows[0]["player_id"], 1394089)
+        self.assertEqual(rows[0]["event_id"], 14025197)
+
+    def test_rating_breakdown_falls_back_to_context_without_url(self) -> None:
+        """Defensive: when both URLs are absent and pattern has no /player/N/,
+        fall back to ``context_entity_id`` so old paths keep working."""
+        parser = EventPlayerRatingBreakdownParser()
+        snapshot = RawSnapshot(
+            snapshot_id=805,
+            endpoint_pattern="/api/v1/some/synthetic",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/some/synthetic",  # no /player/
+            resolved_url=None,
+            envelope_key="passes",
+            http_status=200,
+            payload={
+                "passes": [{"eventActionType": "pass"}],
+            },
+            fetched_at="2026-04-17T10:00:00+00:00",
+            context_entity_type="player",
+            context_entity_id=99999,
+            context_event_id=14023987,
+        )
+
+        result = parser.parse(snapshot)
+
+        rows = result.metric_rows["event_player_rating_breakdown_action"]
+        self.assertEqual(rows[0]["player_id"], 99999)
+
+    def test_player_statistics_prefers_url_when_payload_player_id_missing(self) -> None:
+        """Defense in depth: if payload's ``player.id`` is missing/non-int
+        AND ``context_entity_id`` is wrong (= event_id), the parser should
+        still pull the correct player_id from the URL."""
+        parser = EventPlayerStatisticsParser()
+        snapshot = RawSnapshot(
+            snapshot_id=806,
+            endpoint_pattern="/api/v1/event/{event_id}/player/{player_id}/statistics",
+            sport_slug="football",
+            source_url="https://www.sofascore.com/api/v1/event/14025197/player/848276/statistics",
+            resolved_url="https://www.sofascore.com/api/v1/event/14025197/player/848276/statistics",
+            envelope_key="player,statistics",
+            http_status=200,
+            payload={
+                # player.id is missing — pathological but possible if upstream
+                # ever returns a partial shape.  Without URL fallback we would
+                # write event_id (14025197) as player_id and hit FK fail.
+                "player": {"slug": "jp-mateta", "name": "Jean Philippe Mateta"},
+                "statistics": {"rating": 7.0, "minutesPlayed": 90},
+            },
+            fetched_at="2026-04-17T10:00:00+00:00",
+            context_entity_type="event",          # ← wrong but historical
+            context_entity_id=14025197,           # ← event_id, not player_id
+            context_event_id=14025197,
+        )
+
+        result = parser.parse(snapshot)
+
+        summary = result.metric_rows["event_player_statistics"][0]
+        self.assertEqual(summary["player_id"], 848276)
+        self.assertEqual(summary["event_id"], 14025197)
+        # All fact rows must carry the same player_id
+        for row in result.metric_rows["event_player_stat_value"]:
+            self.assertEqual(row["player_id"], 848276)
 
 
 if __name__ == "__main__":
