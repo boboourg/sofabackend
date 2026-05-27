@@ -40,6 +40,7 @@ import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -98,15 +99,17 @@ class _CachedEntry:
 
 
 class InProcessResponseCache:
-    """Threadsafe dict-backed cache. Per-process, lost on restart.
+    """Threadsafe LRU dict-backed cache. Per-process, lost on restart.
 
-    Equivalent to the legacy ``_response_cache`` dict in
-    ``local_api_server.py``, surfaced as a class so the same call sites
-    can use either backend.
+    Uses an OrderedDict for O(1) LRU eviction. When ``max_entries`` is
+    reached the least-recently-used entry is evicted before the new one
+    is inserted, bounding memory regardless of how many distinct paths
+    the server serves.
     """
 
-    def __init__(self, *, clock: Any = None) -> None:
-        self._entries: dict[Any, _CachedEntry] = {}
+    def __init__(self, *, max_entries: int = 8192, clock: Any = None) -> None:
+        self._entries: OrderedDict[Any, _CachedEntry] = OrderedDict()
+        self._max_entries = max(1, max_entries)
         self._lock = threading.Lock()
         self._clock = clock or time.monotonic
 
@@ -117,8 +120,10 @@ class InProcessResponseCache:
             if entry is None:
                 return None
             if entry.expires_at <= now:
-                self._entries.pop(key, None)
+                del self._entries[key]
                 return None
+            # Promote to MRU position.
+            self._entries.move_to_end(key)
             return entry.response
 
     def put(self, key: Any, response: CachedResponse, ttl_seconds: float) -> None:
@@ -129,7 +134,12 @@ class InProcessResponseCache:
             expires_at=float(self._clock()) + float(ttl_seconds),
         )
         with self._lock:
+            if key in self._entries:
+                self._entries.move_to_end(key)
             self._entries[key] = entry
+            # Evict LRU entries when over capacity.
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
 
 
 # ---------------------------------------------------------------------------
@@ -256,35 +266,43 @@ def _env_int(env: dict[str, str], name: str, default: int) -> int:
 class CacheTTLPolicy:
     """Env-backed TTL policy. All values in seconds.
 
-    Defaults preserve legacy behavior. Override via env vars to extend
-    cache horizon (e.g. for Layer B / Layer C rollout).
+    Defaults are production-appropriate. Override via env vars when
+    lower latency or a different staleness budget is needed.
+
+    live / inprogress: 5s — tight enough to reflect real-time score
+        changes within one polling interval; 2s was burning the L1 dict
+        excessively (too many distinct live-event paths).
+    notstarted / scheduled: 60s — lineup/odds change infrequently.
+    finalized: 3600s — finished results are immutable; a 30s TTL just
+        burned cache capacity for no benefit.
+    static: 3600s — tournament/category metadata almost never changes.
     """
 
-    live_seconds: int = 2
-    inprogress_seconds: int = 2
-    notstarted_seconds: int = 30
-    finalized_seconds: int = 30
-    scheduled_seconds: int = 30
-    static_seconds: int = 30
+    live_seconds: int = 5
+    inprogress_seconds: int = 5
+    notstarted_seconds: int = 60
+    finalized_seconds: int = 3600
+    scheduled_seconds: int = 60
+    static_seconds: int = 3600
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CacheTTLPolicy":
         resolved = dict(os.environ) if env is None else dict(env)
         return cls(
-            live_seconds=_env_int(resolved, "SOFASCORE_API_CACHE_TTL_LIVE_SECONDS", 2),
+            live_seconds=_env_int(resolved, "SOFASCORE_API_CACHE_TTL_LIVE_SECONDS", 5),
             inprogress_seconds=_env_int(
-                resolved, "SOFASCORE_API_CACHE_TTL_INPROGRESS_SECONDS", 2
+                resolved, "SOFASCORE_API_CACHE_TTL_INPROGRESS_SECONDS", 5
             ),
             notstarted_seconds=_env_int(
-                resolved, "SOFASCORE_API_CACHE_TTL_NOTSTARTED_SECONDS", 30
+                resolved, "SOFASCORE_API_CACHE_TTL_NOTSTARTED_SECONDS", 60
             ),
             finalized_seconds=_env_int(
-                resolved, "SOFASCORE_API_CACHE_TTL_FINALIZED_SECONDS", 30
+                resolved, "SOFASCORE_API_CACHE_TTL_FINALIZED_SECONDS", 3600
             ),
             scheduled_seconds=_env_int(
-                resolved, "SOFASCORE_API_CACHE_TTL_SCHEDULED_SECONDS", 30
+                resolved, "SOFASCORE_API_CACHE_TTL_SCHEDULED_SECONDS", 60
             ),
             static_seconds=_env_int(
-                resolved, "SOFASCORE_API_CACHE_TTL_STATIC_SECONDS", 30
+                resolved, "SOFASCORE_API_CACHE_TTL_STATIC_SECONDS", 3600
             ),
         )
