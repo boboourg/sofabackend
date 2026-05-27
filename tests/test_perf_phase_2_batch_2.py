@@ -71,8 +71,8 @@ class RetentionStatementTimeoutTests(unittest.IsolatedAsyncioTestCase):
         )
         # Statement_timeout SET must have been issued
         self.assertTrue(
-            any("statement_timeout" in q.lower() and "120" in q for q in captured),
-            f"expected SET LOCAL statement_timeout = 120s in batch; got {captured}",
+            any("statement_timeout" in q.lower() and "600" in q for q in captured),
+            f"expected SET LOCAL statement_timeout = 600s in batch; got {captured}",
         )
         # The DELETE itself must still be issued
         self.assertTrue(

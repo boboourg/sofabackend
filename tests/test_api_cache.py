@@ -243,32 +243,32 @@ class BuildResponseCacheTests(unittest.TestCase):
 
 
 class CacheTTLPolicyTests(unittest.TestCase):
-    def test_defaults_match_legacy_behavior(self) -> None:
+    def test_production_defaults(self) -> None:
         policy = CacheTTLPolicy.from_env(env={})
-        self.assertEqual(policy.live_seconds, 2)
-        self.assertEqual(policy.inprogress_seconds, 2)
-        self.assertEqual(policy.notstarted_seconds, 30)
-        self.assertEqual(policy.finalized_seconds, 30)
-        self.assertEqual(policy.scheduled_seconds, 30)
-        self.assertEqual(policy.static_seconds, 30)
+        self.assertEqual(policy.live_seconds, 5)
+        self.assertEqual(policy.inprogress_seconds, 5)
+        self.assertEqual(policy.notstarted_seconds, 60)
+        self.assertEqual(policy.finalized_seconds, 3600)
+        self.assertEqual(policy.scheduled_seconds, 60)
+        self.assertEqual(policy.static_seconds, 3600)
 
     def test_env_overrides_apply(self) -> None:
         policy = CacheTTLPolicy.from_env(
             env={
-                "SOFASCORE_API_CACHE_TTL_LIVE_SECONDS": "5",
-                "SOFASCORE_API_CACHE_TTL_FINALIZED_SECONDS": "3600",
+                "SOFASCORE_API_CACHE_TTL_LIVE_SECONDS": "10",
+                "SOFASCORE_API_CACHE_TTL_FINALIZED_SECONDS": "7200",
                 "SOFASCORE_API_CACHE_TTL_STATIC_SECONDS": "86400",
             }
         )
-        self.assertEqual(policy.live_seconds, 5)
-        self.assertEqual(policy.finalized_seconds, 3600)
+        self.assertEqual(policy.live_seconds, 10)
+        self.assertEqual(policy.finalized_seconds, 7200)
         self.assertEqual(policy.static_seconds, 86400)
 
     def test_invalid_env_falls_back_to_default(self) -> None:
         policy = CacheTTLPolicy.from_env(
             env={"SOFASCORE_API_CACHE_TTL_LIVE_SECONDS": "not-a-number"}
         )
-        self.assertEqual(policy.live_seconds, 2)
+        self.assertEqual(policy.live_seconds, 5)
 
 
 if __name__ == "__main__":

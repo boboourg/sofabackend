@@ -1627,11 +1627,11 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
 
         first = await application.handle_api_get_http_response("/api/v1/sport/football/events/live", "")
         second = await application.handle_api_get_http_response("/api/v1/sport/football/events/live", "")
-        current_time[0] += 2.1
+        current_time[0] += 5.1
         third = await application.handle_api_get_http_response("/api/v1/sport/football/events/live", "")
 
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(first.cache_control, "public, max-age=2")
+        self.assertEqual(first.cache_control, "public, max-age=5")
         self.assertEqual(first.body, second.body)
         self.assertEqual(
             calls,
@@ -1640,7 +1640,7 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
                 ("/api/v1/sport/football/events/live", ""),
             ],
         )
-        self.assertEqual(third.cache_control, "public, max-age=2")
+        self.assertEqual(third.cache_control, "public, max-age=5")
 
     async def test_handle_api_get_http_response_uses_static_ttl_for_non_live_payloads(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
@@ -1660,7 +1660,7 @@ class LocalApiConnectionAndCacheTests(unittest.IsolatedAsyncioTestCase):
             "",
         )
 
-        self.assertEqual(response.cache_control, "public, max-age=30")
+        self.assertEqual(response.cache_control, "public, max-age=3600")
 
 
 class LocalApiAsgiTests(unittest.IsolatedAsyncioTestCase):
@@ -1747,7 +1747,7 @@ class LocalApiAsgiTests(unittest.IsolatedAsyncioTestCase):
 
         response = await application.handle_api_get_http_response("/api/v1/event/15868599", "")
 
-        self.assertEqual(response.cache_control, "public, max-age=30")
+        self.assertEqual(response.cache_control, "public, max-age=3600")
 
     async def test_startup_runs_pool_on_dedicated_runtime_loop(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)

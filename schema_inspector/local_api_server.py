@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import orjson
 from fastapi import FastAPI, Request, Response
 
-from .api_cache import CachedResponse, ResponseCache, build_response_cache
+from .api_cache import CachedResponse, CacheTTLPolicy, ResponseCache, build_response_cache
 from .db import DatabaseConfig, create_pool_with_fallback, load_database_config
 from .endpoints import (
     SPORT_ALL_EVENT_COUNT_ENDPOINT,
@@ -216,10 +216,16 @@ class LocalApiApplication:
         # Flip SOFASCORE_API_RESPONSE_CACHE_BACKEND=redis in .env to enable
         # shared Redis cache across uvicorn workers, surviving restart.
         # See docs/N4_API_PERFORMANCE_PLAN.md.
+        project_env = _load_project_env()
         self._response_cache_v2: ResponseCache = build_response_cache(
             redis_backend=redis_backend,
-            env=_load_project_env(),
+            env=project_env,
         )
+        self._ttl_policy: CacheTTLPolicy = CacheTTLPolicy.from_env(project_env)
+        # Singleflight: asyncio.Future per cache key, set when the fetch
+        # completes. Concurrent coroutines waiting for the same key await
+        # this future instead of each firing a redundant DB query.
+        self._in_flight: dict[Any, asyncio.Future[SerializedApiResponse]] = {}
         self._cache_now = time.monotonic
         self.swagger_html = _build_viewer_html("openapi.json")
         self._openapi_json = load_cached_openapi_bytes(base_urls=self.openapi_base_urls)
@@ -515,20 +521,56 @@ class LocalApiApplication:
         route_match = match_route(path, self.routes)
         route = route_match[0] if route_match is not None else None
         cache_key = _response_cache_key(path, raw_query)
+
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-        response = await self.handle_api_get(path, raw_query)
-        cache_control = _cache_control_for_response(route, response.payload)
-        serialized = SerializedApiResponse(
-            status_code=response.status_code,
-            body=_json_dumps_bytes(response.payload),
-            cache_control=cache_control,
-        )
-        ttl_seconds = _response_ttl_seconds(route, response.payload) if response.status_code == HTTPStatus.OK else 0.0
-        if ttl_seconds > 0:
-            self._cache_put(cache_key, serialized, ttl_seconds)
-        return serialized
+
+        # Singleflight: if another coroutine is already fetching this key,
+        # await its future instead of issuing a duplicate DB query.
+        # ``getattr`` fallback: tests may build LocalApiApplication via
+        # __new__() without running __init__, so treat missing _in_flight
+        # as "singleflight disabled" (no-op, same as legacy behavior).
+        in_flight: dict | None = getattr(self, "_in_flight", None)
+        if in_flight is not None:
+            existing: asyncio.Future[SerializedApiResponse] | None = in_flight.get(cache_key)
+            if existing is not None:
+                return await asyncio.shield(existing)
+
+        ttl_policy: CacheTTLPolicy | None = getattr(self, "_ttl_policy", None)
+
+        if in_flight is not None:
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[SerializedApiResponse] = loop.create_future()
+            in_flight[cache_key] = future
+        else:
+            future = None  # type: ignore[assignment]
+
+        try:
+            response = await self.handle_api_get(path, raw_query)
+            cache_control = _cache_control_for_response(route, response.payload, ttl_policy)
+            serialized = SerializedApiResponse(
+                status_code=response.status_code,
+                body=_json_dumps_bytes(response.payload),
+                cache_control=cache_control,
+            )
+            ttl_seconds = (
+                _response_ttl_seconds(route, response.payload, ttl_policy)
+                if response.status_code == HTTPStatus.OK
+                else 0.0
+            )
+            if ttl_seconds > 0:
+                self._cache_put(cache_key, serialized, ttl_seconds)
+            if future is not None and not future.done():
+                future.set_result(serialized)
+            return serialized
+        except Exception as exc:
+            if future is not None and not future.done():
+                future.set_exception(exc)
+            raise
+        finally:
+            if in_flight is not None:
+                in_flight.pop(cache_key, None)
 
     async def handle_ops_get(self, path: str, raw_query: str) -> ApiResponse:
         if path == "/ops/health":
@@ -5133,28 +5175,36 @@ def _response_cache_key(raw_path: str, raw_query: str) -> tuple[str, tuple[tuple
     return raw_path, normalized_query
 
 
-def _cache_control_for_response(route: RouteSpec | None, payload: Any) -> str:
-    ttl = _response_ttl_seconds(route, payload)
+def _cache_control_for_response(
+    route: RouteSpec | None, payload: Any, ttl_policy: CacheTTLPolicy | None = None
+) -> str:
+    ttl = _response_ttl_seconds(route, payload, ttl_policy)
     if ttl <= 0:
         return "no-cache"
     return f"public, max-age={int(ttl)}"
 
 
-def _response_ttl_seconds(route: RouteSpec | None, payload: Any) -> float:
+def _response_ttl_seconds(
+    route: RouteSpec | None, payload: Any, ttl_policy: CacheTTLPolicy | None = None
+) -> float:
+    policy = ttl_policy or CacheTTLPolicy()
     if route is None:
         return 0.0
     path_template = route.endpoint.path_template
     if "/events/live" in path_template:
-        return 2.0
+        return float(policy.live_seconds)
     status_type = _payload_status_type(payload)
     if status_type is not None:
         normalized = status_type.strip().lower()
-        if normalized and normalized not in _NATURAL_TERMINAL_STATUSES and normalized not in {"notstarted"}:
-            return 2.0
-        return 30.0
+        if not normalized or normalized in _NATURAL_TERMINAL_STATUSES:
+            return float(policy.finalized_seconds)
+        if normalized == "notstarted":
+            return float(policy.notstarted_seconds)
+        # inprogress / unknown live status
+        return float(policy.inprogress_seconds)
     if path_template.startswith("/api/v1/event/"):
-        return 2.0
-    return 30.0
+        return float(policy.inprogress_seconds)
+    return float(policy.static_seconds)
 
 
 _SPORT_PATH_TEMPLATE_PATTERN = re.compile(r"^/api/v1/sport/([^/]+)/")
