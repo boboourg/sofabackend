@@ -403,5 +403,122 @@ class OrchestratorBatchResolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_registry.get_verdicts_batch.await_count, 0)
 
 
+class OrchestratorEdgeBatchResolveTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 4.7.4-followup (2026-05-29): the *core-edge* gating loop was
+    left calling per-edge ``get_verdict`` (DB-fallback) even after the
+    detail-spec fanout was batched. On the 2026-05-28 football-only flip
+    this produced 55-97 ``db.fetch failed`` warnings/min from unprobed
+    leagues (asyncpg pool starvation — the exact pattern 4.7.4 fixed for
+    detail specs). ``_resolve_edge_capability_verdicts`` is the batch
+    sibling that resolves all core edges in ONE Redis-only call."""
+
+    def _make_orchestrator(self, *, registry):
+        from schema_inspector.pipeline.pilot_orchestrator import PilotOrchestrator
+        orch = PilotOrchestrator.__new__(PilotOrchestrator)
+        orch.league_capabilities = registry
+        return orch
+
+    async def test_resolve_edges_calls_batch_once_never_single(self) -> None:
+        from unittest.mock import patch
+        from schema_inspector.services.league_capabilities_registry import (
+            EndpointVerdict,
+        )
+
+        fake_registry = SimpleNamespace(
+            get_verdict=AsyncMock(side_effect=AssertionError(
+                "regression: core-edge resolve must not call per-edge "
+                "get_verdict (DB-fallback) — that's the pool-starvation path"
+            )),
+            get_verdicts_batch=AsyncMock(return_value={
+                "/api/v1/event/{event_id}/statistics": EndpointVerdict.ALLOWED,
+                "/api/v1/event/{event_id}/incidents": EndpointVerdict.ALLOWED,
+                "/api/v1/event/{event_id}/lineups": EndpointVerdict.DISABLED,
+                "/api/v1/event/{event_id}/graph": EndpointVerdict.ALLOWED,
+            }),
+        )
+        orch = self._make_orchestrator(registry=fake_registry)
+        with patch.dict("os.environ", {"SOFASCORE_LEAGUE_CAPABILITIES_ENABLED": "true"}):
+            result = await orch._resolve_edge_capability_verdicts(
+                unique_tournament_id=17,
+                season_id=61643,
+                status_type="inprogress",
+                edge_kinds=["meta", "statistics", "lineups", "incidents", "graph"],
+            )
+
+        # Never the single DB-fallback method; exactly one batch call.
+        self.assertEqual(fake_registry.get_verdict.await_count, 0)
+        self.assertEqual(fake_registry.get_verdicts_batch.await_count, 1)
+        # Result keyed by edge_kind (not pattern). 'meta' has no endpoint
+        # so it's omitted → caller treats as None → legacy gating.
+        self.assertEqual(result["statistics"], "allowed")
+        self.assertEqual(result["incidents"], "allowed")
+        self.assertEqual(result["lineups"], "disabled")
+        self.assertEqual(result["graph"], "allowed")
+        self.assertNotIn("meta", result)
+        # The batch must NOT include the non-fetchable 'meta' pattern.
+        kwargs = fake_registry.get_verdicts_batch.await_args.kwargs
+        self.assertIsInstance(kwargs["endpoint_patterns"], (tuple, list))
+        self.assertEqual(kwargs["unique_tournament_id"], 17)
+        self.assertEqual(kwargs["status_type"], "inprogress")
+        # 4 fetchable edges → 4 distinct patterns (meta dropped).
+        self.assertEqual(len(set(kwargs["endpoint_patterns"])), 4)
+
+    async def test_resolve_edges_returns_empty_when_flag_off(self) -> None:
+        from unittest.mock import patch
+        import os
+
+        fake_registry = SimpleNamespace(
+            get_verdicts_batch=AsyncMock(return_value={"x": "y"}),
+        )
+        orch = self._make_orchestrator(registry=fake_registry)
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("SOFASCORE_LEAGUE_CAPABILITIES_ENABLED", None)
+            result = await orch._resolve_edge_capability_verdicts(
+                unique_tournament_id=17,
+                season_id=61643,
+                status_type="inprogress",
+                edge_kinds=["statistics", "incidents"],
+            )
+        self.assertEqual(result, {})
+        self.assertEqual(fake_registry.get_verdicts_batch.await_count, 0)
+
+    async def test_resolve_edges_empty_when_no_fetchable_kinds(self) -> None:
+        """Only non-fetchable edge_kinds (e.g. 'meta') → no registry call."""
+        from unittest.mock import patch
+
+        fake_registry = SimpleNamespace(
+            get_verdict=AsyncMock(),
+            get_verdicts_batch=AsyncMock(return_value={}),
+        )
+        orch = self._make_orchestrator(registry=fake_registry)
+        with patch.dict("os.environ", {"SOFASCORE_LEAGUE_CAPABILITIES_ENABLED": "true"}):
+            result = await orch._resolve_edge_capability_verdicts(
+                unique_tournament_id=17,
+                season_id=61643,
+                status_type="inprogress",
+                edge_kinds=["meta", ""],
+            )
+        self.assertEqual(result, {})
+        self.assertEqual(fake_registry.get_verdicts_batch.await_count, 0)
+
+    async def test_resolve_edges_fail_safe_on_batch_exception(self) -> None:
+        """A registry/DB failure returns {} (→ legacy gating) — never
+        raises into the hot path."""
+        from unittest.mock import patch
+
+        fake_registry = SimpleNamespace(
+            get_verdicts_batch=AsyncMock(side_effect=RuntimeError("redis down")),
+        )
+        orch = self._make_orchestrator(registry=fake_registry)
+        with patch.dict("os.environ", {"SOFASCORE_LEAGUE_CAPABILITIES_ENABLED": "true"}):
+            result = await orch._resolve_edge_capability_verdicts(
+                unique_tournament_id=17,
+                season_id=61643,
+                status_type="inprogress",
+                edge_kinds=["statistics", "incidents"],
+            )
+        self.assertEqual(result, {})
+
+
 if __name__ == "__main__":
     unittest.main()

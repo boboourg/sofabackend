@@ -362,6 +362,79 @@ class PilotOrchestrator:
             endpoint_pattern=endpoint.pattern,
         )
 
+    async def _resolve_edge_capability_verdicts(
+        self,
+        *,
+        unique_tournament_id,
+        season_id,
+        status_type,
+        edge_kinds,
+    ) -> dict[str, str]:
+        """Batch sibling of ``_resolve_edge_capability_verdict``.
+
+        Phase 4.7.4 converted the *detail-spec* fanout to a single
+        ``get_verdicts_batch`` (Redis-only) call, but the *core-edge*
+        gating loop in ``run_event`` kept calling the single
+        ``_resolve_edge_capability_verdict`` → ``get_verdict`` →
+        ``_read_db`` once per edge.  With the feature flag ON that meant
+        up to 4 sequential single-verdict lookups per live event, each
+        hitting Postgres on a Redis miss — the exact asyncpg pool-
+        starvation pattern Phase 4.7.4 eliminated for detail specs.
+        Observed 2026-05-28 on the football-only flip: 55–97
+        ``db.fetch failed`` warnings/min from unprobed leagues, with
+        ``refresh_live_event`` success dipping below SLO.
+
+        This resolves every core edge's verdict in ONE Redis-only batch
+        call (``get_verdicts_batch`` does not fall back to ``_read_db``).
+
+        Returns ``{edge_kind: 'allowed'|'disabled'|'unknown'}``.
+        edge_kinds that map to no fetchable endpoint (e.g. ``meta``) or
+        are absent from the registry are omitted — the caller treats a
+        missing key as ``None`` → legacy tier-based gating, identical to
+        the previous per-edge ``None`` fall-through.
+        """
+
+        if not is_league_capabilities_enabled() or self.league_capabilities is None:
+            return {}
+        if unique_tournament_id is None or status_type is None:
+            return {}
+
+        # Map each requested edge_kind to its endpoint pattern; non-
+        # fetchable edges (``meta`` → None) are skipped here so they
+        # never reach the registry.
+        pattern_by_kind: dict[str, str] = {}
+        for edge_kind in edge_kinds:
+            endpoint = _endpoint_for_edge_kind(str(edge_kind or ""))
+            if endpoint is not None:
+                pattern_by_kind[str(edge_kind)] = endpoint.pattern
+        if not pattern_by_kind:
+            return {}
+
+        try:
+            batch = await self.league_capabilities.get_verdicts_batch(
+                unique_tournament_id=int(unique_tournament_id),
+                season_id=None if season_id is None else int(season_id),
+                status_type=str(status_type),
+                endpoint_patterns=tuple(dict.fromkeys(pattern_by_kind.values())),
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "PilotOrchestrator edge verdicts batch failed "
+                "ut=%s season=%s status=%s err=%r",
+                unique_tournament_id, season_id, status_type, exc,
+            )
+            return {}
+
+        verdict_by_pattern = {
+            str(pattern): verdict.cache_value
+            for pattern, verdict in batch.items()
+        }
+        return {
+            edge_kind: verdict_by_pattern[pattern]
+            for edge_kind, pattern in pattern_by_kind.items()
+            if pattern in verdict_by_pattern
+        }
+
     async def _resolve_detail_capability_verdicts(
         self,
         *,
@@ -697,17 +770,27 @@ class PilotOrchestrator:
             trace_id=f"pilot:{sport_slug}:{event_id}",
         )
         planned_jobs = self.planner.expand(root_job)
+        # Phase 4.7.4-followup (2026-05-29): resolve every core-edge
+        # capability verdict in ONE Redis-only batch call before the
+        # gating loop, instead of a per-edge single get_verdict that fell
+        # back to Postgres on a Redis miss (asyncpg pool starvation —
+        # see _resolve_edge_capability_verdicts docstring).
+        edge_capability_verdicts = await self._resolve_edge_capability_verdicts(
+            unique_tournament_id=unique_tournament_id,
+            season_id=season_id,
+            status_type=status_type,
+            edge_kinds=[
+                str(j.params.get("edge_kind") or "") for j in planned_jobs
+            ],
+        )
         if effective_hydration_mode == "live_delta" and self._fanout_max_inflight > 1:
             edge_specs: list[_EventEndpointFetchSpec] = []
             for edge_job in planned_jobs:
                 edge_kind = str(edge_job.params.get("edge_kind") or "")
                 # Phase 4.7 wire: registry verdict short-circuits legacy.
-                capability_verdict = await self._resolve_edge_capability_verdict(
-                    unique_tournament_id=unique_tournament_id,
-                    season_id=season_id,
-                    status_type=status_type,
-                    edge_kind=edge_kind,
-                )
+                # Missing key → None → legacy tier gating (same semantics
+                # as the previous per-edge resolver's None fall-through).
+                capability_verdict = edge_capability_verdicts.get(edge_kind)
                 if not football_edge_allowed(
                     sport_slug=sport_slug,
                     edge_kind=edge_kind,
@@ -742,13 +825,8 @@ class PilotOrchestrator:
         else:
             for edge_job in planned_jobs:
                 edge_kind = str(edge_job.params.get("edge_kind") or "")
-                # Phase 4.7 wire.
-                capability_verdict = await self._resolve_edge_capability_verdict(
-                    unique_tournament_id=unique_tournament_id,
-                    season_id=season_id,
-                    status_type=status_type,
-                    edge_kind=edge_kind,
-                )
+                # Phase 4.7 wire. Verdict pre-resolved in the batch above.
+                capability_verdict = edge_capability_verdicts.get(edge_kind)
                 if not football_edge_allowed(
                     sport_slug=sport_slug,
                     edge_kind=edge_kind,
