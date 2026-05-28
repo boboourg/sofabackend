@@ -390,5 +390,69 @@ class LeaderboardsParserTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class IngestPeriodsSeasonTypeTests(unittest.TestCase):
+    """Regression for the 2026-05-29 "Team of the Season missing
+    everywhere" bug.
+
+    Sofascore's ``team-of-the-week/periods`` returns a ``type=season``
+    aggregate period that — unlike ``type=round`` periods — omits
+    ``startDateTimestamp``.  ``ingest_periods`` used to require that
+    field, so it ``continue``-skipped every season period: its
+    period_id never entered the returned list, so the season Team of
+    the Week was never fetched, and ``period.type='season'`` had zero
+    rows DB-wide. The fix drops ``startDateTimestamp`` from the
+    mandatory check (column made nullable in migration 2026-05-29).
+    """
+
+    def _accumulator(self):
+        from schema_inspector.leaderboards_parser import _LeaderboardsAccumulator
+        return _LeaderboardsAccumulator()
+
+    def test_season_period_without_start_date_is_kept(self) -> None:
+        acc = self._accumulator()
+        # Mirrors the real APL payload: 1 season (no startDateTimestamp)
+        # + 1 round (with it).
+        period_ids = acc.ingest_periods(
+            17,
+            76986,
+            [
+                {"id": 27304, "type": "season", "periodName": "season",
+                 "createdAtTimestamp": 1779695552},  # ← no startDateTimestamp
+                {"id": 19564, "type": "round", "periodName": "Round 1",
+                 "startDateTimestamp": 1710000000, "createdAtTimestamp": 1710000100,
+                 "round": {"name": "Round 1", "round": 1, "slug": "round-1"}},
+            ],
+        )
+
+        # BOTH periods survive — the season one is no longer dropped.
+        self.assertEqual(set(period_ids), {27304, 19564})
+        season = acc.periods[27304]
+        self.assertEqual(season["type"], "season")
+        # Season carries no start date — stored as NULL, not invented.
+        self.assertIsNone(season["start_date_timestamp"])
+        self.assertEqual(season["created_at_timestamp"], 1779695552)
+        # Round period keeps its real start date.
+        self.assertEqual(acc.periods[19564]["start_date_timestamp"], 1710000000)
+
+    def test_period_still_dropped_when_truly_malformed(self) -> None:
+        """The relaxed check must NOT let through rows missing the still-
+        mandatory fields (id / periodName / type / createdAtTimestamp)."""
+        acc = self._accumulator()
+        period_ids = acc.ingest_periods(
+            17,
+            76986,
+            [
+                {"type": "season", "periodName": "season",
+                 "createdAtTimestamp": 1779695552},               # no id
+                {"id": 5, "type": "round",
+                 "createdAtTimestamp": 1710000100},                # no periodName
+                {"id": 6, "type": "round", "periodName": "Round 6"},  # no createdAt
+            ],
+        )
+
+        self.assertEqual(period_ids, ())
+        self.assertEqual(acc.periods, {})
+
+
 if __name__ == "__main__":
     unittest.main()

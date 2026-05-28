@@ -107,7 +107,10 @@ class PeriodRecord:
     season_id: int
     period_name: str
     type: str
-    start_date_timestamp: int
+    # Nullable: Sofascore's ``type=season`` aggregate period carries no
+    # ``startDateTimestamp`` (it is not tied to one matchday date). round
+    # periods always have it. See migration 2026-05-29.
+    start_date_timestamp: int | None
     created_at_timestamp: int
     round_name: str | None = None
     round_number: int | None = None
@@ -843,11 +846,16 @@ class _LeaderboardsAccumulator:
             period_type = _as_str(item.get("type"))
             start_date_timestamp = _as_int(item.get("startDateTimestamp"))
             created_at_timestamp = _as_int(item.get("createdAtTimestamp"))
+            # ``startDateTimestamp`` is intentionally NOT required: the
+            # ``type=season`` aggregate period (Team of the Season) omits
+            # it upstream. Requiring it dropped every season period — the
+            # 2026-05-29 "Team of the Season missing everywhere" bug.
+            # round periods still carry it; season periods stay NULL
+            # (column made nullable in migration 2026-05-29).
             if (
                 period_id is None
                 or period_name is None
                 or period_type is None
-                or start_date_timestamp is None
                 or created_at_timestamp is None
             ):
                 continue

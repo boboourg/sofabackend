@@ -1,0 +1,28 @@
+-- 2026-05-29: allow NULL period.start_date_timestamp for season-type TotW.
+--
+-- Bug discovered 2026-05-29: Team of the Season was missing for EVERY
+-- league.  Root cause — Sofascore's
+-- ``/unique-tournament/{ut}/season/{s}/team-of-the-week/periods`` returns
+-- a ``type=season`` aggregate period that, unlike ``type=round`` periods,
+-- carries NO ``startDateTimestamp`` field (the season aggregate isn't tied
+-- to a single matchday date):
+--
+--   round  period: {id, type, periodName, round, createdAtTimestamp, startDateTimestamp}
+--   season period: {id, type, periodName,        createdAtTimestamp}            ← no start date
+--
+-- ``LeaderboardsParser.ingest_periods`` treated ``startDateTimestamp`` as
+-- mandatory and ``continue``-skipped any period missing it, so the season
+-- period was dropped before its period_id could drive the TotW fetch.
+-- Result: 0 rows of ``period.type='season'`` despite upstream serving one
+-- per league/season.  Confirmed via prod probe of APL 25/26 (39 periods:
+-- 38 round + 1 season).
+--
+-- The parser fix (same commit) stops requiring startDateTimestamp; this
+-- migration makes the column nullable so the season period — which
+-- legitimately has no start date — can be persisted.  Existing round
+-- rows are unaffected (they keep their non-null start date).
+--
+-- No backfill here: the next leaderboards refresh / backfill run for each
+-- league re-fetches the periods list and inserts the season period.
+
+ALTER TABLE period ALTER COLUMN start_date_timestamp DROP NOT NULL;
