@@ -1481,6 +1481,20 @@ class LocalApiApplication:
                 int(path_params["event_id"]),
                 int(path_params["team_id"]),
             )
+        if template == "/api/v1/event/{event_id}/best-players/summary":
+            return await self._fetch_event_best_players_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/graph":
+            return await self._fetch_event_graph_payload(int(path_params["event_id"]))
+        if template == "/api/v1/event/{event_id}/odds/{provider_id}/all":
+            return await self._fetch_event_odds_payload(
+                int(path_params["event_id"]),
+                int(path_params["provider_id"]),
+            )
+        if template == "/api/v1/event/{event_id}/provider/{provider_id}/winning-odds":
+            return await self._fetch_event_winning_odds_payload(
+                int(path_params["event_id"]),
+                int(path_params["provider_id"]),
+            )
         if template in {_SEASON_EVENTS_LAST_TEMPLATE, _SEASON_EVENTS_NEXT_TEMPLATE}:
             return await self._fetch_season_events_payload(
                 unique_tournament_id=int(path_params["unique_tournament_id"]),
@@ -3440,6 +3454,211 @@ class LocalApiApplication:
             else:
                 payload["playerPoints"].append(point)
         return payload
+
+    async def _fetch_event_best_players_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT e.bucket, e.ordinal, e.player_id, e.label,
+                       e.value_text, e.value_numeric, e.is_player_of_the_match,
+                       p.slug AS player_slug, p.name AS player_name,
+                       p.short_name AS player_short_name
+                FROM event_best_player_entry AS e
+                LEFT JOIN player AS p ON p.id = e.player_id
+                WHERE e.event_id = $1
+                ORDER BY e.bucket, e.ordinal
+                """,
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        best_home: list[dict[str, Any]] = []
+        best_away: list[dict[str, Any]] = []
+        player_of_match: dict[str, Any] | None = None
+        for r in rows:
+            entry: dict[str, Any] = {}
+            if r["player_id"] is not None:
+                entry["player"] = _minimal_entity_payload(
+                    r["player_id"],
+                    slug=r["player_slug"],
+                    name=r["player_name"],
+                    short_name=r["player_short_name"],
+                )
+            if r["label"] is not None:
+                entry["label"] = str(r["label"])
+            value = _first_not_none(r["value_numeric"], r["value_text"])
+            if value is not None:
+                entry["value"] = value
+            bucket = str(r["bucket"])
+            if bucket == "best_home":
+                best_home.append(entry)
+            elif bucket == "best_away":
+                best_away.append(entry)
+            elif bucket == "player_of_the_match":
+                player_of_match = entry
+
+        result: dict[str, Any] = {}
+        if best_home:
+            result["bestHomeTeamPlayers"] = best_home
+        if best_away:
+            result["bestAwayTeamPlayers"] = best_away
+        if player_of_match is not None:
+            result["playerOfTheMatch"] = player_of_match
+        return result or None
+
+    async def _fetch_event_graph_payload(self, event_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            graph_row = await connection.fetchrow(
+                "SELECT period_time, period_count, overtime_length FROM event_graph WHERE event_id = $1",
+                event_id,
+            )
+            point_rows = await connection.fetch(
+                "SELECT minute, value FROM event_graph_point WHERE event_id = $1 ORDER BY ordinal",
+                event_id,
+            )
+        finally:
+            await connection.close()
+        if graph_row is None and not point_rows:
+            return None
+
+        payload: dict[str, Any] = {}
+        if graph_row is not None:
+            if graph_row["period_time"] is not None:
+                payload["periodTime"] = int(graph_row["period_time"])
+            if graph_row["period_count"] is not None:
+                payload["periodCount"] = int(graph_row["period_count"])
+            if graph_row["overtime_length"] is not None:
+                payload["overtimeLength"] = int(graph_row["overtime_length"])
+        payload["graphPoints"] = [
+            {
+                k: v
+                for k, v in (
+                    ("minute", float(r["minute"]) if r["minute"] is not None else None),
+                    ("value", int(r["value"]) if r["value"] is not None else None),
+                )
+                if v is not None
+            }
+            for r in point_rows
+        ]
+        return payload
+
+    async def _fetch_event_odds_payload(self, event_id: int, provider_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            market_rows = await connection.fetch(
+                """
+                SELECT id, fid, market_id, source_id, market_group, market_name,
+                       market_period, structure_type, choice_group, is_live, suspended
+                FROM event_market
+                WHERE event_id = $1 AND provider_id = $2
+                ORDER BY id
+                """,
+                event_id,
+                provider_id,
+            )
+            if not market_rows:
+                return None
+            market_ids = [int(r["id"]) for r in market_rows]
+            choice_rows = await connection.fetch(
+                """
+                SELECT event_market_id, source_id, name, change_value,
+                       fractional_value, initial_fractional_value
+                FROM event_market_choice
+                WHERE event_market_id = ANY($1::bigint[])
+                ORDER BY event_market_id, source_id
+                """,
+                market_ids,
+            )
+            provider_row = await connection.fetchrow(
+                "SELECT id, slug, name, country FROM provider WHERE id = $1",
+                provider_id,
+            )
+        finally:
+            await connection.close()
+
+        choices_by_market: dict[int, list[dict[str, Any]]] = {}
+        for c in choice_rows:
+            mid = int(c["event_market_id"])
+            choice: dict[str, Any] = {"name": str(c["name"])}
+            if c["source_id"] is not None:
+                choice["sourceId"] = int(c["source_id"])
+            if c["change_value"] is not None:
+                choice["change"] = int(c["change_value"])
+            if c["fractional_value"] is not None:
+                choice["fractionalValue"] = str(c["fractional_value"])
+            if c["initial_fractional_value"] is not None:
+                choice["initialFractionalValue"] = str(c["initial_fractional_value"])
+            choices_by_market.setdefault(mid, []).append(choice)
+
+        markets: list[dict[str, Any]] = []
+        for m in market_rows:
+            mid = int(m["id"])
+            market: dict[str, Any] = {
+                "id": mid,
+                "fid": int(m["fid"]),
+                "marketId": int(m["market_id"]),
+                "marketGroup": str(m["market_group"]),
+                "marketName": str(m["market_name"]),
+                "marketPeriod": str(m["market_period"]),
+                "structureType": int(m["structure_type"]),
+                "isLive": bool(m["is_live"]),
+                "suspended": bool(m["suspended"]),
+                "choices": choices_by_market.get(mid, []),
+            }
+            if m["source_id"] is not None:
+                market["sourceId"] = int(m["source_id"])
+            if m["choice_group"] is not None:
+                market["choiceGroup"] = str(m["choice_group"])
+            markets.append(market)
+
+        result: dict[str, Any] = {"markets": markets}
+        if provider_row is not None:
+            prov: dict[str, Any] = {"id": int(provider_row["id"])}
+            if provider_row["slug"] is not None:
+                prov["slug"] = str(provider_row["slug"])
+            if provider_row["name"] is not None:
+                prov["name"] = str(provider_row["name"])
+            if provider_row["country"] is not None:
+                prov["country"] = str(provider_row["country"])
+            result["provider"] = prov
+        return result
+
+    async def _fetch_event_winning_odds_payload(self, event_id: int, provider_id: int) -> dict[str, Any] | None:
+        connection = await self._connect()
+        try:
+            rows = await connection.fetch(
+                """
+                SELECT side, odds_id, actual, expected, fractional_value
+                FROM event_winning_odds
+                WHERE event_id = $1 AND provider_id = $2
+                """,
+                event_id,
+                provider_id,
+            )
+        finally:
+            await connection.close()
+        if not rows:
+            return None
+
+        result: dict[str, Any] = {}
+        for r in rows:
+            side = str(r["side"])
+            entry: dict[str, Any] = {}
+            if r["odds_id"] is not None:
+                entry["id"] = int(r["odds_id"])
+            if r["actual"] is not None:
+                entry["actual"] = float(r["actual"])
+            if r["expected"] is not None:
+                entry["expected"] = float(r["expected"])
+            if r["fractional_value"] is not None:
+                entry["fractionalValue"] = str(r["fractional_value"])
+            result[side] = entry
+        return result or None
 
     async def _fetch_top_player_payload(
         self,
