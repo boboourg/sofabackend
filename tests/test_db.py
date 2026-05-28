@@ -9,6 +9,7 @@ from schema_inspector.db import (
     connect_with_fallback,
     create_pool_with_fallback,
     load_database_config,
+    load_historical_database_config,
     register_post_commit_hook,
 )
 
@@ -297,3 +298,76 @@ class DatabaseFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(connection, result)
         self.assertEqual(attempts[0]["host"], "/var/run/postgresql")
         self.assertNotIn("host", attempts[1])
+
+
+# ---------------------------------------------------------------------------
+# load_historical_database_config + statement_timeout_ms
+# ---------------------------------------------------------------------------
+
+
+class HistoricalDatabaseConfigTests(unittest.TestCase):
+    _BASE_ENV = {"SOFASCORE_DATABASE_URL": "postgresql://localhost/main"}
+
+    def test_historical_defaults(self) -> None:
+        config = load_historical_database_config(env=self._BASE_ENV)
+        self.assertEqual(config.min_size, 1)
+        self.assertEqual(config.max_size, 5)
+        self.assertEqual(config.command_timeout, 120.0)
+        self.assertEqual(config.acquire_timeout, 60.0)
+        self.assertEqual(config.statement_timeout_ms, 120_000)
+
+    def test_historical_env_overrides(self) -> None:
+        env = {
+            **self._BASE_ENV,
+            "SOFASCORE_HISTORICAL_PG_MIN_SIZE": "2",
+            "SOFASCORE_HISTORICAL_PG_MAX_SIZE": "8",
+            "SOFASCORE_HISTORICAL_PG_COMMAND_TIMEOUT": "90.0",
+            "SOFASCORE_HISTORICAL_PG_ACQUIRE_TIMEOUT": "45.0",
+            "SOFASCORE_HISTORICAL_STATEMENT_TIMEOUT_MS": "60000",
+        }
+        config = load_historical_database_config(env=env)
+        self.assertEqual(config.min_size, 2)
+        self.assertEqual(config.max_size, 8)
+        self.assertEqual(config.command_timeout, 90.0)
+        self.assertEqual(config.acquire_timeout, 45.0)
+        self.assertEqual(config.statement_timeout_ms, 60_000)
+
+    def test_historical_uses_dedicated_dsn_when_set(self) -> None:
+        env = {
+            **self._BASE_ENV,
+            "SOFASCORE_HISTORICAL_DATABASE_URL": "postgresql://localhost/historical",
+        }
+        config = load_historical_database_config(env=env)
+        self.assertEqual(config.dsn, "postgresql://localhost/historical")
+
+    def test_historical_falls_back_to_main_dsn(self) -> None:
+        config = load_historical_database_config(env=self._BASE_ENV)
+        self.assertEqual(config.dsn, "postgresql://localhost/main")
+
+    def test_statement_timeout_zero_disables_timeout(self) -> None:
+        env = {**self._BASE_ENV, "SOFASCORE_HISTORICAL_STATEMENT_TIMEOUT_MS": "0"}
+        config = load_historical_database_config(env=env)
+        self.assertIsNone(config.statement_timeout_ms)
+
+    def test_statement_timeout_ms_in_server_settings(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost/x",
+            statement_timeout_ms=120_000,
+        )
+        kwargs = config.connect_kwargs(platform="win32")
+        self.assertEqual(kwargs["server_settings"]["statement_timeout"], "120000")
+
+    def test_statement_timeout_ms_none_absent_from_server_settings(self) -> None:
+        config = DatabaseConfig(dsn="postgresql://localhost/x")
+        kwargs = config.connect_kwargs(platform="win32")
+        self.assertNotIn("server_settings", kwargs)
+
+    def test_statement_timeout_ms_combined_with_application_name(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost/x",
+            application_name="worker-historical-hydrate",
+            statement_timeout_ms=60_000,
+        )
+        kwargs = config.connect_kwargs(platform="win32")
+        self.assertEqual(kwargs["server_settings"]["application_name"], "worker-historical-hydrate")
+        self.assertEqual(kwargs["server_settings"]["statement_timeout"], "60000")

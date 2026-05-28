@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .db import AsyncpgDatabase, load_database_config
+from .db import AsyncpgDatabase, load_database_config, load_historical_database_config
 from .coverage_policy import lineup_recheck_window_open
 from .endpoints import hybrid_runtime_registry_entries_for_sport
 from .event_endpoint_negative_cache import EventEndpointNegativeCache, load_event_negative_cache_settings
@@ -1545,12 +1545,20 @@ async def _dispatch(args) -> int:
         )
     if _normalized_source_slug(getattr(args, "source", None)) is not None:
         runtime_config = replace(runtime_config, source_slug=_normalized_source_slug(args.source))
-    database_config = load_database_config(
-        dsn=args.database_url,
-        min_size=args.db_min_size,
-        max_size=args.db_max_size,
-        command_timeout=args.db_timeout,
-    )
+    if command in _HISTORICAL_COMMANDS:
+        database_config = load_historical_database_config(
+            dsn=args.database_url,
+            min_size=args.db_min_size,
+            max_size=args.db_max_size,
+            command_timeout=args.db_timeout,
+        )
+    else:
+        database_config = load_database_config(
+            dsn=args.database_url,
+            min_size=args.db_min_size,
+            max_size=args.db_max_size,
+            command_timeout=args.db_timeout,
+        )
     async with AsyncpgDatabase(database_config) as database:
         redis_backend = _load_redis_backend(
             args.redis_url,

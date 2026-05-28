@@ -88,6 +88,14 @@ class DatabaseConfig:
     # ``SOFASCORE_PG_STATEMENT_CACHE_SIZE`` if a future workload proves
     # the cache pays off.
     statement_cache_size: int = 0
+    # Per-session PostgreSQL statement_timeout in milliseconds.  When set,
+    # asyncpg passes it as a startup GUC so every query on that connection
+    # is automatically cancelled if it runs longer than this value.
+    # None (default) leaves PostgreSQL's cluster default in place (usually
+    # 0 = unlimited).  Historical workers override this to 120 000 ms (2 min)
+    # via load_historical_database_config() so a runaway backfill query
+    # can never hold a lock for longer than that window.
+    statement_timeout_ms: int | None = None
 
     def connect_kwargs(
         self,
@@ -112,8 +120,13 @@ class DatabaseConfig:
                 parsed = urlsplit(self.dsn)
                 if parsed.port is not None:
                     kwargs["port"] = parsed.port
-        if self.application_name:
-            kwargs["server_settings"] = {"application_name": self.application_name}
+        if self.application_name or self.statement_timeout_ms is not None:
+            server_settings: dict[str, str] = {}
+            if self.application_name:
+                server_settings["application_name"] = self.application_name
+            if self.statement_timeout_ms is not None:
+                server_settings["statement_timeout"] = str(self.statement_timeout_ms)
+            kwargs["server_settings"] = server_settings
         return kwargs
 
     def pool_kwargs(
@@ -225,6 +238,67 @@ def load_database_config(
         # DuplicatePreparedStatementError on rolling restarts. Override
         # only if profiling proves the cache earns its ~0.5ms back.
         statement_cache_size=_env_int(env, "SOFASCORE_PG_STATEMENT_CACHE_SIZE", 0),
+        application_name=application_name
+        or env.get("SOFASCORE_PG_APPLICATION_NAME")
+        or _default_application_name(),
+        unix_socket_dir=unix_socket_dir or env.get("SOFASCORE_PG_SOCKET_DIR") or "/var/run/postgresql",
+    )
+
+
+def load_historical_database_config(
+    *,
+    env: dict[str, str] | None = None,
+    dsn: str | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    command_timeout: float | None = None,
+    application_name: str | None = None,
+    unix_socket_dir: str | None = None,
+) -> DatabaseConfig:
+    """Build database config for historical (backfill) workers.
+
+    Historical workers get a dedicated pool with conservative defaults so
+    backfill cannot saturate connections reserved for live workers.
+    Pool size defaults: min=1, max=5 (vs live workers min=3, max=10).
+    statement_timeout defaults to 120 000 ms (2 min) so a runaway query
+    cannot hold locks during a burst.
+
+    Falls back to the main SOFASCORE_DATABASE_URL if the dedicated
+    SOFASCORE_HISTORICAL_DATABASE_URL is not set, so existing deployments
+    need zero migration — they just gain smaller pool limits.
+
+    Override env vars (all optional):
+      SOFASCORE_HISTORICAL_DATABASE_URL   — separate PG instance/role
+      SOFASCORE_HISTORICAL_PG_MIN_SIZE    — default 1
+      SOFASCORE_HISTORICAL_PG_MAX_SIZE    — default 5
+      SOFASCORE_HISTORICAL_PG_COMMAND_TIMEOUT   — default 120.0 s
+      SOFASCORE_HISTORICAL_PG_ACQUIRE_TIMEOUT   — default 60.0 s
+      SOFASCORE_HISTORICAL_STATEMENT_TIMEOUT_MS — default 120000 ms (0 = off)
+    """
+    env = env or _load_project_env()
+    resolved_dsn = (
+        dsn
+        or env.get("SOFASCORE_HISTORICAL_DATABASE_URL")
+        or env.get("SOFASCORE_DATABASE_URL")
+        or env.get("DATABASE_URL")
+        or env.get("POSTGRES_DSN")
+    )
+    if not resolved_dsn:
+        raise RuntimeError(
+            "Database DSN is required. Set SOFASCORE_DATABASE_URL, DATABASE_URL or POSTGRES_DSN."
+        )
+
+    raw_timeout_ms = _env_int(env, "SOFASCORE_HISTORICAL_STATEMENT_TIMEOUT_MS", 120_000)
+    statement_timeout_ms = raw_timeout_ms if raw_timeout_ms > 0 else None
+
+    return DatabaseConfig(
+        dsn=resolved_dsn,
+        min_size=min_size or _env_int(env, "SOFASCORE_HISTORICAL_PG_MIN_SIZE", 1),
+        max_size=max_size or _env_int(env, "SOFASCORE_HISTORICAL_PG_MAX_SIZE", 5),
+        command_timeout=command_timeout or _env_float(env, "SOFASCORE_HISTORICAL_PG_COMMAND_TIMEOUT", 120.0),
+        acquire_timeout=_env_float(env, "SOFASCORE_HISTORICAL_PG_ACQUIRE_TIMEOUT", 60.0),
+        statement_cache_size=_env_int(env, "SOFASCORE_PG_STATEMENT_CACHE_SIZE", 0),
+        statement_timeout_ms=statement_timeout_ms,
         application_name=application_name
         or env.get("SOFASCORE_PG_APPLICATION_NAME")
         or _default_application_name(),
