@@ -605,22 +605,33 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
-    async def test_handle_api_get_uses_generic_normalized_fallback_for_remaining_source_table_routes(self) -> None:
+    async def test_handle_api_get_graph_uses_specialized_handler(self) -> None:
+        # /event/{id}/graph has a dedicated handler reading from event_graph +
+        # event_graph_point tables. Verify it returns the Sofascore-shaped payload.
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()
         snapshot_connection = _FakeSnapshotConnection([])
-        normalized_connection = _FakeGenericNormalizedConnection(
-            table_columns={"event_graph": {"event_id", "minute", "value"}},
-            table_rows={
-                "event_graph": [
-                    {
-                        "event_id": 14083191,
-                        "minute": 53,
-                        "value": 42,
-                    }
-                ]
-            },
-        )
+
+        class _FakeGraphConnection:
+            closed = False
+
+            async def fetchrow(self, query: str, *args):
+                if "FROM event_graph" in query:
+                    return {"period_time": 45, "period_count": 2, "overtime_length": None}
+                return None
+
+            async def fetch(self, query: str, *args):
+                if "event_graph_point" in query:
+                    return [
+                        {"minute": 12.0, "value": 1},
+                        {"minute": 53.0, "value": -1},
+                    ]
+                return []
+
+            async def close(self):
+                self.closed = True
+
+        normalized_connection = _FakeGraphConnection()
         application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
 
         response = await application.handle_api_get("/api/v1/event/14083191/graph", "")
@@ -629,13 +640,12 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             response.payload,
             {
+                "periodTime": 45,
+                "periodCount": 2,
                 "graphPoints": [
-                    {
-                        "eventId": 14083191,
-                        "minute": 53,
-                        "value": 42,
-                    }
-                ]
+                    {"minute": 12.0, "value": 1},
+                    {"minute": 53.0, "value": -1},
+                ],
             },
         )
         self.assertTrue(snapshot_connection.closed)
