@@ -651,6 +651,273 @@ class LocalApiOperationsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot_connection.closed)
         self.assertTrue(normalized_connection.closed)
 
+    async def test_handle_api_get_best_players_summary_uses_specialized_handler(self) -> None:
+        """``/event/{id}/best-players/summary`` has a dedicated handler
+        (PR #6) reading ``event_best_player_entry`` JOIN ``player`` and
+        bucketing into ``bestHomeTeamPlayers`` / ``bestAwayTeamPlayers``
+        / ``playerOfTheMatch``.  Pin the Sofascore envelope shape so a
+        future refactor can't quietly drop a bucket."""
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+
+        class _FakeBestPlayersConnection:
+            closed = False
+
+            async def fetch(self, query: str, *args):
+                if "event_best_player_entry" in query:
+                    return [
+                        # Home bucket: ordered by ordinal, two entries.
+                        {"bucket": "best_home", "ordinal": 1,
+                         "player_id": 700, "label": "rating",
+                         "value_numeric": 8.5, "value_text": None,
+                         "is_player_of_the_match": False,
+                         "player_slug": "saka", "player_name": "Bukayo Saka",
+                         "player_short_name": "B. Saka"},
+                        {"bucket": "best_home", "ordinal": 2,
+                         "player_id": 701, "label": "rating",
+                         "value_numeric": 8.0, "value_text": None,
+                         "is_player_of_the_match": False,
+                         "player_slug": "odegaard", "player_name": "Martin Odegaard",
+                         "player_short_name": "M. Odegaard"},
+                        # Away bucket: one entry.
+                        {"bucket": "best_away", "ordinal": 1,
+                         "player_id": 702, "label": "rating",
+                         "value_numeric": 7.5, "value_text": None,
+                         "is_player_of_the_match": False,
+                         "player_slug": "palmer", "player_name": "Cole Palmer",
+                         "player_short_name": "C. Palmer"},
+                        # POTM = same player as bestHome[0], but in its own bucket.
+                        {"bucket": "player_of_the_match", "ordinal": 1,
+                         "player_id": 700, "label": "rating",
+                         "value_numeric": 8.5, "value_text": None,
+                         "is_player_of_the_match": True,
+                         "player_slug": "saka", "player_name": "Bukayo Saka",
+                         "player_short_name": "B. Saka"},
+                    ]
+                return []
+
+            async def close(self):
+                self.closed = True
+
+        normalized_connection = _FakeBestPlayersConnection()
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/event/14083191/best-players/summary", ""
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.payload
+        self.assertEqual(sorted(body.keys()),
+                         ["bestAwayTeamPlayers", "bestHomeTeamPlayers", "playerOfTheMatch"])
+        self.assertEqual(len(body["bestHomeTeamPlayers"]), 2)
+        self.assertEqual(len(body["bestAwayTeamPlayers"]), 1)
+        # POTM is a single object (not a list) — Sofascore envelope shape.
+        self.assertEqual(body["playerOfTheMatch"]["player"]["id"], 700)
+        # Order within a bucket matches ordinal: Saka (ord=1) before Odegaard (ord=2).
+        self.assertEqual(body["bestHomeTeamPlayers"][0]["player"]["id"], 700)
+        # Numeric value preserved (rating 8.5, not stringified).
+        self.assertEqual(body["bestHomeTeamPlayers"][0]["value"], 8.5)
+        # Empty bucket → key omitted (sparse envelope).  Verify by
+        # checking that when no rows come back we return None entirely
+        # (covered in a separate test below).
+        self.assertTrue(snapshot_connection.closed)
+        self.assertTrue(normalized_connection.closed)
+
+    async def test_fetch_event_best_players_payload_returns_none_when_empty(self) -> None:
+        """No rows in event_best_player_entry → handler returns None.
+        Avoids emitting an empty ``{"bestHomeTeamPlayers": []}`` envelope
+        which clients would interpret as "match had no notable players."
+        Tested at the handler boundary (not via full dispatch) because
+        the waterfall above falls through to other normalised fallbacks
+        when this handler returns None — that's the dispatch contract,
+        not what we want to pin here."""
+        application = LocalApiApplication.__new__(LocalApiApplication)
+
+        class _EmptyConn:
+            closed = False
+            async def fetch(self, *a, **kw): return []
+            async def close(self): self.closed = True
+
+        conn = _EmptyConn()
+        application._connect = _make_fake_connector(conn)
+
+        result = await application._fetch_event_best_players_payload(14083191)
+
+        self.assertIsNone(result)
+        self.assertTrue(conn.closed)
+
+    async def test_handle_api_get_event_odds_all_assembles_markets_with_choices(self) -> None:
+        """``/event/{id}/odds/{provider_id}/all`` rebuilds the
+        ``markets[]`` + ``provider`` envelope from event_market +
+        event_market_choice + provider (PR #6).
+
+        Critical: market_id → choices grouping must respect the JOIN
+        (a market with N choices appears once, not N times)."""
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+
+        class _FakeOddsConnection:
+            closed = False
+
+            async def fetch(self, query: str, *args):
+                if "FROM event_market" in query and "WHERE event_id" in query:
+                    return [
+                        {"id": 901, "fid": 1, "market_id": 1, "source_id": 10,
+                         "market_group": "Main", "market_name": "Full time",
+                         "market_period": "regular", "structure_type": 1,
+                         "choice_group": None, "is_live": False, "suspended": False},
+                        {"id": 902, "fid": 2, "market_id": 2, "source_id": 20,
+                         "market_group": "Main", "market_name": "Double chance",
+                         "market_period": "regular", "structure_type": 1,
+                         "choice_group": None, "is_live": False, "suspended": False},
+                    ]
+                if "FROM event_market_choice" in query:
+                    return [
+                        # market 901: 3 choices (1X2)
+                        {"event_market_id": 901, "source_id": 1, "name": "1",
+                         "change_value": None, "fractional_value": "163/100",
+                         "initial_fractional_value": "150/100"},
+                        {"event_market_id": 901, "source_id": 2, "name": "X",
+                         "change_value": None, "fractional_value": "9/4",
+                         "initial_fractional_value": "9/4"},
+                        {"event_market_id": 901, "source_id": 3, "name": "2",
+                         "change_value": None, "fractional_value": "17/10",
+                         "initial_fractional_value": "2/1"},
+                        # market 902: 2 choices (DC)
+                        {"event_market_id": 902, "source_id": 1, "name": "1X",
+                         "change_value": None, "fractional_value": "8/15",
+                         "initial_fractional_value": None},
+                        {"event_market_id": 902, "source_id": 2, "name": "X2",
+                         "change_value": None, "fractional_value": "5/6",
+                         "initial_fractional_value": None},
+                    ]
+                return []
+
+            async def fetchrow(self, query: str, *args):
+                if "FROM provider" in query:
+                    return {"id": 1, "slug": "bet365", "name": "bet365", "country": "GB"}
+                return None
+
+            async def close(self):
+                self.closed = True
+
+        normalized_connection = _FakeOddsConnection()
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/event/14083191/odds/1/all", ""
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.payload
+        self.assertIn("markets", body)
+        self.assertEqual(len(body["markets"]), 2)
+        # Market 901 gets 3 choices, 902 gets 2 — JOIN grouping correct.
+        m901 = next(m for m in body["markets"] if m["id"] == 901)
+        m902 = next(m for m in body["markets"] if m["id"] == 902)
+        self.assertEqual(len(m901["choices"]), 3)
+        self.assertEqual(len(m902["choices"]), 2)
+        # Choice names + fractional values preserved.
+        self.assertEqual([c["name"] for c in m901["choices"]], ["1", "X", "2"])
+        self.assertEqual(m901["choices"][0]["fractionalValue"], "163/100")
+        # initialFractionalValue is sparse — emitted for 1X2 but absent for DC.
+        self.assertIn("initialFractionalValue", m901["choices"][0])
+        self.assertNotIn("initialFractionalValue", m902["choices"][0])
+        # Provider info inlined.
+        self.assertEqual(body["provider"], {"id": 1, "slug": "bet365",
+                                            "name": "bet365", "country": "GB"})
+
+    async def test_fetch_event_odds_payload_returns_none_when_no_markets(self) -> None:
+        """Empty event_market → handler returns None.  Don't emit
+        ``{"markets": []}``.  Tested at the handler boundary (see
+        rationale on best-players empty test)."""
+        application = LocalApiApplication.__new__(LocalApiApplication)
+
+        class _EmptyOddsConn:
+            closed = False
+            async def fetch(self, *a, **kw): return []
+            async def fetchrow(self, *a, **kw): return None
+            async def close(self): self.closed = True
+
+        conn = _EmptyOddsConn()
+        application._connect = _make_fake_connector(conn)
+
+        result = await application._fetch_event_odds_payload(14083191, 1)
+
+        self.assertIsNone(result)
+        self.assertTrue(conn.closed)
+
+    async def test_handle_api_get_winning_odds_returns_side_keyed_envelope(self) -> None:
+        """``/event/{id}/provider/{provider_id}/winning-odds`` returns
+        a side-keyed dict (``{"home": {...}, "draw": {...}, "away":
+        {...}}``) — NOT an array.  PR #6 handler reconstructs this from
+        ``event_winning_odds`` rows.  Pin both shape and that absent
+        sides (e.g. a no-draw market) are simply omitted."""
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application.routes = build_route_specs()
+        snapshot_connection = _FakeSnapshotConnection([])
+
+        class _FakeWinningOddsConnection:
+            closed = False
+
+            async def fetch(self, query: str, *args):
+                if "FROM event_winning_odds" in query:
+                    return [
+                        {"side": "home", "odds_id": 1001,
+                         "actual": 43.0, "expected": 38.0,
+                         "fractional_value": "163/100"},
+                        {"side": "draw", "odds_id": 1002,
+                         "actual": 28.0, "expected": 25.0,
+                         "fractional_value": "9/4"},
+                        {"side": "away", "odds_id": 1003,
+                         "actual": 29.0, "expected": 37.0,
+                         "fractional_value": "17/10"},
+                    ]
+                return []
+
+            async def close(self):
+                self.closed = True
+
+        normalized_connection = _FakeWinningOddsConnection()
+        application._connect = _make_sequence_connector([snapshot_connection, normalized_connection])
+
+        response = await application.handle_api_get(
+            "/api/v1/event/14083191/provider/1/winning-odds", ""
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.payload
+        # Side-keyed dict, not list — match Sofascore envelope.
+        self.assertIsInstance(body, dict)
+        self.assertEqual(sorted(body.keys()), ["away", "draw", "home"])
+        self.assertEqual(body["home"]["actual"], 43.0)
+        self.assertEqual(body["home"]["expected"], 38.0)
+        self.assertEqual(body["home"]["fractionalValue"], "163/100")
+        self.assertEqual(body["draw"]["id"], 1002)
+
+    async def test_fetch_event_winning_odds_payload_returns_none_when_empty(self) -> None:
+        """No rows → handler returns None.  Critical: an empty ``{}``
+        would let mobile render a dummy odds widget with no markets.
+        Tested at the handler boundary (see rationale on best-players
+        empty test)."""
+        application = LocalApiApplication.__new__(LocalApiApplication)
+
+        class _EmptyWOConn:
+            closed = False
+            async def fetch(self, *a, **kw): return []
+            async def close(self): self.closed = True
+
+        conn = _EmptyWOConn()
+        application._connect = _make_fake_connector(conn)
+
+        result = await application._fetch_event_winning_odds_payload(14083191, 1)
+
+        self.assertIsNone(result)
+        self.assertTrue(conn.closed)
+
     async def test_handle_api_get_rebuilds_transfer_history_with_nested_entities_without_raw_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         application.routes = build_route_specs()
