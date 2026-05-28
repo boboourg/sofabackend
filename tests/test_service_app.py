@@ -240,5 +240,106 @@ class HistoricalBootstrapWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(planner.bootstrap_stream, STREAM_HISTORICAL_BOOTSTRAP)
 
 
+class ResolveServiceSportSlugsTests(unittest.TestCase):
+    """Pin the CLI → ENV → DEFAULT priority for the sport allowlist.
+
+    Used by every planner factory to decide which sports to drive.
+    Production currently sets ``SOFASCORE_PLANNER_SPORT_SLUGS=football``
+    in ``.env`` to keep the fleet football-only while the mobile app
+    is football-only — pin the contract so a future refactor can't
+    silently let the 13-sport default leak back into prod.
+    """
+
+    def test_cli_args_win_over_env(self) -> None:
+        from schema_inspector.services.service_app import _resolve_service_sport_slugs
+
+        # CLI explicitly asks for tennis, even though ENV says football.
+        result = _resolve_service_sport_slugs(
+            ("tennis",),
+            env={"SOFASCORE_PLANNER_SPORT_SLUGS": "football"},
+        )
+
+        self.assertEqual(result, ("tennis",))
+
+    def test_env_used_when_no_cli(self) -> None:
+        from schema_inspector.services.service_app import _resolve_service_sport_slugs
+
+        result = _resolve_service_sport_slugs(
+            None, env={"SOFASCORE_PLANNER_SPORT_SLUGS": "football"}
+        )
+
+        self.assertEqual(result, ("football",))
+
+    def test_env_parses_comma_separated_list(self) -> None:
+        from schema_inspector.services.service_app import _resolve_service_sport_slugs
+
+        result = _resolve_service_sport_slugs(
+            None,
+            env={"SOFASCORE_PLANNER_SPORT_SLUGS": "football, tennis ,basketball"},
+        )
+
+        # Whitespace stripped, order preserved, all lowercased.
+        self.assertEqual(result, ("football", "tennis", "basketball"))
+
+    def test_env_uppercase_normalized_to_lowercase(self) -> None:
+        from schema_inspector.services.service_app import _resolve_service_sport_slugs
+
+        result = _resolve_service_sport_slugs(
+            None, env={"SOFASCORE_PLANNER_SPORT_SLUGS": "Football,TENNIS"}
+        )
+
+        self.assertEqual(result, ("football", "tennis"))
+
+    def test_default_used_when_env_missing(self) -> None:
+        from schema_inspector.services.service_app import (
+            DEFAULT_SERVICE_SPORT_SLUGS,
+            _resolve_service_sport_slugs,
+        )
+
+        # No env, no CLI → full 13-sport default.
+        result = _resolve_service_sport_slugs(None, env={})
+
+        self.assertEqual(result, DEFAULT_SERVICE_SPORT_SLUGS)
+
+    def test_default_used_when_env_blank(self) -> None:
+        from schema_inspector.services.service_app import (
+            DEFAULT_SERVICE_SPORT_SLUGS,
+            _resolve_service_sport_slugs,
+        )
+
+        result = _resolve_service_sport_slugs(
+            None, env={"SOFASCORE_PLANNER_SPORT_SLUGS": "   "}
+        )
+
+        self.assertEqual(result, DEFAULT_SERVICE_SPORT_SLUGS)
+
+    def test_default_used_when_env_only_commas(self) -> None:
+        from schema_inspector.services.service_app import (
+            DEFAULT_SERVICE_SPORT_SLUGS,
+            _resolve_service_sport_slugs,
+        )
+
+        # ``,,,`` parses to an empty tuple after filter → fall back to
+        # default rather than running the fleet with zero sports
+        # (which would be a silent outage).
+        result = _resolve_service_sport_slugs(
+            None, env={"SOFASCORE_PLANNER_SPORT_SLUGS": ",,,"}
+        )
+
+        self.assertEqual(result, DEFAULT_SERVICE_SPORT_SLUGS)
+
+    def test_cli_empty_tuple_treated_as_no_cli(self) -> None:
+        from schema_inspector.services.service_app import _resolve_service_sport_slugs
+
+        # CLI args==() (no --sport-slug passed) must fall through to ENV,
+        # not be interpreted as "run zero sports".  Same shape that
+        # ``planner-daemon`` produces when invoked without --sport-slug.
+        result = _resolve_service_sport_slugs(
+            (), env={"SOFASCORE_PLANNER_SPORT_SLUGS": "football"}
+        )
+
+        self.assertEqual(result, ("football",))
+
+
 if __name__ == "__main__":
     unittest.main()

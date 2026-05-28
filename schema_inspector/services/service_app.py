@@ -215,6 +215,45 @@ DELAYED_ENVELOPE_HASH = "hash:etl:delayed_envelopes"
 DEFAULT_SERVICE_SPORT_SLUGS = SUPPORTED_SPORT_SLUGS
 
 
+def _resolve_service_sport_slugs(
+    cli_sport_slugs: tuple[str, ...] | None,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Resolve which sports a planner/service should drive.
+
+    Priority order (highest → lowest):
+
+    1. ``cli_sport_slugs`` — ``--sport-slug`` repeated on the CLI.  Operator
+       intent overrides everything (e.g. ad-hoc backfill of one league).
+    2. ``SOFASCORE_PLANNER_SPORT_SLUGS`` env var — comma-separated allowlist
+       that pins which sports the prod fleet currently parses.  Used to
+       temporarily disable non-football lanes while the mobile app is
+       football-only, without having to edit 7 systemd unit ``ExecStart``
+       lines.  Set to ``football`` to run football-only; set to
+       ``football,tennis`` to add a sport back; leave unset to fall through.
+    3. ``DEFAULT_SERVICE_SPORT_SLUGS`` (= ``SUPPORTED_SPORT_SLUGS``) — the
+       full 13-sport list.  Legacy default; the dev/test path expects this
+       so it stays the fallback.
+
+    Empty strings, whitespace, and unknown slugs are not filtered here — the
+    downstream allowed_sports check in ``_historical_tournament_targets_from_registry``
+    + ``structure_planner`` already drops anything that doesn't match a
+    registered sport.  We only guarantee that the returned tuple is
+    non-empty (falls back to default) and lowercased.
+    """
+    if cli_sport_slugs:
+        return cli_sport_slugs
+    resolved_env = dict(os.environ) if env is None else dict(env)
+    raw = resolved_env.get("SOFASCORE_PLANNER_SPORT_SLUGS", "").strip()
+    if not raw:
+        return DEFAULT_SERVICE_SPORT_SLUGS
+    parsed = tuple(
+        slug for slug in (item.strip().lower() for item in raw.split(",")) if slug
+    )
+    return parsed or DEFAULT_SERVICE_SPORT_SLUGS
+
+
 def _historical_tournament_targets_from_registry(
     registry_targets,
     *,
@@ -394,7 +433,7 @@ class ServiceApp:
         scheduled_interval_seconds: float = 3600.0,  # changed from 300 → 3600 (once per hour)
         loop_interval_seconds: float = 5.0,
     ) -> PlannerDaemon:
-        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        normalized_sports = _resolve_service_sport_slugs(sport_slugs)
         targets = tuple(
             ScheduledPlanningTarget(
                 sport_slug=sport_slug,
@@ -490,7 +529,7 @@ class ServiceApp:
         sport_slugs: tuple[str, ...] | None = None,
         loop_interval_seconds: float = 5.0,
     ) -> LiveDiscoveryPlannerDaemon:
-        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        normalized_sports = _resolve_service_sport_slugs(sport_slugs)
         targets = tuple(
             LiveDiscoveryPlanningTarget(
                 sport_slug=sport_slug,
@@ -537,7 +576,7 @@ class ServiceApp:
         loop_interval_seconds: float = 5.0,
         today_factory=None,
     ) -> HistoricalPlannerDaemon:
-        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        normalized_sports = _resolve_service_sport_slugs(sport_slugs)
         if bool(date_from) != bool(date_to):
             raise RuntimeError("Historical planner requires both date_from and date_to together.")
         database = getattr(self.app, "database", None)
@@ -658,7 +697,7 @@ class ServiceApp:
         tournaments_per_tick: int = 10,
         loop_interval_seconds: float = 10.0,
     ) -> HistoricalTournamentPlannerDaemon:
-        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        normalized_sports = _resolve_service_sport_slugs(sport_slugs)
         fallback_targets = tuple(
             HistoricalTournamentPlanningTarget(sport_slug=sport_slug)
             for sport_slug in normalized_sports
@@ -820,7 +859,7 @@ class ServiceApp:
         """
 
         if targets is None:
-            normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+            normalized_sports = _resolve_service_sport_slugs(sport_slugs)
             fallback_targets = load_managed_tournaments(sport_slugs=normalized_sports)
             database = getattr(self.app, "database", None)
             connection_factory = getattr(database, "connection", None) if database is not None else None
@@ -894,7 +933,7 @@ class ServiceApp:
         sports_per_tick: int = 1,
         timeout_s: float = 20.0,
     ) -> TournamentRegistryRefreshDaemon:
-        normalized_sports = tuple(sport_slugs or DEFAULT_SERVICE_SPORT_SLUGS)
+        normalized_sports = _resolve_service_sport_slugs(sport_slugs)
         database = getattr(self.app, "database", None)
         connection_factory = getattr(database, "connection", None) if database is not None else None
         runtime_config = getattr(self.app, "runtime_config", None)
