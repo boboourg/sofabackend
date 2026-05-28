@@ -1340,6 +1340,15 @@ class NormalizeRepository:
                 _as_scalar_text(row.get("home_score")),
                 _as_scalar_text(row.get("away_score")),
                 row.get("text"),
+                # Migration 2026-05-28: player_id / assist1_player_id /
+                # incident_class / is_home / length added so the
+                # /player/{pid}/events/last/{page} ``incidentsMap``
+                # aggregator can slice goals/assists/cards per player.
+                row.get("player_id"),
+                row.get("assist1_player_id"),
+                row.get("incident_class"),
+                row.get("is_home"),
+                row.get("length"),
             )
             for row in rows
         ]
@@ -1349,9 +1358,10 @@ class NormalizeRepository:
             """
             INSERT INTO event_incident (
                 event_id, ordinal, incident_id, incident_type,
-                minute, home_score_text, away_score_text, text_value
+                minute, home_score_text, away_score_text, text_value,
+                player_id, assist1_player_id, incident_class, is_home, length
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
             normalized_rows,
         )

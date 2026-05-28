@@ -10,7 +10,7 @@ from ..entities import extract_entities
 
 class EventIncidentsParser:
     parser_family = "event_incidents"
-    parser_version = "v1"
+    parser_version = "v2"
 
     def parse(self, snapshot: RawSnapshot) -> ParseResult:
         payload = _as_mapping(snapshot.payload) or {}
@@ -21,13 +21,19 @@ class EventIncidentsParser:
                 incident = _as_mapping(item)
                 if incident is None:
                     continue
+                player_id, assist1_player_id = _extract_player_pointers(incident)
                 rows.append(
                     {
                         "event_id": snapshot.context_event_id or snapshot.context_entity_id,
                         "ordinal": ordinal,
                         "incident_id": _as_int(incident.get("id")),
                         "incident_type": _as_str(incident.get("incidentType")) or _as_str(incident.get("type")),
+                        "incident_class": _as_str(incident.get("incidentClass")),
                         "time": _as_int(incident.get("time")),
+                        "is_home": _as_bool(incident.get("isHome")),
+                        "length": _as_int(incident.get("length")),
+                        "player_id": player_id,
+                        "assist1_player_id": assist1_player_id,
                         "home_score": incident.get("homeScore"),
                         "away_score": incident.get("awayScore"),
                         "text": _as_str(incident.get("text")),
@@ -43,6 +49,38 @@ class EventIncidentsParser:
             metric_rows={"event_incident": tuple(rows)} if rows else {},
             observed_root_keys=snapshot.observed_root_keys,
         )
+
+
+def _extract_player_pointers(incident: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Resolve (player_id, assist1_player_id) from one incident.
+
+    Sofascore puts player pointers in different keys depending on
+    ``incidentType``:
+
+      * ``goal`` / ``card`` / ``penaltyMiss`` / ``varDecision`` etc:
+        - ``player.id``       — primary actor
+        - ``assist1.id``      — assister (goals only)
+      * ``substitution``:
+        - ``playerIn.id``     — primary actor (subbed-in)
+        - ``playerOut.id``    — stored as ``assist1_player_id`` so a
+          single column covers both roles.  The ``incidentsMap``
+          aggregator does not tally substitutions, so the overload is
+          safe for the downstream consumer.
+
+    Incident types without player references (``period``,
+    ``injuryTime``, etc.) return ``(None, None)``.
+    """
+    incident_type = _as_str(incident.get("incidentType")) or _as_str(incident.get("type"))
+    if incident_type == "substitution":
+        return _player_id(incident.get("playerIn")), _player_id(incident.get("playerOut"))
+    return _player_id(incident.get("player")), _player_id(incident.get("assist1"))
+
+
+def _player_id(value: Any) -> int | None:
+    mapping = _as_mapping(value)
+    if mapping is None:
+        return None
+    return _as_int(mapping.get("id"))
 
 
 def _as_mapping(value: object) -> Mapping[str, Any] | None:
@@ -63,3 +101,7 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
+
+
+def _as_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None

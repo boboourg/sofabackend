@@ -3105,6 +3105,84 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
         # events + hasNextPage still come from build_payload + page logic.
         self.assertEqual(len(payload["events"]), 2)
 
+    async def test_player_events_last_incidents_map_aggregates_goals_assists_cards(self) -> None:
+        """Migration 2026-05-28 added player_id/assist1_player_id/incident_class
+        to event_incident.  The incidentsMap query then runs two CTEs
+        (``primary_actor`` for goals/cards, ``assister`` for assists)
+        and emits a sparse per-event dict matching Sofascore's web
+        envelope.  Pin both branches and the own-goal exclusion."""
+
+        class _IncidentStub:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def fetchrow(self, query: str, *args):
+                return None  # force synthesizer path
+
+            async def fetch(self, query: str, *args):
+                if "selected_events AS MATERIALIZED" in query:
+                    return [
+                        {"event_id": 5001, "event_slug": "x", "start_timestamp": 1, "is_editor": False,
+                         "home_team_id": 1, "away_team_id": 2, "tournament_id": 1,
+                         "tournament_name": "T", "tournament_slug": "t", "ut_id": 100,
+                         "season_id": 1, "season_name": "S", "season_year": "24/25",
+                         "category_id": 1, "category_name": "C", "category_slug": "c",
+                         "category_sport_id": 1, "category_sport_name": "Football",
+                         "category_sport_slug": "football",
+                         "status_code": 100, "status_type": "finished",
+                         "home_team_name": "H", "home_team_slug": "h",
+                         "away_team_name": "A", "away_team_slug": "a"},
+                        {"event_id": 5002, "event_slug": "y", "start_timestamp": 2, "is_editor": False,
+                         "home_team_id": 3, "away_team_id": 4, "tournament_id": 1,
+                         "tournament_name": "T", "tournament_slug": "t", "ut_id": 100,
+                         "season_id": 1, "season_name": "S", "season_year": "24/25",
+                         "category_id": 1, "category_name": "C", "category_slug": "c",
+                         "category_sport_id": 1, "category_sport_name": "Football",
+                         "category_sport_slug": "football",
+                         "status_code": 100, "status_type": "finished",
+                         "home_team_name": "H", "home_team_slug": "h",
+                         "away_team_name": "A", "away_team_slug": "a"},
+                    ]
+                # event_lineup_player query: empty, doesn't matter for this test
+                if "event_lineup_player" in query and "team_id" in query and "substitute" in query:
+                    return []
+                if "event_player_statistics" in query:
+                    return []
+                # incidentsMap query — return canned aggregation.  Two events:
+                #   5001: 2 goals + 1 assist + 1 yellow card
+                #   5002: 1 own goal + 1 red card (no real goal credit)
+                if "primary_actor" in query and "assister" in query:
+                    return [
+                        {"event_id": 5001, "goals": 2, "own_goals": 0,
+                         "yellow_cards": 1, "red_cards": 0, "assists": 1},
+                        {"event_id": 5002, "goals": 0, "own_goals": 1,
+                         "yellow_cards": 0, "red_cards": 1, "assists": 0},
+                    ]
+                return []
+
+            async def close(self) -> None:
+                self.closed = True
+
+        stub = _IncidentStub()
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application._connect = _make_fake_connector(stub)
+
+        payload = await application._fetch_player_events_last_payload(4242, 0)
+
+        self.assertIsNotNone(payload)
+        # Event 5001 has goals + assist + yellow — sparse-true output.
+        self.assertEqual(
+            payload["incidentsMap"]["5001"],
+            {"goals": 2, "assists": 1, "yellowCards": 1},
+        )
+        # Event 5002 has own goal + red card.  Own goal must NOT be
+        # counted under ``goals`` — that's a defender accidentally
+        # scoring against their own team, not a regular goal.
+        self.assertEqual(
+            payload["incidentsMap"]["5002"],
+            {"ownGoals": 1, "redCards": 1},
+        )
+
     async def test_player_events_last_fails_open_on_map_query_error(self) -> None:
         """If the map enrichment query raises (DB blip, schema drift),
         the dispatcher must still return the event list with empty maps

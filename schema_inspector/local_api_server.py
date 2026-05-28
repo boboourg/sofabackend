@@ -5300,11 +5300,84 @@ async def _collect_player_event_maps(
         if entry:
             statistics[eid_str] = entry
 
+    # incidentsMap: aggregate goals / assists / yellowCards / redCards
+    # for the player.  Migration 2026-05-28 added ``player_id`` and
+    # ``assist1_player_id`` to event_incident; the event_incidents
+    # parser v2 populates them.  Rows from before the parser bump
+    # carry NULL for both columns — they're transparently skipped by
+    # the WHERE clause, so the tally is just "0 incidents" for older
+    # data.  Mobile is football-only / recent-first so this graceful
+    # degradation is acceptable.
+    #
+    # The two CTEs run in one round-trip.  ``primary_actor`` covers
+    # goals / cards (counted on ``incident_type`` × ``incident_class``)
+    # and ``assister`` covers the assist-on-goal case.  We deliberately
+    # do **not** count ``substitution`` rows (which reuse
+    # ``assist1_player_id`` for ``playerOut``) — the WHERE clause
+    # filters those out.
+    incident_rows = await connection.fetch(
+        """
+        WITH primary_actor AS (
+            SELECT
+                event_id,
+                COUNT(*) FILTER (WHERE incident_type = 'goal'
+                                   AND COALESCE(incident_class, '') NOT IN ('ownGoal'))         AS goals,
+                COUNT(*) FILTER (WHERE incident_type = 'goal'
+                                   AND incident_class = 'ownGoal')                              AS own_goals,
+                COUNT(*) FILTER (WHERE incident_type = 'card'
+                                   AND incident_class = 'yellow')                               AS yellow_cards,
+                COUNT(*) FILTER (WHERE incident_type = 'card'
+                                   AND incident_class IN ('red', 'yellowRed'))                  AS red_cards
+            FROM event_incident
+            WHERE player_id = $1
+              AND event_id = ANY($2::bigint[])
+            GROUP BY event_id
+        ),
+        assister AS (
+            SELECT event_id, COUNT(*) AS assists
+            FROM event_incident
+            WHERE assist1_player_id = $1
+              AND event_id = ANY($2::bigint[])
+              AND incident_type = 'goal'
+            GROUP BY event_id
+        )
+        SELECT
+            COALESCE(p.event_id, a.event_id) AS event_id,
+            COALESCE(p.goals, 0)         AS goals,
+            COALESCE(p.own_goals, 0)     AS own_goals,
+            COALESCE(p.yellow_cards, 0)  AS yellow_cards,
+            COALESCE(p.red_cards, 0)     AS red_cards,
+            COALESCE(a.assists, 0)       AS assists
+        FROM primary_actor p
+        FULL OUTER JOIN assister a USING (event_id)
+        """,
+        int(player_id),
+        list(event_ids),
+    )
+    incidents_map: dict[str, dict[str, int]] = {}
+    for row in incident_rows:
+        eid_str = str(int(row["event_id"]))
+        # Sparse output: only emit non-zero counters, matching
+        # Sofascore's web client envelope.  Empty dict means the
+        # player had no countable incidents in that event.
+        entry: dict[str, int] = {}
+        if row["goals"]:
+            entry["goals"] = int(row["goals"])
+        if row["own_goals"]:
+            entry["ownGoals"] = int(row["own_goals"])
+        if row["assists"]:
+            entry["assists"] = int(row["assists"])
+        if row["yellow_cards"]:
+            entry["yellowCards"] = int(row["yellow_cards"])
+        if row["red_cards"]:
+            entry["redCards"] = int(row["red_cards"])
+        if entry:
+            incidents_map[eid_str] = entry
+
     return {
         "playedForTeamMap": played_for,
         "statisticsMap": statistics,
-        "incidentsMap": {},  # TODO: needs event_incident parser + migration; see
-                             # task #31 / docs/SIMPLIFICATION_AUDIT.md
+        "incidentsMap": incidents_map,
         "onBenchMap": on_bench,
     }
 
