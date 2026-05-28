@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily refresh of Sofascore league capability verdicts (re-probe expiring cohorts)
+
+[Timer]
+# Run daily at 04:30 local — off-peak (after the 03:00 horizon schedule
+# sync, before morning live load). Capability verdicts have a 14-day TTL
+# and the refresh script only touches cohorts expiring within 4 days, so a
+# daily cadence keeps every football cohort fresh with margin to spare.
+OnCalendar=*-*-* 04:30:00
+# If the box was off at 04:30, run on next boot rather than skipping.
+Persistent=true
+AccuracySec=5min
+Unit=sofascore-capability-probe.service
+
+[Install]
+WantedBy=timers.target

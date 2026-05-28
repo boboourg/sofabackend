@@ -1,0 +1,18 @@
+[Unit]
+Description=Sofascore League Capabilities Probe Refresh (re-probe expiring cohorts + prime Redis)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+ExecStart=/opt/sofascore/scripts/ops/capability_probe_refresh.sh
+# Bounded run: 60 cohorts x ~55s probe + prime-redis. 90 min is a generous
+# ceiling; the timer fires daily so a missed run self-heals next day.
+TimeoutStartSec=5400
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
