@@ -3335,11 +3335,37 @@ class LocalApiApplication:
         except Exception:  # noqa: BLE001
             await connection.close()
             return None
-        await connection.close()
         if not rows:
+            await connection.close()
             return None
+        page_rows = rows[:_SEASON_EVENTS_PAGE_SIZE]
         has_next_page = len(rows) > _SEASON_EVENTS_PAGE_SIZE
-        payload = build_payload(rows[:_SEASON_EVENTS_PAGE_SIZE])
+        event_ids = [int(row["event_id"]) for row in page_rows]
+        # Sofascore-shape enrichment maps — same envelope keys that the
+        # public ``/player/{id}/events/last/{page}`` returns on the web
+        # client: ``playedForTeamMap``, ``statisticsMap``,
+        # ``incidentsMap``, ``onBenchMap``.  Keys are stringified event
+        # ids so json.dumps preserves the same payload shape clients
+        # already expect from the upstream API.
+        try:
+            maps = await _collect_player_event_maps(
+                connection,
+                player_id=player_id,
+                event_ids=event_ids,
+            )
+        except Exception:  # noqa: BLE001 — fail-open
+            maps = {
+                "playedForTeamMap": {},
+                "statisticsMap": {},
+                "incidentsMap": {},
+                "onBenchMap": {},
+            }
+        await connection.close()
+        payload = build_payload(page_rows)
+        payload["playedForTeamMap"] = maps["playedForTeamMap"]
+        payload["statisticsMap"] = maps["statisticsMap"]
+        payload["incidentsMap"] = maps["incidentsMap"]
+        payload["onBenchMap"] = maps["onBenchMap"]
         payload["hasNextPage"] = has_next_page
         return payload
 
@@ -5168,6 +5194,119 @@ def _wrap_stripped_entity_payload(payload: Any, wrapper_key: str) -> Any:
 
 def _json_dumps_bytes(payload: Any) -> bytes:
     return orjson.dumps(payload, default=_json_default)
+
+
+async def _collect_player_event_maps(
+    connection: Any,
+    *,
+    player_id: int,
+    event_ids: list[int],
+) -> dict[str, dict[str, Any]]:
+    """Build the 4 enrichment maps the Sofascore web client returns alongside
+    ``/api/v1/player/{player_id}/events/last/{page}``.
+
+    Result shape (matches what the web client sees on production sofascore.com,
+    verified 2026-05-28 via proxy probe of player 1402912):
+
+    - ``playedForTeamMap[event_id] -> team_id``: which team the player turned
+      out for in each event.  Source: ``event_lineup_player.team_id`` filtered
+      to this player's rows.
+    - ``statisticsMap[event_id] -> {rating, minutesPlayed}``: per-event
+      summary stats.  ``rating`` from ``event_player_statistics.rating``;
+      ``minutesPlayed`` from the ``event_player_stat_value`` row with
+      ``stat_name='minutesPlayed'``.
+    - ``incidentsMap[event_id] -> {goals?, assists?, yellowCards?, redCards?}``:
+      goals/assists/cards summary.  **Currently always empty** — our
+      ``event_incident`` table normalises only event-level metadata
+      (incident_type, minute, score_text) and does not yet carry
+      ``player_id`` references.  Wiring it up requires a parser+migration
+      change tracked separately; we emit an empty dict so the payload
+      shape matches Sofascore's envelope and clients can ship code that
+      handles both the populated and empty case from day one.
+    - ``onBenchMap[event_id] -> bool``: ``true`` if the player started on
+      the bench (was a substitute).  Source: ``event_lineup_player.substitute``.
+      Mirrors Sofascore's sparse pattern — only the ``true`` entries are
+      included (players who started never appear).
+
+    All map keys are **string-coerced event ids** because that's how
+    Sofascore's JSON serialises them — `payload["playedForTeamMap"]["14083168"]`
+    not `payload["playedForTeamMap"][14083168]`.
+    """
+    empty: dict[str, dict[str, Any]] = {
+        "playedForTeamMap": {},
+        "statisticsMap": {},
+        "incidentsMap": {},
+        "onBenchMap": {},
+    }
+    if not event_ids:
+        return empty
+
+    # playedForTeamMap + onBenchMap come from the same row.  Composite
+    # PK (event_id, side, player_id) means at most one row per (event,
+    # player) — there's no second team for a transfer mid-match, and
+    # Sofascore mirrors that.
+    lineup_rows = await connection.fetch(
+        """
+        SELECT event_id, team_id, substitute
+        FROM event_lineup_player
+        WHERE player_id = $1
+          AND event_id = ANY($2::bigint[])
+        """,
+        int(player_id),
+        list(event_ids),
+    )
+    played_for: dict[str, int] = {}
+    on_bench: dict[str, bool] = {}
+    for row in lineup_rows:
+        eid_str = str(int(row["event_id"]))
+        if row["team_id"] is not None:
+            played_for[eid_str] = int(row["team_id"])
+        # Match Sofascore's sparse-true behaviour: only emit the entry
+        # when the player started on the bench.  Players who started are
+        # absent from the map.
+        if bool(row["substitute"]):
+            on_bench[eid_str] = True
+
+    # statisticsMap: rating from summary, minutesPlayed from the wide
+    # ``event_player_stat_value`` fact table.  Single JOIN keeps it to
+    # one round-trip; ``stat_value_numeric`` is non-null for minutesPlayed.
+    stats_rows = await connection.fetch(
+        """
+        SELECT
+            eps.event_id,
+            eps.rating,
+            MAX(sv.stat_value_numeric) FILTER (WHERE sv.stat_name = 'minutesPlayed')
+                AS minutes_played
+        FROM event_player_statistics eps
+        LEFT JOIN event_player_stat_value sv USING (event_id, player_id)
+        WHERE eps.player_id = $1
+          AND eps.event_id = ANY($2::bigint[])
+        GROUP BY eps.event_id, eps.rating
+        """,
+        int(player_id),
+        list(event_ids),
+    )
+    statistics: dict[str, dict[str, Any]] = {}
+    for row in stats_rows:
+        eid_str = str(int(row["event_id"]))
+        entry: dict[str, Any] = {}
+        if row["rating"] is not None:
+            # Match Sofascore's 1-decimal precision (the upstream stores
+            # rating as a high-precision numeric; client only renders 7.5
+            # etc.).  Cast through float so json doesn't emit Decimals.
+            entry["rating"] = round(float(row["rating"]), 1)
+        if row["minutes_played"] is not None:
+            entry["minutesPlayed"] = int(row["minutes_played"])
+        if entry:
+            statistics[eid_str] = entry
+
+    return {
+        "playedForTeamMap": played_for,
+        "statisticsMap": statistics,
+        "incidentsMap": {},  # TODO: needs event_incident parser + migration; see
+                             # task #31 / docs/SIMPLIFICATION_AUDIT.md
+        "onBenchMap": on_bench,
+    }
 
 
 def _response_cache_key(raw_path: str, raw_query: str) -> tuple[str, tuple[tuple[str, tuple[str, ...]], ...]]:

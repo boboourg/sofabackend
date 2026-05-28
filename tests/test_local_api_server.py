@@ -2997,6 +2997,161 @@ class LocalApiRawPassthroughTests(unittest.IsolatedAsyncioTestCase):
     # The former soft_error / 4xx tests are removed because their
     # assertion (``assertIsNone``) is now incorrect — the contract changed.
 
+    async def test_player_events_last_emits_enrichment_maps_from_synthesizer_fallback(self) -> None:
+        """When the raw-snapshot path returns nothing, the synthesizer
+        fallback must include the 4 Sofascore-shape envelope maps
+        (``playedForTeamMap``, ``statisticsMap``, ``incidentsMap``,
+        ``onBenchMap``) — same keys the upstream web client emits.
+
+        Verified against ``GET /api/v1/player/1402912/events/last/0``
+        via prod probe 2026-05-28 (Yamal: 30 events, 31 played-for
+        entries, 31 stats entries with rating+minutesPlayed, sparse
+        on-bench).
+        """
+
+        class _StatStub:
+            """In-memory connection that satisfies the three SQL paths
+            the handler walks: snapshot lookup (empty), event-list
+            synthesiser (returns canned rows), and the three follow-up
+            map queries."""
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.fetchrow_calls: list[tuple[str, tuple]] = []
+                self.fetch_calls: list[tuple[str, tuple]] = []
+
+            async def fetchrow(self, query: str, *args):
+                self.fetchrow_calls.append((query, args))
+                # No raw snapshot — fall through to synthesizer.
+                return None
+
+            async def fetch(self, query: str, *args):
+                self.fetch_calls.append((query, args))
+                # synthesizer query — return 2 events for the player
+                if "event_lineup_player elp" in query and "_FETCH_QUERY" not in query:
+                    pass  # not our case; let it match below
+                if "selected_events AS MATERIALIZED" in query:
+                    return [
+                        {"event_id": 1001, "event_slug": "foo-bar",
+                         "start_timestamp": 1700000000, "is_editor": False,
+                         "home_team_id": 10, "away_team_id": 20,
+                         "tournament_id": 1, "tournament_name": "T",
+                         "tournament_slug": "t", "ut_id": 100,
+                         "season_id": 1, "season_name": "S", "season_year": "24/25",
+                         "category_id": 1, "category_name": "Cat", "category_slug": "cat",
+                         "category_sport_id": 1, "category_sport_name": "Football",
+                         "category_sport_slug": "football",
+                         "status_code": 100, "status_type": "finished",
+                         "home_team_name": "H", "home_team_slug": "h",
+                         "away_team_name": "A", "away_team_slug": "a",
+                         "round_number": 30,
+                         },
+                        {"event_id": 1002, "event_slug": "baz-qux",
+                         "start_timestamp": 1690000000, "is_editor": False,
+                         "home_team_id": 30, "away_team_id": 40,
+                         "tournament_id": 1, "tournament_name": "T",
+                         "tournament_slug": "t", "ut_id": 100,
+                         "season_id": 1, "season_name": "S", "season_year": "24/25",
+                         "category_id": 1, "category_name": "Cat", "category_slug": "cat",
+                         "category_sport_id": 1, "category_sport_name": "Football",
+                         "category_sport_slug": "football",
+                         "status_code": 100, "status_type": "finished",
+                         "home_team_name": "H2", "home_team_slug": "h2",
+                         "away_team_name": "A2", "away_team_slug": "a2",
+                         "round_number": 29,
+                         },
+                    ]
+                if "event_lineup_player" in query and "team_id" in query and "substitute" in query:
+                    # playedForTeamMap + onBenchMap source.
+                    # event 1001 played for team 10 (starter); event 1002 played for team 40 (sub).
+                    return [
+                        {"event_id": 1001, "team_id": 10, "substitute": False},
+                        {"event_id": 1002, "team_id": 40, "substitute": True},
+                    ]
+                if "event_player_statistics" in query and "minutesPlayed" in query:
+                    # statisticsMap source.
+                    return [
+                        {"event_id": 1001, "rating": 7.5, "minutes_played": 90},
+                        {"event_id": 1002, "rating": None, "minutes_played": 15},
+                    ]
+                return []
+
+            async def close(self) -> None:
+                self.closed = True
+
+        stub = _StatStub()
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application._connect = _make_fake_connector(stub)
+
+        payload = await application._fetch_player_events_last_payload(7777, 0)
+
+        self.assertIsNotNone(payload)
+        # All 4 envelope keys are present even when one is empty.
+        for key in ("playedForTeamMap", "statisticsMap", "incidentsMap", "onBenchMap"):
+            self.assertIn(key, payload, f"missing envelope key {key}")
+        # Event ids stringified, sparse where appropriate.
+        self.assertEqual(payload["playedForTeamMap"], {"1001": 10, "1002": 40})
+        # rating only present when not null; minutesPlayed always int when present
+        self.assertEqual(
+            payload["statisticsMap"],
+            {"1001": {"rating": 7.5, "minutesPlayed": 90},
+             "1002": {"minutesPlayed": 15}},
+        )
+        # onBench is sparse-true: starter (event 1001) is absent, substitute is true.
+        self.assertEqual(payload["onBenchMap"], {"1002": True})
+        # incidentsMap is empty by contract until we wire the incident
+        # parser to carry player_id (see task #31).
+        self.assertEqual(payload["incidentsMap"], {})
+        # events + hasNextPage still come from build_payload + page logic.
+        self.assertEqual(len(payload["events"]), 2)
+
+    async def test_player_events_last_fails_open_on_map_query_error(self) -> None:
+        """If the map enrichment query raises (DB blip, schema drift),
+        the dispatcher must still return the event list with empty maps
+        rather than 404-ing the whole page.  Clients can re-request the
+        maps later; losing the events is the bigger regression."""
+
+        class _PartialStub:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def fetchrow(self, query: str, *args):
+                return None  # no raw snapshot
+
+            async def fetch(self, query: str, *args):
+                if "selected_events AS MATERIALIZED" in query:
+                    return [
+                        {"event_id": 2001, "event_slug": "x", "start_timestamp": 1, "is_editor": False,
+                         "home_team_id": 1, "away_team_id": 2, "tournament_id": 1,
+                         "tournament_name": "T", "tournament_slug": "t", "ut_id": 100,
+                         "season_id": 1, "season_name": "S", "season_year": "24/25",
+                         "category_id": 1, "category_name": "C", "category_slug": "c",
+                         "category_sport_id": 1, "category_sport_name": "Football",
+                         "category_sport_slug": "football",
+                         "status_code": 100, "status_type": "finished",
+                         "home_team_name": "H", "home_team_slug": "h",
+                         "away_team_name": "A", "away_team_slug": "a"},
+                    ]
+                # any other fetch (map queries) blows up
+                raise RuntimeError("simulated DB blip on map enrichment query")
+
+            async def close(self) -> None:
+                self.closed = True
+
+        stub = _PartialStub()
+        application = LocalApiApplication.__new__(LocalApiApplication)
+        application._connect = _make_fake_connector(stub)
+
+        payload = await application._fetch_player_events_last_payload(8888, 0)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(payload["events"]), 1)
+        # All 4 maps must default to empty dict on partial failure.
+        self.assertEqual(payload["playedForTeamMap"], {})
+        self.assertEqual(payload["statisticsMap"], {})
+        self.assertEqual(payload["incidentsMap"], {})
+        self.assertEqual(payload["onBenchMap"], {})
+
     async def test_player_events_last_returns_none_for_soft_error_snapshot(self) -> None:
         application = LocalApiApplication.__new__(LocalApiApplication)
         connection = _FakeEntityPassthroughConnection(
