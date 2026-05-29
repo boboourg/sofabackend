@@ -94,7 +94,19 @@ class PlannerDaemon:
 
     async def run_forever(self) -> None:
         while not self.shutdown_requested:
-            await self.tick()
+            # Guard the tick: this is a single-instance daemon and the only
+            # emitter of refresh_live_event for the hot/warm lanes. A
+            # transient Redis/DB error inside tick() (including the
+            # deliberate clear_claim+raise on publish failure) must NOT
+            # terminate the process — that would stop live polling for all
+            # football until systemd restarts us. Mirror the resource /
+            # rescue / final-sync planners which already wrap tick().
+            try:
+                await self.tick()
+            except Exception:
+                logger.exception(
+                    "Planner tick failed; continuing to next interval"
+                )
             if self.shutdown_requested:
                 break
             await asyncio.sleep(self.loop_interval_s)

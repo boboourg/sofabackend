@@ -6,6 +6,46 @@ import unittest
 from schema_inspector.queue.streams import STREAM_HYDRATE, STREAM_LIVE_DISCOVERY, ConsumerGroupInfo
 
 
+class LiveDiscoveryPlannerRunForeverGuardTests(unittest.IsolatedAsyncioTestCase):
+    """Regression (2026-05-29 audit): run_forever must survive a tick that
+    raises. This single-instance daemon feeds NEW live football events into
+    zset:live:hot; an unhandled tick exception used to kill the process and
+    silently stop live discovery until systemd restarted it."""
+
+    async def test_run_forever_survives_raising_tick(self) -> None:
+        import asyncio
+        from schema_inspector.services.live_discovery_planner import (
+            LiveDiscoveryPlannerDaemon,
+        )
+
+        daemon = LiveDiscoveryPlannerDaemon(queue=_FakeQueue(), targets=())
+        calls = {"n": 0}
+
+        async def _boom(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient redis/db blip")
+            daemon.request_shutdown()  # 2nd iteration: clean exit
+            return 0
+
+        daemon.tick = _boom  # type: ignore[assignment]
+
+        orig_sleep = asyncio.sleep
+
+        async def _no_sleep(_seconds):
+            return None
+
+        asyncio.sleep = _no_sleep  # type: ignore[assignment]
+        try:
+            # Without the guard the RuntimeError propagates out and fails
+            # the test; with it the loop logs, continues, then shuts down.
+            await daemon.run_forever()
+        finally:
+            asyncio.sleep = orig_sleep  # type: ignore[assignment]
+
+        self.assertEqual(calls["n"], 2)  # survived the raise, ran again
+
+
 class LiveDiscoveryPlannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_discovery_planner_publishes_due_targets_with_live_scope(self) -> None:
         from schema_inspector.services.live_discovery_planner import (

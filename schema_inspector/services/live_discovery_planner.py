@@ -56,7 +56,18 @@ class LiveDiscoveryPlannerDaemon:
 
     async def run_forever(self) -> None:
         while not self.shutdown_requested:
-            await self.tick()
+            # Guard the tick: single-instance daemon that feeds NEW live
+            # football events into zset:live:hot. tick() runs a DB query
+            # (_load_drifted_sports, which can raise TypeError on an
+            # unexpected payload) + Redis publishes; an unhandled error
+            # here would silently stop live discovery and degrade coverage
+            # (CLAUDE §5.1 #10). Mirror the other planners' guarded loop.
+            try:
+                await self.tick()
+            except Exception:
+                logger.exception(
+                    "Live discovery tick failed; continuing to next interval"
+                )
             if self.shutdown_requested:
                 break
             await asyncio.sleep(self.loop_interval_s)
