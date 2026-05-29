@@ -170,7 +170,17 @@ def _live_entry(
     lane_stream: str,
     event_id: int = 8001,
     message_id: str = "1-1",
+    live_dispatch_tier: str = "tier_3",
 ) -> StreamEntry:
+    # ``live_dispatch_tier`` defaults to ``tier_3`` (NON-marquee) on purpose:
+    # P0(c.3) added a high-value carve-out keyed on
+    # ``live_dispatch_tier == 'tier_1'`` — a marquee match is NEVER quarantined
+    # (see _is_high_value_tier_1 + QuarantineRescheduleAndCarveOutTests).
+    # Quarantine *eligibility* is lane-based (self.lane == 'tier_1'), so a
+    # non-marquee event on the tier_1 lane still exercises the full quarantine
+    # mechanism. These mechanism tests therefore use a tier_3-dispatch event so
+    # the carve-out does not mask the behaviour under test; tests that
+    # specifically assert the carve-out pass live_dispatch_tier='tier_1'.
     return StreamEntry(
         stream=lane_stream,
         message_id=message_id,
@@ -182,7 +192,7 @@ def _live_entry(
             "lane": "tier_1",
             "attempt": "1",
             "params_json": json.dumps(
-                {"hydration_mode": "live_delta", "live_dispatch_tier": "tier_1"}
+                {"hydration_mode": "live_delta", "live_dispatch_tier": live_dispatch_tier}
             ),
         },
     )
@@ -193,12 +203,18 @@ def _hydrate_root_entry(
     lane_stream: str,
     event_id: int = 8001,
     message_id: str = "1-1",
+    live_dispatch_tier: str = "tier_3",
 ) -> StreamEntry:
     """Mirrors a discovery_worker bootstrap publish — same shape as
     ``_live_entry`` but with ``job_type=hydrate_event_root`` and
     ``live_bootstrap`` in params, as discovery_worker.py emits for newly-
     discovered live events. Used by the P0(c.2) regression tests that
-    verify quarantine engages on this job_type too."""
+    verify quarantine engages on this job_type too.
+
+    ``live_dispatch_tier`` defaults to ``tier_3`` (non-marquee) for the same
+    reason as ``_live_entry`` — the P0(c.3) high-value carve-out would
+    otherwise exempt a ``tier_1`` event from quarantine and mask the
+    bootstrap bad-route protection these tests exercise."""
     return StreamEntry(
         stream=lane_stream,
         message_id=message_id,
@@ -212,7 +228,7 @@ def _hydrate_root_entry(
             "params_json": json.dumps(
                 {
                     "hydration_mode": "live_delta",
-                    "live_dispatch_tier": "tier_1",
+                    "live_dispatch_tier": live_dispatch_tier,
                     "live_bootstrap": True,
                 }
             ),
@@ -807,6 +823,108 @@ class QuarantineHydrateEventRootTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertGreater(store.is_quarantined(event_id=8001), 0)
+
+
+# ---------------------------------------------------------------------------
+# 6. P0(c.3) — reschedule-on-skip + high-value carve-out (2026-05-30)
+# ---------------------------------------------------------------------------
+class _RecordingLiveWorker:
+    """Minimal stand-in for LiveWorker that records reschedule calls."""
+    def __init__(self):
+        self.reschedule_calls = []
+    def reschedule_after_transient_failure(self, *, sport_slug, event_id, live_state_store=None, **kw):
+        self.reschedule_calls.append(
+            {"sport_slug": sport_slug, "event_id": event_id, "live_state_store": live_state_store}
+        )
+        return 1_700_000_000_000
+
+
+class _OrchestratorWithLiveState(_SpyOrchestrator):
+    """_SpyOrchestrator plus the live_worker + live_state_store attributes the
+    real PilotOrchestrator exposes (pilot_orchestrator.py:298,304), so the
+    worker's quarantine-skip reschedule path has something to reach through."""
+    def __init__(self, *, report=None, raise_on_run=None):
+        super().__init__(report=report, raise_on_run=raise_on_run)
+        self.live_worker = _RecordingLiveWorker()
+        self.live_state_store = object()  # sentinel; helper only passes it through
+
+
+class QuarantineRescheduleAndCarveOutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quarantine_skip_reschedules_via_orchestrator_live_state(self) -> None:
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        for _ in range(3):
+            store.record_failure(event_id=8001)
+        self.assertGreater(store.is_quarantined(event_id=8001), 0)
+
+        spy = _OrchestratorWithLiveState(report=_FakeReport(edges_pending=True))
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            # tier_3 (non-marquee) default → carve-out does NOT fire → the
+            # quarantine-skip path (and its reschedule) is exercised.
+            result = await worker.handle(_live_entry(lane_stream=STREAM_LIVE_TIER_1))
+
+        self.assertEqual(result, "quarantined_skip")
+        self.assertEqual(spy.calls, [])  # orchestrator.run_event never called
+        # The skip path advanced the schedule via the orchestrator's helper.
+        self.assertEqual(len(spy.live_worker.reschedule_calls), 1)
+        call = spy.live_worker.reschedule_calls[0]
+        self.assertEqual(call["event_id"], 8001)
+        self.assertEqual(call["sport_slug"], "football")
+        self.assertIs(call["live_state_store"], spy.live_state_store)
+
+    async def test_high_value_tier_1_event_is_never_quarantined(self) -> None:
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        # Pre-quarantine the event id (e.g. set by a prior non-marquee tick /
+        # stale marker). The carve-out must ignore it for a marquee match.
+        for _ in range(3):
+            store.record_failure(event_id=8001)
+        self.assertGreater(store.is_quarantined(event_id=8001), 0)
+
+        spy = _OrchestratorWithLiveState(report=_FakeReport(edges_pending=True))
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            # Explicit live_dispatch_tier=tier_1 → high-value carve-out fires.
+            result = await worker.handle(
+                _live_entry(lane_stream=STREAM_LIVE_TIER_1, live_dispatch_tier="tier_1")
+            )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(len(spy.calls), 1)  # orchestrator ran normally
+        self.assertEqual(spy.calls[0][2], "root_only")
+        # High-value path bypasses the skip block, so no reschedule fired.
+        self.assertEqual(spy.live_worker.reschedule_calls, [])
+
+    async def test_high_value_retryable_failure_does_not_count(self) -> None:
+        from schema_inspector.services.retry_policy import RetryableJobError
+
+        backend = _FakeRedisBackend()
+        queue = _RecordingQueue(backend=backend)
+        store = _build_store(backend)
+        spy = _OrchestratorWithLiveState(
+            raise_on_run=RetryableJobError("simulated proxy timeout")
+        )
+        with _patched_env(LIVE_TIER_1_ROOT_ONLY="1"):
+            worker = _build_worker(
+                backend=backend, queue=queue, orchestrator=spy, quarantine_store=store
+            )
+            for _ in range(5):
+                with self.assertRaises(RetryableJobError):
+                    await worker.handle(
+                        _live_entry(
+                            lane_stream=STREAM_LIVE_TIER_1, live_dispatch_tier="tier_1"
+                        )
+                    )
+        # Marquee event: counter never incremented, never quarantined.
+        self.assertEqual(int(backend.values.get("live:tier1_retry_failed:8001", "0")), 0)
+        self.assertEqual(store.is_quarantined(event_id=8001), 0)
 
 
 if __name__ == "__main__":

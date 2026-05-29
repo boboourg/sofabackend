@@ -177,7 +177,9 @@ class LiveTier1RetryQuarantineStore:
         except (TypeError, ValueError):
             return 0
 
-    def record_failure(self, *, event_id: int, now_ms: int | None = None) -> bool:
+    def record_failure(
+        self, *, event_id: int, now_ms: int | None = None, high_value: bool = False
+    ) -> bool:
         """Increment failure counter; trigger quarantine at threshold.
 
         Returns True iff a new (or extended) quarantine was set.
@@ -188,6 +190,21 @@ class LiveTier1RetryQuarantineStore:
         silence naturally decays away. On threshold, counter is cleared
         so the next quarantine cycle requires a fresh K failures.
         """
+        # P0(c.3) high-value carve-out: a marquee tier_1 event (detailId==1
+        # / user_count>=LIVE_TIER_1_MIN_USER_COUNT, as resolved upstream into
+        # the dispatch tier) must NEVER be quarantined. Short-circuit before
+        # touching the counter so its failures never accumulate toward the
+        # threshold. The transient failure is still surfaced + rescheduled by
+        # the worker/orchestrator; we only refuse to PARK the event. Logged
+        # at INFO so a marquee match flapping on a slow proxy is still
+        # visible in ops.
+        if high_value:
+            logger.info(
+                "Tier_1 quarantine carve-out: high-value event_id=%s failure "
+                "NOT counted (marquee match is never quarantined)",
+                event_id,
+            )
+            return False
         counter_key = LIVE_TIER_1_RETRY_FAILED_KEY.format(event_id=int(event_id))
         quarantine_key = LIVE_TIER_1_QUARANTINE_KEY.format(event_id=int(event_id))
         try:

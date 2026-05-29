@@ -235,6 +235,26 @@ class LiveWorkerService:
             and self.quarantine_store is not None
         )
 
+        # P0(c.3) high-value carve-out (2026-05-30 live audit, event
+        # 15728277): a marquee tier_1 match must NEVER be quarantined.
+        # The 2026-05-29 incident was a fully-covered top match that went
+        # 19 endpoints NO_FETCH and 404'd to the frontend after 3 transient
+        # proxy timeouts tripped the quarantine threshold — exactly like a
+        # niche event. ``resolve_live_dispatch_tier`` already returns
+        # ``tier_1`` for football detailId==1 (_TIER_1_DETAIL_IDS) OR
+        # tournament user_count>=LIVE_TIER_1_MIN_USER_COUNT (6500), and the
+        # planner / discovery worker persist that verdict as
+        # ``live_dispatch_tier`` in the job params — the ONLY marquee signal
+        # reliably present on the dominant planner refresh path (the
+        # LiveEventState hash stores dispatch_tier, not raw detail_id /
+        # user_count). We also honour raw detail_id / user_count when a
+        # caller threads them, so the carve-out stays correct if a future
+        # publisher includes them. ``is_high_value`` is threaded into BOTH
+        # the skip check (so a marquee event is never skipped) AND
+        # record_failure (so its counter never even trips) — see the
+        # ``high_value`` kwarg on LiveTier1RetryQuarantineStore.
+        is_high_value = is_quarantine_eligible and _is_high_value_tier_1(job)
+
         # P0(c) tier_1 retry quarantine check. Performed BEFORE inflight
         # claim so a quarantined event does not spend the in-flight lock
         # slot on this tick. Skip+ACK semantics: the worker returns
@@ -244,7 +264,7 @@ class LiveWorkerService:
         # event will see the cooldown expired (or not) and decide again.
         # Global-cap brake fails open if too many events are currently
         # quarantined.
-        if is_quarantine_eligible:
+        if is_quarantine_eligible and not is_high_value:
             now_ms = int(self.now_ms_factory())
             until_ms = self.quarantine_store.is_quarantined(event_id=event_id, now_ms=now_ms)
             if until_ms > now_ms:
@@ -287,6 +307,28 @@ class LiveWorkerService:
                         event_id,
                         job.job_type,
                         max(0, until_ms - now_ms),
+                    )
+                    # P0(c.3) reschedule-on-skip (2026-05-30 live audit): the
+                    # quarantine-skip return fires BEFORE the inflight claim and
+                    # BEFORE orchestrator.run_event — and run_event is the ONLY
+                    # path that reaches track_event, the ONLY place next_poll_at
+                    # (the hot/warm/cold zset score) advances. So a quarantined
+                    # live event keeps its old, already-due score: the planner
+                    # re-dispatches it every tick (a coalesced refresh storm) and
+                    # oldest_hot_score_age_seconds (= now - min(zset score)),
+                    # which gates the freshness SLO + the 24x7 exit criteria,
+                    # grows unbounded. Push the score forward to a backed-off
+                    # retry (reuses the shipped 2026-05-29 root-fetch helper) so
+                    # the metric reflects the real next-retry time and the event
+                    # self-heals when the cooldown expires. The worker does NOT
+                    # hold live_state_store directly; it reaches through the
+                    # orchestrator (ServiceApp.app), which owns both .live_worker
+                    # and .live_state_store. Fully defensive via getattr — a test
+                    # SimpleNamespace orchestrator without these attrs is a silent
+                    # no-op, and the helper itself never raises / never re-livens
+                    # a finalized event.
+                    self._reschedule_on_quarantine_skip(
+                        event_id=event_id, sport_slug=sport_slug
                     )
                     return "quarantined_skip"
 
@@ -343,7 +385,16 @@ class LiveWorkerService:
                     and _is_retryable_for_quarantine(exc)
                 ):
                     try:
-                        self.quarantine_store.record_failure(event_id=event_id)
+                        # high_value=True short-circuits the counter so a
+                        # marquee tier_1 match never accumulates toward the
+                        # quarantine threshold (P0(c.3) carve-out). The
+                        # transient failure is still surfaced via the re-raise
+                        # below, and the orchestrator's own
+                        # reschedule_after_transient_failure (root-fetch path)
+                        # keeps the schedule honest.
+                        self.quarantine_store.record_failure(
+                            event_id=event_id, high_value=is_high_value
+                        )
                     except Exception as q_exc:  # pragma: no cover - defensive
                         logger.debug(
                             "Quarantine record_failure failed for event_id=%s: %s",
@@ -417,6 +468,42 @@ class LiveWorkerService:
         ):
             self._maybe_enqueue_details(event_id=event_id, sport_slug=sport_slug, job=job, report=report)
         return "completed"
+
+    def _reschedule_on_quarantine_skip(self, *, event_id: int, sport_slug: str) -> None:
+        """Advance ``next_poll_at`` for an event we are about to skip via
+        quarantine, so its hot/warm/cold zset score does not stay frozen at
+        an already-due value and inflate ``oldest_hot_score_age``.
+
+        The worker does not hold ``live_state_store``; it reaches it through
+        the orchestrator (``ServiceApp.app`` == the PilotOrchestrator), which
+        owns both ``live_worker`` and ``live_state_store``. Entirely
+        best-effort and defensive: any missing attribute or raise is a silent
+        no-op so the quarantine-skip return is never disturbed. The helper
+        itself (LiveWorker.reschedule_after_transient_failure) is a no-op for
+        finalized events and for states not in the hot/warm/cold lanes.
+        """
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return
+        live_worker = getattr(orchestrator, "live_worker", None)
+        reschedule = getattr(live_worker, "reschedule_after_transient_failure", None)
+        if not callable(reschedule):
+            return
+        live_state_store = getattr(orchestrator, "live_state_store", None)
+        if live_state_store is None:
+            return
+        try:
+            reschedule(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                live_state_store=live_state_store,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break the skip path
+            logger.debug(
+                "Quarantine-skip reschedule failed for event_id=%s: %s",
+                event_id,
+                exc,
+            )
 
     def _maybe_enqueue_details(self, *, event_id: int, sport_slug: str, job, report) -> None:
         if self.details_throttle is not None:
@@ -703,6 +790,51 @@ def _job_to_stream_payload(job: JobEnvelope) -> dict[str, object]:
         "capability_hint": job.capability_hint or "",
         "idempotency_key": job.idempotency_key,
     }
+
+
+def _is_high_value_tier_1(job) -> bool:
+    """Return True iff ``job`` is a marquee tier_1 event that must never be
+    quarantined (P0(c.3) carve-out).
+
+    Signal priority:
+      1. ``params['live_dispatch_tier'] == 'tier_1'`` — the resolved verdict
+         the planner / discovery worker persist on EVERY live job. This is
+         the only marquee signal reliably present on the dominant planner
+         refresh path, and resolve_live_dispatch_tier already folds football
+         detailId==1 and tournament user_count>=LIVE_TIER_1_MIN_USER_COUNT
+         (6500) into it.
+      2. raw ``params['detail_id'] == 1`` — honoured if a future publisher
+         threads it (football top-tier coverage).
+      3. raw ``params['user_count'] >= LIVE_TIER_1_MIN_USER_COUNT`` — same.
+
+    Defensive: unknown / malformed params → False (event stays eligible for
+    quarantine, i.e. the safe default that preserves the bad-route brake).
+    """
+    params = getattr(job, "params", None)
+    if not isinstance(params, dict):
+        return False
+    tier = params.get("live_dispatch_tier")
+    if isinstance(tier, str) and tier.strip().lower() == "tier_1":
+        return True
+    detail_id = _coerce_int(params.get("detail_id"))
+    if detail_id == 1:
+        return True
+    user_count = _coerce_int(params.get("user_count"))
+    if user_count is not None:
+        from ..live_dispatch_policy import LIVE_TIER_1_MIN_USER_COUNT
+
+        if user_count >= LIVE_TIER_1_MIN_USER_COUNT:
+            return True
+    return False
+
+
+def _coerce_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_retryable_for_quarantine(exc: Exception) -> bool:

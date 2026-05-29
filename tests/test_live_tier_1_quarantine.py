@@ -41,6 +41,13 @@ class LiveTier1RetryQuarantineStoreTests(unittest.TestCase):
         store, _, clock = self._build()
         self.assertEqual(store.is_quarantined(event_id=42, now_ms=clock.now_ms()), 0)
 
+    def test_high_value_failures_never_quarantine(self) -> None:
+        store, backend, clock = self._build()
+        for _ in range(5):
+            self.assertFalse(store.record_failure(event_id=99, high_value=True))
+        self.assertEqual(store.is_quarantined(event_id=99, now_ms=clock.now_ms()), 0)
+        self.assertNotIn("live:tier1_retry_failed:99", backend.values)
+
     def test_threshold_triggers_quarantine_with_base_cooldown(self) -> None:
         store, backend, clock = self._build()
         self.assertFalse(store.record_failure(event_id=42))
