@@ -492,7 +492,7 @@ sofabackend/
 7. **Read cache (Redis)** для повторных API запросов.
 8. **Separate asyncpg pool для historical + live-first governor**. Сейчас общий pool.
 9. **Adaptive polling** для chronic-timeout events.
-10. **Capability-aware gating** перед fetch — убирает 70–90% мусорных 404 запросов (см. [parser-reliability-audit-2026-05-16 §6.1](docs/parser-reliability-audit-2026-05-16.md)).
+10. ~~**Capability-aware gating** перед fetch~~ **✅ В ОСНОВНОМ СДЕЛАНО (проверено 2026-05-29).** Root-payload флаги (`has_event_player_heat_map`, `has_xg`, `has_event_player_statistics`, `has_global_highlights`) извлекаются (`parsers/entities.py:170-186`), персистятся в `event`-таблицу и **уже гейтят** heatmap/shotmap/highlights/player-stats через `is True` в `match_center_policy.football_detail_endpoint_allowed:357-360` / `football_highlights_allowed:390` / `football_special_allowed`. Премиз §6.2 («флаги не подключены») устарел. Высоко-404 ручки `/managers` (70%) / `/official-tweets` (90%) / `/player-of-the-season` (89%) **root-флага НЕ имеют** → закрыты negative-cache + static-denylist, не capability-gating. **НЕ делать** Sportradar-matrix вариант (отвергнут `7c4ef67`, 69% false-pos). Остаток (низкий приоритет, нужна confusion-matrix `flag=false→404`): полярность `is True`→`is False` для покрытия событий с `flag=None`-но-данные-есть.
 
 ### Эпоха 3: Scale (3–6 месяцев)
 - Read replicas Postgres.
