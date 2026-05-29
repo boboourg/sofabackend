@@ -518,10 +518,20 @@ class PilotOrchestrator:
         sport_slug: str,
         hydration_mode: str = "full",
         scope: str | None = None,
+        fetch_timeout_seconds: float | None = None,
     ) -> PilotRunReport:
         self._pending_capability_records.clear()
         if self.fetch_executor is None:
             raise RuntimeError("fetch_executor is required for run_event")
+        # Phase1-A2 (2026-05-29): honour a per-tier fetch-timeout override on
+        # the direct path (worker wired with a bare PilotOrchestrator, e.g.
+        # the live e2e harness). The HybridApp path instead injects the
+        # override at prefetch-executor construction and does NOT pass this
+        # kwarg, so this is a no-op there. ``None`` leaves the executor as-is.
+        if fetch_timeout_seconds is not None:
+            setter = getattr(self.fetch_executor, "set_fetch_timeout_override", None)
+            if callable(setter):
+                setter(fetch_timeout_seconds)
 
         # Task 2 Phase B (2026-05-20): scope marker. When the
         # FinalSyncPlannerDaemon enqueues a final-sync run we receive

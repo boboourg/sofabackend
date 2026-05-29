@@ -407,9 +407,20 @@ class LiveWorkerServiceTests(unittest.IsolatedAsyncioTestCase):
 class _FakeOrchestrator:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str | None, str]] = []
+        # Phase1-A2: record the per-tier fetch timeout the worker passes.
+        self.fetch_timeouts: list[float | None] = []
 
-    async def run_event(self, *, event_id: int, sport_slug: str | None, hydration_mode: str = "full"):
+    async def run_event(
+        self,
+        *,
+        event_id: int,
+        sport_slug: str | None,
+        hydration_mode: str = "full",
+        fetch_timeout_seconds: float | None = None,
+        **_kwargs,
+    ):
         self.calls.append((event_id, sport_slug, hydration_mode))
+        self.fetch_timeouts.append(fetch_timeout_seconds)
         return {"event_id": event_id}
 
 

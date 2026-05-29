@@ -9,6 +9,7 @@ import time
 
 from ..jobs.envelope import JobEnvelope
 from ..jobs.types import JOB_REFRESH_LIVE_EVENT, JOB_REFRESH_LIVE_EVENT_DETAILS
+from ..live_dispatch_policy import fetch_timeout_for_dispatch_tier
 from ..live_hydration_mode import resolve_live_hydration_mode
 from ..queue.streams import (
     GROUP_LIVE_HOT,
@@ -127,6 +128,13 @@ class LiveWorkerService:
         self.live_state_repository = live_state_repository
         self.database = database
         self.lane = normalized_lane
+        # Phase1-A2 (2026-05-29): per-tier HTTP fetch timeout for this lane's
+        # run_event calls. tier_1/hot get the most headroom (top live matches
+        # must survive proxy-latency bursts to hydrate their match-center —
+        # the 2026-05-29 event-15728277 regression); tier_3 fails fast so a
+        # dead niche fetch does not pin a proxy. None for unrecognised lanes
+        # → caller keeps the global SOFASCORE_FETCH_TIMEOUT_SECONDS default.
+        self._fetch_timeout_seconds = fetch_timeout_for_dispatch_tier(normalized_lane)
         self.now_ms_factory = now_ms_factory or (lambda: int(time.time() * 1000))
         self.default_sport_slug = default_sport_slug
         stream, group = _lane_stream_group(normalized_lane)
@@ -313,6 +321,8 @@ class LiveWorkerService:
                     event_id=event_id,
                     sport_slug=sport_slug,
                     hydration_mode=effective_hydration_mode,
+                    # Phase1-A2: per-tier fetch timeout for this lane.
+                    fetch_timeout_seconds=self._fetch_timeout_seconds,
                 )
             except Exception as exc:
                 # P0(c) quarantine bookkeeping: only count

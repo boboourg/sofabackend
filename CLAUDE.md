@@ -394,12 +394,12 @@ sofabackend/
 | # | Проблема | Где | Impact |
 |---|---|---|---|
 | 1 | `event_market_choice` — **28.7 миллиардов seq_tup_read** на 136MB таблице. Нет нужного индекса для access pattern. | [storage/normalize_repository.py](schema_inspector/storage/normalize_repository.py) — find_one/find_many on choice | API queries в odds-секции медленные; planner может затормозиться. |
-| 2 | **HydrateWorker нет in-flight lock**. Два `hydrate-worker@N` могут параллельно обрабатывать один `event_id`. | [workers/hydrate_worker.py:102-191](schema_inspector/workers/hydrate_worker.py) | Race condition: overlapping UPSERTs, wasted proxy budget. |
+| 2 | ~~**HydrateWorker нет in-flight lock**~~ **✅ РЕШЕНО (`d7ab82a`, 2026-05-20).** `HydrateInFlightStore` (`queue/live_inflight.py:146`, `hydrate:inflight:{id}` SETNX+Lua, TTL 300s), wired `service_app.py:1290`, claim/release `hydrate_worker.py:229-303`. Historical-hydrate намеренно БЕЗ него. | [workers/hydrate_worker.py:229-303](schema_inspector/workers/hydrate_worker.py) | (исторический контекст: race overlapping UPSERTs — закрыт) |
 | 3 | `event.custom_id` — **нет индекса**, используется в `IN-list` reconcile path. | [local_api_server.py:1170-1171](schema_inspector/local_api_server.py:1170), [event_list_repository.py:249](schema_inspector/event_list_repository.py:249) | Seq scan на event (4.5M rows) при каждом `/scheduled-events/{date}` если есть custom_id match. |
 | 4 | **Hydrate lock leak на crash** в `App.run_event`. Нет try/finally вокруг acquire→release. | [cli.py — поиск `acquire_hydrate_lock`](schema_inspector/cli.py) (был на line 411-473 в audit 2026-05-20) | 60 сек blocked live polling после оператор-triggered crash. |
 | 5 | `/ops/snapshots/summary?detail=true` — 5 `COUNT(DISTINCT)` на `api_payload_snapshot` (148GB). | [local_api_server.py:4106-4119](schema_inspector/local_api_server.py:4106) | Гарантированный таймаут. Нужно gate за operator role. |
 | 6 | **OFFSET pagination на event-table**. `_FETCH_QUERY_SEASON_LAST/NEXT/TEAM/PLAYER`. | [scheduled_events_synthesizer.py:241-407](schema_inspector/scheduled_events_synthesizer.py:241) | Page 10 → 300 rows materialized. Player Messi page 20 → 600 rows + 15 JOINs. |
-| 7 | `release_hydrate_lock` — GET→CHECK→DELETE через 3 отдельных Redis-вызова, не atomic. | [live_bootstrap.py:86-136](schema_inspector/live_bootstrap.py:86) | Может удалить чужой lock (race). Нужно Lua скрипт (есть pattern в `live_inflight.py:18`). |
+| 7 | ~~`release_hydrate_lock` не atomic~~ **✅ РЕШЕНО (`d7ab82a`/`749475e`, 2026-05-20).** Lua GET+DEL-if-owner (`live_bootstrap.py:34-119`) + try/finally release на каждом exit-пути `run_event`. | [live_bootstrap.py:34-119](schema_inspector/live_bootstrap.py:34) | (исторический контекст: чужой-lock race — закрыт) |
 | 8 | `LiveEventState.upsert + move_lane` — HSET → ZREM × 3 → ZADD = 5 Redis ops, не atomic. | [queue/live_state.py:59-89](schema_inspector/queue/live_state.py:59) | Planner может увидеть event в обеих lanes или ни в одной. |
 | 9 | **`/event/h2h` parser — 11.5% silent drops** (13 из 113 events за 2h). | [parsers/families/event_h2h.py](schema_inspector/parsers/families/event_h2h.py) | Реальный parser bug на edge-case payload shape. |
 | 10 | **Live-discovery — single instance + один большой persist**. Под evening peak (Champions League) может зависнуть. | [services/live_discovery_planner.py](schema_inspector/services/live_discovery_planner.py) + [workers/discovery_worker.py](schema_inspector/workers/discovery_worker.py) | Если worker stuck — НОВЫЕ events не попадают в `zset:live:hot`, live coverage padает. См. ARCHITECTURE_AUDIT §B.1. |
@@ -484,7 +484,7 @@ sofabackend/
 
 Цели:
 1. **Live freshness < 60s sustained 7 дней.** Сейчас `oldest_hot_score_age` ~97s.
-2. **HydrateWorker in-flight lock** (Finding #2 в §5.1). ~50–100 LOC.
+2. ~~**HydrateWorker in-flight lock**~~ ✅ **СДЕЛАНО** (`d7ab82a`, 2026-05-20) — см. §5.1 #2.
 3. **`/ops/snapshots/summary?detail=true` gate** (Finding #5). ~10 LOC.
 4. **Critical индексы**: `idx_event_custom_id`, `idx_event_live_window`, `idx_etl_job_run_*` (Finding #1, #3).
 5. **HTTPS + auth + rate-limit** для публичного API. Сейчас на `127.0.0.1:8000` за SSH-туннелем.

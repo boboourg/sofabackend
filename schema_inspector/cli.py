@@ -512,7 +512,12 @@ class HybridApp:
         sport_slug: str | None,
         hydration_mode: str = "full",
         scope: str | None = None,
+        fetch_timeout_seconds: float | None = None,
     ):
+        # Phase1-A2 (2026-05-29): ``fetch_timeout_seconds`` lets the caller
+        # (live tier worker, per its lane) pin a per-tier HTTP fetch timeout
+        # for the prefetch stage. None → prefetch uses the global
+        # SOFASCORE_FETCH_TIMEOUT_SECONDS default (hydrate / CLI one-shot).
         # Task 2 Phase B (2026-05-20): the ``scope`` kwarg is propagated
         # from the hydrate worker (set to ``"final_sync"`` by the
         # FinalSyncPlannerDaemon) all the way down to the inner
@@ -553,6 +558,7 @@ class HybridApp:
                     event_id=event_id,
                     sport_slug=str(resolved_sport_slug or "football"),
                     hydration_mode=effective_hydration_mode,
+                    fetch_timeout_seconds=fetch_timeout_seconds,
                 )
             except _PrefetchFailedError as wrap:
                 # P3 audit-trail fix: persist whatever request_log records the
@@ -732,6 +738,7 @@ class HybridApp:
         event_id: int,
         sport_slug: str,
         hydration_mode: str,
+        fetch_timeout_seconds: float | None = None,
     ) -> PrefetchedRun:
         initial_capability_rollup = dict(self.capability_rollup)
         snapshot_store = HybridSnapshotStore(self.raw_repository, None)
@@ -742,6 +749,8 @@ class HybridApp:
             snapshot_store=snapshot_store,
             write_mode="deferred",
             freshness_store=self.freshness_store,
+            # Phase1-A2: per-tier fetch timeout from the live worker's lane.
+            fetch_timeout_seconds=fetch_timeout_seconds,
         )
         season_widget_gate = None
         event_endpoint_gate = None
@@ -857,7 +866,22 @@ class HybridApp:
             )
 
     async def _commit_prefetched_run(self, prefetched_run: PrefetchedRun) -> PrefetchedRun:
-        async with self.database.transaction() as connection:
+        # Phase1-B3 (2026-05-29 lock-contention fix): use an AUTOCOMMIT
+        # connection, not a single wrapping transaction. The previous
+        # ``database.transaction()`` held row locks on api_snapshot_head /
+        # api_payload_snapshot for the WHOLE batch of an event's snapshots
+        # (root + all edges), so two processors touching shared rows (or
+        # the same event) blocked each other up to the 5 s lock_timeout
+        # (sqlstate 55P03) — the dominant lock-contention source in the
+        # 2026-05-29 review (CLAUDE §5.1 #11). These writes are independent
+        # and idempotent (insert_request_log; insert_payload_snapshot_if_
+        # missing; upsert_snapshot_head ON CONFLICT), and partial-batch
+        # commit is already tolerated (_commit_request_logs_only). Running
+        # each statement in asyncpg autocommit holds each row lock for ~ms
+        # instead of for the full event commit, collapsing the contention
+        # window. (Stage-3 _persist_prefetched_run STAYS a single
+        # transaction — normalized rows DO need cross-table atomicity.)
+        async with self.database.connection() as connection:
             raw_write_executor = FetchExecutor(
                 transport=self.transport,
                 raw_repository=self.raw_repository,

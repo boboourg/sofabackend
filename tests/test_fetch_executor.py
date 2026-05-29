@@ -677,5 +677,75 @@ class TransportAttemptLatencyFieldTests(unittest.TestCase):
         self.assertEqual(attempt.latency_ms, 10042)
 
 
+class FetchExecutorTimeoutOverrideTests(unittest.IsolatedAsyncioTestCase):
+    """Phase1-A2 (2026-05-29): a per-executor ``fetch_timeout_seconds``
+    overrides the task's own timeout so the live lane can apply a per-tier
+    timeout (tier_1 longer to clear proxy bursts, tier_3 shorter) without
+    threading a value into every FetchTask."""
+
+    @staticmethod
+    def _ok_transport() -> "_FakeTransport":
+        return _FakeTransport(
+            TransportResult(
+                resolved_url="https://www.sofascore.com/api/v1/event/1",
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body_bytes=b'{"event":{"id":1}}',
+                attempts=(TransportAttempt(1, "proxy_1", 200, None, None, "10.0.0.1:1"),),
+                final_proxy_name="proxy_1",
+                final_proxy_address="10.0.0.1:1",
+                challenge_reason=None,
+            )
+        )
+
+    @staticmethod
+    def _task(timeout_seconds: float) -> FetchTask:
+        return FetchTask(
+            trace_id="t",
+            job_id="j",
+            sport_slug="football",
+            endpoint_pattern="/api/v1/event/{event_id}",
+            source_url="https://www.sofascore.com/api/v1/event/1",
+            timeout_profile="pilot",
+            timeout_seconds=timeout_seconds,
+            context_entity_type="event",
+            context_entity_id=1,
+            fetch_reason="hydrate_event_root",
+        )
+
+    async def test_override_replaces_task_timeout(self) -> None:
+        transport = self._ok_transport()
+        executor = FetchExecutor(
+            transport=transport,
+            raw_repository=_FakeRawRepository(),
+            sql_executor=object(),
+            fetch_timeout_seconds=25.0,
+        )
+        await executor.execute(self._task(timeout_seconds=10.0))
+        # transport.fetch received the override (25.0), not the task's 10.0.
+        self.assertEqual(transport.calls[0][2], 25.0)
+
+    async def test_no_override_keeps_task_timeout(self) -> None:
+        transport = self._ok_transport()
+        executor = FetchExecutor(
+            transport=transport,
+            raw_repository=_FakeRawRepository(),
+            sql_executor=object(),
+        )
+        await executor.execute(self._task(timeout_seconds=10.0))
+        self.assertEqual(transport.calls[0][2], 10.0)
+
+    async def test_zero_or_negative_override_ignored(self) -> None:
+        transport = self._ok_transport()
+        executor = FetchExecutor(
+            transport=transport,
+            raw_repository=_FakeRawRepository(),
+            sql_executor=object(),
+            fetch_timeout_seconds=0,
+        )
+        await executor.execute(self._task(timeout_seconds=10.0))
+        self.assertEqual(transport.calls[0][2], 10.0)
+
+
 if __name__ == "__main__":
     unittest.main()

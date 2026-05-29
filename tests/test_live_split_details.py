@@ -136,7 +136,7 @@ class _OrchestratorReturningDetailsPending:
         self.calls: list[tuple[int, str, str]] = []
         self.finalized = finalized
 
-    async def run_event(self, *, event_id, sport_slug, hydration_mode):
+    async def run_event(self, *, event_id, sport_slug, hydration_mode, fetch_timeout_seconds=None, **kwargs):
         self.calls.append((event_id, sport_slug, hydration_mode))
         return _FakeReport(
             fetch_outcomes=(),

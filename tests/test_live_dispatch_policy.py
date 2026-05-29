@@ -116,5 +116,76 @@ class LeaseMsForDispatchTierTests(unittest.TestCase):
             self.assertEqual(module.LIVE_DISPATCH_LEASE_TIER_1_MS, 90_000)
 
 
+class FetchTimeoutForDispatchTierTests(unittest.TestCase):
+    """Phase1-A2 (2026-05-29): per-tier HTTP fetch timeout. Top live matches
+    (tier_1, detailId=1) lost their match-center on 2026-05-29 (event
+    15728277) because a proxy-latency burst blew the 10s global timeout on
+    the root /event fetch; per-tier timeouts give tier_1 headroom while
+    letting tier_3 fail fast."""
+
+    def tearDown(self) -> None:
+        for var in (
+            "SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_1",
+            "SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_2",
+            "SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_3",
+        ):
+            os.environ.pop(var, None)
+        importlib.reload(live_dispatch_policy)
+
+    def test_defaults_give_tier_1_more_headroom_than_tier_3(self) -> None:
+        for var in (
+            "SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_1",
+            "SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_2",
+            "SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_3",
+        ):
+            os.environ.pop(var, None)
+        module = importlib.reload(live_dispatch_policy)
+        self.assertEqual(module.fetch_timeout_for_dispatch_tier("tier_1"), 25.0)
+        self.assertEqual(module.fetch_timeout_for_dispatch_tier("tier_2"), 20.0)
+        self.assertEqual(module.fetch_timeout_for_dispatch_tier("tier_3"), 12.0)
+        # tier_1 must clear the proxy-latency bursts that broke the 10s/20s
+        # global timeout; tier_3 must fail fast so it cannot pin a proxy.
+        self.assertGreater(
+            module.fetch_timeout_for_dispatch_tier("tier_1"),
+            module.fetch_timeout_for_dispatch_tier("tier_3"),
+        )
+
+    def test_lane_strings_map_through_normalize(self) -> None:
+        # The live worker passes self.lane (hot/warm/tier_x). normalize maps
+        # hot→tier_1, warm→tier_2, cold/unknown→tier_3.
+        module = importlib.reload(live_dispatch_policy)
+        self.assertEqual(module.fetch_timeout_for_dispatch_tier("hot"), 25.0)
+        self.assertEqual(module.fetch_timeout_for_dispatch_tier("warm"), 20.0)
+        self.assertEqual(module.fetch_timeout_for_dispatch_tier("cold"), 12.0)
+
+    def test_unrecognised_tier_returns_default_for_non_tier_callers(self) -> None:
+        # hydrate / CLI one-shot pass no tier → must fall back to the global
+        # default (None here) so they keep SOFASCORE_FETCH_TIMEOUT_SECONDS.
+        module = importlib.reload(live_dispatch_policy)
+        # normalize_live_dispatch_tier maps everything non-empty to a tier,
+        # so the "no override" contract is exercised via default_seconds:
+        self.assertEqual(
+            module.fetch_timeout_for_dispatch_tier(None, default_seconds=None), None
+        )
+
+    def test_env_override_applies(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_1": "30"},
+            clear=False,
+        ):
+            module = importlib.reload(live_dispatch_policy)
+            self.assertEqual(module.fetch_timeout_for_dispatch_tier("tier_1"), 30.0)
+
+    def test_invalid_env_falls_back_to_default(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"SOFASCORE_FETCH_TIMEOUT_SECONDS_TIER_3": "not-a-number"},
+            clear=False,
+        ):
+            module = importlib.reload(live_dispatch_policy)
+            self.assertEqual(module.LIVE_TIER_3_FETCH_TIMEOUT_SECONDS, 12.0)
+
+
 if __name__ == "__main__":
     unittest.main()

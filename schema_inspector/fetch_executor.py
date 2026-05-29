@@ -47,6 +47,7 @@ class FetchExecutor:
         freshness_store=None,
         head_probe_recent_200_window_days: int = 30,
         recent_200_lookup=None,
+        fetch_timeout_seconds: float | None = None,
     ) -> None:
         self.transport = transport
         self.raw_repository = raw_repository
@@ -65,11 +66,31 @@ class FetchExecutor:
         # safety net (HEAD result is taken at face value — only for
         # tests where DB access is undesired).
         self._recent_200_lookup = recent_200_lookup
+        # Phase1-A2 (2026-05-29): optional per-executor fetch-timeout override.
+        # When set (>0), it replaces FetchTask.timeout_seconds at execute()
+        # time so the live lane can apply a per-tier timeout (tier_1 longer,
+        # tier_3 shorter) without threading a value into every FetchTask.
+        # None → tasks keep their own timeout (the global env default).
+        self._fetch_timeout_seconds = (
+            float(fetch_timeout_seconds)
+            if fetch_timeout_seconds is not None and float(fetch_timeout_seconds) > 0
+            else None
+        )
         self._prefetched_records: list[PrefetchedFetchRecord] = []
 
     @property
     def prefetched_records(self) -> tuple[PrefetchedFetchRecord, ...]:
         return tuple(self._prefetched_records)
+
+    def set_fetch_timeout_override(self, seconds: float | None) -> None:
+        """Phase1-A2: set/clear the per-tier fetch-timeout override after
+        construction. Used by the direct ``PilotOrchestrator.run_event`` path
+        (e.g. the live tier worker wired with a bare orchestrator). The
+        HybridApp prefetch path instead injects it at construction. ``None``
+        or non-positive clears the override (tasks keep their own timeout)."""
+        self._fetch_timeout_seconds = (
+            float(seconds) if seconds is not None and float(seconds) > 0 else None
+        )
 
     async def commit_prefetched_record(self, record: PrefetchedFetchRecord) -> FetchOutcomeEnvelope:
         if self.sql_executor is None:
@@ -89,6 +110,12 @@ class FetchExecutor:
         return replace(record.outcome, snapshot_id=snapshot_id)
 
     async def execute(self, task: FetchTask) -> FetchOutcomeEnvelope:
+        # Phase1-A2 (2026-05-29): apply the per-executor fetch-timeout
+        # override (live per-tier timeout) before anything else, so both the
+        # HEAD probe (which derives its timeout from task.timeout_seconds) and
+        # the body GET use the tier-appropriate value. No-op when unset.
+        if self._fetch_timeout_seconds is not None and task.timeout_seconds != self._fetch_timeout_seconds:
+            task = replace(task, timeout_seconds=self._fetch_timeout_seconds)
         # P0.2 — HEAD probe gating. Endpoints flagged with
         # ``prefer_head_probe=True`` issue a cheap HEAD first; if HEAD
         # is 4xx we skip the body GET (saving up to ~1.9 MB / call on

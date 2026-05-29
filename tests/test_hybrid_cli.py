@@ -1528,7 +1528,7 @@ class HybridCliTests(unittest.IsolatedAsyncioTestCase):
         prefetched_run = object()
         committed_run = object()
 
-        async def _fake_prefetch(*, event_id: int, sport_slug: str, hydration_mode: str):
+        async def _fake_prefetch(*, event_id: int, sport_slug: str, hydration_mode: str, fetch_timeout_seconds=None, **kwargs):
             phase_calls.append(("prefetch", event_id, sport_slug, hydration_mode))
             return prefetched_run
 

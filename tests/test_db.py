@@ -98,6 +98,47 @@ class DatabaseConfigTests(unittest.TestCase):
 
         self.assertEqual(config.application_name, "schema_inspector.cli-worker-live-hot")
 
+    # Phase1-B4 (2026-05-29): bound idle-in-transaction sessions so a hung
+    # worker cannot hold row locks indefinitely (the 5s lock_timeout cascade
+    # in the 2026-05-29 review). Applied as an asyncpg server_setting.
+    def test_idle_in_transaction_timeout_default_60s_via_loader(self) -> None:
+        config = load_database_config(env={"SOFASCORE_DATABASE_URL": "postgresql://localhost/example"})
+        self.assertEqual(config.idle_in_transaction_timeout_ms, 60000)
+
+    def test_idle_in_transaction_timeout_env_override(self) -> None:
+        config = load_database_config(
+            env={
+                "SOFASCORE_DATABASE_URL": "postgresql://localhost/example",
+                "SOFASCORE_PG_IDLE_IN_TX_TIMEOUT_MS": "30000",
+            }
+        )
+        self.assertEqual(config.idle_in_transaction_timeout_ms, 30000)
+
+    def test_connect_kwargs_includes_idle_in_transaction_server_setting_when_set(self) -> None:
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/x",
+            application_name="worker-live-tier-1",
+            idle_in_transaction_timeout_ms=60000,
+        )
+        kwargs = config.connect_kwargs(platform="linux", socket_dir="/var/run/postgresql")
+        self.assertEqual(
+            kwargs["server_settings"],
+            {
+                "application_name": "worker-live-tier-1",
+                "idle_in_transaction_session_timeout": "60000",
+            },
+        )
+
+    def test_connect_kwargs_omits_idle_in_transaction_when_disabled(self) -> None:
+        # Default DatabaseConfig (idle_in_transaction_timeout_ms=0) must NOT
+        # emit the server_setting — keeps the bare-config behaviour unchanged.
+        config = DatabaseConfig(
+            dsn="postgresql://localhost:5432/x",
+            application_name="local_api",
+        )
+        kwargs = config.connect_kwargs(platform="linux", socket_dir="/var/run/postgresql")
+        self.assertNotIn("idle_in_transaction_session_timeout", kwargs["server_settings"])
+
     def test_connect_kwargs_prefer_unix_socket_for_local_linux_dsn(self) -> None:
         config = DatabaseConfig(
             dsn="postgresql://localhost:5432/sofascore_schema_inspector",

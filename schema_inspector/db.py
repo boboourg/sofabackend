@@ -88,6 +88,21 @@ class DatabaseConfig:
     # ``SOFASCORE_PG_STATEMENT_CACHE_SIZE`` if a future workload proves
     # the cache pays off.
     statement_cache_size: int = 0
+    # Phase1-B4 (2026-05-29 lock-contention hardening): bound IDLE-in-
+    # transaction sessions (a worker that ran BEGIN + a statement then
+    # stopped sending commands — e.g. hung mid-flight) so it cannot hold
+    # row locks indefinitely. Postgres terminates such a session after
+    # this many ms (0 = disabled, Postgres default). Applied as an asyncpg
+    # server_setting; prod DSN is a DIRECT connection (localhost:5432, not
+    # pgbouncer), so startup parameters are honoured per-session. Chosen
+    # generous (60s default) — far above any legitimate inter-statement gap
+    # in the no-network commit/persist transactions (which never do network
+    # I/O inside a txn), but bounds a genuinely stuck transaction that would
+    # otherwise wedge the 5s lock_timeout cascade. NOTE: this does NOT kill
+    # long-RUNNING active transactions (those are statement_timeout's job) —
+    # only ones sitting idle between commands. Override via
+    # SOFASCORE_PG_IDLE_IN_TX_TIMEOUT_MS.
+    idle_in_transaction_timeout_ms: int = 0
 
     def connect_kwargs(
         self,
@@ -112,8 +127,14 @@ class DatabaseConfig:
                 parsed = urlsplit(self.dsn)
                 if parsed.port is not None:
                     kwargs["port"] = parsed.port
+        server_settings: dict[str, str] = {}
         if self.application_name:
-            kwargs["server_settings"] = {"application_name": self.application_name}
+            server_settings["application_name"] = self.application_name
+        if self.idle_in_transaction_timeout_ms and self.idle_in_transaction_timeout_ms > 0:
+            # Postgres accepts an integer (milliseconds) for this GUC.
+            server_settings["idle_in_transaction_session_timeout"] = str(int(self.idle_in_transaction_timeout_ms))
+        if server_settings:
+            kwargs["server_settings"] = server_settings
         return kwargs
 
     def pool_kwargs(
@@ -225,6 +246,8 @@ def load_database_config(
         # DuplicatePreparedStatementError on rolling restarts. Override
         # only if profiling proves the cache earns its ~0.5ms back.
         statement_cache_size=_env_int(env, "SOFASCORE_PG_STATEMENT_CACHE_SIZE", 0),
+        # Phase1-B4 (2026-05-29): default 60s idle-in-transaction bound.
+        idle_in_transaction_timeout_ms=_env_int(env, "SOFASCORE_PG_IDLE_IN_TX_TIMEOUT_MS", 60000),
         application_name=application_name
         or env.get("SOFASCORE_PG_APPLICATION_NAME")
         or _default_application_name(),

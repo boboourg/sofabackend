@@ -168,7 +168,7 @@ class _SpyOrchestrator:
         self.calls: list[tuple[int, str, str]] = []
         self._report = report
 
-    async def run_event(self, *, event_id, sport_slug, hydration_mode):
+    async def run_event(self, *, event_id, sport_slug, hydration_mode, fetch_timeout_seconds=None, **kwargs):
         self.calls.append((event_id, sport_slug, hydration_mode))
         return self._report
 
@@ -976,8 +976,8 @@ class HybridAppRootOnlyPropagationTests(unittest.IsolatedAsyncioTestCase):
             total_payload_size_bytes = 1
             endpoint_count = 1
 
-        async def _prefetch_event_run(*, event_id, sport_slug, hydration_mode):
-            del event_id, sport_slug
+        async def _prefetch_event_run(*, event_id, sport_slug, hydration_mode, fetch_timeout_seconds=None, **kwargs):
+            del event_id, sport_slug, fetch_timeout_seconds, kwargs
             prefetch_called_with.append(hydration_mode)
             return _StubPrefetchedRun()
 

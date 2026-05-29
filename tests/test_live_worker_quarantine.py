@@ -158,7 +158,7 @@ class _SpyOrchestrator:
         self._report = report or _FakeReport()
         self._raise = raise_on_run
 
-    async def run_event(self, *, event_id, sport_slug, hydration_mode):
+    async def run_event(self, *, event_id, sport_slug, hydration_mode, fetch_timeout_seconds=None, **kwargs):
         self.calls.append((event_id, sport_slug, hydration_mode))
         if self._raise is not None:
             raise self._raise
