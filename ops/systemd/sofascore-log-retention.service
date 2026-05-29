@@ -1,0 +1,18 @@
+[Unit]
+Description=Sofascore audit-log retention (bound unbounded diagnostic log tables)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+ExecStart=/opt/sofascore/scripts/ops/log_table_retention.sh
+# Batched deletes; generous ceiling. Daily timer self-heals a missed run.
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily retention sweep of Sofascore audit-log tables
+
+[Timer]
+# 04:50 local — just after the capability-probe timer (04:30), off-peak.
+# Keeps event_endpoint_availability_log / endpoint_capability_observation /
+# api_request_log bounded to LOG_RETENTION_DAYS (default 2) so they can't
+# regrow to the 22 GB / 12 GB / 7.4 GB that drove disk to 99%.
+OnCalendar=*-*-* 04:50:00
+Persistent=true
+AccuracySec=5min
+Unit=sofascore-log-retention.service
+
+[Install]
+WantedBy=timers.target
