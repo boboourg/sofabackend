@@ -340,6 +340,12 @@ class NormalizeRepository:
             )
         ]
         if sport_rows:
+            # Phase2-B2 (2026-05-29): deterministic row-lock order on this
+            # SHARED dimension so two concurrent event hydrates acquire the
+            # same rows in the same order → no ABBA deadlock / lock_timeout
+            # (sqlstate 55P03/40P01). Matches the manager/team/player sites
+            # already sorted below; closes the DO NOTHING parent-pass gap.
+            sport_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -363,6 +369,8 @@ class NormalizeRepository:
             )
         ]
         if country_rows:
+            # Phase2-B2: deterministic row-lock order (key = alpha2).
+            country_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -409,6 +417,8 @@ class NormalizeRepository:
                 )
             )
         if category_rows:
+            # Phase2-B2: deterministic row-lock order (key = id).
+            category_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -464,6 +474,9 @@ class NormalizeRepository:
                 )
             )
         if unique_tournament_rows:
+            # Phase2-B2: deterministic row-lock order (key = id). High
+            # contention — every event in a league writes this same UT row.
+            unique_tournament_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -483,6 +496,8 @@ class NormalizeRepository:
             if row.get("id") is not None and row.get("id") not in self._known_minimal_entities["season"]
         ]
         if season_rows:
+            # Phase2-B2: deterministic row-lock order (key = id).
+            season_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -529,6 +544,8 @@ class NormalizeRepository:
                 )
             )
         if tournament_rows:
+            # Phase2-B2: deterministic row-lock order (key = id).
+            tournament_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """
@@ -563,6 +580,8 @@ class NormalizeRepository:
             )
         ]
         if venue_rows:
+            # Phase2-B2: deterministic row-lock order (key = id).
+            venue_rows.sort(key=lambda row: row[0])
             await _executemany(
                 executor,
                 """

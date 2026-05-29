@@ -2186,5 +2186,41 @@ class IdempotencyGuardBehaviouralTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class NormalizeRepositoryParentPassLockOrderingTests(unittest.IsolatedAsyncioTestCase):
+    """Phase2-B2 (2026-05-29): shared-dimension parent-pass writes must emit
+    rows in deterministic (ascending PK) order so two concurrent event
+    hydrates acquire the same rows in the same order → no ABBA deadlock /
+    lock_timeout (sqlstate 55P03/40P01) on the hot sport/season/category/UT
+    dimension rows."""
+
+    async def test_parent_pass_sorts_dimension_rows_by_pk(self) -> None:
+        repo = NormalizeRepository()
+        executor = _FakeExecutor()
+        # Deliberately out-of-order ids for two FK-free dimensions.
+        entity_upserts = {
+            "sport": (
+                {"id": 3, "slug": "s3", "name": "S3"},
+                {"id": 1, "slug": "s1", "name": "S1"},
+                {"id": 2, "slug": "s2", "name": "S2"},
+            ),
+            "season": (
+                {"id": 30, "name": "30", "year": "2030", "editor": False},
+                {"id": 10, "name": "10", "year": "2010", "editor": False},
+                {"id": 20, "name": "20", "year": "2020", "editor": False},
+            ),
+        }
+
+        await repo._upsert_minimal_entities(executor, entity_upserts)
+
+        sport_rows = next(
+            rows for sql, rows in executor.executemany_calls if "INSERT INTO sport" in sql
+        )
+        season_rows = next(
+            rows for sql, rows in executor.executemany_calls if "INSERT INTO season" in sql
+        )
+        self.assertEqual([row[0] for row in sport_rows], [1, 2, 3])
+        self.assertEqual([row[0] for row in season_rows], [10, 20, 30])
+
+
 if __name__ == "__main__":
     unittest.main()
