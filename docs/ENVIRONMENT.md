@@ -171,7 +171,7 @@ SOFASCORE_LIVE_TIER_3_WORKER_MAX_CONCURRENCY=10
 
 | Variable | Default | Где | Эффект | Restart |
 |---|---|---|---|---|
-| `SOFASCORE_FETCH_TIMEOUT_SECONDS` | `20.0` | `fetch_models.py:42` | Per-attempt HTTP timeout. ⚠️ На проде = `10`. | no (читается per fetch task) |
+| `SOFASCORE_FETCH_TIMEOUT_SECONDS` | `20.0` | `fetch_models.py:42` | Per-attempt HTTP timeout. **Прод = `20` (2026-05-29, было `10`)** — 10s был слишком жёстким для всплесков латентности прокси: топ live-матчи (tier_1, detailId=1) ловили `curl(28)` на root `/event` → `run_event` падал до фетча матч-центра → quarantine → 0 ручек (см. CLAUDE §5.1). | no (читается per fetch task) |
 | `SCHEMA_INSPECTOR_PROXY_URLS` | — | `runtime.py:511` | Список proxy endpoints (comma-sep) | yes |
 | `SCHEMA_INSPECTOR_PROXY_URL` | — | `runtime.py:508` | Single proxy (legacy) | yes |
 | `SCHEMA_INSPECTOR_STRUCTURE_PROXY_URLS` | — | `runtime.py:533` | Proxy для structure sync | yes |
