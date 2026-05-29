@@ -10,6 +10,36 @@ LIVE_HOT_ZSET = "zset:live:hot"
 LIVE_WARM_ZSET = "zset:live:warm"
 LIVE_COLD_ZSET = "zset:live:cold"
 LIVE_DISPATCH_CLAIM_PREFIX = "live:dispatch_claim"
+
+# #42 (2026-05-30) atomic lane membership. KEYS[1..3] = hot/warm/cold zsets,
+# KEYS[4] = target-lane zset, KEYS[5] = event hash (live:event:{id}).
+# ARGV[1] = member, ARGV[2] = next_poll_at score. ZREM from all three lanes,
+# then refuse to (re-)ZADD if the event hash is already finalized
+# (HGET is_finalized in {"1","true"} — the decode_responses=True string forms
+# of int(state.is_finalized) / _as_bool). Folding the finalized check into the
+# same EVAL closes the planner/track_event read-then-ZADD TOCTOU that re-livens
+# ended matches. Returns 1 when (re)added, 0 when refused.
+_MOVE_LANE_SCRIPT = """
+redis.call("ZREM", KEYS[1], ARGV[1])
+redis.call("ZREM", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[3], ARGV[1])
+local finalized = redis.call("HGET", KEYS[5], "is_finalized")
+if finalized == "1" or finalized == "true" then
+    return 0
+end
+redis.call("ZADD", KEYS[4], ARGV[2], ARGV[1])
+return 1
+"""
+
+# #42 atomic finalize lane-removal. KEYS[1..3] = hot/warm/cold zsets,
+# ARGV[1] = member. Single EVAL replacing finalize_event's three discrete
+# ZREMs so a finalize can never leave the member in only some lanes.
+_REMOVE_FROM_LANES_SCRIPT = """
+redis.call("ZREM", KEYS[1], ARGV[1])
+redis.call("ZREM", KEYS[2], ARGV[1])
+redis.call("ZREM", KEYS[3], ARGV[1])
+return 1
+"""
 # F-7 Phase 0: cumulative dispatch metrics for diagnosing the 90s lease cap.
 # Survives planner restarts (no reset), HINCRBY-incremented per event from
 # the planner publish path and the live worker claim-clear path. Exposed
@@ -82,11 +112,67 @@ class LiveEventStateStore:
             self.move_lane(state.event_id, lane=lane, next_poll_at=state.next_poll_at)
 
     def move_lane(self, event_id: int, *, lane: str, next_poll_at: int) -> None:
+        """Atomically move ``event_id`` into ``lane`` at score ``next_poll_at``.
+
+        #42: single Redis EVAL (ZREM hot/warm/cold + ZADD target), but the
+        ZADD is REFUSED if the event hash is already finalized — preventing
+        (a) a crash/interleave leaving the member in two lanes or zero lanes,
+        and (b) re-livening a just-finalized event (the planner/track_event
+        read-then-act TOCTOU). Falls back to discrete ops when the backend
+        lacks EVAL (dev _MemoryRedisBackend + test fakes), preserving the
+        previous best-effort behaviour. Score is passed as repr(float(...)) so
+        a large epoch-ms value is never serialised in scientific notation that
+        Lua ZADD would misparse.
+        """
         member = str(event_id)
+        target_key = self._lane_key(lane)
+        eval_method = getattr(self.backend, "eval", None)
+        if callable(eval_method):
+            try:
+                eval_method(
+                    _MOVE_LANE_SCRIPT,
+                    5,
+                    self.hot_zset_key,
+                    self.warm_zset_key,
+                    self.cold_zset_key,
+                    target_key,
+                    self._key(event_id),
+                    member,
+                    repr(float(next_poll_at)),
+                )
+                return
+            except Exception:  # pragma: no cover - defensive fallback for non-Redis backends
+                pass
         self.backend.zrem(self.hot_zset_key, member)
         self.backend.zrem(self.warm_zset_key, member)
         self.backend.zrem(self.cold_zset_key, member)
-        self.backend.zadd(self._lane_key(lane), {member: float(next_poll_at)})
+        self.backend.zadd(target_key, {member: float(next_poll_at)})
+
+    def remove_from_lanes(self, event_id: int) -> None:
+        """Atomically remove ``event_id`` from all three polling lanes.
+
+        #42: single Redis EVAL (ZREM hot/warm/cold) for the finalize path so a
+        finalize can never strand the member in only some lanes. Falls back to
+        three discrete ZREMs when the backend lacks EVAL.
+        """
+        member = str(event_id)
+        eval_method = getattr(self.backend, "eval", None)
+        if callable(eval_method):
+            try:
+                eval_method(
+                    _REMOVE_FROM_LANES_SCRIPT,
+                    3,
+                    self.hot_zset_key,
+                    self.warm_zset_key,
+                    self.cold_zset_key,
+                    member,
+                )
+                return
+            except Exception:  # pragma: no cover - defensive fallback for non-Redis backends
+                pass
+        self.backend.zrem(self.hot_zset_key, member)
+        self.backend.zrem(self.warm_zset_key, member)
+        self.backend.zrem(self.cold_zset_key, member)
 
     def due_events(self, *, lane: str, now_ms: int) -> tuple[int, ...]:
         return tuple(int(value) for value in self.backend.zrangebyscore(self._lane_key(lane), float("-inf"), float(now_ms)))

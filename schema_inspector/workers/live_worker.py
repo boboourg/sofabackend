@@ -260,10 +260,20 @@ class LiveWorker:
             ),
             lane=None,
         )
-        member = str(event_id)
-        live_state_store.backend.zrem(live_state_store.hot_zset_key, member)
-        live_state_store.backend.zrem(live_state_store.warm_zset_key, member)
-        live_state_store.backend.zrem(live_state_store.cold_zset_key, member)
+        # #42 (2026-05-30): the upsert above already wrote is_finalized=1 to
+        # the event hash; now remove the member from every lane in a single
+        # atomic EVAL so a crash/interleave cannot leave it in only some
+        # lanes. Any concurrent move_lane (e.g. a stale "inprogress"
+        # track_event) reads is_finalized=1 inside its own script and refuses
+        # to re-add — the finalize wins the race deterministically.
+        remove_from_lanes = getattr(live_state_store, "remove_from_lanes", None)
+        if callable(remove_from_lanes):
+            remove_from_lanes(event_id)
+        else:  # pragma: no cover - legacy stores without the atomic helper
+            member = str(event_id)
+            live_state_store.backend.zrem(live_state_store.hot_zset_key, member)
+            live_state_store.backend.zrem(live_state_store.warm_zset_key, member)
+            live_state_store.backend.zrem(live_state_store.cold_zset_key, member)
         clear_claim = getattr(live_state_store, "clear_dispatch_claim", None)
         if callable(clear_claim):
             clear_claim(event_id)
