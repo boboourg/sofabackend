@@ -2076,11 +2076,14 @@ class IdempotencyGuardSourceTests(unittest.TestCase):
         import re
         text = _GuardSourceFixture.text()
         # The real-player INSERT has DO UPDATE; the stub one has DO NOTHING.
-        # We anchor on "team_id = EXCLUDED.team_id" which is unique to the
-        # real branch.
+        # We anchor on "name = EXCLUDED.name" which is unique to the real
+        # (DO UPDATE) branch — the stub branch is a bare DO NOTHING with no
+        # SET list. (Previously anchored on "team_id = EXCLUDED.team_id", but
+        # that literal was replaced by the COALESCE NULL-corruption fix so
+        # team_id no longer clobbers a stored value with an incoming NULL.)
         match = re.search(
             r"INSERT INTO player \(id, slug, name, short_name, team_id\).*?"
-            r"team_id = EXCLUDED.team_id.*?\"\"\"",
+            r"name = EXCLUDED.name.*?\"\"\"",
             text,
             flags=re.DOTALL,
         )

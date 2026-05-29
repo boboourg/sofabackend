@@ -123,6 +123,96 @@ class NormalizeRepositoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         row = await self.connection.fetchrow("SELECT team_id FROM player WHERE id = $1", 701)
         self.assertEqual(row["team_id"], 42)
 
+    async def test_existing_player_team_id_not_overwritten_by_null(self) -> None:
+        """Phase 0 regression: player.team_id NULL corruption. A player
+        already stored with a real team_id must KEEP it when a later
+        snapshot's player block carries team_id=NULL (incidents /
+        best-players / partial per-player stats arriving before the team
+        row exists, or the parent-missing nullify). Before the COALESCE
+        fix, raw `team_id = EXCLUDED.team_id` wrote NULL over the good value
+        and the IS DISTINCT FROM guard triggered the write."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO team (id, slug, name) VALUES (42, 'arsenal', 'Arsenal');
+            INSERT INTO player (id, slug, name, short_name, team_id)
+                VALUES (702, 'saka', 'Bukayo Saka', 'B. Saka', 42);
+            """
+        )
+        result = ParseResult(
+            snapshot_id=5001,
+            parser_family="event_incidents",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "player": (
+                    {
+                        "id": 702,
+                        "slug": "saka",
+                        "name": "Bukayo Saka",
+                        "short_name": "B. Saka",
+                        "team_id": None,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow("SELECT team_id FROM player WHERE id = $1", 702)
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            row["team_id"],
+            42,
+            msg=(
+                "NULL incoming team_id must NOT overwrite a stored team_id "
+                "(player.team_id NULL corruption). Expected 42 to survive "
+                "via COALESCE(EXCLUDED.team_id, player.team_id)."
+            ),
+        )
+
+    async def test_real_incoming_team_id_updates_existing_player(self) -> None:
+        """COALESCE must not freeze team_id: a real (non-NULL) incoming
+        team_id still updates the row (transfers, lineup team moves)."""
+        repository = NormalizeRepository()
+        await self.connection.execute(
+            """
+            INSERT INTO team (id, slug, name) VALUES (42, 'arsenal', 'Arsenal');
+            INSERT INTO team (id, slug, name) VALUES (43, 'chelsea', 'Chelsea');
+            INSERT INTO player (id, slug, name, short_name, team_id)
+                VALUES (703, 'mover', 'Player Mover', 'P. Mover', 42);
+            """
+        )
+        result = ParseResult(
+            snapshot_id=5002,
+            parser_family="entity_profiles",
+            parser_version="v1",
+            status="parsed",
+            entity_upserts={
+                "player": (
+                    {
+                        "id": 703,
+                        "slug": "mover",
+                        "name": "Player Mover",
+                        "short_name": "P. Mover",
+                        "team_id": 43,
+                    },
+                ),
+            },
+        )
+
+        await repository.persist_parse_result(self.connection, result)
+
+        row = await self.connection.fetchrow("SELECT team_id FROM player WHERE id = $1", 703)
+        self.assertEqual(
+            row["team_id"],
+            43,
+            msg=(
+                "A real incoming team_id must update the stored value; "
+                "COALESCE only protects against NULL, not legitimate moves."
+            ),
+        )
+
     async def test_missing_event_unique_tournament_raises_retryable_error(self) -> None:
         repository = NormalizeRepository()
         result = ParseResult(

@@ -103,7 +103,17 @@ def _latest_rows_by_event(rows) -> tuple[object, ...]:
 
 
 def _normalized_lane(value: str | None) -> str:
+    # Phase 0 (2026-05-30): an unknown/missing poll_profile MUST fall back to
+    # a POLLED lane. The planner only iterates ("hot", "warm") and there is
+    # no cold live stream/consumer group; the sweeper only evicts FINALIZED
+    # events. So a recovered NON-terminal event placed in "cold" is never
+    # polled and never swept -> permanent black hole (PROD_AUDIT 7.4: 45
+    # events frozen 7.7 days post Redis-flush recovery). Default unknown ->
+    # "warm" so the planner re-polls it and its real lane is re-derived on
+    # the next pass. An EXPLICIT 'cold' is preserved (operator/archival).
     normalized = str(value or "").strip().lower()
     if normalized in {"hot", "warm"}:
         return normalized
-    return "cold"
+    if normalized == "cold":
+        return "cold"
+    return "warm"

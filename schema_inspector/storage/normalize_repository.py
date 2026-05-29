@@ -903,12 +903,21 @@ class NormalizeRepository:
         # canonical (ascending-by-id) order at the storage boundary.
         if real_player_rows:
             real_player_rows.sort(key=lambda row: row[0])
-            # Stage 1.2 (2026-05-20 stability re-audit): WHERE
-            # IS DISTINCT FROM guard. No COALESCE here — the real
-            # branch overwrites with EXCLUDED.*, so the guard is
-            # the simple direct form. Identical lineup ticks
-            # (720x/hour for tier-1) on unchanged players now
-            # produce zero row-versions.
+            # Stage 1.2 (2026-05-20): WHERE IS DISTINCT FROM guard.
+            # slug/name/short_name overwrite with EXCLUDED.* (direct form).
+            # team_id is the ONE exception (Phase 0, 2026-05-30): a snapshot
+            # whose player block arrives before the team row exists
+            # (incidents / best-players / partial per-player stats) carries
+            # team_id=NULL — and the parent-missing nullify above ALSO sets
+            # it NULL when the parent is not present this txn. Under raw
+            # `team_id = EXCLUDED.team_id` that incoming NULL overwrote a
+            # previously-stored good team_id, and the direct guard
+            # `player.team_id IS DISTINCT FROM EXCLUDED.team_id` (42 vs NULL)
+            # TRIGGERED that write — silently corrupting squad/roster data.
+            # Use the COALESCE-on-SET + COALESCE-in-guard pattern that
+            # team.parent_team_id and event home/away team already use: a
+            # NULL incoming leaves the stored value untouched (guard false,
+            # no dead tuple), a real incoming team_id still wins.
             await _executemany(
                 executor,
                 """
@@ -918,12 +927,12 @@ class NormalizeRepository:
                     slug = EXCLUDED.slug,
                     name = EXCLUDED.name,
                     short_name = EXCLUDED.short_name,
-                    team_id = EXCLUDED.team_id
+                    team_id = COALESCE(EXCLUDED.team_id, player.team_id)
                 WHERE
                     player.slug IS DISTINCT FROM EXCLUDED.slug
                     OR player.name IS DISTINCT FROM EXCLUDED.name
                     OR player.short_name IS DISTINCT FROM EXCLUDED.short_name
-                    OR player.team_id IS DISTINCT FROM EXCLUDED.team_id
+                    OR player.team_id IS DISTINCT FROM COALESCE(EXCLUDED.team_id, player.team_id)
                 """,
                 real_player_rows,
             )
