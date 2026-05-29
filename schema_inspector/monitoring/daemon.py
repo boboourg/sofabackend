@@ -28,7 +28,7 @@ from typing import Any, Awaitable, Callable
 from .alerter import AlertSink
 from .config import MonitoringConfig
 from .dedupe import DedupeStore
-from .signals import SignalSnapshot, format_alert_message
+from .signals import SIGNAL_MONITORING_BLIND, SignalSnapshot, format_alert_message
 
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,11 @@ class MonitoringDaemon:
         self.total_alerts_fired = 0
         self.total_alerts_suppressed = 0
         self.total_resolved_alerts = 0
+        # Consecutive ticks where every signal source returned empty or
+        # errored. Drives the synthetic "monitoring blind" CRIT so the
+        # daemon does not go silent during a full-pipeline outage (the
+        # signal sources in signal_source.py return [] on any fetch error).
+        self._consecutive_blind_ticks = 0
 
     async def run_forever(self) -> None:
         """Loop until cancelled. Each iteration runs ``_tick`` and sleeps."""
@@ -111,23 +116,29 @@ class MonitoringDaemon:
             snapshots = await self.signal_source()
         except Exception as exc:  # noqa: BLE001 — never crash daemon
             logger.warning("MonitoringDaemon: signal_source failed: %r", exc)
+            blind = await self._account_blind_tick()
             return TickReport(
                 snapshots_received=0,
-                alerts_fired=0,
-                alerts_suppressed=0,
+                alerts_fired=blind.alerts_fired,
+                alerts_suppressed=blind.alerts_suppressed,
                 resolved_signals=0,
                 error=repr(exc),
             )
         if not snapshots:
+            blind = await self._account_blind_tick()
             return TickReport(
                 snapshots_received=0,
-                alerts_fired=0,
-                alerts_suppressed=0,
+                alerts_fired=blind.alerts_fired,
+                alerts_suppressed=blind.alerts_suppressed,
                 resolved_signals=0,
             )
+        # A tick with real data clears the blind streak and, if we had
+        # previously fired the synthetic CRIT, emits exactly one RESOLVED —
+        # folded into this tick's report.resolved_signals.
+        sighted_resolved = await self._account_sighted_tick()
         alerts_fired = 0
         alerts_suppressed = 0
-        resolved_signals = 0
+        resolved_signals = sighted_resolved
         for snapshot in snapshots:
             try:
                 outcome = await self._process_snapshot(snapshot)
@@ -153,6 +164,85 @@ class MonitoringDaemon:
             alerts_suppressed=alerts_suppressed,
             resolved_signals=resolved_signals,
         )
+
+    async def _account_blind_tick(self) -> TickReport:
+        """Handle a tick where every signal source was empty/errored.
+
+        Increments the consecutive-blind streak. Once it reaches the
+        configured threshold (``blind_alert_consecutive_ticks``, default 3)
+        we synthesize a CRIT ``SignalSnapshot`` and route it through the
+        normal dedupe path so the operator gets one alert immediately and
+        then at most one repeat per ``crit_ttl_seconds`` until recovery.
+        Returns a partial TickReport carrying only the fired/suppressed
+        counts so ``_tick`` can fold them into its report.
+        """
+
+        self._consecutive_blind_ticks += 1
+        threshold = self.config.blind_alert_consecutive_ticks
+        if threshold <= 0 or self._consecutive_blind_ticks < threshold:
+            return TickReport(0, 0, 0, 0)
+        snapshot = SignalSnapshot(
+            name=SIGNAL_MONITORING_BLIND.name,
+            value=self._consecutive_blind_ticks,
+            severity="CRIT",
+            direction=SIGNAL_MONITORING_BLIND.direction,
+            threshold_warn=threshold,
+            threshold_crit=threshold,
+            timestamp=self.clock(),
+            unit=SIGNAL_MONITORING_BLIND.unit,
+            note=(
+                "All signal sources returned empty/errored for "
+                f"{self._consecutive_blind_ticks} consecutive ticks. "
+                "Monitoring is blind: check the local API (/ops/health), "
+                "Postgres, and Redis. Other alerts are SUPPRESSED until "
+                "this clears."
+            ),
+            extra={"consecutive_blind_ticks": self._consecutive_blind_ticks},
+        )
+        try:
+            outcome = await self._process_snapshot(snapshot)
+        except Exception as exc:  # noqa: BLE001 — never crash daemon
+            logger.warning("MonitoringDaemon: blind-tick alert failed: %r", exc)
+            return TickReport(0, 0, 0, 0)
+        if outcome == "fired":
+            self.total_alerts_fired += 1
+            return TickReport(0, 1, 0, 0)
+        if outcome == "suppressed":
+            self.total_alerts_suppressed += 1
+            return TickReport(0, 0, 1, 0)
+        return TickReport(0, 0, 0, 0)
+
+    async def _account_sighted_tick(self) -> int:
+        """A tick returned real data: reset the streak, fire RESOLVED once.
+
+        Only emits a RESOLVED snapshot if the synthetic CRIT had actually
+        been raised (``_last_severity`` for the blind signal is CRIT), so a
+        normal healthy tick does nothing. Routing an OK snapshot through
+        ``_process_snapshot`` reuses the existing CRIT->OK RESOLVED path.
+        """
+
+        self._consecutive_blind_ticks = 0
+        if self._last_severity.get(SIGNAL_MONITORING_BLIND.name) != "CRIT":
+            return 0
+        snapshot = SignalSnapshot(
+            name=SIGNAL_MONITORING_BLIND.name,
+            value=0,
+            severity="OK",
+            direction=SIGNAL_MONITORING_BLIND.direction,
+            threshold_warn=self.config.blind_alert_consecutive_ticks,
+            threshold_crit=self.config.blind_alert_consecutive_ticks,
+            timestamp=self.clock(),
+            unit=SIGNAL_MONITORING_BLIND.unit,
+        )
+        try:
+            outcome = await self._process_snapshot(snapshot)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MonitoringDaemon: blind-tick resolve failed: %r", exc)
+            return 0
+        if outcome == "resolved":
+            self.total_resolved_alerts += 1
+            return 1
+        return 0
 
     async def _process_snapshot(self, snapshot: SignalSnapshot) -> str:
         severity = snapshot.severity

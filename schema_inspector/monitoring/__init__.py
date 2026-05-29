@@ -29,6 +29,7 @@ from .daemon import MonitoringDaemon
 from .dedupe import DedupeStore, NullDedupeStore, RedisDedupeStore
 from .signal_source import (
     fetch_all_signals_from_api,
+    fetch_disk_signals,
     fetch_queue_signals_from_api,
     fetch_slo_signals_from_api,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "TelegramAlertSink",
     "classify_signal",
     "fetch_all_signals_from_api",
+    "fetch_disk_signals",
     "fetch_queue_signals_from_api",
     "fetch_slo_signals_from_api",
     "format_alert_message",

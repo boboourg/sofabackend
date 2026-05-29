@@ -12,8 +12,9 @@ trivially testable — see :mod:`tests.test_monitoring_signal_source`.
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .signals import (
     SIGNAL_DISCOVERY_LAG,
@@ -24,6 +25,7 @@ from .signals import (
     SIGNAL_LIVE_WARM_LAG,
     SIGNAL_NO_RECENT_JOBS_AGE,
     SIGNAL_OLDEST_HOT_AGE,
+    SIGNAL_POSTGRES_DISK_FREE,
     SIGNAL_REFRESH_SUCCESS,
     SIGNAL_RETRY_RATE_15MIN,
     SIGNAL_TIER_1_BLOCKED,
@@ -447,6 +449,61 @@ def _parse_iso_timestamp(value: Any) -> datetime | None:
             return None
 
 
+# ---------------------------------------------------------------------------
+# Phase 0 — local disk-free signal (no HTTP). Reads the Postgres data mount
+# directly via shutil.disk_usage because the monitoring daemon runs on the
+# same host as Postgres. Self-contained: takes its own thresholds, not the
+# /ops overrides dict, so it works regardless of HTTP/API health (and is
+# unaffected by the historical thresholds_overrides bug).
+# ---------------------------------------------------------------------------
+
+
+async def fetch_disk_signals(
+    *,
+    mount_path: str,
+    warn_free_gb: float,
+    crit_free_gb: float,
+    now: datetime | None = None,
+    disk_usage: Callable[[str], Any] | None = None,
+) -> list[SignalSnapshot]:
+    """Emit one snapshot of free space (GB) on ``mount_path``.
+
+    ``disk_usage`` is injectable for tests; production uses
+    ``shutil.disk_usage`` which returns ``(total, used, free)`` in bytes.
+    Free bytes -> GiB (1024**3), classified with direction "min" (smaller
+    free = worse). Any OS error returns ``[]`` (no data this tick) — never
+    a fabricated OK — so an unreadable mount surfaces via the WARN log, not
+    as false health.
+    """
+
+    # Resolve shutil.disk_usage at CALL time (not as a def-time default arg)
+    # so tests can monkeypatch ``shutil.disk_usage`` on this module.
+    probe = disk_usage or shutil.disk_usage
+    try:
+        usage = probe(mount_path)
+        free_bytes = int(usage.free)
+    except Exception as exc:  # noqa: BLE001 — never crash the daemon tick
+        logger.warning(
+            "fetch_disk_signals: disk_usage failed path=%s err=%r",
+            mount_path,
+            exc,
+        )
+        return []
+
+    timestamp = now or datetime.now(timezone.utc)
+    free_gb = round(free_bytes / (1024 ** 3), 2)
+    return [
+        make_snapshot(
+            definition=SIGNAL_POSTGRES_DISK_FREE,
+            value=free_gb,
+            timestamp=timestamp,
+            threshold_warn=warn_free_gb,
+            threshold_crit=crit_free_gb,
+            extra={"mount_path": mount_path, "free_bytes": free_bytes},
+        )
+    ]
+
+
 async def fetch_all_signals_from_api(
     *,
     base_url: str,
@@ -455,8 +512,11 @@ async def fetch_all_signals_from_api(
     now: datetime | None = None,
     overrides: dict[str, dict[str, float | int]] | None = None,
     include_job_signals: bool = False,
+    disk_mount_path: str | None = None,
+    disk_warn_free_gb: float = 20.0,
+    disk_crit_free_gb: float = 10.0,
 ) -> list[SignalSnapshot]:
-    """Compose SLO + queue (+ optional job) signals.
+    """Compose SLO + queue (+ optional job + optional disk) signals.
 
     Failures in any branch don't poison the others — each branch returns
     ``[]`` independently. Job signals are off by default so the daemon
@@ -489,4 +549,12 @@ async def fetch_all_signals_from_api(
             overrides=overrides,
         )
         combined.extend(jobs)
+    if disk_mount_path:
+        disk = await fetch_disk_signals(
+            mount_path=disk_mount_path,
+            warn_free_gb=disk_warn_free_gb,
+            crit_free_gb=disk_crit_free_gb,
+            now=now,
+        )
+        combined.extend(disk)
     return combined

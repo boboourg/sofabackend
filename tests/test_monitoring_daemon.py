@@ -295,5 +295,112 @@ class CounterAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(daemon.total_ticks, 1)
 
 
+class BlindWatchdogTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 0 (2026-05-30): synthetic CRIT when every signal source is
+    empty/errored for N consecutive ticks, so the daemon does not go silent
+    during a full-pipeline outage."""
+
+    def _daemon(self, source, *, n=3, dedupe=None, sink=None):
+        sink = sink or _RecordingSink()
+        dedupe = dedupe or _CountingDedupeStore()
+        config = MonitoringConfig(
+            enabled=True,
+            interval_seconds=1.0,
+            crit_ttl_seconds=1800,
+            blind_alert_consecutive_ticks=n,
+        )
+        daemon = MonitoringDaemon(
+            config=config, signal_source=source, sink=sink, dedupe=dedupe
+        )
+        return daemon, sink, dedupe
+
+    async def test_n_consecutive_empty_ticks_fire_synthetic_crit(self) -> None:
+        async def empty_source() -> list[SignalSnapshot]:
+            return []
+
+        daemon, sink, dedupe = self._daemon(empty_source, n=3)
+        r1 = await daemon._tick()
+        r2 = await daemon._tick()
+        self.assertEqual((r1.alerts_fired, r2.alerts_fired), (0, 0))
+        self.assertEqual(sink.send_calls, 0)
+        r3 = await daemon._tick()
+        self.assertEqual(r3.alerts_fired, 1)
+        self.assertEqual(sink.send_calls, 1)
+        msg = sink.messages[-1]
+        self.assertIn("[CRIT]", msg)
+        self.assertIn("monitoring_blind_consecutive_ticks", msg)
+        self.assertIn(
+            ("monitoring_blind_consecutive_ticks", "CRIT"), dedupe.mark_calls
+        )
+
+    async def test_below_threshold_does_not_fire(self) -> None:
+        async def empty_source() -> list[SignalSnapshot]:
+            return []
+
+        daemon, sink, _ = self._daemon(empty_source, n=3)
+        await daemon._tick()
+        await daemon._tick()
+        self.assertEqual(sink.send_calls, 0)
+
+    async def test_exception_source_counts_toward_blind_streak(self) -> None:
+        async def broken_source() -> list[SignalSnapshot]:
+            raise RuntimeError("boom")
+
+        daemon, sink, _ = self._daemon(broken_source, n=3)
+        await daemon._tick()
+        await daemon._tick()
+        r3 = await daemon._tick()
+        self.assertEqual(r3.alerts_fired, 1)
+        self.assertIsNotNone(r3.error)
+        self.assertEqual(sink.send_calls, 1)
+
+    async def test_crit_dedupe_suppresses_repeat_until_ttl(self) -> None:
+        async def empty_source() -> list[SignalSnapshot]:
+            return []
+
+        # tick3's first CRIT escalates OK->CRIT, which force-sends (bypassing
+        # should_send), so the schedule applies starting at tick4: [False]
+        # makes tick4's should_send return False -> suppressed.
+        dedupe = _CountingDedupeStore(schedule=[False])
+        daemon, sink, _ = self._daemon(empty_source, n=3, dedupe=dedupe)
+        await daemon._tick()
+        await daemon._tick()
+        r3 = await daemon._tick()
+        r4 = await daemon._tick()
+        self.assertEqual(r3.alerts_fired, 1)
+        self.assertEqual(r4.alerts_suppressed, 1)
+        self.assertEqual(sink.send_calls, 1)
+
+    async def test_recovery_resets_streak_and_fires_resolved(self) -> None:
+        state = {"empty": True}
+
+        async def source() -> list[SignalSnapshot]:
+            return [] if state["empty"] else [_make_ok_snapshot()]
+
+        daemon, sink, _ = self._daemon(source, n=3)
+        for _ in range(3):
+            await daemon._tick()  # fires CRIT on tick 3
+        self.assertEqual(sink.send_calls, 1)
+        state["empty"] = False
+        report = await daemon._tick()  # recovery
+        self.assertGreaterEqual(report.resolved_signals, 1)
+        self.assertIn("RESOLVED", sink.messages[-1])
+        self.assertIn("monitoring_blind_consecutive_ticks", sink.messages[-1])
+        self.assertEqual(daemon._consecutive_blind_ticks, 0)
+        state["empty"] = True
+        sends_before = sink.send_calls
+        await daemon._tick()
+        self.assertEqual(sink.send_calls, sends_before)
+
+    async def test_disabled_when_threshold_zero(self) -> None:
+        async def empty_source() -> list[SignalSnapshot]:
+            return []
+
+        daemon, sink, _ = self._daemon(empty_source, n=0)
+        for _ in range(5):
+            await daemon._tick()
+        self.assertEqual(sink.send_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

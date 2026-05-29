@@ -3390,26 +3390,36 @@ async def _run_monitoring_daemon(args) -> int:
             "warn": config.tier_1_quarantined_warn,
             "crit": config.tier_1_quarantined_crit,
         },
-        # Phase 2 — queue XLEN thresholds.
-        "hydrate_xlen": {
-            "warn": config.hydrate_xlen_warn,
-            "crit": config.hydrate_xlen_crit,
+        # Phase 0 (2026-05-30): queue LAG thresholds. These keys + config
+        # attrs were renamed xlen->lag in config.py + signals.py (signal
+        # names are hydrate_lag / live_*_lag / discovery_lag) but this
+        # override dict still referenced config.hydrate_xlen_warn etc. —
+        # a non-existent attribute that raises AttributeError when
+        # _run_monitoring_daemon builds the dict. The currently-running
+        # daemon survives only because it is a STALE process predating the
+        # rename; any restart (incl. deploying the disk/blind-watchdog
+        # signals) would crash-loop. Aligning the keys to the real signal
+        # names also makes these overrides actually apply (an xlen key
+        # matched no signal, so the override was silently ignored).
+        "hydrate_lag": {
+            "warn": config.hydrate_lag_warn,
+            "crit": config.hydrate_lag_crit,
         },
-        "live_hot_xlen": {
-            "warn": config.live_hot_xlen_warn,
-            "crit": config.live_hot_xlen_crit,
+        "live_hot_lag": {
+            "warn": config.live_hot_lag_warn,
+            "crit": config.live_hot_lag_crit,
         },
-        "live_warm_xlen": {
-            "warn": config.live_warm_xlen_warn,
-            "crit": config.live_warm_xlen_crit,
+        "live_warm_lag": {
+            "warn": config.live_warm_lag_warn,
+            "crit": config.live_warm_lag_crit,
         },
-        "live_discovery_xlen": {
-            "warn": config.live_discovery_xlen_warn,
-            "crit": config.live_discovery_xlen_crit,
+        "live_discovery_lag": {
+            "warn": config.live_discovery_lag_warn,
+            "crit": config.live_discovery_lag_crit,
         },
-        "discovery_xlen": {
-            "warn": config.discovery_xlen_warn,
-            "crit": config.discovery_xlen_crit,
+        "discovery_lag": {
+            "warn": config.discovery_lag_warn,
+            "crit": config.discovery_lag_crit,
         },
         # Phase 3 — job signal thresholds.
         "failed_jobs_15min": {
@@ -3433,6 +3443,9 @@ async def _run_monitoring_daemon(args) -> int:
             timeout_seconds=config.http_request_timeout_seconds,
             overrides=thresholds_overrides,
             include_job_signals=config.job_signals_enabled,
+            disk_mount_path=config.disk_mount_path or None,
+            disk_warn_free_gb=config.disk_free_warn_gb,
+            disk_crit_free_gb=config.disk_free_crit_gb,
         )
 
     daemon = MonitoringDaemon(

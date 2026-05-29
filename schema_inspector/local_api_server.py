@@ -4581,10 +4581,20 @@ class LocalApiApplication:
                 """,
                 int(limit),
             )
+            # Phase 0 (2026-05-30): bound the status aggregate to the last 2
+            # hours so it hits idx_etl_job_run_started_at_brin instead of
+            # seq-scanning ~28M etl_job_run rows on every call. Unbounded,
+            # this GROUP BY exceeded the monitoring daemon's HTTP timeout, so
+            # the job-failure / no-recent-jobs signals never reached Telegram
+            # (monitoring blackout — observed as repeated /ops/jobs/runs
+            # ReadTimeout in the monitoring logs). The daemon recomputes its
+            # own failed/retry/age numbers from the LIMIT-bounded jobRuns
+            # list and does not consume these status_counts, so 2h is safe.
             status_rows = await connection.fetch(
                 """
                 SELECT status, COUNT(*)::bigint AS row_count
                 FROM etl_job_run
+                WHERE started_at >= now() - interval '2 hours'
                 GROUP BY status
                 ORDER BY status
                 """

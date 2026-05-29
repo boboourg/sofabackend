@@ -235,9 +235,49 @@ SIGNAL_NO_RECENT_JOBS_AGE = SignalDefinition(
     ),
 )
 
+# Synthetic watchdog (2026-05-30): NOT pulled from /ops/*. Emitted by
+# MonitoringDaemon itself when every signal source returns empty/errors
+# for N consecutive ticks. The signal sources in signal_source.py return
+# [] on any fetch/parse error, and the daemon treats [] as "no data this
+# tick" and stays silent — so the monitor goes blind exactly during a
+# full-pipeline incident (PROD_AUDIT: 1 alert/24h while 613 jobs failed).
+# value = the current consecutive-empty streak length. direction "max".
+SIGNAL_MONITORING_BLIND = SignalDefinition(
+    name="monitoring_blind_consecutive_ticks",
+    direction="max",
+    threshold_warn=1,
+    threshold_crit=1,
+    unit="",
+    help=(
+        "Consecutive monitoring ticks where every signal source returned "
+        "empty or errored. Non-zero = the monitor cannot see the pipeline "
+        "(API/DB/Redis down, /ops/* 5xx, or full outage). The daemon is "
+        "blind and would otherwise stay silent — this is a synthetic CRIT."
+    ),
+)
+
+
+# Phase 0 (2026-05-26 incident): Postgres data-mount free space. Direction
+# "min" — alert when free space drops BELOW the threshold. value = free GB
+# (float). Defaults: WARN < 20 GB, CRIT < 10 GB. The 2026-05-25 disk-full ->
+# Postgres-crash -> Redis-stuck cascade ran ~12h undetected because monitoring
+# had no disk signal; this closes that gap.
+SIGNAL_POSTGRES_DISK_FREE = SignalDefinition(
+    name="postgres_disk_free_gb",
+    direction="min",
+    threshold_warn=20.0,
+    threshold_crit=10.0,
+    unit="GB",
+    help=(
+        "Free space (GB) on the Postgres data mount. Smaller = closer to a "
+        "disk-full Postgres crash. WARN <20GB, CRIT <10GB."
+    ),
+)
+
 
 SIGNAL_DEFINITIONS = {
     SIGNAL_OLDEST_HOT_AGE.name: SIGNAL_OLDEST_HOT_AGE,
+    SIGNAL_POSTGRES_DISK_FREE.name: SIGNAL_POSTGRES_DISK_FREE,
     SIGNAL_TIER_1_BLOCKED.name: SIGNAL_TIER_1_BLOCKED,
     SIGNAL_REFRESH_SUCCESS.name: SIGNAL_REFRESH_SUCCESS,
     SIGNAL_TIER_1_QUARANTINED.name: SIGNAL_TIER_1_QUARANTINED,
@@ -249,6 +289,7 @@ SIGNAL_DEFINITIONS = {
     SIGNAL_FAILED_JOBS_15MIN.name: SIGNAL_FAILED_JOBS_15MIN,
     SIGNAL_RETRY_RATE_15MIN.name: SIGNAL_RETRY_RATE_15MIN,
     SIGNAL_NO_RECENT_JOBS_AGE.name: SIGNAL_NO_RECENT_JOBS_AGE,
+    SIGNAL_MONITORING_BLIND.name: SIGNAL_MONITORING_BLIND,
 }
 
 

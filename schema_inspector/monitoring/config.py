@@ -60,7 +60,10 @@ class MonitoringConfig:
     telegram_chat_id: str | None = None
     telegram_timeout_seconds: float = 10.0
     host_label: str = "sofascore"
-    http_request_timeout_seconds: float = 5.0
+    # Phase 0 (2026-05-30): 5s was too tight — /ops/jobs/runs (and other ops
+    # aggregates) overran it, so the job/SLO signals never reached Telegram.
+    # Paired with the 2h-bounded /ops/jobs/runs query; 15s is the safety margin.
+    http_request_timeout_seconds: float = 15.0
     # Thresholds for SLO signals — match the contract in
     # docs/N1_MONITORING_PLAN.md §"P0 — SLO signals". All env-overridable.
     oldest_hot_age_warn_seconds: int = 120
@@ -95,6 +98,21 @@ class MonitoringConfig:
     retry_rate_crit: float = 0.05
     no_recent_jobs_warn_seconds: int = 300
     no_recent_jobs_crit_seconds: int = 600
+    # Phase 0 (2026-05-26 incident): Postgres data-mount free-space alert.
+    # Default mount path is the conventional PGDATA location; override per-host
+    # via SOFASCORE_MONITORING_DISK_MOUNT_PATH. Thresholds in GB: WARN <20,
+    # CRIT <10. Set the path to "" to disable the signal.
+    disk_mount_path: str = "/var/lib/postgresql"
+    disk_free_warn_gb: float = 20.0
+    disk_free_crit_gb: float = 10.0
+    # Synthetic watchdog (2026-05-30): fire a CRIT when every signal source
+    # returns empty/errors for this many consecutive ticks. signal_source.py
+    # returns [] on any fetch error and the daemon treats [] as "no data ->
+    # no alert", so without this the monitor goes silent during a full
+    # outage. Default 3 ticks (~3 min at 60s interval) debounces a single
+    # transient /ops/* blip while still catching a real incident fast. <=0
+    # disables the watchdog.
+    blind_alert_consecutive_ticks: int = 3
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "MonitoringConfig":
@@ -128,7 +146,7 @@ class MonitoringConfig:
             )
             or "sofascore",
             http_request_timeout_seconds=_env_float(
-                resolved, "SOFASCORE_MONITORING_HTTP_TIMEOUT_SECONDS", 5.0
+                resolved, "SOFASCORE_MONITORING_HTTP_TIMEOUT_SECONDS", 15.0
             ),
             oldest_hot_age_warn_seconds=_env_int(
                 resolved, "SOFASCORE_MONITORING_OLDEST_HOT_AGE_WARN_SECONDS", 120
@@ -204,6 +222,23 @@ class MonitoringConfig:
             ),
             no_recent_jobs_crit_seconds=_env_int(
                 resolved, "SOFASCORE_MONITORING_NO_RECENT_JOBS_CRIT_SECONDS", 600
+            ),
+            disk_mount_path=_env_str(
+                resolved,
+                "SOFASCORE_MONITORING_DISK_MOUNT_PATH",
+                "/var/lib/postgresql",
+            )
+            or "",
+            disk_free_warn_gb=_env_float(
+                resolved, "SOFASCORE_MONITORING_DISK_FREE_WARN_GB", 20.0
+            ),
+            disk_free_crit_gb=_env_float(
+                resolved, "SOFASCORE_MONITORING_DISK_FREE_CRIT_GB", 10.0
+            ),
+            blind_alert_consecutive_ticks=_env_int(
+                resolved,
+                "SOFASCORE_MONITORING_BLIND_ALERT_CONSECUTIVE_TICKS",
+                3,
             ),
         )
 
