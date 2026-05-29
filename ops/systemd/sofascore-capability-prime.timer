@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly Sofascore league-capability Redis prime (keep warm cache below its 24h TTL)
+
+[Timer]
+# Hourly, offset to :15 so it never collides with the 04:30 daily probe
+# (sofascore-capability-probe.timer) or 04:50 log-retention sweep.
+OnCalendar=*-*-* *:15:00
+# If the box was off, run once on next boot rather than waiting an hour.
+Persistent=true
+AccuracySec=2min
+Unit=sofascore-capability-prime.service
+
+[Install]
+WantedBy=timers.target

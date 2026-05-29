@@ -74,7 +74,7 @@ else
   FAIL=0
   while IFS=$'\t' read -r ut season status; do
     [ -z "${ut}" ] && continue
-    if python -m schema_inspector.cli league-capability probe \
+    if /opt/sofascore/.venv/bin/python -m schema_inspector.cli league-capability probe \
         --unique-tournament-id "${ut}" --season-id "${season}" \
         --status-type "${status}" --samples "${SAMPLES}" >/dev/null 2>&1; then
       OK=$((OK + 1))
@@ -88,7 +88,7 @@ else
 fi
 
 # Always re-prime Redis so workers pick up whatever is freshest in PG.
-if python -m schema_inspector.cli league-capability prime-redis >/dev/null 2>&1; then
+if /opt/sofascore/.venv/bin/python -m schema_inspector.cli league-capability prime-redis >/dev/null 2>&1; then
   echo "[$(date -Iseconds)] ${LOG_TAG}: prime-redis ok"
 else
   echo "[$(date -Iseconds)] ${LOG_TAG}: prime-redis FAILED"

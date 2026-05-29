@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -72,6 +73,47 @@ class SystemdAssetTests(unittest.TestCase):
         self.assertIn("systemctl daemon-reload", text)
         self.assertIn("systemctl enable --now", text)
         self.assertIn("journalctl", text)
+
+
+class CapabilityOpsAssetTests(unittest.TestCase):
+    REFRESH = ROOT / "scripts" / "ops" / "capability_probe_refresh.sh"
+    PRIME_SERVICE = SYSTEMD_DIR / "sofascore-capability-prime.service"
+    PRIME_TIMER = SYSTEMD_DIR / "sofascore-capability-prime.timer"
+
+    def test_capability_probe_refresh_uses_venv_python(self) -> None:
+        script = self.REFRESH.read_text(encoding="utf-8")
+        self.assertIn(
+            "/opt/sofascore/.venv/bin/python -m schema_inspector.cli league-capability probe",
+            script,
+        )
+        self.assertIn(
+            "/opt/sofascore/.venv/bin/python -m schema_inspector.cli league-capability prime-redis",
+            script,
+        )
+
+    def test_capability_probe_refresh_has_no_bare_python_invocation(self) -> None:
+        # Regression guard: a bare `python -m schema_inspector.cli` (not
+        # prefixed by a venv path) silently fails under systemd.
+        script = self.REFRESH.read_text(encoding="utf-8")
+        bare = re.search(r"(?<![\w./-])python -m schema_inspector\.cli", script)
+        self.assertIsNone(
+            bare,
+            "capability_probe_refresh.sh must call the venv python, not bare `python`",
+        )
+
+    def test_capability_prime_units_exist_and_use_venv_python(self) -> None:
+        self.assertTrue(self.PRIME_SERVICE.exists(), self.PRIME_SERVICE.name)
+        self.assertTrue(self.PRIME_TIMER.exists(), self.PRIME_TIMER.name)
+        svc = self.PRIME_SERVICE.read_text(encoding="utf-8")
+        self.assertIn("Type=oneshot", svc)
+        self.assertIn("EnvironmentFile=/opt/sofascore/.env", svc)
+        self.assertIn(
+            "ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.cli league-capability prime-redis",
+            svc,
+        )
+        tmr = self.PRIME_TIMER.read_text(encoding="utf-8")
+        self.assertIn("OnCalendar=*-*-* *:15:00", tmr)
+        self.assertIn("Unit=sofascore-capability-prime.service", tmr)
 
 
 if __name__ == "__main__":

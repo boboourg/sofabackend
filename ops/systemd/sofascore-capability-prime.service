@@ -1,0 +1,17 @@
+[Unit]
+Description=Sofascore league-capability Redis prime (prime-redis only; keep warm cache fresh between daily probe runs)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+ExecStart=/opt/sofascore/.venv/bin/python -m schema_inspector.cli league-capability prime-redis
+# Single bounded SELECT + Redis writes; finishes in seconds. Short ceiling.
+TimeoutStartSec=300
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
