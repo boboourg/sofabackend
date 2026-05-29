@@ -1301,8 +1301,33 @@ class PilotOrchestrator:
         # planners / workers / read-path will skip the event forever.
         # On exception this code is unreached, so the FinalSyncPlanner
         # will re-queue on the next tick.
+        #
+        # Conservative-freeze guard (2026-05-30): a successful root fetch
+        # is NOT sufficient to freeze. The FinalSyncPlanner can enqueue an
+        # event that is STILL LIVE (e.g. a zombie_stale row whose match is
+        # actually in progress — CLAUDE rule #9). Stamping locked_at on
+        # such an event freezes it permanently (every worker skips,
+        # live-rescue refuses to re-liven, read-path serves snapshot
+        # only). Only stamp when THIS run genuinely reached a terminal
+        # state: either the planner emitted a finalize job (``finalized``)
+        # or the freshly-parsed root status_type is in the terminal set.
+        # ``finalized`` already implies the latter via planner.rules
+        # (JOB_FINALIZE_EVENT is emitted iff status_type in
+        # TERMINAL_STATUS_TYPES); the explicit status check is a
+        # belt-and-braces guard against future planner refactors. A live
+        # event therefore stays unlocked, the FinalSyncPlanner harmlessly
+        # re-queues it next tick, and it freezes only once it truly ends.
+        normalized_final_status = (
+            str(status_type).strip().lower() if status_type is not None else ""
+        )
+        is_terminal_for_lock = (
+            finalized or normalized_final_status in TERMINAL_STATUS_TYPES
+        )
         if normalized_scope == FINAL_SYNC_SCOPE and self.live_state_repository is not None:
-            if root_outcome.classification in {"success_json", "success_empty_json"}:
+            if (
+                is_terminal_for_lock
+                and root_outcome.classification in {"success_json", "success_empty_json"}
+            ):
                 try:
                     await self.live_state_repository.set_event_locked(
                         self.sql_executor, event_id=event_id
@@ -1317,6 +1342,15 @@ class PilotOrchestrator:
                         event_id,
                         exc,
                     )
+            elif not is_terminal_for_lock:
+                logger.info(
+                    "final_sync: skipped locked_at stamp for non-terminal "
+                    "event_id=%s (status_type=%r, finalized=%s) — re-queue "
+                    "will retry once the event truly ends",
+                    event_id,
+                    status_type,
+                    finalized,
+                )
 
         return PilotRunReport(
             sport_slug=sport_slug,

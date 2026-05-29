@@ -226,6 +226,17 @@ class LiveStateRepository:
         )
         return _command_tag_affected(command_tag) > 0
 
+    # terminal_status values that are NOT a genuine end-of-match and so
+    # must never be frozen by the final-sync lock. ``zombie_stale`` is the
+    # housekeeping zombie sweeper's tag (services/housekeeping.py:
+    # ZOMBIE_TERMINAL_STATUS) and is explicitly NOT end-of-match
+    # (CLAUDE rule #9 — the match may still be live). ``not_found`` is the
+    # missing-root synthetic tag (pilot_orchestrator.MISSING_ROOT_TERMINAL_STATUS)
+    # stamped when the upstream root 404s. Genuine finalize writes one of
+    # planner.live.TERMINAL_STATUS_TYPES via _record_terminal_state, so
+    # those rows still flow through the queue normally.
+    _NON_TERMINAL_LOCK_STATUSES: tuple[str, ...] = ("zombie_stale", "not_found")
+
     async def pending_lock_event_ids(
         self,
         executor: SqlExecutor,
@@ -240,6 +251,13 @@ class LiveStateRepository:
         sync first. Index ``idx_event_terminal_state_pending_lock`` is
         partial on ``WHERE locked_at IS NULL`` — scan stays bounded to
         events still in flight.
+
+        Synthetic terminal rows (``zombie_stale``, ``not_found``) are
+        excluded: enqueuing them would let the orchestrator freeze a
+        still-live match permanently (CLAUDE rule #9). They are filtered
+        here AND defended at the stamp site in pilot_orchestrator (the
+        terminal-status gate), so a zombie can never be frozen even if a
+        row slips through one layer.
         """
         rows = await executor.fetch(
             """
@@ -247,11 +265,13 @@ class LiveStateRepository:
             FROM event_terminal_state
             WHERE locked_at IS NULL
               AND finalized_at <= now() - make_interval(secs => $1)
+              AND terminal_status <> ALL($3::text[])
             ORDER BY finalized_at ASC, event_id ASC
             LIMIT $2
             """,
             int(delay_seconds),
             int(limit),
+            list(self._NON_TERMINAL_LOCK_STATUSES),
         )
         return [int(row["event_id"]) for row in rows]
 
