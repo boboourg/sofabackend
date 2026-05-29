@@ -275,6 +275,180 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(store.clear_calls, [(15235532, "tier_1")])
 
 
+class LiveWorkerRescheduleAfterTransientFailureTests(unittest.TestCase):
+    """2026-05-29 live audit: a retryable root-/event fetch failure raises
+    before track_event, so next_poll_at (the zset score) never advances and
+    the event freezes overdue in its lane — the planner re-dispatches it every
+    tick and oldest_hot_score_age breaches the SLO. reschedule_after_transient_
+    failure pushes the score forward to a backed-off retry instead."""
+
+    _NOW = 1_800_000_000_000
+
+    def _store_with_live_event(
+        self,
+        *,
+        event_id: int,
+        dispatch_tier: str,
+        poll_profile: str = "hot",
+        next_poll_at: int | None = None,
+    ) -> tuple[LiveEventStateStore, _FakeLiveBackend]:
+        from schema_inspector.queue.live_state import LiveEventState
+
+        backend = _FakeLiveBackend()
+        store = LiveEventStateStore(backend)
+        # next_poll_at deliberately in the PAST (overdue) to mimic a frozen
+        # event whose last refresh attempt failed.
+        overdue = next_poll_at if next_poll_at is not None else self._NOW - 1_000_000
+        store.upsert(
+            LiveEventState(
+                event_id=event_id,
+                sport_slug="football",
+                status_type="inprogress",
+                poll_profile=poll_profile,
+                last_seen_at=self._NOW - 1_000_000,
+                last_ingested_at=self._NOW - 1_000_000,
+                last_changed_at=self._NOW - 1_000_000,
+                next_poll_at=overdue,
+                hot_until=overdue,
+                home_score=1,
+                away_score=0,
+                version_hint=None,
+                is_finalized=False,
+                dispatch_tier=dispatch_tier,
+            ),
+            lane=poll_profile,
+        )
+        return store, backend
+
+    def test_reschedules_overdue_event_to_tier_cadence(self) -> None:
+        store, backend = self._store_with_live_event(
+            event_id=14722478, dispatch_tier="tier_3"
+        )
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+
+        new_next_poll = worker.reschedule_after_transient_failure(
+            sport_slug="football",
+            event_id=14722478,
+            live_state_store=store,
+        )
+
+        # tier_3 poll cadence is 90s; floored min (15s) does not apply.
+        self.assertEqual(new_next_poll, self._NOW + 90_000)
+        # The zset score moved from overdue (now - 1_000_000) to a future
+        # value, so the freshness metric (now - min score) no longer breaches.
+        self.assertEqual(
+            backend.zsets["zset:live:hot"]["14722478"], float(self._NOW + 90_000)
+        )
+
+    def test_floors_fast_tier_to_min_backoff(self) -> None:
+        # tier_1 normal cadence is 5s — too aggressive as a failure retry.
+        # The min_backoff floor (15s) protects against a refresh storm.
+        store, backend = self._store_with_live_event(
+            event_id=15235532, dispatch_tier="tier_1"
+        )
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+
+        new_next_poll = worker.reschedule_after_transient_failure(
+            sport_slug="football",
+            event_id=15235532,
+            live_state_store=store,
+        )
+
+        self.assertEqual(new_next_poll, self._NOW + 15_000)
+        self.assertEqual(
+            backend.zsets["zset:live:hot"]["15235532"], float(self._NOW + 15_000)
+        )
+
+    def test_clears_dispatch_claim_so_planner_can_redispatch(self) -> None:
+        store, backend = self._store_with_live_event(
+            event_id=14722478, dispatch_tier="tier_3"
+        )
+        # Simulate the planner having claimed the dispatch lease.
+        self.assertTrue(
+            store.claim_dispatch(14722478, now_ms=self._NOW, lease_ms=90_000)
+        )
+        self.assertIn("live:dispatch_claim:14722478", backend.claims)
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+
+        worker.reschedule_after_transient_failure(
+            sport_slug="football",
+            event_id=14722478,
+            live_state_store=store,
+        )
+
+        # Claim dropped — otherwise the ~90s lease would block the retry even
+        # after next_poll_at fell due.
+        self.assertNotIn("live:dispatch_claim:14722478", backend.claims)
+
+    def test_does_not_touch_data_freshness_fields(self) -> None:
+        # No data was fetched on a failed refresh, so the per-event hash must
+        # keep telling the truth that the payload is stale. Only the schedule
+        # (zset score) moves; last_changed_at / last_ingested_at stay put.
+        store, backend = self._store_with_live_event(
+            event_id=14722478, dispatch_tier="tier_3"
+        )
+        original_last_changed = backend.hashes["live:event:14722478"]["last_changed_at"]
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+
+        worker.reschedule_after_transient_failure(
+            sport_slug="football",
+            event_id=14722478,
+            live_state_store=store,
+        )
+
+        self.assertEqual(
+            backend.hashes["live:event:14722478"]["last_changed_at"],
+            original_last_changed,
+        )
+
+    def test_no_op_for_finalized_event(self) -> None:
+        # A finished match must never be re-livened back into a polling lane.
+        backend = _FakeLiveBackend()
+        store = LiveEventStateStore(backend)
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+        worker.finalize_event(
+            sport_slug="football",
+            event_id=14083568,
+            status_type="finished",
+            live_state_store=store,
+        )
+
+        result = worker.reschedule_after_transient_failure(
+            sport_slug="football",
+            event_id=14083568,
+            live_state_store=store,
+        )
+
+        self.assertIsNone(result)
+        self.assertNotIn("14083568", backend.zsets.get("zset:live:hot", {}))
+        self.assertNotIn("14083568", backend.zsets.get("zset:live:warm", {}))
+        self.assertNotIn("14083568", backend.zsets.get("zset:live:cold", {}))
+
+    def test_no_op_when_no_prior_state(self) -> None:
+        backend = _FakeLiveBackend()
+        store = LiveEventStateStore(backend)
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+
+        result = worker.reschedule_after_transient_failure(
+            sport_slug="football",
+            event_id=99999999,
+            live_state_store=store,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(backend.zsets.get("zset:live:hot", {}), {})
+
+    def test_no_op_when_live_state_store_is_none(self) -> None:
+        worker = LiveWorker(now_ms_factory=lambda: self._NOW)
+        self.assertIsNone(
+            worker.reschedule_after_transient_failure(
+                sport_slug="football",
+                event_id=14722478,
+                live_state_store=None,
+            )
+        )
+
+
 class _ClearRecordingStore:
     """Live state store fake that records every clear_dispatch_claim call
     so we can assert the tier kwarg threading."""

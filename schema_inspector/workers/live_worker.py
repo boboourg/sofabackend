@@ -147,6 +147,88 @@ class LiveWorker:
             job=job,
         )
 
+    def reschedule_after_transient_failure(
+        self,
+        *,
+        sport_slug: str,
+        event_id: int,
+        live_state_store=None,
+        min_backoff_seconds: int = 15,
+    ) -> int | None:
+        """Push ``next_poll_at`` forward after a *transient* (retryable) live
+        refresh failure so the event reschedules on a sane cadence instead of
+        freezing.
+
+        Why this exists (2026-05-29 live audit): on a retryable root
+        ``/event/{id}`` fetch failure (network timeout / 403 / 429),
+        ``run_event`` raises ``RetryableJobError`` *before* it reaches
+        ``track_event`` — and ``track_event`` is the ONLY place ``next_poll_at``
+        (the hot/warm/cold zset score) is advanced. So a persistently
+        timing-out event keeps its old, already-due score: the planner
+        re-dispatches it every single tick (a coalesced refresh storm), and
+        ``oldest_hot_score_age_seconds`` (= ``now - min(zset score)``) grows
+        unbounded and breaches the 900 s SLO — even though the event is
+        genuinely live and merely hitting a slow proxy.
+
+        This helper re-scores the event ``min_backoff_seconds`` (floored up to
+        the event's tier poll cadence) into the future, in its CURRENT lane, so
+        the planner backs off to a sane retry cadence, the freshness metric
+        reflects the real next-retry time, and the event self-heals once the
+        upstream/proxy recovers.
+
+        It deliberately does NOT touch the data-freshness fields
+        (``last_changed_at`` / ``last_ingested_at``): no data was fetched, so
+        the per-event hash must keep telling the truth that the payload is
+        stale. Only the schedule (the zset score, which is what the planner's
+        ``due_events`` and the freshness metric both read) moves.
+
+        Best-effort and fully defensive — this runs on the failure path of the
+        single hydration point for the entire live fleet, so it must NEVER
+        mask the original error: any missing attribute / raise / absent state
+        is a silent no-op. Terminal (``is_finalized``) events are left alone so
+        a finished match is never re-livened. Returns the new ``next_poll_at``,
+        or ``None`` when nothing was rescheduled.
+        """
+        if live_state_store is None:
+            return None
+        fetch = getattr(live_state_store, "fetch", None)
+        move_lane = getattr(live_state_store, "move_lane", None)
+        if not callable(fetch) or not callable(move_lane):
+            return None
+        try:
+            existing = fetch(event_id)
+        except Exception:
+            return None
+        if existing is None or existing.is_finalized:
+            return None
+        lane = str(existing.poll_profile or "").strip().lower()
+        if lane not in {"hot", "warm", "cold"}:
+            return None
+        backoff_seconds = poll_seconds_for_live_dispatch_tier(
+            existing.dispatch_tier,
+            default_seconds=min_backoff_seconds,
+        )
+        backoff_seconds = max(
+            int(backoff_seconds or min_backoff_seconds), int(min_backoff_seconds)
+        )
+        next_poll_at = int(self.now_ms_factory()) + backoff_seconds * 1000
+        try:
+            move_lane(event_id, lane=lane, next_poll_at=next_poll_at)
+        except Exception:
+            return None
+        # Drop the dispatch claim so the planner can re-dispatch when the
+        # backed-off score comes due (track_event clears it the same way on
+        # the success path). Without this the ~90 s claim lease would block
+        # the retry until it expired even after next_poll_at fell due.
+        clear_claim = getattr(live_state_store, "clear_dispatch_claim", None)
+        if callable(clear_claim):
+            try:
+                clear_claim(event_id, tier=existing.dispatch_tier)
+            except Exception:
+                pass
+        del sport_slug  # accepted for call-site symmetry / future logging
+        return next_poll_at
+
     def finalize_event(
         self,
         *,

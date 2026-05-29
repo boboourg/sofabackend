@@ -588,6 +588,18 @@ class PilotOrchestrator:
             root_outcome.classification in _ROOT_FETCH_RETRYABLE_CLASSIFICATIONS
             and root_outcome.retry_recommended
         ):
+            # 2026-05-29 live audit: this raise fires BEFORE track_event, the
+            # only place next_poll_at (the hot/warm/cold zset score) advances.
+            # Without rescheduling here, a persistently timing-out live event
+            # freezes at its old, already-due score — the planner re-dispatches
+            # it every tick (coalesced storm) and oldest_hot_score_age breaches
+            # the SLO. Push it to a backed-off retry so it self-heals once the
+            # proxy/upstream recovers. Best-effort: never masks the raise below.
+            self.live_worker.reschedule_after_transient_failure(
+                sport_slug=sport_slug,
+                event_id=event_id,
+                live_state_store=self.live_state_store,
+            )
             raise RetryableJobError(
                 "Root /event fetch failed (event_id={event_id}, "
                 "classification={classification}, http_status={http_status}): "
