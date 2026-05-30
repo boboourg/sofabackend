@@ -1857,6 +1857,57 @@ class ServiceApp:
         daemon = self.build_final_sync_planner_daemon()
         await daemon.run_forever()
 
+    def build_upcoming_hydrate_planner_daemon(
+        self,
+        *,
+        horizon_days: float = 2.0,
+        publish_per_tick_cap: int = 50,
+        batch_size: int = 500,
+        lag_threshold: int = 5000,
+        tick_interval_seconds: int = 60,
+        season_id: int | None = None,
+    ):
+        """Factory for the UpcomingHydratePlannerDaemon (2026-05-30).
+
+        Hydrates NOTSTARTED future fixtures ahead of kickoff (pre-match
+        matrix) which no existing planner does. Reuses the LiveStateRepository
+        (``upcoming_notstarted_event_ids``) + ``stream:etl:hydrate`` + the
+        existing HydrateWorker fleet — no new worker pool.
+        """
+        from .upcoming_hydrate_planner import UpcomingHydratePlannerDaemon
+
+        return UpcomingHydratePlannerDaemon(
+            database=self.app.database,
+            queue=self.stream_queue,
+            repository=self.app.live_state_repository,
+            horizon_days=horizon_days,
+            publish_per_tick_cap=publish_per_tick_cap,
+            batch_size=batch_size,
+            lag_threshold=lag_threshold,
+            tick_interval_seconds=tick_interval_seconds,
+            season_id=season_id,
+        )
+
+    async def run_upcoming_hydrate_planner_daemon(
+        self,
+        *,
+        horizon_days: float = 2.0,
+        publish_per_tick_cap: int = 50,
+        batch_size: int = 500,
+        lag_threshold: int = 5000,
+        tick_interval_seconds: int = 60,
+        season_id: int | None = None,
+    ) -> None:
+        daemon = self.build_upcoming_hydrate_planner_daemon(
+            horizon_days=horizon_days,
+            publish_per_tick_cap=publish_per_tick_cap,
+            batch_size=batch_size,
+            lag_threshold=lag_threshold,
+            tick_interval_seconds=tick_interval_seconds,
+            season_id=season_id,
+        )
+        await daemon.run_forever()
+
     async def run_historical_hydrate_worker(self, *, consumer_name: str, block_ms: int = 5_000) -> None:
         worker = self.build_historical_hydrate_worker(consumer_name=consumer_name, block_ms=block_ms)
         await worker.run_forever()

@@ -275,6 +275,45 @@ class LiveStateRepository:
         )
         return [int(row["event_id"]) for row in rows]
 
+    async def upcoming_notstarted_event_ids(
+        self,
+        executor: SqlExecutor,
+        *,
+        horizon_seconds: int,
+        limit: int,
+        season_id: int | None = None,
+    ) -> list[int]:
+        """UpcomingHydratePlanner feed: notstarted events kicking off within
+        ``[now, now + horizon_seconds]``, soonest first.
+
+        ``status_code = 0`` is notstarted. ``is_editor IS NOT TRUE`` honours
+        the isEditor HARD BAN (CLAUDE rule #10) before we even publish and
+        keeps the scan on the partial index ``idx_event_live_window``
+        (``(status_code, start_timestamp DESC, id DESC) WHERE is_editor IS NOT
+        TRUE``). ``$3`` optionally scopes to a single season (e.g. a future
+        tournament backfill); NULL = all. ``start_timestamp`` is epoch
+        seconds. Ordered ASC so the soonest kickoffs (which also unlock the
+        24h odds/votes window first) are hydrated before the long tail.
+        """
+        rows = await executor.fetch(
+            """
+            SELECT id
+            FROM event
+            WHERE status_code = 0
+              AND start_timestamp IS NOT NULL
+              AND start_timestamp >= EXTRACT(EPOCH FROM now())::bigint
+              AND start_timestamp <= EXTRACT(EPOCH FROM now())::bigint + $1::bigint
+              AND is_editor IS NOT TRUE
+              AND ($3::bigint IS NULL OR season_id = $3::bigint)
+            ORDER BY start_timestamp ASC, id ASC
+            LIMIT $2
+            """,
+            int(horizon_seconds),
+            int(limit),
+            None if season_id is None else int(season_id),
+        )
+        return [int(row["id"]) for row in rows]
+
     async def mark_event_stale_live_retired(
         self,
         executor: SqlExecutor,

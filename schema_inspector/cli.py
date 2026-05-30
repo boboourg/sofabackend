@@ -2216,6 +2216,21 @@ async def _dispatch(args) -> int:
                 service_app = ServiceApp(app)
                 await service_app.run_final_sync_planner_daemon()
                 return 0
+            if args.command == "upcoming-hydrate-planner-daemon":
+                # 2026-05-30: hydrate NOTSTARTED future fixtures ahead of
+                # kickoff (full pre-match matrix). No existing planner does
+                # this — operational planner is today-only and historical
+                # lanes are off. Reuses stream:etl:hydrate + hydrate fleet.
+                service_app = ServiceApp(app)
+                await service_app.run_upcoming_hydrate_planner_daemon(
+                    horizon_days=args.horizon_days,
+                    publish_per_tick_cap=args.publish_per_tick_cap,
+                    batch_size=args.batch_size,
+                    lag_threshold=args.lag_threshold,
+                    tick_interval_seconds=args.tick_interval_seconds,
+                    season_id=args.season_id,
+                )
+                return 0
             if args.command == "unlock-event":
                 # Task 2 Phase B operator escape hatch: clear
                 # event_terminal_state.locked_at so a frozen event
@@ -2593,6 +2608,43 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     # daemon takes no extra args — config via env vars.
+
+    upcoming_hydrate_planner_daemon = subparsers.add_parser(
+        "upcoming-hydrate-planner-daemon",
+        help=(
+            "Run the UpcomingHydratePlannerDaemon. Publishes hydrate jobs "
+            "(scope=prematch, hydration_mode=full) for NOTSTARTED events that "
+            "kick off within --horizon-days, so future fixtures + their "
+            "pre-match endpoints (managers/h2h/pregame-form/team-streaks/"
+            "lineups, odds/votes within 24h) populate ahead of match day. "
+            "Reuses stream:etl:hydrate + the existing hydrate fleet. Bounded "
+            "by a per-tick cap and cg:hydrate lag backpressure."
+        ),
+    )
+    upcoming_hydrate_planner_daemon.add_argument(
+        "--horizon-days", type=float, default=2.0,
+        help="Look-ahead window in days (now..now+N). Raise (with --season-id) to backfill a whole future tournament.",
+    )
+    upcoming_hydrate_planner_daemon.add_argument(
+        "--publish-per-tick-cap", type=int, default=50,
+        help="Max hydrate jobs published per tick (proxy-pool guard).",
+    )
+    upcoming_hydrate_planner_daemon.add_argument(
+        "--batch-size", type=int, default=500,
+        help="SQL LIMIT on the candidate query per tick (>= cap).",
+    )
+    upcoming_hydrate_planner_daemon.add_argument(
+        "--lag-threshold", type=int, default=5000,
+        help="Skip the tick when cg:hydrate consumer-group lag >= this (live-SLO guard). <=0 disables.",
+    )
+    upcoming_hydrate_planner_daemon.add_argument(
+        "--tick-interval-seconds", type=int, default=60,
+        help="Sleep between ticks.",
+    )
+    upcoming_hydrate_planner_daemon.add_argument(
+        "--season-id", type=int, default=None,
+        help="Optional: scope to a single season id (e.g. WC2026 = 58210). Omit for all football.",
+    )
 
     unlock_event = subparsers.add_parser(
         "unlock-event",

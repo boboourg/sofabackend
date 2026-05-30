@@ -1,0 +1,28 @@
+[Unit]
+Description=Sofascore Upcoming Pre-Match Hydrate Planner Daemon (hydrate notstarted future fixtures + their pre-match endpoints ahead of kickoff)
+After=network-online.target redis-server.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sofascore
+EnvironmentFile=/opt/sofascore/.env
+Environment=PYTHONUNBUFFERED=1
+# Default: 2-day look-ahead over ALL football, conservative caps, lag
+# backpressure on cg:hydrate so it never crowds the shared hydrate fleet /
+# live SLO. For a single-tournament backfill run with a longer horizon, pass
+# --season-id <id> --horizon-days <N> (e.g. WC2026: --season-id 58210 --horizon-days 60).
+ExecStart=/opt/sofascore/deploy/run_service.sh upcoming-hydrate-planner-daemon \
+    --horizon-days 2 \
+    --publish-per-tick-cap 50 \
+    --batch-size 500 \
+    --lag-threshold 5000 \
+    --tick-interval-seconds 60
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
