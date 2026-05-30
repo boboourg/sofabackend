@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -129,11 +130,36 @@ class ConsumerGroupInfo:
 class RedisStreamQueue:
     """Thin queue wrapper over a redis-py compatible Streams backend."""
 
-    def __init__(self, backend: Any) -> None:
+    def __init__(self, backend: Any, *, max_stream_len: int | None = None) -> None:
         self.backend = backend
+        if max_stream_len is None:
+            try:
+                max_stream_len = int(os.environ.get("SOFASCORE_STREAM_MAXLEN", "1000000"))
+            except (TypeError, ValueError):
+                max_stream_len = 1_000_000
+        # <= 0 disables the cap (legacy unbounded behaviour).
+        self.max_stream_len = max_stream_len if max_stream_len and max_stream_len > 0 else None
 
     def publish(self, stream: str, values: Mapping[str, object]) -> str:
         payload = {str(key): _stringify(value) for key, value in values.items()}
+        # Runaway backstop (2026-05-30): cap stream length with an APPROXIMATE
+        # MAXLEN so a misbehaving producer cannot grow a stream unbounded
+        # (cg:hydrate reached 3.85M). Approximate trim is cheap (radix-node
+        # granularity) and trims OLDEST-first — when consumers are caught up
+        # those are long-ack'd; only a genuine runaway (unread tail > cap)
+        # loses unprocessed messages, the lesser evil vs Redis OOM. Bounded
+        # independent of the per-producer dedup/backpressure guards.
+        if self.max_stream_len is not None:
+            try:
+                return str(
+                    self.backend.xadd(
+                        stream, payload, maxlen=self.max_stream_len, approximate=True
+                    )
+                )
+            except TypeError:
+                # Backend stub without maxlen support (dev in-memory) — fall
+                # through to the plain XADD.
+                pass
         return str(self.backend.xadd(stream, payload))
 
     def ensure_group(self, stream: str, group: str, *, start_id: str = "0-0") -> None:

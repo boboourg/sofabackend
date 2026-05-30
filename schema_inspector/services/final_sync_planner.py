@@ -32,7 +32,8 @@ from ..pipeline.pilot_orchestrator import (
     FINAL_SYNC_DELAY_SECONDS,
     FINAL_SYNC_SCOPE,
 )
-from ..queue.streams import STREAM_HYDRATE
+from ..queue.dedupe import DedupeStore
+from ..queue.streams import GROUP_HYDRATE, STREAM_HYDRATE
 from ..workers._stream_jobs import encode_stream_job
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 class _QueueLike(Protocol):
     def publish(self, stream: str, payload: Any) -> Any: ...
+
+    def group_info(self, stream: str, group: str) -> Any: ...
 
 
 class _RepoLike(Protocol):
@@ -91,6 +94,18 @@ class FinalSyncPlannerDaemon:
     tick_interval_seconds: int = 60
     priority: int = 4
     default_sport_slug: str = "football"
+    # 2026-05-30: backpressure + per-event publish cooldown. Without these
+    # the planner re-published the same oldest-N unlocked events every tick
+    # (an event only leaves the candidate set once its final_sync run stamps
+    # locked_at, which cannot happen while the hydrate fleet is behind),
+    # amplifying cg:hydrate into a multi-million-message backlog (incident
+    # 2026-05-24/30). ``dedupe_store`` gives each event a publish cooldown;
+    # ``lag_threshold`` pauses the whole tick when cg:hydrate is saturated.
+    dedupe_store: DedupeStore | None = None
+    lag_threshold: int = 5000
+    publish_cooldown_seconds: int = 3600
+    stream: str = STREAM_HYDRATE
+    group: str = GROUP_HYDRATE
 
     async def tick(self, *, now_ms: int) -> int:
         """One sweep: pick due events, publish hydrate jobs, return count.
@@ -99,7 +114,18 @@ class FinalSyncPlannerDaemon:
         NOT here — keeping retries simple: a failed final-sync run
         leaves ``locked_at`` NULL, so the next tick re-enqueues.
         """
-        del now_ms  # reserved for future jitter / cooldown logic
+        del now_ms  # reserved for future jitter logic
+        # Pause the entire tick when the hydrate fleet is saturated. Pouring
+        # 200 jobs/tick into a multi-million-message backlog only deepens it
+        # and starves real work; the candidates are still here next tick.
+        if self._is_blocked_by_backpressure():
+            logger.info(
+                "final_sync_planner: paused by backpressure stream=%s lag>=%s",
+                self.stream,
+                self.lag_threshold,
+            )
+            return 0
+
         async with self.database.connection() as connection:
             event_ids = await self.repository.pending_lock_event_ids(
                 connection,
@@ -108,7 +134,23 @@ class FinalSyncPlannerDaemon:
             )
 
         published = 0
+        skipped = 0
+        cooldown_ms = int(self.publish_cooldown_seconds) * 1000
         for event_id in event_ids:
+            # Per-event publish cooldown: an event only leaves the candidate
+            # set once its final_sync run stamps ``locked_at`` — which cannot
+            # happen until the worker actually processes the job. Without a
+            # cooldown the same oldest-N events are re-published every tick
+            # while they wait, amplifying the stream by 17x+ and growing an
+            # unbounded backlog. The cooldown (default 1h, comfortably above
+            # the worst-case drain latency under the lag cap) means each event
+            # is enqueued at most once per window; once locked it drops out.
+            if self.dedupe_store is not None and cooldown_ms > 0:
+                if not self.dedupe_store.claim_job(
+                    self._publish_cooldown_key(event_id), ttl_ms=cooldown_ms
+                ):
+                    skipped += 1
+                    continue
             envelope = JobEnvelope.create(
                 job_type=JOB_HYDRATE_EVENT_ROOT,
                 sport_slug=self.default_sport_slug,
@@ -123,7 +165,7 @@ class FinalSyncPlannerDaemon:
             )
             try:
                 self.queue.publish(
-                    STREAM_HYDRATE,
+                    self.stream,
                     encode_stream_job(envelope),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -140,7 +182,37 @@ class FinalSyncPlannerDaemon:
                 envelope.job_id,
             )
 
+        if skipped:
+            logger.info(
+                "final_sync_planner: %d candidate(s) skipped (publish cooldown active)",
+                skipped,
+            )
         return published
+
+    @staticmethod
+    def _publish_cooldown_key(event_id: int) -> str:
+        return f"final_sync:pub:{int(event_id)}"
+
+    def _is_blocked_by_backpressure(self) -> bool:
+        """True when ``cg:hydrate`` consumer-group LAG (unread tail, NOT XLEN)
+        is at/above the threshold. Fail-open: any probe error returns False so
+        a transient Redis hiccup cannot wedge the planner. ``lag_threshold<=0``
+        disables the check (legacy behaviour)."""
+        if self.lag_threshold <= 0:
+            return False
+        group_info = getattr(self.queue, "group_info", None)
+        if not callable(group_info):
+            return False
+        try:
+            info = group_info(self.stream, self.group)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "final_sync_planner: group_info probe failed (fail-open): %s", exc
+            )
+            return False
+        if info is None or getattr(info, "lag", None) is None:
+            return False
+        return int(info.lag) >= self.lag_threshold
 
     async def run_forever(self) -> None:
         """Continuous loop intended for use as a systemd-managed daemon.

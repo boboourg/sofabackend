@@ -359,5 +359,101 @@ class HybridAppForwardsScopeTests(unittest.TestCase):
         )
 
 
+class FinalSyncBackpressureAndCooldownTests(unittest.IsolatedAsyncioTestCase):
+    """2026-05-30: the planner must (a) pause when cg:hydrate lag is high and
+    (b) not re-publish the same event every tick (per-event cooldown). Without
+    these it re-spammed the hydrate stream into a 3.8M-message backlog."""
+
+    def _daemon(self, *, queue, repo_ids, dedupe=None, lag_threshold=5000, cooldown=3600):
+        from schema_inspector.services.final_sync_planner import FinalSyncPlannerDaemon
+
+        class _FakeRepo:
+            async def pending_lock_event_ids(self, executor, *, delay_seconds, limit):
+                return list(repo_ids)
+
+        class _FakeDb:
+            class _Conn:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    return False
+
+            def connection(self):
+                return _FakeDb._Conn()
+
+        return FinalSyncPlannerDaemon(
+            database=_FakeDb(),
+            queue=queue,
+            repository=_FakeRepo(),
+            dedupe_store=dedupe,
+            lag_threshold=lag_threshold,
+            publish_cooldown_seconds=cooldown,
+        )
+
+    async def test_skips_tick_under_hydrate_backpressure(self) -> None:
+        published: list = []
+
+        class _Q:
+            def publish(self, stream, payload):
+                published.append(payload)
+
+            def group_info(self, stream, group):
+                class _Info:
+                    lag = 9999
+                return _Info()
+
+        daemon = self._daemon(queue=_Q(), repo_ids=[1, 2, 3], lag_threshold=5000)
+        count = await daemon.tick(now_ms=0)
+        self.assertEqual(count, 0)
+        self.assertEqual(published, [])  # nothing published while saturated
+
+    async def test_publishes_when_lag_below_threshold(self) -> None:
+        published: list = []
+
+        class _Q:
+            def publish(self, stream, payload):
+                published.append(payload)
+
+            def group_info(self, stream, group):
+                class _Info:
+                    lag = 10
+                return _Info()
+
+        daemon = self._daemon(queue=_Q(), repo_ids=[1, 2, 3], lag_threshold=5000)
+        count = await daemon.tick(now_ms=0)
+        self.assertEqual(count, 3)
+
+    async def test_cooldown_dedup_skips_recently_published(self) -> None:
+        published: list = []
+
+        class _Q:
+            def publish(self, stream, payload):
+                published.append(payload)
+
+            def group_info(self, stream, group):
+                class _Info:
+                    lag = 0
+                return _Info()
+
+        class _Dedupe:
+            def __init__(self) -> None:
+                self.claimed: set[str] = set()
+
+            def claim_job(self, key, *, ttl_ms, now_ms=None):
+                if key in self.claimed:
+                    return False
+                self.claimed.add(key)
+                return True
+
+        dedupe = _Dedupe()
+        daemon = self._daemon(queue=_Q(), repo_ids=[1, 2, 3], dedupe=dedupe)
+        first = await daemon.tick(now_ms=0)
+        second = await daemon.tick(now_ms=0)
+        self.assertEqual(first, 3)  # first sweep publishes all
+        self.assertEqual(second, 0)  # same events in cooldown -> none re-published
+        self.assertEqual(len(published), 3)  # no duplicate amplification
+
+
 if __name__ == "__main__":
     unittest.main()

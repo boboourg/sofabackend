@@ -1845,12 +1845,17 @@ class ServiceApp:
         ``pending_lock_event_ids``) and publishes into the existing
         ``stream:etl:hydrate`` so no new worker pool is needed.
         """
+        from ..queue.dedupe import DedupeStore
         from .final_sync_planner import FinalSyncPlannerDaemon
 
         return FinalSyncPlannerDaemon(
             database=self.app.database,
             queue=self.stream_queue,
             repository=self.app.live_state_repository,
+            # Per-event publish cooldown + cg:hydrate lag backpressure
+            # (2026-05-30) so the planner cannot re-spam the same unlocked
+            # events into the hydrate stream every tick.
+            dedupe_store=DedupeStore(self.app.redis_backend),
         )
 
     async def run_final_sync_planner_daemon(self) -> None:

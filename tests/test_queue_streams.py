@@ -405,5 +405,46 @@ class HistoricalBootstrapConstantsTests(unittest.TestCase):
         )
 
 
+class _MaxlenAwareBackend:
+    """Backend whose xadd records the maxlen/approximate kwargs (real redis-py
+    xadd accepts them)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def xadd(self, stream, fields, *, maxlen=None, approximate=None):
+        self.calls.append(
+            {"stream": stream, "maxlen": maxlen, "approximate": approximate}
+        )
+        return f"1-{len(self.calls)}"
+
+
+class StreamMaxlenBackstopTests(unittest.TestCase):
+    """2026-05-30: publish must cap stream length with an approximate MAXLEN so
+    a runaway producer cannot grow a stream unbounded (cg:hydrate hit 3.85M)."""
+
+    def test_publish_forwards_approximate_maxlen(self) -> None:
+        backend = _MaxlenAwareBackend()
+        queue = RedisStreamQueue(backend, max_stream_len=250_000)
+        queue.publish(STREAM_HYDRATE, {"job_id": "j1"})
+        self.assertEqual(backend.calls[-1]["maxlen"], 250_000)
+        self.assertIs(backend.calls[-1]["approximate"], True)
+
+    def test_zero_maxlen_disables_cap(self) -> None:
+        backend = _MaxlenAwareBackend()
+        queue = RedisStreamQueue(backend, max_stream_len=0)
+        queue.publish(STREAM_HYDRATE, {"job_id": "j1"})
+        self.assertIsNone(backend.calls[-1]["maxlen"])
+
+    def test_publish_falls_back_when_backend_lacks_maxlen(self) -> None:
+        # _FakeStreamBackend.xadd has no maxlen kwarg -> TypeError -> the
+        # plain XADD fallback must still publish (no crash).
+        backend = _FakeStreamBackend()
+        queue = RedisStreamQueue(backend, max_stream_len=100_000)
+        message_id = queue.publish(STREAM_HYDRATE, {"job_id": "j1"})
+        self.assertTrue(message_id)
+        self.assertEqual(len(backend.streams.get(STREAM_HYDRATE, [])), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
