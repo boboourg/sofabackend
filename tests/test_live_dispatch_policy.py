@@ -187,5 +187,113 @@ class FetchTimeoutForDispatchTierTests(unittest.TestCase):
             self.assertEqual(module.LIVE_TIER_3_FETCH_TIMEOUT_SECONDS, 12.0)
 
 
+class FootballTier5FallThroughTests(unittest.TestCase):
+    """Phase 0: football tier_5 (detailId ABSENT, ~93% of football) must
+    fall through to the user_count / tournament_tier ladder instead of being
+    hard-returned as LIVE_TIER_3. The genuine tier_3 cohort (detailId in
+    {2,3,5}) and explicit tier_1/tier_2 detailIds stay exactly as before.
+
+    These read the thresholds from module constants so the assertions stay
+    correct even if LIVE_TIER_1_MIN_USER_COUNT / LIVE_TIER_2_MIN_USER_COUNT
+    are overridden via env on prod.
+    """
+
+    def setUp(self) -> None:
+        self.policy = live_dispatch_policy
+        self.tier1_min = self.policy.LIVE_TIER_1_MIN_USER_COUNT
+        self.tier2_min = self.policy.LIVE_TIER_2_MIN_USER_COUNT
+
+    def _resolve(self, **kwargs):
+        base = dict(
+            sport_slug="football",
+            detail_id=None,
+            tournament_tier=None,
+            tournament_user_count=None,
+        )
+        base.update(kwargs)
+        return self.policy.resolve_live_dispatch_tier(**base)
+
+    # --- the fix: tier_5 now reaches the user_count ladder ---------------
+
+    def test_tier5_high_user_count_promotes_to_tier_1(self) -> None:
+        # EPL/UCL: no detailId (tier_5) but ~1.2M users. Previously DEAD
+        # CODE -> hard tier_3 (lag 6.1h). Must now reach tier_1.
+        tier = self._resolve(tournament_user_count=1_200_000)
+        self.assertEqual(tier, self.policy.LIVE_TIER_1)
+        # And the documented boundary value also promotes.
+        self.assertEqual(
+            self._resolve(tournament_user_count=self.tier1_min),
+            self.policy.LIVE_TIER_1,
+        )
+
+    def test_tier5_mid_user_count_promotes_to_tier_2(self) -> None:
+        mid = self.tier2_min  # >= tier2 min, < tier1 min
+        self.assertLess(mid, self.tier1_min)
+        self.assertEqual(
+            self._resolve(tournament_user_count=mid),
+            self.policy.LIVE_TIER_2,
+        )
+
+    def test_tier5_low_user_count_stays_tier_3(self) -> None:
+        self.assertEqual(
+            self._resolve(tournament_user_count=50),
+            self.policy.LIVE_TIER_3,
+        )
+
+    def test_tier5_no_user_count_uses_tournament_tier_ladder(self) -> None:
+        # user_count None -> fall through to tournament_tier ladder.
+        self.assertEqual(
+            self._resolve(tournament_user_count=None, tournament_tier=1),
+            self.policy.LIVE_TIER_1,
+        )
+        self.assertEqual(
+            self._resolve(tournament_user_count=None, tournament_tier=3),
+            self.policy.LIVE_TIER_2,
+        )
+
+    def test_tier5_all_unknown_preserves_tier_3_fallback(self) -> None:
+        # live_rescue passes user_count=None, tournament_tier=None. Must keep
+        # landing in tier_3 via the final fallback (no behaviour change).
+        self.assertEqual(self._resolve(), self.policy.LIVE_TIER_3)
+
+    # --- regression guards: cohorts that MUST NOT change -----------------
+
+    def test_genuine_tier_3_is_not_promoted_by_user_count(self) -> None:
+        # detailId in {2,3,5} == genuine tier_3. Even with a huge user_count
+        # it must stay tier_3 (it must NOT fall through to the ladder).
+        for detail_id in (2, 3, 5):
+            self.assertEqual(
+                self._resolve(detail_id=detail_id, tournament_user_count=10_000_000),
+                self.policy.LIVE_TIER_3,
+                msg=f"detailId={detail_id} (genuine tier_3) was promoted",
+            )
+
+    def test_explicit_tier_1_and_tier_2_detail_ids_unchanged(self) -> None:
+        # detailId 1 -> tier_1, detailId in {4,6} -> tier_2, regardless of
+        # user_count (explicit-detailId returns happen before the ladder).
+        self.assertEqual(
+            self._resolve(detail_id=1, tournament_user_count=0),
+            self.policy.LIVE_TIER_1,
+        )
+        for detail_id in (4, 6):
+            self.assertEqual(
+                self._resolve(detail_id=detail_id, tournament_user_count=0),
+                self.policy.LIVE_TIER_2,
+            )
+
+    def test_non_football_unaffected(self) -> None:
+        # Non-football skips the football branch entirely and uses the
+        # generic ladder both before and after this change.
+        self.assertEqual(
+            self.policy.resolve_live_dispatch_tier(
+                sport_slug="tennis",
+                detail_id=None,
+                tournament_tier=None,
+                tournament_user_count=1_200_000,
+            ),
+            self.policy.LIVE_TIER_1,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

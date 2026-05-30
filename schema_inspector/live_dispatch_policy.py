@@ -110,8 +110,18 @@ def resolve_live_dispatch_tier(
             return LIVE_TIER_1
         if football_tier == "tier_2":
             return LIVE_TIER_2
-        if football_tier in {"tier_3", "tier_5"}:
+        if football_tier == "tier_3":
             return LIVE_TIER_3
+        # Phase 0 (2026-05-30): football_detail_tier returns "tier_5" when the
+        # root payload carries NO detailId. ~93% of football events fall here,
+        # including popular EPL/UCL matches whose tournament_user_count is well
+        # above LIVE_TIER_1_MIN_USER_COUNT. Hard-returning LIVE_TIER_3 for
+        # tier_5 (the old rule) routed those into the long-tail tier_3 stream
+        # and made the user_count / tournament_tier ladder below DEAD CODE for
+        # football. We now let ONLY the tier_5 cohort (detailId ABSENT) fall
+        # through to that ladder. The genuine tier_3 cohort (detailId in
+        # {2,3,5}) keeps its hard LIVE_TIER_3 return above, and explicit
+        # detailId tier_1/tier_2 are unchanged.
 
     normalized_user_count = _as_int(tournament_user_count)
     if normalized_user_count is not None:
